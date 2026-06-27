@@ -1,9 +1,9 @@
 /**
- * Direct-core browser canary for the React todo app.
+ * Core browser canary for the React todo app.
  *
  * Mounts the real <App /> component in Chromium and connects two persistent
  * OPFS clients to one local Jazz server. The public serverUrl config is
- * converted by the runtime to the direct websocket endpoint.
+ * converted by the runtime to the websocket endpoint.
  */
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -71,7 +71,7 @@ async function addTodoAndWaitForLocalDurability(el: HTMLDivElement, title: strin
   await localWriteDurable;
 }
 
-describe("React Todo App direct-core browser canary", () => {
+describe("React Todo App core browser canary", () => {
   const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
 
   async function mountApp(config: {
@@ -123,9 +123,9 @@ describe("React Todo App direct-core browser canary", () => {
     mounts.length = 0;
   });
 
-  it("syncs two persistent OPFS app instances through one direct-core server", async () => {
-    const writerDbName = uniqueDbName("direct-core-writer");
-    const readerDbName = uniqueDbName("direct-core-reader");
+  it("syncs two persistent OPFS app instances through one core server", async () => {
+    const writerDbName = uniqueDbName("core-writer");
+    const readerDbName = uniqueDbName("core-reader");
 
     const writer = await mountApp({
       appId: APP_ID,
@@ -144,51 +144,51 @@ describe("React Todo App direct-core browser canary", () => {
 
     await new Promise((r) => setTimeout(r, 750));
 
-    await addTodo(writer, "Direct-core writer todo");
+    await addTodo(writer, "Core writer todo");
     await waitFor(
-      () => hasTodoTitle(reader, "Direct-core writer todo"),
+      () => hasTodoTitle(reader, "Core writer todo"),
       20000,
       "reader useAll subscription should observe writer create",
     );
 
-    const writerItem = todoItemByTitle(writer, "Direct-core writer todo")!;
+    const writerItem = todoItemByTitle(writer, "Core writer todo")!;
     await act(async () => writerItem.querySelector<HTMLInputElement>("input.toggle")!.click());
 
     await waitFor(
-      () => todoItemByTitle(writer, "Direct-core writer todo")?.classList.contains("done") === true,
+      () => todoItemByTitle(writer, "Core writer todo")?.classList.contains("done") === true,
       3000,
       "writer should render its own update before remount",
     );
 
     await waitFor(
-      () => todoItemByTitle(reader, "Direct-core writer todo")?.classList.contains("done") === true,
+      () => todoItemByTitle(reader, "Core writer todo")?.classList.contains("done") === true,
       20000,
       "reader useAll subscription should observe writer update",
     );
 
-    await addTodo(reader, "Direct-core reader todo");
+    await addTodo(reader, "Core reader todo");
     await waitFor(
-      () => hasTodoTitle(writer, "Direct-core reader todo"),
+      () => hasTodoTitle(writer, "Core reader todo"),
       20000,
       "writer useAll subscription should observe reader create",
     );
 
     const deleteButton = todoItemByTitle(
       writer,
-      "Direct-core writer todo",
+      "Core writer todo",
     )!.querySelector<HTMLButtonElement>(".delete-btn")!;
     await act(async () => deleteButton.click());
 
     await waitFor(
-      () => !hasTodoTitle(reader, "Direct-core writer todo"),
+      () => !hasTodoTitle(reader, "Core writer todo"),
       20000,
       "reader useAll subscription should observe writer delete",
     );
   });
 
   it("reopens a persistent OPFS app instance with DOM-written todos", async () => {
-    const dbName = uniqueDbName("direct-core-reopen");
-    const title = "Direct-core durable todo";
+    const dbName = uniqueDbName("core-reopen");
+    const title = "Core durable todo";
 
     const firstSession = await mountApp({
       appId: APP_ID,

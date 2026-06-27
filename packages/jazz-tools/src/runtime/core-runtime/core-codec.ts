@@ -15,7 +15,7 @@ import {
   readAbiSubscriptionDelta,
   writeDescriptor,
   writeValueType,
-} from "./direct-row-codec.js";
+} from "./row-codec.js";
 
 export {
   createRecord,
@@ -33,7 +33,7 @@ export {
   readValueType,
   writeDescriptor,
   writeValueType,
-} from "./direct-row-codec.js";
+} from "./row-codec.js";
 export type {
   AbiRelationSubscriptionDelta,
   AbiRelationSubscriptionEdge,
@@ -44,7 +44,7 @@ export type {
   AbiSubscriptionDelta,
   DescriptorField,
   ValueType,
-} from "./direct-row-codec.js";
+} from "./row-codec.js";
 
 export type SubscriptionSnapshotChunk = {
   type: "snapshot";
@@ -167,30 +167,30 @@ export function queryWhereStringContains(
   return writer.finish();
 }
 
-export type DirectQueryLiteral =
+export type QueryLiteral =
   | { type: "Boolean"; value: boolean }
   | { type: "Integer"; value: number }
   | { type: "Text"; value: string }
   | { type: "Uuid"; value: string }
   | { type: "Bytea"; value: Uint8Array }
-  | { type: "Array"; value: DirectQueryLiteral[] }
-  | { type: "Nullable"; value: DirectQueryLiteral | null };
+  | { type: "Array"; value: QueryLiteral[] }
+  | { type: "Nullable"; value: QueryLiteral | null };
 
-export type DirectQueryPredicate =
+export type QueryPredicate =
   | {
       column: string;
-      op: DirectQueryPredicateOp;
-      value: DirectQueryLiteral;
+      op: QueryPredicateOp;
+      value: QueryLiteral;
     }
   | {
       column: string;
       op: "In";
-      values: DirectQueryLiteral[];
+      values: QueryLiteral[];
     }
   | {
       column: string;
       op: "Contains";
-      value: DirectQueryLiteral;
+      value: QueryLiteral;
     }
   | {
       column: string;
@@ -201,22 +201,22 @@ export type DirectQueryPredicate =
       op: "IsNotNull";
     };
 
-export type DirectQueryPredicateOp = "Eq" | "Ne" | "Gt" | "Gte" | "Lt" | "Lte";
-export type DirectQueryOrder = {
+export type QueryPredicateOp = "Eq" | "Ne" | "Gt" | "Gte" | "Lt" | "Lte";
+export type QueryOrder = {
   column: string;
   direction: "Asc" | "Desc";
 };
 
-export type DirectQueryOptions = {
+export type QueryOptions = {
   limit?: number;
   offset?: number;
-  orderBy?: DirectQueryOrder[];
+  orderBy?: QueryOrder[];
   select?: string[];
 };
 
 export function queryWithEqFilters(
   table: string,
-  filters: Array<{ column: string; value: DirectQueryLiteral }>,
+  filters: Array<{ column: string; value: QueryLiteral }>,
   limit?: number,
 ): Uint8Array {
   return queryWithPredicates(
@@ -228,8 +228,8 @@ export function queryWithEqFilters(
 
 export function queryWithPredicates(
   table: string,
-  predicates: DirectQueryPredicate[],
-  options: number | DirectQueryOptions = {},
+  predicates: QueryPredicate[],
+  options: number | QueryOptions = {},
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
   const { limit, offset = 0, orderBy = [], select } = queryOptions;
@@ -272,7 +272,7 @@ export function queryWithPredicates(
   return writer.finish();
 }
 
-function writePredicate(writer: PostcardWriter, predicate: DirectQueryPredicate): void {
+function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void {
   if (predicate.op === "In") {
     writer.u64(5); // Predicate::In
     writeColumnOperand(writer, predicate.column);
@@ -302,8 +302,8 @@ function writePredicate(writer: PostcardWriter, predicate: DirectQueryPredicate)
 function writePredicateCmpLiteral(
   writer: PostcardWriter,
   column: string,
-  op: DirectQueryPredicateOp,
-  value: DirectQueryLiteral,
+  op: QueryPredicateOp,
+  value: QueryLiteral,
 ): void {
   writer.u64(predicateOpTag(op));
   writeColumnOperand(writer, column);
@@ -315,12 +315,12 @@ function writeColumnOperand(writer: PostcardWriter, column: string): void {
   writer.string(column);
 }
 
-function writeLiteralOperand(writer: PostcardWriter, value: DirectQueryLiteral): void {
+function writeLiteralOperand(writer: PostcardWriter, value: QueryLiteral): void {
   writer.u64(3); // Operand::Literal
   writeGrooveValue(writer, value);
 }
 
-function predicateOpTag(op: DirectQueryPredicateOp): number {
+function predicateOpTag(op: QueryPredicateOp): number {
   switch (op) {
     case "Eq":
       return 3; // Predicate::Eq
@@ -337,7 +337,7 @@ function predicateOpTag(op: DirectQueryPredicateOp): number {
   }
 }
 
-function writeGrooveValue(writer: PostcardWriter, value: DirectQueryLiteral): void {
+function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
   if (value.type === "Nullable") {
     writer.u64(12); // groove::records::Value::Nullable
     if (value.value == null) {

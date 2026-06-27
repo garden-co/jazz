@@ -13,7 +13,7 @@ import {
   queryFromTable,
   type SubscriptionStreamChunk,
   utf8,
-} from "./direct-codec.js";
+} from "./core-codec.js";
 import {
   ANONYMOUS_JWT_ISSUER,
   decodeBase64UrlToUtf8,
@@ -710,7 +710,7 @@ export function defineApp<const Schema extends SchemaDefinition>(
 export async function createDb(options: DbOptions): Promise<Db> {
   const resolvedOptions = await resolveDbOptions(options);
   const Runtime = options.Runtime ?? (await loadRuntime());
-  return new DirectAbiDb(asWasmDbConstructor(Runtime), resolvedOptions);
+  return new CoreAbiDb(asWasmDbConstructor(Runtime), resolvedOptions);
 }
 
 export function parseJwtPayload(jwtToken: string): JwtPayload | null {
@@ -820,12 +820,12 @@ export function deleteFile<Row extends BinaryLargeValueRow>(
   db.delete(table, rowId);
 }
 
-class DirectAbiDb implements Db {
+class CoreAbiDb implements Db {
   readonly #schema: SchemaDefinition;
   readonly #db: WasmDb;
   readonly #preparedQueries = new Map<string, WasmPreparedQuery>();
   readonly #authStore: AuthStateStore;
-  readonly #subscriptions = new Set<DirectAbiSubscription<unknown>>();
+  readonly #subscriptions = new Set<CoreAbiSubscription<unknown>>();
   #nextRowId: number;
   #closed = false;
 
@@ -854,7 +854,7 @@ class DirectAbiDb implements Db {
         "exclusive transactions are not supported by the direct wasm object facade yet",
       );
     }
-    return new DirectAbiTransaction(this, this.#db.mergeableTx());
+    return new CoreAbiTransaction(this, this.#db.mergeableTx());
   }
 
   transaction<Value>(callback: (tx: Transaction) => PromiseLike<Value>): Promise<Value>;
@@ -1028,11 +1028,11 @@ class DirectAbiDb implements Db {
       ? this.#prepareQueryBytes(encodeBuiltQuery(JSON.stringify(relationQuery), this.#schema))
       : this.#prepareQuery(tableOrQuery);
     const reader = this.#db.subscribe(query, subscriptionReadOptions()).getReader();
-    const subscription = new DirectAbiSubscription(
+    const subscription = new CoreAbiSubscription(
       reader,
       this.#schema,
       () => {
-        this.#subscriptions.delete(subscription as DirectAbiSubscription<unknown>);
+        this.#subscriptions.delete(subscription as CoreAbiSubscription<unknown>);
       },
       callback,
       relationQuery,
@@ -1041,7 +1041,7 @@ class DirectAbiDb implements Db {
           sameBytes(encodeRowId(row.id), rowId),
         ) ?? null,
     );
-    this.#subscriptions.add(subscription as DirectAbiSubscription<unknown>);
+    this.#subscriptions.add(subscription as CoreAbiSubscription<unknown>);
     void subscription.start().catch((error: unknown) => {
       queueMicrotask(() => {
         throw error;
@@ -1313,11 +1313,11 @@ class DirectAbiDb implements Db {
   }
 }
 
-class DirectAbiTransaction implements Transaction {
+class CoreAbiTransaction implements Transaction {
   #closed = false;
 
   constructor(
-    private readonly db: DirectAbiDb,
+    private readonly db: CoreAbiDb,
     private readonly tx: WasmTx,
   ) {}
 
@@ -1429,7 +1429,7 @@ class DirectAbiTransaction implements Transaction {
   }
 }
 
-class DirectAbiSubscription<Row> implements Subscription<Row> {
+class CoreAbiSubscription<Row> implements Subscription<Row> {
   #currentRows: Array<Record<string, unknown>> = [];
 
   constructor(
@@ -3392,10 +3392,10 @@ function makeTableHandle<Row extends { id: string | Uint8Array }, Init = Omit<Ro
   table: string,
   schema: SchemaDefinition,
 ): Table<Row, Init> {
-  return new DirectAbiQueryBuilder<Row, Init>(table, schema);
+  return new CoreAbiQueryBuilder<Row, Init>(table, schema);
 }
 
-class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder<Row> {
+class CoreAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder<Row> {
   readonly _rowType = {} as Row;
   readonly _initType = {} as Init;
 
@@ -3438,7 +3438,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
         throw new Error(`${op} requires a scalar query value`);
       if (value === null && !nullable)
         throw new Error("null query value must target a nullable column");
-      return new DirectAbiQueryBuilder<Row>(
+      return new CoreAbiQueryBuilder<Row>(
         this._table,
         this._schema,
         [
@@ -3458,7 +3458,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
       if (!isQueryValueArray(value)) throw new Error("in requires an array of query values");
       if (value.some((item) => item === null) && !nullable)
         throw new Error("null query value must target a nullable column");
-      return new DirectAbiQueryBuilder<Row>(
+      return new CoreAbiQueryBuilder<Row>(
         this._table,
         this._schema,
         [...this.filters, inFilter(column, columnType, nullable, value)],
@@ -3475,7 +3475,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
       if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
         throw new Error(`${op} requires a text or integer query value`);
       }
-      return new DirectAbiQueryBuilder<Row>(
+      return new CoreAbiQueryBuilder<Row>(
         this._table,
         this._schema,
         [
@@ -3492,7 +3492,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
       );
     }
     if (op === "isNull" || op === "isNotNull") {
-      return new DirectAbiQueryBuilder<Row>(
+      return new CoreAbiQueryBuilder<Row>(
         this._table,
         this._schema,
         [...this.filters, { column, columnType, op }],
@@ -3508,7 +3508,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     if (op !== "contains") throw new Error(`unsupported query operator ${op}`);
     if (typeof value !== "string")
       throw new Error("contains is currently wired for string values only");
-    return new DirectAbiQueryBuilder<Row>(
+    return new CoreAbiQueryBuilder<Row>(
       this._table,
       this._schema,
       [...this.filters, { column, columnType, op, value }],
@@ -3526,7 +3526,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     ...columns: Columns
   ): QueryBuilder<ProjectedRow<Row, Columns>> {
     for (const column of columns) this.#columnType(column);
-    return new DirectAbiQueryBuilder<ProjectedRow<Row, Columns>>(
+    return new CoreAbiQueryBuilder<ProjectedRow<Row, Columns>>(
       this._table,
       this._schema,
       this.filters,
@@ -3544,7 +3544,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     this.#columnType(column);
     if (direction !== "asc" && direction !== "desc")
       throw new Error("query order direction must be 'asc' or 'desc'");
-    return new DirectAbiQueryBuilder<Row>(
+    return new CoreAbiQueryBuilder<Row>(
       this._table,
       this._schema,
       this.filters,
@@ -3559,7 +3559,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
   }
 
   limit(count: number): QueryBuilder<Row> {
-    return new DirectAbiQueryBuilder<Row>(
+    return new CoreAbiQueryBuilder<Row>(
       this._table,
       this._schema,
       this.filters,
@@ -3574,7 +3574,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
   }
 
   offset(count: number): QueryBuilder<Row> {
-    return new DirectAbiQueryBuilder<Row>(
+    return new CoreAbiQueryBuilder<Row>(
       this._table,
       this._schema,
       this.filters,
@@ -3602,7 +3602,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
         (query, [property, include]) =>
           include === undefined
             ? query
-            : ((query as DirectAbiQueryBuilder<Row>).includeSpecInternal(
+            : ((query as CoreAbiQueryBuilder<Row>).includeSpecInternal(
                 property,
                 include,
               ) as QueryBuilder<Row>),
@@ -3611,7 +3611,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     }
     const property = propertyOrIncludes;
     includeRelation(this._schema, this._table, property);
-    return new DirectAbiQueryBuilder<Row & Record<Property, unknown[] | unknown | null>>(
+    return new CoreAbiQueryBuilder<Row & Record<Property, unknown[] | unknown | null>>(
       this._table,
       this._schema,
       this.filters,
@@ -3632,7 +3632,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     const relation = includeRelation(this._schema, this._table, property);
     const normalized = normalizeIncludeOptions(include);
     validateIncludeSpec(this._schema, relation.table, normalized);
-    return new DirectAbiQueryBuilder<Row & Record<Property, unknown[] | unknown | null>>(
+    return new CoreAbiQueryBuilder<Row & Record<Property, unknown[] | unknown | null>>(
       this._table,
       this._schema,
       this.filters,
@@ -3677,7 +3677,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
       includeRelation(this._schema, this._table, property);
       includes[property] = { required: true };
     }
-    return new DirectAbiQueryBuilder<
+    return new CoreAbiQueryBuilder<
       Row & { [Property in Properties[number]]: unknown[] | unknown | null }
     >(
       this._table,
@@ -3695,7 +3695,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
 
   hop<Property extends string>(property: Property): QueryBuilder<Record<string, unknown>> {
     forwardRelation(this._schema, this.#terminalHopTable(), property);
-    return new DirectAbiQueryBuilder<Record<string, unknown>>(
+    return new CoreAbiQueryBuilder<Record<string, unknown>>(
       this._table,
       this._schema,
       this.filters,
@@ -3710,7 +3710,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
   }
 
   gather(options: GatherOptions): QueryBuilder<Row> {
-    return new DirectAbiQueryBuilder<Row>(
+    return new CoreAbiQueryBuilder<Row>(
       this._table,
       this._schema,
       this.filters,

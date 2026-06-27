@@ -5,7 +5,7 @@
 //!
 //! # Architecture
 //!
-//! - `NapiDirectDb` exposes the vendored Jazz core DB directly over an
+//! - `NapiDb` exposes the vendored Jazz core DB directly over an
 //!   encoded-row boundary for the TypeScript client packages.
 //! - `JazzServer` exposes the Rust server process used by integration tests
 //!   and Node deployments.
@@ -42,27 +42,26 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz::db::{
-    Db as DirectDb, DbConfig as DirectDbConfig, DbIdentity as DirectDbIdentity,
-    LocalUpdates as DirectLocalUpdates, PeerConnection as DirectPeerConnection,
-    PreparedQuery as DirectPreparedQueryInner, Propagation as DirectPropagation,
-    ReadOpts as DirectReadOpts, RemovedRow as DirectRemovedRowInner, RowCells as DirectRowCells,
-    SeededRowIdSource as DirectSeededRowIdSource, SubscriptionEvent as DirectSubscriptionEvent,
-    SubscriptionStream as DirectSubscriptionStream, TickScheduler as DirectTickScheduler,
-    TickUrgency as DirectTickUrgency, WireTransportAdapter as DirectWireTransportAdapter,
-    WriteHandle as DirectWriteHandle, block_on as direct_block_on,
+    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
+    LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
+    PreparedQuery as PreparedQueryInner, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
+    RemovedRow as CoreRemovedRowInner, RowCells as CoreRowCells,
+    SeededRowIdSource as CoreSeededRowIdSource, SubscriptionEvent, SubscriptionStream,
+    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
+    WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
 use jazz::groove::records::{
-    BorrowedRecord as DirectBorrowedRecord, RecordDescriptor, Value as DirectValue,
+    BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
 };
 use jazz::groove::storage::{
-    MemoryStorage as DirectMemoryStorage, OrderedKvStorage as DirectOrderedKvStorage,
-    ReopenableStorage as DirectReopenableStorage, RocksDbStorage as DirectRocksDbStorage,
+    MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
+    ReopenableStorage as CoreReopenableStorage, RocksDbStorage as CoreRocksDbStorage,
 };
-use jazz::ids::{AuthorId as DirectAuthorId, NodeUuid as DirectNodeUuid, RowUuid as DirectRowUuid};
-use jazz::query::Query as DirectQuery;
+use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use jazz::query::Query as CoreQuery;
 use jazz::schema::JazzSchema;
-use jazz::tx::{DurabilityTier as DirectDurabilityTier, Fate as DirectFate, TxId as DirectTxId};
-use jazz::wire::{TransportError as DirectTransportError, WireTransport as DirectWireTransport};
+use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
+use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
 use jazz_tools::AppId;
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -72,20 +71,20 @@ use jazz_tools::server::{
 };
 
 #[derive(Clone, Debug, Deserialize)]
-struct DirectOpenDbConfig {
-    identity: DirectOpenDbIdentity,
+struct CoreOpenDbConfig {
+    identity: CoreOpenDbIdentity,
     row_id_seed: Option<u64>,
     history_complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
-struct DirectOpenDbIdentity {
-    node: DirectNodeUuid,
-    author: DirectAuthorId,
+struct CoreOpenDbIdentity {
+    node: CoreNodeUuid,
+    author: CoreAuthorId,
 }
 
-impl From<DirectOpenDbIdentity> for DirectDbIdentity {
-    fn from(identity: DirectOpenDbIdentity) -> Self {
+impl From<CoreOpenDbIdentity> for CoreDbIdentity {
+    fn from(identity: CoreOpenDbIdentity) -> Self {
         Self {
             node: identity.node,
             author: identity.author,
@@ -94,102 +93,102 @@ impl From<DirectOpenDbIdentity> for DirectDbIdentity {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-struct DirectRowBatch<'a> {
+struct CoreRowBatch<'a> {
     table: &'a str,
     descriptor: RecordDescriptor,
-    rows: Vec<DirectRow<'a>>,
+    rows: Vec<CoreRow<'a>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-struct DirectRow<'a> {
-    row_id: DirectRowUuid,
+struct CoreRow<'a> {
+    row_id: CoreRowUuid,
     deleted: bool,
     raw: &'a [u8],
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-struct DirectWriteResult {
-    row_id: DirectRowUuid,
-    tx_id: DirectTxId,
+struct WriteResult {
+    row_id: CoreRowUuid,
+    tx_id: TxId,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-struct DirectRemovedRow<'a> {
+struct CoreRemovedRow<'a> {
     table: &'a str,
-    row_id: DirectRowUuid,
+    row_id: CoreRowUuid,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-struct DirectSubscriptionDelta<'a> {
-    added: Vec<DirectRowBatch<'a>>,
-    updated: Vec<DirectRowBatch<'a>>,
-    removed: Vec<DirectRemovedRow<'a>>,
+struct SubscriptionDelta<'a> {
+    added: Vec<CoreRowBatch<'a>>,
+    updated: Vec<CoreRowBatch<'a>>,
+    removed: Vec<CoreRemovedRow<'a>>,
 }
 
-type DirectNapiDbInner = Rc<RefCell<Option<DirectNapiDb>>>;
+type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
-enum DirectNapiDb {
-    Memory(Rc<DirectDb<DirectMemoryStorage>>),
-    Persistent(Rc<DirectDb<DirectRocksDbStorage>>),
+enum NapiDbInnerStorage {
+    Memory(Rc<CoreDb<CoreMemoryStorage>>),
+    Persistent(Rc<CoreDb<CoreRocksDbStorage>>),
 }
 
-enum DirectNapiWrite {
+enum NapiWrite {
     Memory {
-        db: Rc<DirectDb<DirectMemoryStorage>>,
-        tx_id: DirectTxId,
+        db: Rc<CoreDb<CoreMemoryStorage>>,
+        tx_id: TxId,
     },
     Persistent {
-        db: Rc<DirectDb<DirectRocksDbStorage>>,
-        tx_id: DirectTxId,
+        db: Rc<CoreDb<CoreRocksDbStorage>>,
+        tx_id: TxId,
     },
 }
 
-enum DirectNapiTxWrite {
+enum NapiTxWrite {
     Insert {
         table: String,
-        row_id: DirectRowUuid,
-        cells: DirectRowCells,
+        row_id: CoreRowUuid,
+        cells: CoreRowCells,
     },
     Update {
         table: String,
-        row_id: DirectRowUuid,
-        patch: DirectRowCells,
+        row_id: CoreRowUuid,
+        patch: CoreRowCells,
     },
     Upsert {
         table: String,
-        row_id: DirectRowUuid,
-        cells: DirectRowCells,
+        row_id: CoreRowUuid,
+        cells: CoreRowCells,
     },
     Delete {
         table: String,
-        row_id: DirectRowUuid,
+        row_id: CoreRowUuid,
     },
     Restore {
         table: String,
-        row_id: DirectRowUuid,
-        cells: DirectRowCells,
+        row_id: CoreRowUuid,
+        cells: CoreRowCells,
     },
 }
 
 #[derive(Clone, Default)]
-struct DirectWireQueues {
+struct WireQueues {
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
 }
 
 struct NapiWireTransport {
-    queues: DirectWireQueues,
+    queues: WireQueues,
 }
 
 struct NapiTickScheduler {
     callback: ThreadsafeFunction<String, ()>,
 }
 
-impl DirectTickScheduler for NapiTickScheduler {
-    fn schedule_tick(&self, urgency: DirectTickUrgency) {
+impl CoreTickScheduler for NapiTickScheduler {
+    fn schedule_tick(&self, urgency: CoreTickUrgency) {
         let urgency = match urgency {
-            DirectTickUrgency::Immediate => "immediate",
-            DirectTickUrgency::Deferred => "deferred",
+            CoreTickUrgency::Immediate => "immediate",
+            CoreTickUrgency::Deferred => "deferred",
         };
         let _ = self.callback.call(
             Ok(urgency.to_string()),
@@ -198,8 +197,8 @@ impl DirectTickScheduler for NapiTickScheduler {
     }
 }
 
-impl DirectWireTransport for NapiWireTransport {
-    fn send_frame(&mut self, frame: Vec<u8>) -> std::result::Result<(), DirectTransportError> {
+impl CoreWireTransport for NapiWireTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> std::result::Result<(), TransportError> {
         self.queues.outbound.borrow_mut().push_back(frame);
         Ok(())
     }
@@ -209,52 +208,52 @@ impl DirectWireTransport for NapiWireTransport {
     }
 }
 
-#[napi(js_name = "DirectPreparedQuery")]
-pub struct NapiDirectPreparedQuery {
-    inner: DirectPreparedQueryInner,
+#[napi(js_name = "PreparedQuery")]
+pub struct PreparedQuery {
+    inner: PreparedQueryInner,
 }
 
-#[napi(js_name = "DirectWrite")]
-pub struct NapiDirectWrite {
+#[napi(js_name = "Write")]
+pub struct Write {
     payload: Vec<u8>,
-    inner: Option<DirectNapiWrite>,
+    inner: Option<NapiWrite>,
 }
 
-#[napi(js_name = "DirectTransport")]
-pub struct NapiDirectTransport {
-    inner: DirectNapiTransportInner,
-    queues: DirectWireQueues,
+#[napi(js_name = "Transport")]
+pub struct Transport {
+    inner: NapiTransportInner,
+    queues: WireQueues,
 }
 
-#[napi(js_name = "DirectSubscription")]
-pub struct NapiDirectSubscription {
-    inner: Option<DirectNapiSubscription>,
+#[napi(js_name = "Subscription")]
+pub struct Subscription {
+    inner: Option<NapiSubscription>,
 }
 
-enum DirectNapiTransportInner {
+enum NapiTransportInner {
     Memory {
-        db: Rc<DirectDb<DirectMemoryStorage>>,
-        connection: Option<Rc<RefCell<DirectPeerConnection<DirectMemoryStorage>>>>,
+        db: Rc<CoreDb<CoreMemoryStorage>>,
+        connection: Option<Rc<RefCell<CorePeerConnection<CoreMemoryStorage>>>>,
     },
     Persistent {
-        db: Rc<DirectDb<DirectRocksDbStorage>>,
-        connection: Option<Rc<RefCell<DirectPeerConnection<DirectRocksDbStorage>>>>,
+        db: Rc<CoreDb<CoreRocksDbStorage>>,
+        connection: Option<Rc<RefCell<CorePeerConnection<CoreRocksDbStorage>>>>,
     },
 }
 
-enum DirectNapiSubscription {
-    Memory(DirectSubscriptionStream),
-    Persistent(DirectSubscriptionStream),
+enum NapiSubscription {
+    Memory(SubscriptionStream),
+    Persistent(SubscriptionStream),
 }
 
-#[napi(js_name = "DirectTx")]
-pub struct NapiDirectTx {
-    db: DirectNapiDb,
-    writes: Option<Vec<DirectNapiTxWrite>>,
+#[napi(js_name = "Tx")]
+pub struct Tx {
+    db: NapiDbInnerStorage,
+    writes: Option<Vec<NapiTxWrite>>,
 }
 
 #[napi]
-impl NapiDirectWrite {
+impl Write {
     #[napi(getter)]
     pub fn payload(&self) -> Uint8Array {
         Uint8Array::new(self.payload.clone())
@@ -262,11 +261,11 @@ impl NapiDirectWrite {
 
     #[napi]
     pub fn wait(&self, tier: String) -> napi::Result<()> {
-        let tier = direct_durability_tier_from_str(&tier)?;
+        let tier = core_durability_tier_from_str(&tier)?;
         if let Some(write) = &self.inner {
             match write {
-                DirectNapiWrite::Memory { db, tx_id } => direct_wait_for_tx(db, *tx_id, tier)?,
-                DirectNapiWrite::Persistent { db, tx_id } => direct_wait_for_tx(db, *tx_id, tier)?,
+                NapiWrite::Memory { db, tx_id } => core_wait_for_tx(db, *tx_id, tier)?,
+                NapiWrite::Persistent { db, tx_id } => core_wait_for_tx(db, *tx_id, tier)?,
             }
         }
         Ok(())
@@ -278,11 +277,11 @@ impl NapiDirectWrite {
             return Err(napi::Error::from_reason("write state is unavailable"));
         };
         let state = match write {
-            DirectNapiWrite::Memory { db, tx_id } => db.write_state(*tx_id),
-            DirectNapiWrite::Persistent { db, tx_id } => db.write_state(*tx_id),
+            NapiWrite::Memory { db, tx_id } => db.write_state(*tx_id),
+            NapiWrite::Persistent { db, tx_id } => db.write_state(*tx_id),
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        Ok(direct_write_state_to_json(&state))
+        Ok(core_write_state_to_json(&state))
     }
 
     #[napi(js_name = "nextWriteStateChange")]
@@ -300,12 +299,12 @@ impl NapiDirectWrite {
             ));
         }
         match write {
-            DirectNapiWrite::Memory { db, tx_id } => {
+            NapiWrite::Memory { db, tx_id } => {
                 db.on_next_write_state_change(*tx_id, move || {
                     resolve_raw_promise(env, deferred);
                 });
             }
-            DirectNapiWrite::Persistent { db, tx_id } => {
+            NapiWrite::Persistent { db, tx_id } => {
                 db.on_next_write_state_change(*tx_id, move || {
                     resolve_raw_promise(env, deferred);
                 });
@@ -321,7 +320,7 @@ impl NapiDirectWrite {
 }
 
 #[napi]
-impl NapiDirectTransport {
+impl Transport {
     #[napi(js_name = "sendWireFrame")]
     pub fn send_wire_frame(&self, frame: Uint8Array) {
         self.queues.inbound.borrow_mut().push_back(frame.to_vec());
@@ -340,25 +339,21 @@ impl NapiDirectTransport {
     #[napi]
     pub fn tick(&self) -> napi::Result<u32> {
         match &self.inner {
-            DirectNapiTransportInner::Memory { connection, .. } => {
-                direct_tick_connection(connection)
-            }
-            DirectNapiTransportInner::Persistent { connection, .. } => {
-                direct_tick_connection(connection)
-            }
+            NapiTransportInner::Memory { connection, .. } => core_tick_connection(connection),
+            NapiTransportInner::Persistent { connection, .. } => core_tick_connection(connection),
         }
     }
 
     #[napi]
     pub fn close(&mut self) -> bool {
         match &mut self.inner {
-            DirectNapiTransportInner::Memory { db, connection } => {
+            NapiTransportInner::Memory { db, connection } => {
                 let Some(connection) = connection.take() else {
                     return false;
                 };
                 db.detach_connection(&connection)
             }
-            DirectNapiTransportInner::Persistent { db, connection } => {
+            NapiTransportInner::Persistent { db, connection } => {
                 let Some(connection) = connection.take() else {
                     return false;
                 };
@@ -369,7 +364,7 @@ impl NapiDirectTransport {
 }
 
 #[napi]
-impl NapiDirectSubscription {
+impl Subscription {
     #[napi(js_name = "readAll")]
     pub fn read_all(&mut self) -> napi::Result<Vec<serde_json::Value>> {
         let subscription = self
@@ -379,13 +374,13 @@ impl NapiDirectSubscription {
         let mut events = Vec::new();
         loop {
             let event = match subscription {
-                DirectNapiSubscription::Memory(stream) => stream.try_next_event(),
-                DirectNapiSubscription::Persistent(stream) => stream.try_next_event(),
+                NapiSubscription::Memory(stream) => stream.try_next_event(),
+                NapiSubscription::Persistent(stream) => stream.try_next_event(),
             };
             let Some(event) = event else {
                 break;
             };
-            events.push(direct_subscription_event_to_json(&event)?);
+            events.push(core_subscription_event_to_json(&event)?);
         }
         Ok(events)
     }
@@ -402,7 +397,7 @@ impl NapiDirectSubscription {
 }
 
 #[napi]
-impl NapiDirectTx {
+impl Tx {
     #[napi(js_name = "insertWithIdEncoded")]
     pub fn insert_with_id_encoded(
         &mut self,
@@ -410,9 +405,9 @@ impl NapiDirectTx {
         row_id: Uint8Array,
         cells: Uint8Array,
     ) -> napi::Result<()> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_direct_cells(&cells)?;
-        self.pending_writes()?.push(DirectNapiTxWrite::Insert {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        self.pending_writes()?.push(NapiTxWrite::Insert {
             table,
             row_id,
             cells,
@@ -427,9 +422,9 @@ impl NapiDirectTx {
         row_id: Uint8Array,
         patch: Uint8Array,
     ) -> napi::Result<()> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_direct_cells(&patch)?;
-        self.pending_writes()?.push(DirectNapiTxWrite::Update {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        self.pending_writes()?.push(NapiTxWrite::Update {
             table,
             row_id,
             patch,
@@ -444,9 +439,9 @@ impl NapiDirectTx {
         row_id: Uint8Array,
         cells: Uint8Array,
     ) -> napi::Result<()> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_direct_cells(&cells)?;
-        self.pending_writes()?.push(DirectNapiTxWrite::Upsert {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        self.pending_writes()?.push(NapiTxWrite::Upsert {
             table,
             row_id,
             cells,
@@ -456,9 +451,9 @@ impl NapiDirectTx {
 
     #[napi(js_name = "delete")]
     pub fn delete_encoded(&mut self, table: String, row_id: Uint8Array) -> napi::Result<()> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
         self.pending_writes()?
-            .push(DirectNapiTxWrite::Delete { table, row_id });
+            .push(NapiTxWrite::Delete { table, row_id });
         Ok(())
     }
 
@@ -469,9 +464,9 @@ impl NapiDirectTx {
         row_id: Uint8Array,
         cells: Uint8Array,
     ) -> napi::Result<()> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_direct_cells(&cells)?;
-        self.pending_writes()?.push(DirectNapiTxWrite::Restore {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        self.pending_writes()?.push(NapiTxWrite::Restore {
             table,
             row_id,
             cells,
@@ -480,14 +475,14 @@ impl NapiDirectTx {
     }
 
     #[napi]
-    pub fn commit(&mut self) -> napi::Result<NapiDirectWrite> {
+    pub fn commit(&mut self) -> napi::Result<Write> {
         let writes = self
             .writes
             .take()
             .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))?;
         match &self.db {
-            DirectNapiDb::Memory(db) => direct_commit_tx_memory(db, writes),
-            DirectNapiDb::Persistent(db) => direct_commit_tx_persistent(db, writes),
+            NapiDbInnerStorage::Memory(db) => core_commit_tx_memory(db, writes),
+            NapiDbInnerStorage::Persistent(db) => core_commit_tx_persistent(db, writes),
         }
     }
 
@@ -500,30 +495,30 @@ impl NapiDirectTx {
     }
 }
 
-impl NapiDirectTx {
-    fn pending_writes(&mut self) -> napi::Result<&mut Vec<DirectNapiTxWrite>> {
+impl Tx {
+    fn pending_writes(&mut self) -> napi::Result<&mut Vec<NapiTxWrite>> {
         self.writes
             .as_mut()
             .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))
     }
 }
 
-#[napi(js_name = "NapiDirectDb")]
-pub struct NapiDirectDb {
-    inner: DirectNapiDbInner,
+#[napi(js_name = "NapiDb")]
+pub struct NapiDb {
+    inner: NapiDbInner,
 }
 
 #[napi]
-impl NapiDirectDb {
+impl NapiDb {
     #[napi(factory, js_name = "openMemory")]
     pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
-        let (schema, config) = decode_direct_open_args(&schema, &config)?;
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_direct_db(schema, DirectMemoryStorage::new(&refs), config)
+        let db = open_core_db(schema, CoreMemoryStorage::new(&refs), config)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(Some(DirectNapiDb::Memory(Rc::new(db))))),
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
         })
     }
 
@@ -533,15 +528,17 @@ impl NapiDirectDb {
         schema: Uint8Array,
         config: Uint8Array,
     ) -> napi::Result<Self> {
-        let (schema, config) = decode_direct_open_args(&schema, &config)?;
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = DirectRocksDbStorage::open(data_path, &refs)
+        let storage = CoreRocksDbStorage::open(data_path, &refs)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        let db = open_direct_db(schema, storage, config)
+        let db = open_core_db(schema, storage, config)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(Some(DirectNapiDb::Persistent(Rc::new(db))))),
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
+                db,
+            ))))),
         })
     }
 
@@ -553,48 +550,48 @@ impl NapiDirectDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
-            DirectNapiDb::Persistent(db) => db.set_tick_scheduler(Some(scheduler)),
+            NapiDbInnerStorage::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
+            NapiDbInnerStorage::Persistent(db) => db.set_tick_scheduler(Some(scheduler)),
         }
         Ok(())
     }
 
     #[napi(js_name = "prepareQuery")]
-    pub fn prepare_query(&self, query: Uint8Array) -> napi::Result<NapiDirectPreparedQuery> {
-        let query: DirectQuery = postcard::from_bytes(&query)
+    pub fn prepare_query(&self, query: Uint8Array) -> napi::Result<PreparedQuery> {
+        let query: CoreQuery = postcard::from_bytes(&query)
             .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         let inner = match db {
-            DirectNapiDb::Memory(db) => db.prepare_query(&query),
-            DirectNapiDb::Persistent(db) => db.prepare_query(&query),
+            NapiDbInnerStorage::Memory(db) => db.prepare_query(&query),
+            NapiDbInnerStorage::Persistent(db) => db.prepare_query(&query),
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        Ok(NapiDirectPreparedQuery { inner })
+        Ok(PreparedQuery { inner })
     }
 
     #[napi]
     pub fn all(
         &self,
-        query: &NapiDirectPreparedQuery,
+        query: &PreparedQuery,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
     ) -> napi::Result<Uint8Array> {
-        let opts = direct_read_opts_from_json(opts)?;
+        let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         let rows = match db {
-            DirectNapiDb::Memory(db) => direct_block_on(db.all(&query.inner, opts)),
-            DirectNapiDb::Persistent(db) => direct_block_on(db.all(&query.inner, opts)),
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.all(&query.inner, opts)),
+            NapiDbInnerStorage::Persistent(db) => core_block_on(db.all(&query.inner, opts)),
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_direct_rows(&rows)
+        encode_core_rows(&rows)
             .map(Uint8Array::new)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
@@ -602,31 +599,31 @@ impl NapiDirectDb {
     #[napi(js_name = "allForIdentity")]
     pub fn all_for_identity(
         &self,
-        query: &NapiDirectPreparedQuery,
+        query: &PreparedQuery,
         author: Uint8Array,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
     ) -> napi::Result<Uint8Array> {
-        let author = direct_author_id_from_bytes(&author)?;
-        let opts = direct_read_opts_from_json(opts)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         let rows = match db {
-            DirectNapiDb::Memory(db) => {
-                direct_set_identity_claims(db, author);
-                direct_block_on(db.all_for_identity(&query.inner, opts, author))
+            NapiDbInnerStorage::Memory(db) => {
+                core_set_identity_claims(db, author);
+                core_block_on(db.all_for_identity(&query.inner, opts, author))
             }
-            DirectNapiDb::Persistent(db) => {
-                direct_set_identity_claims(db, author);
-                direct_block_on(db.all_for_identity(&query.inner, opts, author))
+            NapiDbInnerStorage::Persistent(db) => {
+                core_set_identity_claims(db, author);
+                core_block_on(db.all_for_identity(&query.inner, opts, author))
             }
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_direct_rows(&rows)
+        encode_core_rows(&rows)
             .map(Uint8Array::new)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
@@ -634,93 +631,93 @@ impl NapiDirectDb {
     #[napi(js_name = "propagateQuery")]
     pub fn propagate_query(
         &self,
-        query: &NapiDirectPreparedQuery,
+        query: &PreparedQuery,
         opts: Option<serde_json::Value>,
     ) -> napi::Result<()> {
-        let opts = direct_read_opts_from_json(opts)?;
+        let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => db.propagate_query_with_opts(&query.inner, opts),
-            DirectNapiDb::Persistent(db) => db.propagate_query_with_opts(&query.inner, opts),
+            NapiDbInnerStorage::Memory(db) => db.propagate_query_with_opts(&query.inner, opts),
+            NapiDbInnerStorage::Persistent(db) => db.propagate_query_with_opts(&query.inner, opts),
         }
         Ok(())
     }
 
     #[napi(js_name = "queryIsCovered")]
-    pub fn query_is_covered(&self, query: &NapiDirectPreparedQuery) -> napi::Result<bool> {
+    pub fn query_is_covered(&self, query: &PreparedQuery) -> napi::Result<bool> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         Ok(match db {
-            DirectNapiDb::Memory(db) => db.query_is_covered(&query.inner),
-            DirectNapiDb::Persistent(db) => db.query_is_covered(&query.inner),
+            NapiDbInnerStorage::Memory(db) => db.query_is_covered(&query.inner),
+            NapiDbInnerStorage::Persistent(db) => db.query_is_covered(&query.inner),
         })
     }
 
     #[napi]
     pub fn subscribe(
         &self,
-        query: &NapiDirectPreparedQuery,
+        query: &PreparedQuery,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<NapiDirectSubscription> {
-        let opts = direct_read_opts_from_json(opts)?;
+    ) -> napi::Result<Subscription> {
+        let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         let inner = match db {
-            DirectNapiDb::Memory(db) => DirectNapiSubscription::Memory(
-                direct_block_on(db.subscribe(&query.inner, opts))
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
+                core_block_on(db.subscribe(&query.inner, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
-            DirectNapiDb::Persistent(db) => DirectNapiSubscription::Persistent(
-                direct_block_on(db.subscribe(&query.inner, opts))
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
+                core_block_on(db.subscribe(&query.inner, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
-        Ok(NapiDirectSubscription { inner: Some(inner) })
+        Ok(Subscription { inner: Some(inner) })
     }
 
     #[napi(js_name = "subscribeForIdentity")]
     pub fn subscribe_for_identity(
         &self,
-        query: &NapiDirectPreparedQuery,
+        query: &PreparedQuery,
         author: Uint8Array,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<NapiDirectSubscription> {
-        let author = direct_author_id_from_bytes(&author)?;
-        let opts = direct_read_opts_from_json(opts)?;
+    ) -> napi::Result<Subscription> {
+        let author = core_author_id_from_bytes(&author)?;
+        let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         let inner = match db {
-            DirectNapiDb::Memory(db) => {
-                direct_set_identity_claims(db, author);
-                DirectNapiSubscription::Memory(
-                    direct_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+            NapiDbInnerStorage::Memory(db) => {
+                core_set_identity_claims(db, author);
+                NapiSubscription::Memory(
+                    core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
             }
-            DirectNapiDb::Persistent(db) => {
-                direct_set_identity_claims(db, author);
-                DirectNapiSubscription::Persistent(
-                    direct_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+            NapiDbInnerStorage::Persistent(db) => {
+                core_set_identity_claims(db, author);
+                NapiSubscription::Persistent(
+                    core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
             }
         };
-        Ok(NapiDirectSubscription { inner: Some(inner) })
+        Ok(Subscription { inner: Some(inner) })
     }
 
     #[napi(js_name = "insertWithIdEncoded")]
@@ -729,20 +726,20 @@ impl NapiDirectDb {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_direct_cells(&cells)?;
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
                 db.insert_with_id(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
-            DirectNapiDb::Persistent(db) => direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
                 db.insert_with_id(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -757,26 +754,26 @@ impl NapiDirectDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         author: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_direct_cells(&cells)?;
-        let author = direct_author_id_from_bytes(&author)?;
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => {
+                core_set_identity_claims(db, author);
+                core_write_memory(
                     Rc::clone(db),
                     db.insert_with_id_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
             }
-            DirectNapiDb::Persistent(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => {
+                core_set_identity_claims(db, author);
+                core_write_persistent(
                     Rc::clone(db),
                     db.insert_with_id_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -791,20 +788,20 @@ impl NapiDirectDb {
         table: String,
         row_id: Uint8Array,
         patch: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_direct_cells(&patch)?;
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
                 db.update(&table, row_id, patch)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
-            DirectNapiDb::Persistent(db) => direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
                 db.update(&table, row_id, patch)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -819,26 +816,26 @@ impl NapiDirectDb {
         row_id: Uint8Array,
         patch: Uint8Array,
         author: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_direct_cells(&patch)?;
-        let author = direct_author_id_from_bytes(&author)?;
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let author = core_author_id_from_bytes(&author)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => {
+                core_set_identity_claims(db, author);
+                core_write_memory(
                     Rc::clone(db),
                     db.update_for_identity(author, &table, row_id, patch)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
             }
-            DirectNapiDb::Persistent(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => {
+                core_set_identity_claims(db, author);
+                core_write_persistent(
                     Rc::clone(db),
                     db.update_for_identity(author, &table, row_id, patch)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -853,20 +850,20 @@ impl NapiDirectDb {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_direct_cells(&cells)?;
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
                 db.upsert(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
-            DirectNapiDb::Persistent(db) => direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
                 db.upsert(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -881,26 +878,26 @@ impl NapiDirectDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         author: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_direct_cells(&cells)?;
-        let author = direct_author_id_from_bytes(&author)?;
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => {
+                core_set_identity_claims(db, author);
+                core_write_memory(
                     Rc::clone(db),
                     db.upsert_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
             }
-            DirectNapiDb::Persistent(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => {
+                core_set_identity_claims(db, author);
+                core_write_persistent(
                     Rc::clone(db),
                     db.upsert_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -910,23 +907,19 @@ impl NapiDirectDb {
     }
 
     #[napi(js_name = "delete")]
-    pub fn delete_encoded(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+    pub fn delete_encoded(&self, table: String, row_id: Uint8Array) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
                 db.delete(&table, row_id)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
-            DirectNapiDb::Persistent(db) => direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
                 db.delete(&table, row_id)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -940,25 +933,25 @@ impl NapiDirectDb {
         table: String,
         row_id: Uint8Array,
         author: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let author = direct_author_id_from_bytes(&author)?;
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let author = core_author_id_from_bytes(&author)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => {
+                core_set_identity_claims(db, author);
+                core_write_memory(
                     Rc::clone(db),
                     db.delete_for_identity(author, &table, row_id)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
             }
-            DirectNapiDb::Persistent(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => {
+                core_set_identity_claims(db, author);
+                core_write_persistent(
                     Rc::clone(db),
                     db.delete_for_identity(author, &table, row_id)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -973,20 +966,20 @@ impl NapiDirectDb {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_direct_cells(&cells)?;
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
                 db.restore(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
-            DirectNapiDb::Persistent(db) => direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
                 db.restore(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -1001,26 +994,26 @@ impl NapiDirectDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         author: Uint8Array,
-    ) -> napi::Result<NapiDirectWrite> {
-        let row_id = direct_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_direct_cells(&cells)?;
-        let author = direct_author_id_from_bytes(&author)?;
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_memory(
+            NapiDbInnerStorage::Memory(db) => {
+                core_set_identity_claims(db, author);
+                core_write_memory(
                     Rc::clone(db),
                     db.restore_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
             }
-            DirectNapiDb::Persistent(db) => {
-                direct_set_identity_claims(db, author);
-                direct_write_persistent(
+            NapiDbInnerStorage::Persistent(db) => {
+                core_set_identity_claims(db, author);
+                core_write_persistent(
                     Rc::clone(db),
                     db.restore_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
@@ -1036,45 +1029,45 @@ impl NapiDirectDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
-            DirectNapiDb::Memory(db) => db.tick(),
-            DirectNapiDb::Persistent(db) => db.tick(),
+            NapiDbInnerStorage::Memory(db) => db.tick(),
+            NapiDbInnerStorage::Persistent(db) => db.tick(),
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "connectUpstream")]
-    pub fn connect_upstream(&self) -> napi::Result<NapiDirectTransport> {
+    pub fn connect_upstream(&self) -> napi::Result<Transport> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
-        let queues = DirectWireQueues::default();
-        let transport = Box::new(DirectWireTransportAdapter::current(NapiWireTransport {
+        let queues = WireQueues::default();
+        let transport = Box::new(CoreWireTransportAdapter::current(NapiWireTransport {
             queues: queues.clone(),
         }));
         let inner = match db {
-            DirectNapiDb::Memory(db) => DirectNapiTransportInner::Memory {
+            NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
                 connection: Some(db.connect_upstream(transport)),
             },
-            DirectNapiDb::Persistent(db) => DirectNapiTransportInner::Persistent {
+            NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
                 db: Rc::clone(db),
                 connection: Some(db.connect_upstream(transport)),
             },
         };
-        Ok(NapiDirectTransport { inner, queues })
+        Ok(Transport { inner, queues })
     }
 
     #[napi(js_name = "mergeableTx")]
-    pub fn mergeable_tx(&self) -> napi::Result<NapiDirectTx> {
+    pub fn mergeable_tx(&self) -> napi::Result<Tx> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
-        Ok(NapiDirectTx {
+        Ok(Tx {
             db: match db {
-                DirectNapiDb::Memory(db) => DirectNapiDb::Memory(Rc::clone(db)),
-                DirectNapiDb::Persistent(db) => DirectNapiDb::Persistent(Rc::clone(db)),
+                NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
+                NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
             },
             writes: Some(Vec::new()),
         })
@@ -1086,44 +1079,44 @@ impl NapiDirectDb {
     }
 }
 
-fn decode_direct_open_args(
+fn decode_core_open_args(
     schema: &[u8],
     config: &[u8],
-) -> napi::Result<(JazzSchema, DirectOpenDbConfig)> {
+) -> napi::Result<(JazzSchema, CoreOpenDbConfig)> {
     let schema: JazzSchema = postcard::from_bytes(schema)
         .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
-    let config: DirectOpenDbConfig = postcard::from_bytes(config)
+    let config: CoreOpenDbConfig = postcard::from_bytes(config)
         .map_err(|error| napi::Error::from_reason(format!("decode open config: {error}")))?;
     Ok((schema, config))
 }
 
-fn open_direct_db<S>(
+fn open_core_db<S>(
     schema: JazzSchema,
     storage: S,
-    config: DirectOpenDbConfig,
-) -> std::result::Result<DirectDb<S>, jazz::db::Error>
+    config: CoreOpenDbConfig,
+) -> std::result::Result<CoreDb<S>, jazz::db::Error>
 where
-    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    let mut db_config = DirectDbConfig::new(schema, storage, config.identity.into());
+    let mut db_config = CoreDbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {
-        db_config = db_config.with_id_source(DirectSeededRowIdSource::new(seed));
+        db_config = db_config.with_id_source(CoreSeededRowIdSource::new(seed));
     }
     if config.history_complete {
-        direct_block_on(DirectDb::open_history_complete(db_config))
+        core_block_on(CoreDb::open_history_complete(db_config))
     } else {
-        direct_block_on(DirectDb::open(db_config))
+        core_block_on(CoreDb::open(db_config))
     }
 }
 
-fn decode_direct_cells(bytes: &[u8]) -> napi::Result<DirectRowCells> {
+fn decode_core_cells(bytes: &[u8]) -> napi::Result<CoreRowCells> {
     let (descriptor, raw): (RecordDescriptor, Vec<u8>) = postcard::from_bytes(bytes)
         .map_err(|error| napi::Error::from_reason(format!("decode cells: {error}")))?;
-    let record = DirectBorrowedRecord::new(&raw, &descriptor);
+    let record = CoreBorrowedRecord::new(&raw, &descriptor);
     let values = record
         .to_values()
         .map_err(|error| napi::Error::from_reason(format!("decode cell record: {error}")))?;
-    let mut cells = DirectRowCells::new();
+    let mut cells = CoreRowCells::new();
     for (field, value) in descriptor.fields().iter().zip(values) {
         let Some(name) = &field.name else {
             return Err(napi::Error::from_reason(
@@ -1135,87 +1128,84 @@ fn decode_direct_cells(bytes: &[u8]) -> napi::Result<DirectRowCells> {
     Ok(cells)
 }
 
-fn direct_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<DirectRowUuid> {
+fn core_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<CoreRowUuid> {
     let bytes: [u8; 16] = bytes
         .try_into()
         .map_err(|_| napi::Error::from_reason("row id must be 16 bytes"))?;
-    Ok(DirectRowUuid::from_bytes(bytes))
+    Ok(CoreRowUuid::from_bytes(bytes))
 }
 
-fn direct_author_id_from_bytes(bytes: &[u8]) -> napi::Result<DirectAuthorId> {
+fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorId> {
     let bytes: [u8; 16] = bytes
         .try_into()
         .map_err(|_| napi::Error::from_reason("author id must be 16 bytes"))?;
-    Ok(DirectAuthorId::from_bytes(bytes))
+    Ok(CoreAuthorId::from_bytes(bytes))
 }
 
-fn direct_write_memory(
-    db: Rc<DirectDb<DirectMemoryStorage>>,
-    write: DirectWriteHandle<DirectMemoryStorage>,
-) -> napi::Result<NapiDirectWrite> {
+fn core_write_memory(
+    db: Rc<CoreDb<CoreMemoryStorage>>,
+    write: WriteHandle<CoreMemoryStorage>,
+) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
-    let result = DirectWriteResult {
+    let result = WriteResult {
         row_id: write.row_uuid(),
         tx_id,
     };
-    Ok(NapiDirectWrite {
+    Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        inner: Some(DirectNapiWrite::Memory { db, tx_id }),
+        inner: Some(NapiWrite::Memory { db, tx_id }),
     })
 }
 
-fn direct_write_persistent(
-    db: Rc<DirectDb<DirectRocksDbStorage>>,
-    write: DirectWriteHandle<DirectRocksDbStorage>,
-) -> napi::Result<NapiDirectWrite> {
+fn core_write_persistent(
+    db: Rc<CoreDb<CoreRocksDbStorage>>,
+    write: WriteHandle<CoreRocksDbStorage>,
+) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
-    let result = DirectWriteResult {
+    let result = WriteResult {
         row_id: write.row_uuid(),
         tx_id,
     };
-    Ok(NapiDirectWrite {
+    Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        inner: Some(DirectNapiWrite::Persistent { db, tx_id }),
+        inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
 }
 
-fn direct_set_identity_claims<S>(db: &DirectDb<S>, author: DirectAuthorId)
+fn core_set_identity_claims<S>(db: &CoreDb<S>, author: CoreAuthorId)
 where
-    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
     let subject = author.0.to_string();
     db.set_identity_claims(
         author,
         BTreeMap::from([
-            ("subject".to_owned(), DirectValue::String(subject.clone())),
-            ("sub".to_owned(), DirectValue::String(subject.clone())),
-            ("user_id".to_owned(), DirectValue::String(subject)),
+            ("subject".to_owned(), CoreValue::String(subject.clone())),
+            ("sub".to_owned(), CoreValue::String(subject.clone())),
+            ("user_id".to_owned(), CoreValue::String(subject)),
         ]),
     );
 }
 
-fn direct_tx_write(
-    tx_id: DirectTxId,
-    inner: Option<DirectNapiWrite>,
-) -> napi::Result<NapiDirectWrite> {
-    let result = DirectWriteResult {
-        row_id: DirectRowUuid::from_bytes([0; 16]),
+fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
+    let result = WriteResult {
+        row_id: CoreRowUuid::from_bytes([0; 16]),
         tx_id,
     };
-    Ok(NapiDirectWrite {
+    Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         inner,
     })
 }
 
-fn direct_tick_connection<S>(
-    connection: &Option<Rc<RefCell<DirectPeerConnection<S>>>>,
+fn core_tick_connection<S>(
+    connection: &Option<Rc<RefCell<CorePeerConnection<S>>>>,
 ) -> napi::Result<u32>
 where
-    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
     let Some(connection) = connection else {
         return Ok(0);
@@ -1227,32 +1217,28 @@ where
     Ok(stats.subscription_events as u32)
 }
 
-fn direct_wait_for_tx<S>(
-    db: &DirectDb<S>,
-    tx_id: DirectTxId,
-    tier: DirectDurabilityTier,
-) -> napi::Result<()>
+fn core_wait_for_tx<S>(db: &CoreDb<S>, tx_id: TxId, tier: CoreDurabilityTier) -> napi::Result<()>
 where
-    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    if tier <= DirectDurabilityTier::Local {
+    if tier <= CoreDurabilityTier::Local {
         return Ok(());
     }
     let state = db
         .write_state(tx_id)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     match state.fate {
-        DirectFate::Rejected(reason) => {
+        CoreFate::Rejected(reason) => {
             return Err(napi::Error::from_reason(format!(
                 "transaction was rejected: {reason:?}"
             )));
         }
-        DirectFate::Pending if tier >= DirectDurabilityTier::Edge => {
+        CoreFate::Pending if tier >= CoreDurabilityTier::Edge => {
             return Err(napi::Error::from_reason(format!(
                 "transaction has not been accepted at requested tier {tier:?}"
             )));
         }
-        DirectFate::Pending | DirectFate::Accepted => {}
+        CoreFate::Pending | CoreFate::Accepted => {}
     }
     if state.durability >= tier {
         return Ok(());
@@ -1262,7 +1248,7 @@ where
     )))
 }
 
-fn direct_write_state_to_json(state: &jazz::db::WriteState) -> serde_json::Value {
+fn core_write_state_to_json(state: &jazz::db::WriteState) -> serde_json::Value {
     serde_json::to_value(state).unwrap_or_else(|_| serde_json::json!({}))
 }
 
@@ -1274,38 +1260,38 @@ fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
     }
 }
 
-fn direct_commit_tx<S>(db: &DirectDb<S>, writes: Vec<DirectNapiTxWrite>) -> napi::Result<DirectTxId>
+fn core_commit_tx<S>(db: &CoreDb<S>, writes: Vec<NapiTxWrite>) -> napi::Result<TxId>
 where
-    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
     let mut tx = db.mergeable_tx();
     for write in writes {
         match write {
-            DirectNapiTxWrite::Insert {
+            NapiTxWrite::Insert {
                 table,
                 row_id,
                 cells,
             } => tx
                 .insert_with_id(&table, row_id, cells)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            DirectNapiTxWrite::Update {
+            NapiTxWrite::Update {
                 table,
                 row_id,
                 patch,
             } => tx
                 .update(&table, row_id, patch)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            DirectNapiTxWrite::Upsert {
+            NapiTxWrite::Upsert {
                 table,
                 row_id,
                 cells,
             } => tx
                 .update(&table, row_id, cells)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            DirectNapiTxWrite::Delete { table, row_id } => tx
+            NapiTxWrite::Delete { table, row_id } => tx
                 .delete(&table, row_id)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            DirectNapiTxWrite::Restore {
+            NapiTxWrite::Restore {
                 table,
                 row_id,
                 cells,
@@ -1318,36 +1304,36 @@ where
         .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
-fn direct_commit_tx_memory(
-    db: &Rc<DirectDb<DirectMemoryStorage>>,
-    writes: Vec<DirectNapiTxWrite>,
-) -> napi::Result<NapiDirectWrite> {
-    let tx_id = direct_commit_tx(db, writes)?;
-    direct_tx_write(
+fn core_commit_tx_memory(
+    db: &Rc<CoreDb<CoreMemoryStorage>>,
+    writes: Vec<NapiTxWrite>,
+) -> napi::Result<Write> {
+    let tx_id = core_commit_tx(db, writes)?;
+    core_tx_write(
         tx_id,
-        Some(DirectNapiWrite::Memory {
+        Some(NapiWrite::Memory {
             db: Rc::clone(db),
             tx_id,
         }),
     )
 }
 
-fn direct_commit_tx_persistent(
-    db: &Rc<DirectDb<DirectRocksDbStorage>>,
-    writes: Vec<DirectNapiTxWrite>,
-) -> napi::Result<NapiDirectWrite> {
-    let tx_id = direct_commit_tx(db, writes)?;
-    direct_tx_write(
+fn core_commit_tx_persistent(
+    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    writes: Vec<NapiTxWrite>,
+) -> napi::Result<Write> {
+    let tx_id = core_commit_tx(db, writes)?;
+    core_tx_write(
         tx_id,
-        Some(DirectNapiWrite::Persistent {
+        Some(NapiWrite::Persistent {
             db: Rc::clone(db),
             tx_id,
         }),
     )
 }
 
-fn direct_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<DirectReadOpts> {
-    let mut opts = DirectReadOpts::default();
+fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOpts> {
+    let mut opts = CoreReadOpts::default();
     let Some(value) = value else {
         return Ok(opts);
     };
@@ -1355,12 +1341,12 @@ fn direct_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<DirectRe
         return Ok(opts);
     }
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        opts.tier = direct_durability_tier_from_str(&tier)?;
+        opts.tier = core_durability_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
-            "Immediate" | "immediate" => DirectLocalUpdates::Immediate,
-            "Deferred" | "deferred" => DirectLocalUpdates::Deferred,
+            "Immediate" | "immediate" => CoreLocalUpdates::Immediate,
+            "Deferred" | "deferred" => CoreLocalUpdates::Deferred,
             other => {
                 return Err(napi::Error::from_reason(format!(
                     "unknown local_updates {other}"
@@ -1370,8 +1356,8 @@ fn direct_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<DirectRe
     }
     if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
         opts.propagation = match propagation.as_str() {
-            "Full" | "full" => DirectPropagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" | "local-only" => DirectPropagation::LocalOnly,
+            "Full" | "full" => CorePropagation::Full,
+            "LocalOnly" | "local_only" | "localOnly" | "local-only" => CorePropagation::LocalOnly,
             other => {
                 return Err(napi::Error::from_reason(format!(
                     "unknown propagation {other}"
@@ -1385,12 +1371,12 @@ fn direct_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<DirectRe
     Ok(opts)
 }
 
-fn direct_durability_tier_from_str(tier: &str) -> napi::Result<DirectDurabilityTier> {
+fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
     match tier {
-        "None" | "none" => Ok(DirectDurabilityTier::None),
-        "Local" | "local" => Ok(DirectDurabilityTier::Local),
-        "Edge" | "edge" => Ok(DirectDurabilityTier::Edge),
-        "Global" | "global" => Ok(DirectDurabilityTier::Global),
+        "None" | "none" => Ok(CoreDurabilityTier::None),
+        "Local" | "local" => Ok(CoreDurabilityTier::Local),
+        "Edge" | "edge" => Ok(CoreDurabilityTier::Edge),
+        "Global" | "global" => Ok(CoreDurabilityTier::Global),
         other => Err(napi::Error::from_reason(format!(
             "unknown durability tier {other}"
         ))),
@@ -1415,74 +1401,72 @@ fn optional_json_bool_prop(value: &JsonValue, name: &str) -> napi::Result<Option
     }
 }
 
-fn encode_direct_rows(
+fn encode_core_rows(
     rows: &[jazz::node::CurrentRow],
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&direct_row_batches(rows))
+    postcard::to_allocvec(&core_row_batches(rows))
 }
 
-fn direct_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<DirectRowBatch<'_>> {
-    let mut batches: Vec<DirectRowBatch<'_>> = Vec::new();
+fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
+    let mut batches: Vec<CoreRowBatch<'_>> = Vec::new();
     for row in rows {
         let (descriptor, raw) = row.encoded_record();
         match batches.last_mut() {
             Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
-                batch.rows.push(direct_row(row, raw));
+                batch.rows.push(core_row(row, raw));
             }
-            _ => batches.push(DirectRowBatch {
+            _ => batches.push(CoreRowBatch {
                 table: row.table(),
                 descriptor: *descriptor,
-                rows: vec![direct_row(row, raw)],
+                rows: vec![core_row(row, raw)],
             }),
         }
     }
     batches
 }
 
-fn direct_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> DirectRow<'a> {
-    DirectRow {
+fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {
+    CoreRow {
         row_id: row.row_uuid(),
         deleted: row.is_deleted(),
         raw,
     }
 }
 
-fn direct_removed_rows(rows: &[DirectRemovedRowInner]) -> Vec<DirectRemovedRow<'_>> {
+fn core_removed_rows(rows: &[CoreRemovedRowInner]) -> Vec<CoreRemovedRow<'_>> {
     rows.iter()
-        .map(|row| DirectRemovedRow {
+        .map(|row| CoreRemovedRow {
             table: row.table.as_str(),
             row_id: row.row_uuid,
         })
         .collect()
 }
 
-fn encode_direct_subscription_delta(
+fn encode_core_subscription_delta(
     added: &[jazz::node::CurrentRow],
     updated: &[jazz::node::CurrentRow],
-    removed: &[DirectRemovedRowInner],
+    removed: &[CoreRemovedRowInner],
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&DirectSubscriptionDelta {
-        added: direct_row_batches(added),
-        updated: direct_row_batches(updated),
-        removed: direct_removed_rows(removed),
+    postcard::to_allocvec(&SubscriptionDelta {
+        added: core_row_batches(added),
+        updated: core_row_batches(updated),
+        removed: core_removed_rows(removed),
     })
 }
 
-fn direct_subscription_event_to_json(
-    event: &DirectSubscriptionEvent,
-) -> napi::Result<serde_json::Value> {
+fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<serde_json::Value> {
     match event {
-        DirectSubscriptionEvent::Opened {
+        SubscriptionEvent::Opened {
             current,
             settled,
             tier,
         }
-        | DirectSubscriptionEvent::Reset {
+        | SubscriptionEvent::Reset {
             current,
             settled,
             tier,
         } => {
-            let rows = encode_direct_rows(current)
+            let rows = encode_core_rows(current)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             Ok(serde_json::json!({
                 "type": "snapshot",
@@ -1491,14 +1475,14 @@ fn direct_subscription_event_to_json(
                 "tier": format!("{tier:?}"),
             }))
         }
-        DirectSubscriptionEvent::Delta {
+        SubscriptionEvent::Delta {
             added,
             updated,
             removed,
             settled,
             tier,
         } => {
-            let delta = encode_direct_subscription_delta(added, updated, removed)
+            let delta = encode_core_subscription_delta(added, updated, removed)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             Ok(serde_json::json!({
                 "type": "delta",
@@ -1507,7 +1491,7 @@ fn direct_subscription_event_to_json(
                 "tier": format!("{tier:?}"),
             }))
         }
-        DirectSubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
+        SubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
     }
 }
 
@@ -1878,8 +1862,8 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use crate::direct_read_opts_from_json;
-    use jazz::db::Propagation as DirectPropagation;
+    use crate::core_read_opts_from_json;
+    use jazz::db::Propagation as CorePropagation;
     use jazz_tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
     use serde_json::json;
 
@@ -1934,10 +1918,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_read_opts_accept_public_local_only_spelling() {
-        let opts = direct_read_opts_from_json(Some(json!({ "propagation": "local-only" })))
+    fn core_read_opts_accept_public_local_only_spelling() {
+        let opts = core_read_opts_from_json(Some(json!({ "propagation": "local-only" })))
             .expect("parse direct read opts");
 
-        assert_eq!(opts.propagation, DirectPropagation::LocalOnly);
+        assert_eq!(opts.propagation, CorePropagation::LocalOnly);
     }
 }

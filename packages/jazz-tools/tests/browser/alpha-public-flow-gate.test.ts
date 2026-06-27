@@ -87,7 +87,7 @@ afterEach(async () => {
 });
 
 describe("alpha public package flow", () => {
-  it("opens public createDb with persistent direct core locally, then runs todo CRUD and subscriptions", async () => {
+  it("opens public createDb with persistent core locally, then runs todo CRUD and subscriptions", async () => {
     const appId = uniqueDbName("alpha-public-local-flow");
     const persistentDbName = uniqueDbName("alpha-public-local-opfs");
     const sharedSecret = generateAuthSecret();
@@ -247,7 +247,7 @@ describe("alpha public package flow", () => {
     });
   });
 
-  it("gates richer public row shapes through local direct core queries and subscriptions", async () => {
+  it("gates richer public row shapes through local core queries and subscriptions", async () => {
     const appId = uniqueDbName("alpha-public-rich-local-flow");
     const persistentDbName = uniqueDbName("alpha-public-rich-local-opfs");
     const db = ctx.track(
@@ -286,7 +286,7 @@ describe("alpha public package flow", () => {
         done: false,
         list: "launch",
         priority: 7,
-        tags: ["alpha", "direct-core"],
+        tags: ["alpha", "core"],
         payload: new Uint8Array([4, 5, 6, 7]),
         ownerId: owner.id,
       })
@@ -312,7 +312,7 @@ describe("alpha public package flow", () => {
     unsubscribe();
   });
 
-  it("opens public createDb with direct websocket server config and converges between clients", async () => {
+  it("opens public createDb with websocket server config and converges between clients", async () => {
     const requestedAppId = uniqueDbName("alpha-public-websocket-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
@@ -404,7 +404,7 @@ describe("alpha public package flow", () => {
           done: false,
           list: "launch",
           priority: 7,
-          tags: ["alpha", "direct-core"],
+          tags: ["alpha", "core"],
           payload: new Uint8Array([4, 5, 6, 7]),
           ownerId: owner.id,
         })
@@ -423,7 +423,7 @@ describe("alpha public package flow", () => {
       id: created.id,
       title: "Adopt alpha websocket rich row",
       priority: 7,
-      tags: ["alpha", "direct-core"],
+      tags: ["alpha", "core"],
       ownerId: owner.id,
     });
     expect(Array.from(rowOnB.payload ?? [])).toEqual([4, 5, 6, 7]);
@@ -447,7 +447,7 @@ describe("alpha public package flow", () => {
     expect(snapshots.some((rows) => rows.some((todo) => todo.id === created.id))).toBe(true);
   });
 
-  it("converges memory writer to persistent OPFS reader over direct websocket and reopens locally", async () => {
+  it("converges memory writer to persistent OPFS reader over websocket and reopens locally", async () => {
     const requestedAppId = uniqueDbName("alpha-public-mixed-websocket-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
@@ -593,7 +593,7 @@ describe("alpha public package flow", () => {
     );
   });
 
-  it("opens public createDb with persistent OPFS and direct websocket server config, then converges todo CRUD", async () => {
+  it("opens public createDb with persistent OPFS and websocket server config, then converges todo CRUD", async () => {
     const requestedAppId = uniqueDbName("alpha-public-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
@@ -761,7 +761,7 @@ describe("alpha public package flow", () => {
     expect(rowsOnB).toEqual([restored]);
   });
 
-  it("exposes edge-confirmed browser deletes through includeDeleted over direct websocket", async () => {
+  it("exposes edge-confirmed browser deletes through includeDeleted over websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-include-deleted");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
@@ -794,7 +794,7 @@ describe("alpha public package flow", () => {
     expect(Object.keys(deletedTodo).includes("deleted")).toBe(false);
   });
 
-  it("opens public file/blob helpers with persistent OPFS and direct websocket server config, then converges file rows", async () => {
+  it("opens public file/blob helpers with persistent OPFS and websocket server config, then converges file rows", async () => {
     const requestedAppId = uniqueDbName("alpha-public-file-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, filePermissions, fileApp);

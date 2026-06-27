@@ -8,7 +8,7 @@ import { fetchSchemaHashes, fetchStoredWasmSchema, publishStoredSchema } from ".
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
-import { encodeDirectSchema } from "./runtime.js";
+import { encodeSchema } from "./runtime.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
 const previousWebSocket = globalThis.WebSocket;
@@ -53,7 +53,7 @@ describe("CoreRuntime server convergence", () => {
         appId,
         inMemory: true,
         adminSecret: "core-runtime-convergence-admin",
-        schema: encodeDirectSchema(schema),
+        schema: encodeSchema(schema),
       });
 
       const clientA = await createClient({ appId, serverUrl: server.url, peer: "alice" });
@@ -80,7 +80,7 @@ describe("CoreRuntime server convergence", () => {
       });
 
       const inserted = clientA.insert("todos", {
-        title: { type: "Text", value: "direct websocket convergence" },
+        title: { type: "Text", value: "websocket convergence" },
         done: { type: "Boolean", value: false },
       });
 
@@ -101,7 +101,7 @@ describe("CoreRuntime server convergence", () => {
       expect(convergedRows).toMatchObject({
         id: inserted.value.id,
         values: [
-          { type: "Text", value: "direct websocket convergence" },
+          { type: "Text", value: "websocket convergence" },
           { type: "Boolean", value: false },
         ],
       });
@@ -110,7 +110,7 @@ describe("CoreRuntime server convergence", () => {
   );
 
   maybeIt(
-    "persists direct websocket writes across server restart",
+    "persists websocket writes across server restart",
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
@@ -136,7 +136,7 @@ describe("CoreRuntime server convergence", () => {
       immediateWriter.connectTransport(server.url, { admin_secret: server.adminSecret });
 
       const immediateInsert = immediateWriter.insert("todos", {
-        title: { type: "Text", value: "direct websocket dynamic activation" },
+        title: { type: "Text", value: "websocket dynamic activation" },
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(
@@ -183,7 +183,7 @@ describe("CoreRuntime server convergence", () => {
       writer.connectTransport(server.url, { admin_secret: server.adminSecret });
 
       const inserted = writer.insert("todos", {
-        title: { type: "Text", value: "direct websocket restart" },
+        title: { type: "Text", value: "websocket restart" },
         done: { type: "Boolean", value: true },
       });
       await waitForPromise(
@@ -237,7 +237,7 @@ describe("CoreRuntime server convergence", () => {
       expect(persistedRow).toMatchObject({
         id: inserted.value.id,
         values: [
-          { type: "Text", value: "direct websocket restart" },
+          { type: "Text", value: "websocket restart" },
           { type: "Boolean", value: true },
         ],
       });
@@ -253,7 +253,7 @@ describe("CoreRuntime server convergence", () => {
       appId,
       inMemory: true,
       adminSecret: "core-runtime-bytea-convergence-admin",
-      schema: encodeDirectSchema(binaryLargeValueSchema),
+      schema: encodeSchema(binaryLargeValueSchema),
     });
 
     const writer = await createClient({
@@ -316,7 +316,7 @@ describe("CoreRuntime server convergence", () => {
         appId,
         inMemory: true,
         adminSecret: "core-runtime-restore-convergence-admin",
-        schema: encodeDirectSchema(schema),
+        schema: encodeSchema(schema),
       });
 
       const writer = await createClient({
@@ -328,7 +328,7 @@ describe("CoreRuntime server convergence", () => {
       writer.connectTransport(server.url, { admin_secret: server.adminSecret });
 
       const inserted = writer.insert("todos", {
-        title: { type: "Text", value: "direct websocket before delete" },
+        title: { type: "Text", value: "websocket before delete" },
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(
@@ -343,7 +343,7 @@ describe("CoreRuntime server convergence", () => {
       );
 
       const restored = writer.restore("todos", inserted.value.id, {
-        title: { type: "Text", value: "direct websocket restored row" },
+        title: { type: "Text", value: "websocket restored row" },
         done: { type: "Boolean", value: true },
       });
       await waitForPromise(
@@ -373,7 +373,7 @@ describe("CoreRuntime server convergence", () => {
                 const firstValue = change.row.values[0];
                 if (firstValue?.type === "Text") {
                   replayedValues.push(firstValue.value);
-                  if (firstValue.value === "direct websocket restored row") {
+                  if (firstValue.value === "websocket restored row") {
                     resolve(firstValue.value);
                   }
                 }
@@ -389,7 +389,7 @@ describe("CoreRuntime server convergence", () => {
           replayedToSubscription,
           `fresh reader subscription did not replay restored row; saw ${JSON.stringify(replayedValues)}`,
         ),
-      ).resolves.toBe("direct websocket restored row");
+      ).resolves.toBe("websocket restored row");
 
       const restoredRow = await waitFor(async () => {
         const rows = await reader.query(JSON.stringify({ table: "todos" }), { tier: "local" });
@@ -399,7 +399,7 @@ describe("CoreRuntime server convergence", () => {
       expect(restoredRow).toMatchObject({
         id: inserted.value.id,
         values: [
-          { type: "Text", value: "direct websocket restored row" },
+          { type: "Text", value: "websocket restored row" },
           { type: "Boolean", value: true },
         ],
       });

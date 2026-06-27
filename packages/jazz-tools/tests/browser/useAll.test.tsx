@@ -437,7 +437,7 @@ describe("useAll browser integration", () => {
     await waitForCondition(() => getText("rows") === "p2", 5000, "expected p2 in paginated useAll");
   });
 
-  it("accepts direct-core-supported QueryOptions for component subscriptions", async () => {
+  it("accepts core-supported QueryOptions for component subscriptions", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("options"),

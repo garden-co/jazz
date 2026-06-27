@@ -1,4 +1,4 @@
-import type { DirectInsertResult, DirectMutationResult, Runtime } from "../client.js";
+import type { InsertResult, MutationResult, Runtime } from "../client.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
 import { encodeCellsForPatch, encodeCellsForRow, formatUuid, parseUuid } from "./runtime.js";
@@ -121,7 +121,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly worker: Worker;
   private readonly pending = new Map<number, PendingCall>();
   // Runtime writes are synchronous, but the worker owns the CoreRuntime that can
-  // produce the real direct-core transaction id. These ids are pending handles
+  // produce the real core transaction id. These ids are pending handles
   // that are only valid for waitForTransaction translation below.
   private readonly writes = new Map<string, Promise<string>>();
   private readonly subscriptions = new Map<number, Function>();
@@ -168,7 +168,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
     objectId?: string | null,
-  ): DirectInsertResult {
+  ): InsertResult {
     const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
     const transactionId = this.writeId();
     this.queueWrite(transactionId, "insert", table, values, writeContext, formatUuid(rowId));
@@ -184,7 +184,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     objectId: string,
     values: InsertValues,
     writeContext?: string | null,
-  ): DirectInsertResult {
+  ): InsertResult {
     const transactionId = this.writeId();
     this.queueWrite(transactionId, "restore", table, objectId, values, writeContext);
     return { id: objectId, values: valuesForRow(this.schema, table, values), transactionId };
@@ -195,7 +195,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     objectId: string,
     values: Record<string, Value>,
     writeContext?: string | null,
-  ): DirectMutationResult {
+  ): MutationResult {
     encodeCellsForPatch(tableDefinition(this.schema, table), values);
     const transactionId = this.writeId();
     this.queueWrite(transactionId, "update", table, objectId, values, writeContext);
@@ -207,14 +207,14 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     objectId: string,
     values: InsertValues,
     writeContext?: string | null,
-  ): DirectMutationResult {
+  ): MutationResult {
     encodeCellsForRow(tableDefinition(this.schema, table), values);
     const transactionId = this.writeId();
     this.queueWrite(transactionId, "upsert", table, objectId, values, writeContext);
     return { transactionId };
   }
 
-  delete(table: string, objectId: string, writeContext?: string | null): DirectMutationResult {
+  delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
     tableDefinition(this.schema, table);
     const transactionId = this.writeId();
     this.queueWrite(transactionId, "delete", table, objectId, writeContext);

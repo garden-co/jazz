@@ -9,12 +9,7 @@ import type {
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import { analyzeRelations, type Relation } from "../../codegen/relation-analyzer.js";
-import type {
-  DirectInsertResult,
-  DirectMutationResult,
-  Runtime,
-  TransactionKind,
-} from "../client.js";
+import type { InsertResult, MutationResult, Runtime, TransactionKind } from "../client.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import {
   PostcardReader,
@@ -26,23 +21,19 @@ import {
   writeValueType,
   type AbiRowBatch,
   type AbiRemovedRow,
-  type DirectQueryOrder,
-  type DirectQueryLiteral,
-  type DirectQueryPredicate,
-  type DirectQueryPredicateOp,
+  type QueryOrder,
+  type QueryLiteral,
+  type QueryPredicate,
+  type QueryPredicateOp,
   type DescriptorField,
   type ValueType,
-} from "./direct-codec.js";
-import {
-  columnTypeToValueType,
-  columnValueType,
-  encodeDirectSchema,
-} from "./direct-schema-codec.js";
-import { DirectWebSocketCarrier, directWireAuthFailureReason } from "./direct-websocket.js";
-import { createRecord, decodeRecordValue } from "./direct-row-codec.js";
+} from "./core-codec.js";
+import { columnTypeToValueType, columnValueType, encodeSchema } from "./schema-codec.js";
+import { WebSocketCarrier, wireAuthFailureReason } from "./websocket.js";
+import { createRecord, decodeRecordValue } from "./row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
 
-export { encodeDirectSchema } from "./direct-schema-codec.js";
+export { encodeSchema } from "./schema-codec.js";
 
 type CoreDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): CoreDb;
@@ -50,73 +41,70 @@ type CoreDbConstructor = {
 };
 
 type CoreDb = {
-  all(query: DirectPreparedQuery, opts: unknown): Uint8Array;
-  allForIdentity(query: DirectPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
-  propagateQuery?(query: DirectPreparedQuery, opts: unknown): void;
-  queryIsCovered?(query: DirectPreparedQuery): boolean;
-  prepareQuery(query: Uint8Array): DirectPreparedQuery;
-  subscribe?(
-    query: DirectPreparedQuery,
-    opts: unknown,
-  ): ReadableStream<unknown> | DirectSubscription;
+  all(query: PreparedQuery, opts: unknown): Uint8Array;
+  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+  propagateQuery?(query: PreparedQuery, opts: unknown): void;
+  queryIsCovered?(query: PreparedQuery): boolean;
+  prepareQuery(query: Uint8Array): PreparedQuery;
+  subscribe?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
   subscribeForIdentity?(
-    query: DirectPreparedQuery,
+    query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
-  ): ReadableStream<unknown> | DirectSubscription;
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
+  ): ReadableStream<unknown> | Subscription;
+  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
   insertWithIdEncodedForIdentity(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     author: Uint8Array,
-  ): DirectWrite;
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
+  ): Write;
+  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
   restoreEncodedForIdentity(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     author: Uint8Array,
-  ): DirectWrite;
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): DirectWrite;
+  ): Write;
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): Write;
   updateEncodedForIdentity(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
     author: Uint8Array,
-  ): DirectWrite;
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
+  ): Write;
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
   upsertEncodedForIdentity(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     author: Uint8Array,
-  ): DirectWrite;
-  delete(table: string, rowId: Uint8Array): DirectWrite;
-  deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): DirectWrite;
-  mergeableTx(): DirectTx;
-  mergeableTxForIdentity?(author: Uint8Array): DirectTx;
-  exclusiveTx?(): DirectTx;
+  ): Write;
+  delete(table: string, rowId: Uint8Array): Write;
+  deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): Write;
+  mergeableTx(): Tx;
+  mergeableTxForIdentity?(author: Uint8Array): Tx;
+  exclusiveTx?(): Tx;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
       | ((error: Error | null, urgency: string) => void),
   ): void;
-  connectUpstream(): DirectTransport;
+  connectUpstream(): Transport;
   tick(): void;
   close?(): void;
   free?(): void;
 };
 
-type DirectPreparedQuery = object;
+type PreparedQuery = object;
 
-type DirectSubscription = {
+type Subscription = {
   readAll(): unknown[];
   drain?(): unknown[];
   close?(): boolean;
 };
 
-type DirectWrite = {
+type Write = {
   payload: Uint8Array;
   wait(tier: string): void;
   writeState(): unknown;
@@ -124,8 +112,8 @@ type DirectWrite = {
   close?(): boolean;
 };
 
-type DirectTx = {
-  commit(): DirectWrite;
+type Tx = {
+  commit(): Write;
   rollback(): void;
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
   restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
@@ -134,7 +122,7 @@ type DirectTx = {
   delete(table: string, rowId: Uint8Array): void;
 };
 
-export type DirectTransport = {
+export type Transport = {
   close(): boolean;
   recvWireFrames(): unknown[];
   sendWireFrame(frame: Uint8Array): void;
@@ -143,7 +131,7 @@ export type DirectTransport = {
 
 type PendingTx = {
   kind: TransactionKind;
-  tx?: DirectTx;
+  tx?: Tx;
   identity?: Uint8Array;
   writes: Array<{ table: string; rowId: Uint8Array }>;
 };
@@ -167,7 +155,7 @@ type SubscriptionState = {
 };
 
 type SubscriptionSourceState = {
-  source: ReadableStreamDefaultReader<unknown> | DirectSubscription;
+  source: ReadableStreamDefaultReader<unknown> | Subscription;
   reading: boolean;
 };
 
@@ -196,14 +184,14 @@ type RuntimeArraySubquery = {
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-function openPersistentDirectDb(
+function openPersistentDb(
   Runtime: CoreDbConstructor,
   dataPath: string,
   schema: Uint8Array,
   config: Uint8Array,
 ): CoreDb {
   if (!Runtime.openPersistent) {
-    throw new Error("Direct core runtime does not expose persistent storage");
+    throw new Error("Core runtime does not expose persistent storage");
   }
   return Runtime.openPersistent(dataPath, schema, config);
 }
@@ -214,15 +202,15 @@ export class CoreRuntime implements Runtime {
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
   private readonly schemaHash: string;
-  private readonly preparedQueries = new Map<string, DirectPreparedQuery>();
+  private readonly preparedQueries = new Map<string, PreparedQuery>();
   private readonly pendingTxs = new Map<string, PendingTx>();
   private readonly completedTxs = new Map<string, CompletedTx>();
-  private readonly writes = new Map<string, DirectWrite>();
+  private readonly writes = new Map<string, Write>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
-  private serverTransport: DirectTransport | null = null;
-  private serverCarrier: DirectWebSocketCarrier | null = null;
-  private serverCarrierPromise: Promise<DirectWebSocketCarrier> | null = null;
+  private serverTransport: Transport | null = null;
+  private serverCarrier: WebSocketCarrier | null = null;
+  private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private serverPumpScheduled = false;
@@ -251,7 +239,7 @@ export class CoreRuntime implements Runtime {
     historyComplete: boolean,
     opts?: { persistentPath?: string; db?: CoreDb },
   ) {
-    this.schemaBytes = encodeDirectSchema(schema);
+    this.schemaBytes = encodeSchema(schema);
     this.configBytes = openConfig(node, author, sourceId, historyComplete);
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
@@ -259,22 +247,17 @@ export class CoreRuntime implements Runtime {
       this.db = opts.db;
     } else if (opts?.persistentPath) {
       if (!Runtime) {
-        throw new Error("Direct core runtime constructor required for persistent storage");
+        throw new Error("Core runtime constructor required for persistent storage");
       }
-      this.db = openPersistentDirectDb(
-        Runtime,
-        opts.persistentPath,
-        this.schemaBytes,
-        this.configBytes,
-      );
+      this.db = openPersistentDb(Runtime, opts.persistentPath, this.schemaBytes, this.configBytes);
     } else {
       if (!Runtime) {
-        throw new Error("Direct core runtime constructor required for memory storage");
+        throw new Error("Core runtime constructor required for memory storage");
       }
       this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
     }
     if (typeof this.db.setTickScheduler !== "function") {
-      throw new Error("Direct core runtime requires db.setTickScheduler");
+      throw new Error("Core runtime requires db.setTickScheduler");
     }
     this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
       const urgency = typeof first === "string" ? first : second;
@@ -284,7 +267,7 @@ export class CoreRuntime implements Runtime {
     }) as (error: Error | null, urgency: string) => void);
   }
 
-  connectUpstreamPeer(): DirectTransport {
+  connectUpstreamPeer(): Transport {
     return this.db.connectUpstream();
   }
 
@@ -316,7 +299,7 @@ export class CoreRuntime implements Runtime {
     values: InsertValues,
     _writeContext?: string | null,
     objectId?: string | null,
-  ): DirectInsertResult {
+  ): InsertResult {
     const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
     const cells = encodeCellsForRow(this.table(table), values);
     const writeIdentity = identityFromWriteContext(_writeContext);
@@ -339,7 +322,7 @@ export class CoreRuntime implements Runtime {
     objectId: string,
     values: InsertValues,
     writeContext?: string | null,
-  ): DirectInsertResult {
+  ): InsertResult {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
     const writeIdentity = identityFromWriteContext(writeContext);
@@ -362,7 +345,7 @@ export class CoreRuntime implements Runtime {
     objectId: string,
     values: Record<string, Value>,
     writeContext?: string | null,
-  ): DirectMutationResult {
+  ): MutationResult {
     const rowId = parseUuid(objectId);
     const patch = encodeCellsForPatch(this.table(table), values);
     const writeIdentity = identityFromWriteContext(writeContext);
@@ -385,7 +368,7 @@ export class CoreRuntime implements Runtime {
     objectId: string,
     values: InsertValues,
     writeContext?: string | null,
-  ): DirectMutationResult {
+  ): MutationResult {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
     const writeIdentity = identityFromWriteContext(writeContext);
@@ -403,7 +386,7 @@ export class CoreRuntime implements Runtime {
     return this.finishMutation(write);
   }
 
-  delete(table: string, objectId: string, writeContext?: string | null): DirectMutationResult {
+  delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeIdentity = identityFromWriteContext(writeContext);
@@ -659,7 +642,7 @@ export class CoreRuntime implements Runtime {
                 optionsJson,
               );
         if (select) {
-          included = projectRowsForDirectSelect(included, select.columns, select.publicColumns);
+          included = projectRowsForSelect(included, select.columns, select.publicColumns);
         }
         included = await this.attachArraySubqueries(
           included,
@@ -711,10 +694,10 @@ export class CoreRuntime implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     const session = readSession(sessionJson);
     if (!this.db.subscribe) {
-      throw new Error("Direct core runtime does not support subscriptions");
+      throw new Error("Core runtime does not support subscriptions");
     }
     if (session && !this.db.subscribeForIdentity) {
-      throw new Error("Direct core runtime does not support session-scoped subscriptions");
+      throw new Error("Core runtime does not support session-scoped subscriptions");
     }
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
@@ -732,19 +715,19 @@ export class CoreRuntime implements Runtime {
       return handle;
     }
     const query = this.prepareQuery(queryJson);
-    let nativeSubscription: ReadableStream<unknown> | DirectSubscription;
+    let nativeSubscription: ReadableStream<unknown> | Subscription;
     try {
       nativeSubscription = identity
         ? this.db.subscribeForIdentity!(query, identity, opts)
         : this.db.subscribe!(query, opts);
     } catch (error) {
-      throw new Error(`Direct core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
+      throw new Error(`Core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
     }
     try {
       this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
     } catch (error) {
       throw new Error(
-        `Direct core subscription propagation failed for ${queryJson}: ${errorMessage(error)}`,
+        `Core subscription propagation failed for ${queryJson}: ${errorMessage(error)}`,
       );
     }
     this.subscriptions.set(handle, {
@@ -804,7 +787,7 @@ export class CoreRuntime implements Runtime {
     this.serverEndpointUrl = url;
     const transport = this.db.connectUpstream();
     this.serverTransport = transport;
-    const carrier = new DirectWebSocketCarrier({
+    const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: this.peerIdentity,
       authJson,
@@ -813,7 +796,7 @@ export class CoreRuntime implements Runtime {
         this.scheduleServerPump();
       },
       onError: (error) => {
-        const reason = directWireAuthFailureReason(error);
+        const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
       },
     });
@@ -852,15 +835,15 @@ export class CoreRuntime implements Runtime {
   private finishInsert(
     table: string,
     rowId: Uint8Array,
-    write: DirectWrite,
+    write: Write,
     identity?: Uint8Array,
-  ): DirectInsertResult {
+  ): InsertResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
     return this.resultForRow(table, rowId, transactionId, identity);
   }
 
-  private finishMutation(write: DirectWrite): DirectMutationResult {
+  private finishMutation(write: Write): MutationResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
     return { transactionId };
@@ -871,7 +854,7 @@ export class CoreRuntime implements Runtime {
     rowId: Uint8Array,
     transactionId: string,
     identity?: Uint8Array,
-  ): DirectInsertResult {
+  ): InsertResult {
     const row = this.readRow(table, rowId, identity);
     return { id: formatUuid(rowId), values: row?.values ?? [], transactionId };
   }
@@ -886,7 +869,7 @@ export class CoreRuntime implements Runtime {
     );
   }
 
-  private prepareQuery(queryJson: string): DirectPreparedQuery {
+  private prepareQuery(queryJson: string): PreparedQuery {
     const queryBytes = encodeQueryJson(queryJson, this.schema);
     const key = bytesKey(queryBytes);
     let query = this.preparedQueries.get(key);
@@ -894,7 +877,7 @@ export class CoreRuntime implements Runtime {
       try {
         query = this.db.prepareQuery(queryBytes);
       } catch (error) {
-        throw new Error(`Direct core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
+        throw new Error(`Core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
       }
       this.preparedQueries.set(key, query);
     }
@@ -904,7 +887,7 @@ export class CoreRuntime implements Runtime {
   private async propagateQueryIfNeeded(
     tier: string | null | undefined,
     optionsJson: string | null | undefined,
-    query: DirectPreparedQuery,
+    query: PreparedQuery,
   ): Promise<void> {
     if (tier == null || tier === "local") return;
     const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
@@ -917,7 +900,7 @@ export class CoreRuntime implements Runtime {
   private propagateSubscriptionQueryIfNeeded(
     tier: string | null | undefined,
     optionsJson: string | null | undefined,
-    query: DirectPreparedQuery,
+    query: PreparedQuery,
   ): void {
     const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
     if (options.propagation != null && options.propagation !== "full") return;
@@ -928,7 +911,7 @@ export class CoreRuntime implements Runtime {
     );
   }
 
-  private async waitForQueryCoverage(query: DirectPreparedQuery): Promise<void> {
+  private async waitForQueryCoverage(query: PreparedQuery): Promise<void> {
     for (let attempt = 0; attempt < 50; attempt += 1) {
       this.pumpServerTransport();
       if (this.db.queryIsCovered?.(query)) return;
@@ -954,11 +937,11 @@ export class CoreRuntime implements Runtime {
     throw new Error(`${operation} failed: WriteError("${txStateMessage(id, this.completedTxs)}")`);
   }
 
-  private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): DirectTx {
+  private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): Tx {
     if (pending.kind === "exclusive") {
       if (identity) {
         throw new Error(
-          "Direct core runtime cannot perform session-scoped exclusive transaction writes: " +
+          "Core runtime cannot perform session-scoped exclusive transaction writes: " +
             "the core runtime exclusive transaction API has no identity-aware staging methods.",
         );
       }
@@ -968,10 +951,10 @@ export class CoreRuntime implements Runtime {
       return pending.tx;
     }
     if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
-      throw new Error("Direct core runtime mergeable transaction cannot mix write identities");
+      throw new Error("Core runtime mergeable transaction cannot mix write identities");
     }
     if (identity && pending.tx && !pending.identity) {
-      throw new Error("Direct core runtime mergeable transaction cannot mix write identities");
+      throw new Error("Core runtime mergeable transaction cannot mix write identities");
     }
     if (!pending.tx) {
       pending.identity = identity;
@@ -980,24 +963,24 @@ export class CoreRuntime implements Runtime {
     return pending.tx;
   }
 
-  private txForKind(kind: TransactionKind): DirectTx {
+  private txForKind(kind: TransactionKind): Tx {
     return kind === "exclusive" ? this.exclusiveTx() : this.db.mergeableTx();
   }
 
-  private exclusiveTx(): DirectTx {
+  private exclusiveTx(): Tx {
     if (!this.db.exclusiveTx) {
       throw new Error(
-        "Direct core runtime cannot perform exclusive transaction writes: " +
+        "Core runtime cannot perform exclusive transaction writes: " +
           "the core runtime exclusive transaction API is unavailable.",
       );
     }
     return this.db.exclusiveTx();
   }
 
-  private mergeableTxForIdentity(identity: Uint8Array): DirectTx {
+  private mergeableTxForIdentity(identity: Uint8Array): Tx {
     if (!this.db.mergeableTxForIdentity) {
       throw new Error(
-        "Direct core runtime cannot perform session-scoped transaction writes: " +
+        "Core runtime cannot perform session-scoped transaction writes: " +
           "the core runtime mergeable transaction API has no identity-aware staging methods.",
       );
     }
@@ -1048,7 +1031,7 @@ export class CoreRuntime implements Runtime {
         if (next.done || subscription.cancelled) return;
         void this.applySubscriptionChunk(subscription, next.value).catch((error: unknown) => {
           subscription.cancelled = true;
-          console.error("Direct core subscription failed", error);
+          console.error("Core subscription failed", error);
         });
       }
     } finally {
@@ -1066,7 +1049,7 @@ export class CoreRuntime implements Runtime {
       if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
       void this.applySubscriptionChunk(subscription, event).catch((error: unknown) => {
         subscription.cancelled = true;
-        console.error("Direct core subscription failed", error);
+        console.error("Core subscription failed", error);
       });
     }
   }
@@ -1144,7 +1127,7 @@ export class CoreRuntime implements Runtime {
     });
   }
 
-  private flushQueuedServerFrames(carrier: DirectWebSocketCarrier): void {
+  private flushQueuedServerFrames(carrier: WebSocketCarrier): void {
     if (this.queuedServerFrames.length === 0 || carrier !== this.serverCarrier) return;
     const frames = this.queuedServerFrames.splice(0);
     void carrier.sendBatch(frames).catch((error) => {
@@ -1164,7 +1147,7 @@ function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
   );
 }
 
-function writeId(write: DirectWrite, writes: Map<string, DirectWrite>): string {
+function writeId(write: Write, writes: Map<string, Write>): string {
   const id = `tx-${writes.size + 1}`;
   writes.set(id, write);
   return id;
@@ -1269,7 +1252,7 @@ function readOptions(
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
   if (tier != null && !["local", "edge", "global"].includes(tier)) {
-    throw new Error(`Direct core runtime received unsupported read tier '${tier}'`);
+    throw new Error(`Core runtime received unsupported read tier '${tier}'`);
   }
   if (optionsJson != null) readSupportedReadOptions(optionsJson);
 }
@@ -1278,7 +1261,7 @@ function readSession(sessionJson?: string | null): { user_id: string } | null {
   if (sessionJson == null) return null;
   const parsed = JSON.parse(sessionJson) as { user_id?: unknown };
   if (typeof parsed.user_id !== "string") {
-    throw new Error("Direct core runtime session is missing user_id");
+    throw new Error("Core runtime session is missing user_id");
   }
   return { user_id: parsed.user_id };
 }
@@ -1293,7 +1276,7 @@ function closeSubscriptionSource(source: SubscriptionSourceState["source"]): voi
   }
 }
 
-function relationRefreshSource(): DirectSubscription {
+function relationRefreshSource(): Subscription {
   let closed = false;
   return {
     close: () => {
@@ -1308,9 +1291,7 @@ function readSupportedReadOptions(optionsJson: string): void {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
   const propagation = parsed.propagation;
   if (propagation != null && propagation !== "full" && propagation !== "local-only") {
-    throw new Error(
-      `Direct core runtime does not support read propagation '${String(propagation)}' yet`,
-    );
+    throw new Error(`Core runtime does not support read propagation '${String(propagation)}' yet`);
   }
 }
 
@@ -1392,7 +1373,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     select?: unknown;
   };
   if (typeof parsed.table !== "string") {
-    throw new Error("Direct core runtime only supports table queries in this slice");
+    throw new Error("Core runtime only supports table queries in this slice");
   }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
   return queryWithPredicates(
@@ -1411,7 +1392,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
 
 function unsupportedRelationQueryError(): Error {
   return new Error(
-    "Direct core runtime does not support this relation query shape yet; refusing to run an overbroad table query.",
+    "Core runtime does not support this relation query shape yet; refusing to run an overbroad table query.",
   );
 }
 
@@ -1573,7 +1554,7 @@ function relationValues(row: RowState, column: string, schema: WasmSchema): stri
   return [];
 }
 
-function projectRowsForDirectSelect(
+function projectRowsForSelect(
   rows: RowState[],
   columns: readonly string[],
   publicColumns: readonly string[],
@@ -1611,11 +1592,11 @@ function encodeSimpleRelationQuery(
   },
   schema: WasmSchema,
 ): {
-  predicates: DirectQueryPredicate[];
+  predicates: QueryPredicate[];
   hasPostFilter: boolean;
   limit?: number;
   offset: number;
-  orderBy: DirectQueryOrder[];
+  orderBy: QueryOrder[];
 } {
   const unwrapped = unwrapSimpleQuery(table, query);
   if (!unwrapped) throw unsupportedRelationQueryError();
@@ -1630,9 +1611,9 @@ function encodeSimpleRelationQuery(
 
 function coerceQueryPredicate(
   table: string,
-  filter: DirectQueryPredicate,
+  filter: QueryPredicate,
   schema: WasmSchema,
-): DirectQueryPredicate {
+): QueryPredicate {
   if (filter.op === "In") {
     return {
       ...filter,
@@ -1656,10 +1637,10 @@ function unwrapSimpleQuery(
     orderBy?: unknown;
   },
 ): {
-  predicates: DirectQueryPredicate[];
+  predicates: QueryPredicate[];
   limit?: number;
   offset: number;
-  orderBy: DirectQueryOrder[];
+  orderBy: QueryOrder[];
 } | null {
   if (query.relation_ir != null) return unwrapSimpleRelation(table, query.relation_ir);
   const predicates = readLegacyConditions(query.conditions);
@@ -1677,10 +1658,10 @@ function unwrapSimpleRelation(
   table: string,
   relationIr: unknown,
 ): {
-  predicates: DirectQueryPredicate[];
+  predicates: QueryPredicate[];
   limit?: number;
   offset: number;
-  orderBy: DirectQueryOrder[];
+  orderBy: QueryOrder[];
 } | null {
   if (relationIr == null) return { predicates: [], offset: 0, orderBy: [] };
   if (typeof relationIr !== "object") return null;
@@ -1724,10 +1705,10 @@ function unwrapSimpleRelation(
   return predicates ? { ...input, predicates: input.predicates.concat(predicates) } : null;
 }
 
-function readLegacyConditions(value: unknown): DirectQueryPredicate[] | null {
+function readLegacyConditions(value: unknown): QueryPredicate[] | null {
   if (value == null) return [];
   if (!Array.isArray(value)) return null;
-  const predicates: DirectQueryPredicate[] = [];
+  const predicates: QueryPredicate[] = [];
   for (const entry of value) {
     if (!entry || typeof entry !== "object") return null;
     const condition = entry as { column?: unknown; op?: unknown; value?: unknown };
@@ -1748,7 +1729,7 @@ function readLegacyConditions(value: unknown): DirectQueryPredicate[] | null {
       case "in": {
         if (!Array.isArray(condition.value)) return null;
         const values = condition.value.map(literalFromPlainValue);
-        if (!values.every((literal): literal is DirectQueryLiteral => literal != null)) return null;
+        if (!values.every((literal): literal is QueryLiteral => literal != null)) return null;
         predicates.push({ column: condition.column, op: "In", values });
         break;
       }
@@ -1771,10 +1752,10 @@ function readLegacyConditions(value: unknown): DirectQueryPredicate[] | null {
   return predicates;
 }
 
-function readLegacyOrderBy(value: unknown): DirectQueryOrder[] | null {
+function readLegacyOrderBy(value: unknown): QueryOrder[] | null {
   if (value == null) return [];
   if (!Array.isArray(value)) return null;
-  const terms: DirectQueryOrder[] = [];
+  const terms: QueryOrder[] = [];
   for (const entry of value) {
     if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") return null;
     if (entry[1] !== "asc" && entry[1] !== "desc") return null;
@@ -1792,7 +1773,7 @@ function readSelectColumns(value: unknown): string[] | undefined {
   return value;
 }
 
-function readLegacyPredicateOp(value: string): DirectQueryPredicateOp | null {
+function readLegacyPredicateOp(value: string): QueryPredicateOp | null {
   switch (value) {
     case "eq":
       return "Eq";
@@ -1811,7 +1792,7 @@ function readLegacyPredicateOp(value: string): DirectQueryPredicateOp | null {
   }
 }
 
-function literalFromPlainValue(value: unknown): DirectQueryLiteral | null {
+function literalFromPlainValue(value: unknown): QueryLiteral | null {
   if (value == null) return { type: "Nullable", value: null };
   if (typeof value === "boolean") return { type: "Boolean", value };
   if (typeof value === "number" && Number.isSafeInteger(value)) {
@@ -1821,16 +1802,16 @@ function literalFromPlainValue(value: unknown): DirectQueryLiteral | null {
   if (value instanceof Uint8Array) return { type: "Bytea", value };
   if (Array.isArray(value)) {
     const values = value.map(literalFromPlainValue);
-    return values.every((literal): literal is DirectQueryLiteral => literal != null)
+    return values.every((literal): literal is QueryLiteral => literal != null)
       ? { type: "Array", value: values }
       : null;
   }
   return null;
 }
 
-function readOrderByTerms(value: unknown): DirectQueryOrder[] | null {
+function readOrderByTerms(value: unknown): QueryOrder[] | null {
   if (!Array.isArray(value)) return null;
-  const terms: DirectQueryOrder[] = [];
+  const terms: QueryOrder[] = [];
   for (const term of value) {
     if (!term || typeof term !== "object") return null;
     const record = term as { column?: unknown; direction?: unknown };
@@ -1844,9 +1825,9 @@ function readOrderByTerms(value: unknown): DirectQueryOrder[] | null {
 function coerceQueryLiteral(
   table: string,
   column: string,
-  value: DirectQueryLiteral,
+  value: QueryLiteral,
   schema: WasmSchema,
-): DirectQueryLiteral {
+): QueryLiteral {
   if (value.type === "Array") {
     const elementType =
       column === "id"
@@ -1869,10 +1850,10 @@ function coerceQueryLiteral(
 }
 
 function coerceLiteralForColumnType(
-  value: DirectQueryLiteral,
+  value: QueryLiteral,
   columnType: ColumnType | undefined,
   allowNullable: boolean,
-): DirectQueryLiteral {
+): QueryLiteral {
   if (value.type === "Nullable") {
     return allowNullable && value.value
       ? { type: "Nullable", value: coerceLiteralForColumnType(value.value, columnType, false) }
@@ -1895,20 +1876,20 @@ function coerceLiteralForColumnType(
   return value;
 }
 
-function readByteLiteral(value: DirectQueryLiteral): number {
+function readByteLiteral(value: QueryLiteral): number {
   if (value.type !== "Integer" || value.value < 0 || value.value > 255) {
     throw new Error("Bytea values must contain integers in range 0..255");
   }
   return value.value;
 }
 
-function predicateToFilters(predicate: unknown): DirectQueryPredicate[] | null {
+function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
   if (predicate === "True") return [];
   if (predicate === "False") return [{ column: "id", op: "In", values: [] }];
   if (!predicate || typeof predicate !== "object") return null;
   const record = predicate as Record<string, unknown>;
   if (Array.isArray(record.And)) {
-    const filters: DirectQueryPredicate[] = [];
+    const filters: QueryPredicate[] = [];
     for (const child of record.And) {
       const childFilters = predicateToFilters(child);
       if (!childFilters) return null;
@@ -1941,7 +1922,7 @@ function predicateToFilters(predicate: unknown): DirectQueryPredicate[] | null {
     const column = readColumnRef(inRecord.left);
     if (!column || !Array.isArray(inRecord.values)) return null;
     const values = inRecord.values.map(readLiteral);
-    return values.every((value): value is DirectQueryLiteral => value != null)
+    return values.every((value): value is QueryLiteral => value != null)
       ? [{ column, op: "In", values }]
       : null;
   }
@@ -1952,10 +1933,10 @@ function predicateToFilters(predicate: unknown): DirectQueryPredicate[] | null {
   if (!op) return null;
   const column = readColumnRef(cmpRecord.left);
   const value = readLiteral(cmpRecord.right);
-  return column && value ? [{ column, op: op as DirectQueryPredicateOp, value }] : null;
+  return column && value ? [{ column, op: op as QueryPredicateOp, value }] : null;
 }
 
-function readPredicateOp(value: unknown): DirectQueryPredicateOp | null {
+function readPredicateOp(value: unknown): QueryPredicateOp | null {
   switch (value) {
     case "Eq":
     case "Ne":
@@ -1980,7 +1961,7 @@ function readColumnRef(value: unknown): string | null {
   return column.split(".").at(-1) ?? column;
 }
 
-function readLiteral(value: unknown): DirectQueryLiteral | null {
+function readLiteral(value: unknown): QueryLiteral | null {
   if (!value || typeof value !== "object" || !("Literal" in value)) return null;
   const literal = (value as { Literal?: unknown }).Literal;
   if (!literal || typeof literal !== "object") return null;
@@ -2003,7 +1984,7 @@ function readLiteral(value: unknown): DirectQueryLiteral | null {
   }
   if (record.type === "Array" && Array.isArray(record.value)) {
     const values = record.value.map((entry) => readLiteral({ Literal: entry }));
-    if (values.every((entry): entry is DirectQueryLiteral => entry != null)) {
+    if (values.every((entry): entry is QueryLiteral => entry != null)) {
       return { type: "Array", value: values };
     }
   }
@@ -2104,7 +2085,7 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Boolean":
       return Uint8Array.of(value.type === "Boolean" && value.value ? 1 : 0);
     case "Integer":
-      view.setUint32(0, encodeSignedI32ForDirectCore(expectI32(value, "Integer")), true);
+      view.setUint32(0, encodeSignedI32ForCore(expectI32(value, "Integer")), true);
       return new Uint8Array(view.buffer, 0, 4);
     case "BigInt":
     case "Timestamp":
@@ -2125,7 +2106,7 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Array":
       return encodeArrayValue(type.element, value);
     case "Row":
-      throw new Error(`Direct core runtime does not encode ${type.type} values yet`);
+      throw new Error(`Core runtime does not encode ${type.type} values yet`);
   }
 }
 
@@ -2208,11 +2189,11 @@ function expectI32(value: Value, type: string): number {
   return number;
 }
 
-function encodeSignedI32ForDirectCore(value: number): number {
+function encodeSignedI32ForCore(value: number): number {
   return (value ^ 0x80000000) >>> 0;
 }
 
-function decodeSignedI32FromDirectCore(value: number): number {
+function decodeSignedI32FromCore(value: number): number {
   return (value ^ 0x80000000) | 0;
 }
 
@@ -2306,7 +2287,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Boolean":
       return { type: "Boolean", value: bytes[0] !== 0 };
     case "Integer":
-      return { type: "Integer", value: decodeSignedI32FromDirectCore(view.getUint32(0, true)) };
+      return { type: "Integer", value: decodeSignedI32FromCore(view.getUint32(0, true)) };
     case "BigInt":
       return { type: "BigInt", value: Number(view.getBigUint64(0, true)) };
     case "Double":
@@ -2397,17 +2378,17 @@ function normalizeSubscriptionChunk(chunk: unknown):
 }
 
 function subscriptionSource(
-  subscription: ReadableStream<unknown> | DirectSubscription,
-): ReadableStreamDefaultReader<unknown> | DirectSubscription {
+  subscription: ReadableStream<unknown> | Subscription,
+): ReadableStreamDefaultReader<unknown> | Subscription {
   const maybeReadable = subscription as Partial<ReadableStream<unknown>>;
   if (typeof maybeReadable.getReader === "function") {
     return maybeReadable.getReader();
   }
-  return subscription as DirectSubscription;
+  return subscription as Subscription;
 }
 
 function isReadableSubscriptionReader(
-  source: ReadableStreamDefaultReader<unknown> | DirectSubscription,
+  source: ReadableStreamDefaultReader<unknown> | Subscription,
 ): source is ReadableStreamDefaultReader<unknown> {
   return "read" in source && typeof source.read === "function";
 }

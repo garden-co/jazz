@@ -1,12 +1,12 @@
 # Alpha-style example target matrix
 
 This repo branch is the alpha graft: the public `jazz-tools` package is being
-forced onto `jazz_core` through the shared direct-core runtime and WASM/NAPI
+forced onto `jazz_core` through the shared core runtime and WASM/NAPI
 bindings. The purpose is to pin app-shaped flows that alpha users and
 maintainers can recognize while deleting the old parallel engine paths, not to
 host a separate compatibility facade beside the real package.
 
-Operational rule for this branch: direct core is the product runtime. The
+Operational rule for this branch: core is the product runtime. The
 remaining work should be expressed as public `jazz-tools` API gates, direct
 core/Groove correctness gaps, or missing storage/server/auth surfaces. Do not
 add a second row-batch/sync-manager compatibility implementation to make old
@@ -15,7 +15,7 @@ tests pass.
 The old graft-era `batch_fate`, `row_histories`, and generic `storage` modules
 have been deleted outright. Transaction identity now lives in the neutral
 `transaction` module, schema catalogue persistence uses its own narrow storage
-trait, and remaining persistence work should target the direct-core browser,
+trait, and remaining persistence work should target the core browser,
 server, and native storage paths rather than reintroducing the deleted row
 history engine.
 
@@ -117,11 +117,11 @@ the alpha API yet:
     accepted post-restart message, and assert both messages are visible.
 20. add a public predicate-movement browser canary in
     `packages/jazz-tools/tests/browser/alpha-public-flow-gate.test.ts`: a
-    persistent direct-core `createDb` client subscribes to
+    persistent core `createDb` client subscribes to
     `app.todos.where({ done: false }).orderBy("title")`, then local updates move
     one row out of the predicate and another row into it. This is the minimum
     public subscription movement gate; broader ordered/windowed and websocket
-    predicate movement remain separate direct-core/Groove gates.
+    predicate movement remain separate core/Groove gates.
 
 Rows remain descriptor/raw encoded at the ABI boundary. This package may add
 small app-facing helpers when they express real app semantics, but it should not
@@ -129,17 +129,17 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
 
 ## Gap matrix from first upstream targets
 
-| Upstream target                                                    | Covered now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Still missing                                                                                                                                                                                                                                                        |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/jazz-wasm/tests/wasm.rs`                                   | WASM module loading from TypeScript, schema bytes, deterministic row IDs, `WasmDb` create/update/delete, and query reads are covered by `npm run test:alpha-public-flow` plus the broader demo.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Rust-side `wasm-pack test --node` parity, exported `generate_id`, `current_timestamp`, `parse_schema`, and public query-builder API tests are not present in this repo's WASM package.                                                                               |
-| deleted legacy `crates/jazz-tools/src/runtime_core/tests/basic.rs` | WasmDb-shaped insert/query, update/delete, callback subscription rows, restart-by-snapshot, owner-policy reads, and Rust WebSocket server durable restart are represented in the `WasmDb` binding checks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Default materialization API parity and broader direct-core Rust regression coverage still need to be rebuilt against `Db`/`CoreRuntime`; the old runtime_core harness is intentionally gone.                                                                         |
-| `packages/jazz-tools/tests/browser/db.all.test.ts`                 | `jazz-tools.ts` covers `createDb`, `defineApp`/schema tokens, table/query objects, `insert`, `update`, `delete`, `restore`, row-like write results with `.value`/`.handle`/`.wait(...)`, `all`, `one`, `allForIdentity`, `subscribe(query, callback)`, boolean/text/integer equality, public `id` predicates lowered natively to `row_uuid`, signed integer `lt`/range comparisons, scalar boolean/text/integer `in`, array-element `in`, integer/text `gt`/`gte`/`lt`/`lte`, nullable UUID `isNull`/`isNotNull`, nullable literal equality/inequality and mixed nullable `in`, text inequality, chained positional and object-style filters, one-shot text and array `contains`/`limit`, selected projections, result ordering, offset pagination, text-array insert/update/readback, whole-array `eq`/`in`, Bytea `eq`/`in`, binary-large-value file helpers, one-shot facade include/hop/gather reads over schema references, required object-style includes, one-shot nested include selection for scalar/reference paths, simple/nested forward include subscription callbacks, hop/gather app-shaped subscriptions, and a direct websocket depth-3 reverse include subscription gate with selected include projection materialization rebuilt from subscription rows. The browser example now proves reload persistence through `WasmDb.openBrowser(namespace, schema, config)` OPFS storage and keeps a subscription useful after reload/update. | Full browser `jazz-tools` test runner, broader native relation query/subscription lowering in core rather than TS relation/include materialization scaffolding, unsupported native-lowering gaps, and durable/upload/streaming object-storage semantics are missing. |
+| Upstream target                                                    | Covered now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Still missing                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/jazz-wasm/tests/wasm.rs`                                   | WASM module loading from TypeScript, schema bytes, deterministic row IDs, `WasmDb` create/update/delete, and query reads are covered by `npm run test:alpha-public-flow` plus the broader demo.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Rust-side `wasm-pack test --node` parity, exported `generate_id`, `current_timestamp`, `parse_schema`, and public query-builder API tests are not present in this repo's WASM package.                                                                               |
+| deleted legacy `crates/jazz-tools/src/runtime_core/tests/basic.rs` | WasmDb-shaped insert/query, update/delete, callback subscription rows, restart-by-snapshot, owner-policy reads, and Rust WebSocket server durable restart are represented in the `WasmDb` binding checks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Default materialization API parity and broader core Rust regression coverage still need to be rebuilt against `Db`/`CoreRuntime`; the old runtime_core harness is intentionally gone.                                                                                |
+| `packages/jazz-tools/tests/browser/db.all.test.ts`                 | `jazz-tools.ts` covers `createDb`, `defineApp`/schema tokens, table/query objects, `insert`, `update`, `delete`, `restore`, row-like write results with `.value`/`.handle`/`.wait(...)`, `all`, `one`, `allForIdentity`, `subscribe(query, callback)`, boolean/text/integer equality, public `id` predicates lowered natively to `row_uuid`, signed integer `lt`/range comparisons, scalar boolean/text/integer `in`, array-element `in`, integer/text `gt`/`gte`/`lt`/`lte`, nullable UUID `isNull`/`isNotNull`, nullable literal equality/inequality and mixed nullable `in`, text inequality, chained positional and object-style filters, one-shot text and array `contains`/`limit`, selected projections, result ordering, offset pagination, text-array insert/update/readback, whole-array `eq`/`in`, Bytea `eq`/`in`, binary-large-value file helpers, one-shot facade include/hop/gather reads over schema references, required object-style includes, one-shot nested include selection for scalar/reference paths, simple/nested forward include subscription callbacks, hop/gather app-shaped subscriptions, and a websocket depth-3 reverse include subscription gate with selected include projection materialization rebuilt from subscription rows. The browser example now proves reload persistence through `WasmDb.openBrowser(namespace, schema, config)` OPFS storage and keeps a subscription useful after reload/update. | Full browser `jazz-tools` test runner, broader native relation query/subscription lowering in core rather than TS relation/include materialization scaffolding, unsupported native-lowering gaps, and durable/upload/streaming object-storage semantics are missing. |
 
 The grafted package now also has a browser alpha public-flow gate in
 `packages/jazz-tools/tests/browser/alpha-public-flow-gate.test.ts`. The running
 slice proves public `schema.defineApp`, `createDb({ driver: "persistent" })`,
 CRUD, `db.one`, `subscribeAll`, and read-your-writes in one browser session.
-The package persistent path now uses a direct-core dedicated worker for OPFS and
+The package persistent path now uses a core dedicated worker for OPFS and
 the same file proves a local write can survive shutdown/reopen. The same gate
 also runs a persistent OPFS client through the real Rust websocket server
 boundary, reopens that client, and verifies a second persistent client converges
@@ -150,13 +150,13 @@ can edge-accept the restore, and a fresh websocket client can query the
 restored row. The same gate is now also the public predicate-movement canary for
 filtered local subscriptions.
 
-The alpha docs React todo app now also has a direct-core browser websocket
+The alpha docs React todo app now also has a core browser websocket
 canary in
-`examples/todo-client-localfirst-react/tests/browser/todo-app-direct-core.test.tsx`.
+`examples/todo-client-localfirst-react/tests/browser/todo-app-core.test.tsx`.
 That gate runs the real `JazzProvider`, `useDb`, and `useAll` flow with two
 persistent OPFS clients connected to one local Rust Jazz server. It verifies
 DOM-driven create/update/delete and bidirectional subscription observation over
-the direct websocket path. The old core/edge browser setup has been collapsed
+the websocket path. The old core/edge browser setup has been collapsed
 out of this canary. The DOM-driven OPFS remount/reopen assertion is now
 unskipped: `TodoList` waits for the public `db.insert(...).wait({ tier:
 "local" })` path and emits a test-observable durability event before the test
@@ -166,24 +166,24 @@ shuts down and remounts the app.
 
 - Rust Axum todo-server examples are currently kept outside the root Cargo
   workspace. They put `JazzClient` directly in shared router state, which
-  requires `Send + Sync`; the direct-core `Db` owner is local-thread by design
+  requires `Send + Sync`; the core `Db` owner is local-thread by design
   (`Rc` / `RefCell`). Re-enable these examples by rebuilding them around the
   real server boundary or another explicit local-owner gateway, not by reviving
   the legacy runtime. The standalone examples now compile through an
-  example-local `TodoClient` owner task that keeps the direct-core
+  example-local `TodoClient` owner task that keeps the core
   `JazzClient` on a current-thread `LocalSet` and gives Axum a `Send + Sync`
   request handle. This must stay example-local until we decide whether Rust HTTP
   apps should talk to the direct `jazz-server` boundary or whether
   `jazz-tools` should expose a real native server gateway.
 - Browser persistent creation in the grafted `jazz-tools` package now uses a
-  direct-core dedicated worker for OPFS instead of the deleted broker/leader
+  core dedicated worker for OPFS instead of the deleted broker/leader
   topology. The current positive browser gate covers public CRUD,
   read-your-writes, subscriptions in the direct path, and local OPFS
   shutdown/reopen for a simple inserted row. It also covers persistent OPFS plus
-  direct websocket convergence over a real Rust server for a todo-shaped flow,
+  websocket convergence over a real Rust server for a todo-shaped flow,
   includeDeleted reads for edge-confirmed deletes, and binary-large-value
   file/blob persistence plus websocket convergence. Rust `JazzClient` also has
-  a first offline persistent direct-core RocksDB rehydrate gate for public
+  a first offline persistent core RocksDB rehydrate gate for public
   row insert/query. Remaining persistence gaps are broader history/index
   correctness and production storage coverage beyond the first browser/Rust
   vertical slices.
@@ -192,7 +192,7 @@ shuts down and remounts the app.
 - Public TypeScript API compatibility is intentionally thin. Since this repo is
   separate from the alpha repo, the replacement package is named `jazz-tools`;
   new integration coverage should enter through that public package surface
-  first, then force direct-core gaps to close underneath it. The old todo-only
+  first, then force core gaps to close underneath it. The old todo-only
   alpha facade has been deleted. It now
   includes `allForIdentity(tableOrQuery, identity)` for deterministic
   identity-scoped one-shot reads, object-style `where({ ... })`, object-style
@@ -216,7 +216,7 @@ shuts down and remounts the app.
   integer equality, scalar boolean/text/integer `in`, integer/text
   `gt`/`gte`/`lt`/`lte`, nullable UUID `isNull`/`isNotNull`, nullable literal
   equality/inequality and mixed nullable `in`, text inequality, text
-  `contains`, public `id` predicates lowered natively to direct-core
+  `contains`, public `id` predicates lowered natively to core
   `row_uuid`, array `contains`, array-element `in` lowered to `contains`
   disjunctions, whole-array `eq`/`in`, Bytea `eq`/`in`, chained
   positional and object-style `where` clauses, `db.one(...)`, selected
@@ -226,11 +226,11 @@ shuts down and remounts the app.
   `gather` facade reads. Relation reads are resolved after a base
   `db.all`/`allForIdentity` read using schema `references`, plus explicit
   `schema.table(..., { relations })` aliases for reverse include names. A
-  direct websocket depth-3 reverse include subscription gate now passes by
+  websocket depth-3 reverse include subscription gate now passes by
   recursively materializing nested include arrays and subscribing to schema-
   aware child-table triggers. Selected include projection subscriptions remain
   query-builder gaps.
-- Public signed `Integer` values now bridge to direct core through an
+- Public signed `Integer` values now bridge to core through an
   order-preserving `i32` bias before entering Groove's unsigned `U32` value
   representation. This keeps negative values round-trippable and makes direct
   core range predicates such as `priority < 0` sort the same way public Jazz
@@ -249,17 +249,17 @@ shuts down and remounts the app.
   identity-scoped include over an owner policy table. Core now has a focused
   maintained subscription view proof for `sharedTodos.include(owner)` relation
   deltas without full recompute, and ABI subscription snapshot/delta row batches now carry
-  flat included closure rows as ordinary descriptor/raw records. The TS direct-WasmDb
+  flat included closure rows as ordinary descriptor/raw records. The TS WasmDb
   `subscribe(query, callback)` facade now accepts simple and nested forward
   includes such as `todos.include("owner")` and `users.include({ team: { include:
 { parent: true } } })`, plus a depth-3 reverse include path over the direct
   websocket server, and materializes the alpha-shaped included object from flat
   subscription rows. Hop and forward-gather app-shaped subscriptions now also
   pass through the public browser `useAll`/`useAllSuspense` gates. Those
-  relation subscriptions are still maintained by the TypeScript direct-core
+  relation subscriptions are still maintained by the TypeScript core
   runtime evaluating the supported relation shape and refreshing from direct
   subscription chunks; the remaining integration gap is native relation
-  lowering/deltas in direct core, not another facade fallback. Selected include
+  lowering/deltas in core, not another facade fallback. Selected include
   projections remain query-builder gaps. The nested-forward slice is pinned by
   a Rust prepared subscription regression so root rows survive multi-segment
   include paths.
@@ -267,7 +267,7 @@ shuts down and remounts the app.
   transaction handles: `beginTransaction`, synchronous `transaction(cb)`,
   transactional insert/update/upsert/delete/restore, commit with local write
   waiting, rollback, custom ids, exclusive transaction commit/rollback through
-  direct core WASM, and exclusive transaction `tx.all`/`tx.one` reads over
+  core WASM, and exclusive transaction `tx.all`/`tx.one` reads over
   staged state. Same-row insert/update, update/delete, and
   restore/update sequences are coalesced before commit so the public facade can
   present alpha-shaped staged-row semantics while still replaying a minimal ABI
@@ -292,14 +292,14 @@ shuts down and remounts the app.
   Local-first JWTs now carry standard `aud` equal to the app id, and TS session
   claims expose it as `claims.audience`; client-side session resolution rejects
   mismatched JWT audiences. Server-side audience rejection, browser auth-loss
-  refresh behavior, richer framework integration, and a first-class direct-WasmDb
+  refresh behavior, richer framework integration, and a first-class WasmDb
   subscription listener contract remain future work.
 - In-process server-style create/list/update/delete and subscribe/snapshot are
   present over the memory authority, with a small HTTP/SSE wrapper that covers
   health, list, identity-bound policy list, create, read, update, delete, and
   live snapshots. `GET /todos/as/:userId` exercises real `dbReadForIdentity`
   The Rust server builder now keeps the old HTTP catalogue store explicitly
-  separate from the direct-core server database: catalogue metadata lives under
+  separate from the core server database: catalogue metadata lives under
   `catalogue.rocksdb`/`catalogue.sqlite`, while sync state lives under
   `core-server.rocksdb`. The remaining cleanup is to replace or shrink that
   legacy catalogue persistence path, not to let it grow back into a second
@@ -332,7 +332,7 @@ shuts down and remounts the app.
   Full chat features such as invites, routing, profiles, durable delivery, and
   richer auth/session refresh remain future targets.
 - `subscribeAll` is now part of the public package path used by the browser
-  alpha-flow gates, while lower-level direct-runtime coverage still exercises
+  alpha-flow gates, while lower-level runtime coverage still exercises
   `db.subscribe(query, callback)` directly over `WasmDb.subscribe` snapshot and
   delta chunks. Keep new public integration checks on `createDb`/table/query
   objects unless the gap is specifically in the internal runtime adapter.
@@ -357,7 +357,7 @@ shuts down and remounts the app.
   `PersistentBrowserOpfsProxyRuntime`. That worker owns the real
   `WasmDb.openBrowser(...)` database because OPFS requires worker ownership; it
   is not a compatibility broker, tab leader, or second engine.
-  Keep the small direct-core JS boundary glue (`core-runtime` codecs,
+  Keep the small core JS boundary glue (`core-runtime` codecs,
   websocket framing, and persistent-browser worker/proxy runtime) because it
   adapts package calls to the shared WASM/NAPI core. Do not recreate the old
   parallel browser broker, worker bridge, sync transport, leader-election, or
@@ -369,11 +369,11 @@ shuts down and remounts the app.
   `runtime_core` module have been deleted from the active graft. React Native is
   temporarily unsupported rather than kept alive through the deleted runtime.
   The legacy `onMutationError` callback/event path has also been removed from
-  the TypeScript runtime surface; direct-core writes report policy/durability
+  the TypeScript runtime surface; core writes report policy/durability
   rejection through retained write handles and `.wait(...)`. Old
   SyncManager integration test modules have been removed from active source so
   they no longer act as the semantic oracle for the replacement engine; new
-  coverage must assert public direct-core client/server/browser behavior.
+  coverage must assert public core client/server/browser behavior.
   The old `query_manager` execution engine (`manager`, graph/graph_nodes,
   subscriptions, writes, old indexes, old policy graph/IR/counters, server
   query helpers, and their manager/rebac tests) has been deleted from the
@@ -392,29 +392,29 @@ shuts down and remounts the app.
   mutation helpers are gated out of the default live build. The
   server admin catalogue now depends on dedicated catalogue-only memory/RocksDB
   storage instead of `Box<dyn Storage>` or old storage backend adapters. SQLite
-  remains a native/client storage implementation, but direct-core
+  remains a native/client storage implementation, but core
   `jazz-tools server` rejects SQLite for catalogue and sync storage.
   Admin subscription introspection no longer records fabricated
   `SyncPayload::QuerySubscription` entries in the catalogue store; the endpoint
   currently returns an authenticated empty shell until it can be backed by
-  direct-core subscription telemetry. Server test utilities no longer expose
+  core subscription telemetry. Server test utilities no longer expose
   `JazzServer::block_messages_to(...)` or buffered `SyncPayload::BatchFate`
   assertions; tests should assert public query/subscription/write outcomes
   instead of pinning old semantic sync frames.
   The legacy test-only `SyncPayload` and `SyncTracer` plumbing has now been
   deleted from the active graft; do not reintroduce it for edge/server
   observability. If product observability needs this shape again, define it in
-  direct-core wire/subscription terms instead of reviving the alpha fanout
+  core wire/subscription terms instead of reviving the alpha fanout
   vocabulary.
   Transaction ids and transaction-kind parsing now live in neutral
   `jazz_tools::transaction` vocabulary rather than being sourced from
   `row_histories::BatchId` or `batch_fate::BatchMode`. `WriteContext` keeps the
-  transaction id needed for direct-core staged writes, but it no longer carries
+  transaction id needed for core staged writes, but it no longer carries
   `batch_mode`, and the TypeScript write-context payload no longer advertises
   that dead field. The old `rocksdb_storage_integration` test has been deleted
   so row-history/batch-fate storage is no longer pinned as an integration
   contract; future persistence checks should be narrow catalogue-storage gates
-  or direct-core app gates.
+  or core app gates.
   Schema-manager catalogue persistence and server catalogue storage now use
   catalogue-only traits/errors instead of `crate::storage::SchemaCatalogueStorage`
   or `crate::storage::StorageError`. The old storage module has been deleted;
@@ -424,24 +424,24 @@ shuts down and remounts the app.
   (`ConnectionEventHub`/`SequencedSyncUpdate`/registration dispatch) has also
   been deleted. New sync confidence should come from public
   `createDb`/`JazzClient` outcomes, websocket convergence, durable restart, and
-  direct-core telemetry surfaces if those are added.
+  core telemetry surfaces if those are added.
   Persistent browser OPFS writes now expose their main-thread transaction ids
   as pending worker writes and `.wait(...)` resolves through the worker-owned
-  direct-core transaction id only. Fully removing pending write semantics
+  core transaction id only. Fully removing pending write semantics
   requires changing the synchronous runtime mutation interface or returning a
   write handle that resolves to the authoritative worker result.
-- The Rust server's direct-core authority is now named
+- The Rust server's core authority is now named
   `LocalCoreServerHandle`, with a private local owner around the non-`Send`
   core server shell. This is not intended as a second engine; it is the current
-  required ownership boundary because the direct core server and underlying
+  required ownership boundary because the core server and underlying
   `Db`/`Node` stack are local-owner `Rc`/`RefCell` structures while Axum shares
   server state across tasks.
-- Rust client/server schema conversion names now say public-schema/direct-core
+- Rust client/server schema conversion names now say public-schema/core
   instead of alpha/core. The conversion boundary remains real until the public
-  Rust API itself adopts direct-core-native schema/value types.
+  Rust API itself adopts core-native schema/value types.
 - The TypeScript `DbRuntimeModule` / `WasmRuntimeModule` naming has been
-  collapsed into `DirectCoreSource` / `WasmCoreSource`. The remaining seam is a
-  platform loader/source boundary for direct core, not a swappable engine
+  collapsed into `CoreSource` / `WasmCoreSource`. The remaining seam is a
+  platform loader/source boundary for core, not a swappable engine
   abstraction.
 - Public framework client objects no longer expose the subscription
   orchestrator as `.manager`. Framework hooks read an internal symbol-backed
@@ -452,26 +452,26 @@ shuts down and remounts the app.
   metadata. `Db.all`, transaction reads, and `subscribeAll` now require the
   built query's explicit table to exist in the query's schema. The deferred
   local-update default remains documented in `Db` because immediate local
-  updates still fail several public query shapes; close that as direct-core
+  updates still fail several public query shapes; close that as core
   read/subscription completeness work, not as a facade fallback.
-- The direct-core runtime no longer re-runs JS post-filters for public
+- The core runtime no longer re-runs JS post-filters for public
   predicates after prepared direct query reads. Public `id` predicates are part
-  of the native contract and lower to direct-core `row_uuid`; the old simple
+  of the native contract and lower to core `row_uuid`; the old simple
   JS post-filter fallback for `id` has been removed. Remaining TypeScript
   evaluator work should be framed as relation/include materialization over
   prepared-query-backed reads/subscriptions, or as unsupported native-lowering
-  gaps to close in direct core, not as a predicate fallback.
+  gaps to close in core, not as a predicate fallback.
 - The retired alpha disconnect-marker/sweep lifecycle has been deleted from
-  server state and tests. Direct websocket lifecycle is accounted for through
-  shutdown admission/drain tracking and explicit direct-core session close, not
+  server state and tests. Websocket lifecycle is accounted for through
+  shutdown admission/drain tracking and explicit core session close, not
   the old client TTL/reap loop.
-- Browser `useAll`/`useAllSuspense` tests now cover direct-core
+- Browser `useAll`/`useAllSuspense` tests now cover core
   `propagation: "full"` and positive local persistent reads with
   `propagation: "local-only"`. The local-only path is passed through to native
-  read options and direct core skips upstream subscription registration for
+  read options and core skips upstream subscription registration for
   explicit local-only subscriptions. The same hook gates now cover signed
   integer comparisons plus hop and gather relation subscriptions on the
-  direct-core path.
+  core path.
 
 ## Next targets
 
@@ -482,7 +482,7 @@ shuts down and remounts the app.
 2. **Broaden browser storage coverage.** `WasmDb.openBrowser(namespace, schema, config)`
    uses the repo's OPFS-backed browser storage path and the browser smoke
    has example-level reload coverage. The grafted `jazz-tools` package now
-   bypasses the old worker broker and uses a direct-core dedicated worker
+   bypasses the old worker broker and uses a core dedicated worker
    runtime for OPFS; next it needs persistent transactions, websocket
    convergence, file/blob reopen, and broader storage coverage. Resolve the
    pending-worker-write API shape before treating browser persistent writes as
@@ -496,7 +496,7 @@ shuts down and remounts the app.
    listener reloads active admin schemas on durable startup. The old
    `SyncPayload`-backed subscription introspection shim is not a target; next,
    compose the admin surface with the app-scoped WebSocket command, add a
-   direct-core subscription telemetry API only if the product still needs that
+   core subscription telemetry API only if the product still needs that
    endpoint, and broaden lifecycle coverage before treating the Rust server as
    the default public server.
 4. **Complete alpha-shaped auth/session admission.** Server-side signed
@@ -536,7 +536,7 @@ shuts down and remounts the app.
    The immediate browser blockers are persistent-worker transaction/file/auth
    coverage and cross-client subscription convergence over the real Rust server
    boundary.
-9. **Defer React Native; keep NAPI as a parity gate.** NAPI now has direct-core
+9. **Defer React Native; keep NAPI as a parity gate.** NAPI now has core
    CRUD/subscription/policy/persistence/edge-sync coverage and should stay in
    the green path. React Native remains deferred until the browser/server/API
    semantics above are in place and the storage story is clearer.
@@ -552,7 +552,7 @@ shuts down and remounts the app.
 The alpha starter behavior to match is exact but small: a local-first todo app
 adds a todo, the browser reloads, the app reopens local state, and the same todo
 is rendered from browser-owned durable bytes. The package now has a positive
-public `createDb` gate for that shape backed by a direct-core dedicated worker
+public `createDb` gate for that shape backed by a core dedicated worker
 and real OPFS storage. The browser-wasm example also has a two-load smoke:
 `?smoke=reload-write&ns=...` opens `WasmDb.openBrowser(...)`, creates
 `Survive reload`, waits for local durability, and closes the DB/storage after
@@ -571,11 +571,11 @@ concurrency.
 ### Direct-Core Worker Runtime Shape
 
 The clean package path is not the deleted alpha browser broker. The package now
-has a narrow single direct-core dedicated worker runtime for browser
+has a narrow single core dedicated worker runtime for browser
 persistence:
 
 - `createDb({ driver: { type: "persistent", dbName } })` opens the
-  OPFS-backed direct core in a dedicated module worker, because
+  OPFS-backed core in a dedicated module worker, because
   `WasmDb.openBrowser(namespace, schema, config)` rejects on the main thread.
 - Browser memory DBs, Node, NAPI, and server paths should keep the current
   in-process direct `CoreRuntime` path.
@@ -596,7 +596,7 @@ The landed smallest vertical slice is:
    responsible for request ids, pending write waits, subscription callbacks,
    shutdown, and transport forwarding. Auth failure callback propagation is
    still listed below as follow-up work.
-3. Preserve synchronous writes either by keeping a tiny in-memory direct-core
+3. Preserve synchronous writes either by keeping a tiny in-memory core
    mirror on the main thread for immediate row materialization while sending the
    encoded mutation to the worker for OPFS durability, or by using a
    cross-origin-isolated `SharedArrayBuffer`/`Atomics.wait` synchronous RPC path
@@ -606,13 +606,13 @@ The landed smallest vertical slice is:
    API, but still skipped for the real React DOM todo flow until app code can
    wait for local durability before unmount.
 5. The persistent OPFS websocket gate is unskipped for React todo CRUD and
-   second-client convergence through one direct-core server; shutdown/reopen of
+   second-client convergence through one core server; shutdown/reopen of
    that DOM-driven todo flow remains the durability gap above.
 6. The includeDeleted websocket gate is unskipped for edge-confirmed deletes.
 7. The file/blob websocket gate is unskipped: binary-large-value `files.data`
    survives persistent OPFS reopen and converges to a second websocket client.
-8. The package alpha public browser gate now covers a mixed direct-core
-   boundary: one public `createDb` memory writer syncs over the direct websocket
+8. The package alpha public browser gate now covers a mixed core
+   boundary: one public `createDb` memory writer syncs over the websocket
    server to a persistent OPFS worker reader, the reader observes the row via
    `subscribeAll`, then shuts down/reopens and reads the same binary-rich row
    locally.
@@ -629,7 +629,7 @@ Current blockers:
   the first public end-to-end slices, but they are not a full transaction,
   auth-expiry, or short-lived transport-disconnect matrix.
 - Transactions are not implemented on the persistent worker runtime yet. A
-  worker-only attempt exposed deeper missing direct-core semantics:
+  worker-only attempt exposed deeper missing core semantics:
   transaction-scoped reads, session-scoped staged writes, and exclusive
   transaction support cannot be solved honestly in the wrapper alone.
 - Auth failure and mutation-error callbacks are now forwarded from the worker to

@@ -1,4 +1,4 @@
-import { NapiDirectDb } from "jazz-napi";
+import { NapiDb } from "jazz-napi";
 import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
@@ -141,7 +141,7 @@ export class JazzContext {
     const env = this.config.env ?? "dev";
     const userBranch = this.config.userBranch ?? "main";
     this.runtime = new CoreRuntime(
-      NapiDirectDb,
+      NapiDb,
       schema,
       deterministicBytes(
         `${this.config.appId}:${env}:${userBranch}:${this.nodeIdentityScope}:node`,

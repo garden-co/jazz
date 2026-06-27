@@ -6,11 +6,11 @@ import {
 } from "./client.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
 import {
-  DirectCoreSource,
-  type DirectCoreClientContext,
-  type DirectCoreTelemetryContext,
+  CoreSource,
+  type CoreClientContext,
+  type CoreTelemetryContext,
   type RuntimeTokenOptions,
-} from "./direct-core-source.js";
+} from "./core-source.js";
 import { CoreRuntime } from "./core-runtime/runtime.js";
 import { PersistentBrowserOpfsRuntime } from "./core-runtime/persistent-browser-runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
@@ -71,7 +71,7 @@ function authorBytesForSubject(subject: string, fallbackSeed: string): Uint8Arra
   return uuidBytes(subject) ?? deterministicBytes(`${fallbackSeed}:author`);
 }
 
-export class WasmCoreSource extends DirectCoreSource<DbConfig> {
+export class WasmCoreSource extends CoreSource<DbConfig> {
   private get wasmModule(): WasmModule {
     return this.loadedCore as WasmModule;
   }
@@ -84,7 +84,7 @@ export class WasmCoreSource extends DirectCoreSource<DbConfig> {
     config,
     schema,
     onAuthFailure,
-  }: DirectCoreClientContext<DbConfig>): JazzClient {
+  }: CoreClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
 
     const runtimeOptions: ConnectRuntimeOptions = {
@@ -136,7 +136,7 @@ export class WasmCoreSource extends DirectCoreSource<DbConfig> {
     config,
     collectorUrl,
     runtimeThread,
-  }: DirectCoreTelemetryContext<DbConfig>): (() => void) | null {
+  }: CoreTelemetryContext<DbConfig>): (() => void) | null {
     return installWasmTelemetry({
       wasmModule: this.wasmModule,
       collectorUrl,

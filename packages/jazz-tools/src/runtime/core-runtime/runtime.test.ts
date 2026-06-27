@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
-import { createRecord, PostcardReader, PostcardWriter, writeDescriptor } from "./direct-codec.js";
+import { createRecord, PostcardReader, PostcardWriter, writeDescriptor } from "./core-codec.js";
 import {
-  decodeDirectWebSocketFrameBatch,
-  encodeDirectWebSocketPrelude,
-  encodeDirectWebSocketFrameBatch,
-  isDirectWireHello,
-} from "./direct-websocket.js";
-import { CoreRuntime, type DirectTransport } from "./runtime.js";
+  decodeWebSocketFrameBatch,
+  encodeWebSocketPrelude,
+  encodeWebSocketFrameBatch,
+  isWireHello,
+} from "./websocket.js";
+import { CoreRuntime, type Transport } from "./runtime.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -50,17 +50,15 @@ describe("CoreRuntime server transport", () => {
     expect(sockets).toHaveLength(1);
     expect(sockets[0]!.url).toBe("ws://127.0.0.1:4200/apps/app-a/ws");
     expect(sockets[0]!.sent[0]).toEqual(
-      encodeDirectWebSocketPrelude(
+      encodeWebSocketPrelude(
         "{}",
         Uint8Array.from([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]),
       ),
     );
-    const helloBatch = decodeDirectWebSocketFrameBatch(sockets[0]!.sent[1]!);
+    const helloBatch = decodeWebSocketFrameBatch(sockets[0]!.sent[1]!);
     expect(helloBatch).toHaveLength(1);
-    expect(isDirectWireHello(helloBatch[0]!)).toBe(true);
-    expect(decodeDirectWebSocketFrameBatch(sockets[0]!.sent[2]!)).toEqual([
-      Uint8Array.from([1, 2, 3]),
-    ]);
+    expect(isWireHello(helloBatch[0]!)).toBe(true);
+    expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]!)).toEqual([Uint8Array.from([1, 2, 3])]);
     expect(transport.closed).toBe(false);
 
     runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
@@ -147,10 +145,10 @@ describe("CoreRuntime server transport", () => {
           1,
           true,
         ),
-    ).toThrow("Direct core runtime requires db.setTickScheduler");
+    ).toThrow("Core runtime requires db.setTickScheduler");
   });
 
-  it("reports direct websocket auth failures through the auth failure callback", async () => {
+  it("reports websocket auth failures through the auth failure callback", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
       constructor(url: string) {
@@ -182,16 +180,14 @@ describe("CoreRuntime server transport", () => {
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     await Promise.resolve();
 
-    sockets[0]!.emitMessage(
-      encodeDirectWebSocketFrameBatch([encodeDirectWireError(3, 1, "token expired")]),
-    );
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "token expired")]));
     await Promise.resolve();
 
     expect(authFailures).toEqual(["expired"]);
     expect(transport.received).toEqual([]);
   });
 
-  it("does not report non-auth direct websocket errors as auth failures", async () => {
+  it("does not report non-auth websocket errors as auth failures", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
       constructor(url: string) {
@@ -224,7 +220,7 @@ describe("CoreRuntime server transport", () => {
     await Promise.resolve();
 
     sockets[0]!.emitMessage(
-      encodeDirectWebSocketFrameBatch([encodeDirectWireError(5, 3, "conflicting commit unit")]),
+      encodeWebSocketFrameBatch([encodeWireError(5, 3, "conflicting commit unit")]),
     );
     await Promise.resolve();
 
@@ -400,7 +396,7 @@ describe("CoreRuntime server transport", () => {
     expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
   });
 
-  it("stages session-scoped mergeable transaction writes through identity-aware direct core txs", () => {
+  it("stages session-scoped mergeable transaction writes through identity-aware core txs", () => {
     const authors: string[] = [];
     const staged: string[] = [];
     const runtime = new CoreRuntime(
@@ -487,7 +483,7 @@ describe("CoreRuntime server transport", () => {
         }),
         "00000000-0000-0000-0000-000000000002",
       ),
-    ).toThrow("Direct core runtime mergeable transaction cannot mix write identities");
+    ).toThrow("Core runtime mergeable transaction cannot mix write identities");
   });
 
   it("decodes fixed-width array columns from direct row batches", async () => {
@@ -919,7 +915,7 @@ describe("CoreRuntime server transport", () => {
     expect(readPreparedSelect(preparedBytes!)).toEqual(["title"]);
   });
 
-  it("encodes negative integer query literals as signed i32 bits for direct core", () => {
+  it("encodes negative integer query literals as signed i32 bits for core", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
@@ -2094,7 +2090,7 @@ const binaryLargeValueSchema = {
   },
 } satisfies WasmSchema;
 
-class FakeTransport implements DirectTransport {
+class FakeTransport implements Transport {
   closed = false;
   readonly received: Uint8Array[] = [];
   tickCount = 0;
@@ -2146,7 +2142,7 @@ class FakeWebSocket {
   }
 }
 
-function encodeDirectWireError(code: number, retry: number, message: string): Uint8Array {
+function encodeWireError(code: number, retry: number, message: string): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(2);
   writer.u64(code);
@@ -2236,7 +2232,7 @@ function fakeDb<T extends object>(
   };
 }
 
-function fakeTx(overrides: Partial<DirectTxForTest> = {}): DirectTxForTest {
+function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
   return {
     commit: () => fakeWrite(),
     rollback: () => undefined,
@@ -2258,7 +2254,7 @@ function fakeWrite() {
   };
 }
 
-type DirectTxForTest = {
+type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;

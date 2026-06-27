@@ -7,7 +7,7 @@ import {
   encodeBuiltQueryForTest,
   schema,
 } from "./jazz-tools.js";
-import { queryFromTable } from "./direct-codec.js";
+import { queryFromTable } from "./core-codec.js";
 
 const app = defineApp({
   users: schema.table(

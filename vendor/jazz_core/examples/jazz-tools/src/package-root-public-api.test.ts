@@ -59,7 +59,7 @@ test("package root exports newest direct WasmDb public APIs", async () => {
   assert.equal(isDeleted(restored), false);
 });
 
-test("package root createDb import runs a real direct-WasmDb subscription flow", async () => {
+test("package root createDb import runs a real WasmDb subscription flow", async () => {
   const db = await createDb({ schema: app._schema, appId: "package-root-runtime-subscription" });
   const snapshots: Todo[][] = [];
   const subscription = db.subscribe(app.todos as Table<Todo, Omit<Todo, "id">>, (rows) => {
