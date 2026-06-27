@@ -29,6 +29,7 @@ import {
   type DirectQueryOrder,
   type DirectQueryLiteral,
   type DirectQueryPredicate,
+  type DirectQueryPredicateOp,
   type DescriptorField,
   type ValueType,
 } from "./direct-codec.js";
@@ -151,7 +152,7 @@ type SubscriptionState = {
   reading: boolean;
 };
 
-type RowFilter = { column: string; value: DirectQueryLiteral };
+type RowFilter = DirectQueryPredicate;
 
 type RowState = {
   table: string;
@@ -669,10 +670,14 @@ export class CoreRuntime implements Runtime {
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
     if (this.closed) return;
     if (urgency === "immediate") {
+      this.pumpSubscriptions();
       this.scheduleServerPump();
       return;
     }
-    queueMicrotask(() => this.scheduleServerPump());
+    queueMicrotask(() => {
+      this.pumpSubscriptions();
+      this.scheduleServerPump();
+    });
   }
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
@@ -712,18 +717,18 @@ export class CoreRuntime implements Runtime {
       subscription.cancelled = true;
       return;
     }
+    const previousRows = subscription.rows;
     if (chunk.type === "snapshot") {
       subscription.rows = filterRows(
         rowsFromBatches(chunk.rows, this.schema),
         subscription.filters,
         this.schema,
       );
-      subscription.callback?.(nativeDeltaFromRows(subscription.rows));
     } else {
       subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
       subscription.rows = filterRows(subscription.rows, subscription.filters, this.schema);
-      subscription.callback?.(nativeDeltaFromRows(subscription.rows));
     }
+    subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
   }
 
   private scheduleServerPump(): void {
@@ -948,11 +953,14 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     table?: unknown;
     limit?: unknown;
     relation_ir?: unknown;
+    conditions?: unknown;
+    offset?: unknown;
+    orderBy?: unknown;
   };
   if (typeof parsed.table !== "string") {
     throw new Error("Direct core runtime only supports table queries in this slice");
   }
-  const encoded = encodeSimpleRelationQuery(parsed.table, parsed.relation_ir, schema);
+  const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
   return queryWithPredicates(
     parsed.table,
     encoded.predicates,
@@ -974,7 +982,13 @@ function unsupportedRelationQueryError(): Error {
 
 function encodeSimpleRelationQuery(
   table: string,
-  relationIr: unknown,
+  query: {
+    relation_ir?: unknown;
+    conditions?: unknown;
+    limit?: unknown;
+    offset?: unknown;
+    orderBy?: unknown;
+  },
   schema: WasmSchema,
 ): {
   predicates: DirectQueryPredicate[];
@@ -983,10 +997,10 @@ function encodeSimpleRelationQuery(
   offset: number;
   orderBy: DirectQueryOrder[];
 } {
-  const unwrapped = unwrapSimpleRelation(table, relationIr);
+  const unwrapped = unwrapSimpleQuery(table, query);
   if (!unwrapped) throw unsupportedRelationQueryError();
   const unsupportedIdComparator = unwrapped.predicates.find(
-    (filter) => filter.column === "id" && filter.op !== "Eq",
+    (filter) => filter.column === "id" && filter.op !== "Eq" && filter.op !== "In",
   );
   if (unsupportedIdComparator) {
     throw new Error(
@@ -1001,20 +1015,68 @@ function encodeSimpleRelationQuery(
     orderBy: unwrapped.orderBy,
     predicates: unwrapped.predicates
       .filter((filter) => filter.column !== "id")
-      .map((filter) => ({
-        ...filter,
-        value: coerceQueryLiteral(table, filter.column, filter.value, schema),
-      })),
+      .map((filter) => coerceQueryPredicate(table, filter, schema)),
+  };
+}
+
+function coerceQueryPredicate(
+  table: string,
+  filter: DirectQueryPredicate,
+  schema: WasmSchema,
+): DirectQueryPredicate {
+  if (filter.op === "In") {
+    return {
+      ...filter,
+      values: filter.values.map((value) => coerceQueryLiteral(table, filter.column, value, schema)),
+    };
+  }
+  if (filter.op === "IsNull" || filter.op === "IsNotNull") return filter;
+  return {
+    ...filter,
+    value: coerceQueryLiteral(table, filter.column, filter.value, schema),
   };
 }
 
 function unwrapSimpleRelationOrThrow(
   table: string,
-  relationIr: unknown,
+  query: {
+    relation_ir?: unknown;
+    conditions?: unknown;
+    limit?: unknown;
+    offset?: unknown;
+    orderBy?: unknown;
+  },
 ): { predicates: DirectQueryPredicate[]; offset: number; orderBy: DirectQueryOrder[] } {
-  const unwrapped = unwrapSimpleRelation(table, relationIr);
+  const unwrapped = unwrapSimpleQuery(table, query);
   if (!unwrapped) throw unsupportedRelationQueryError();
   return unwrapped;
+}
+
+function unwrapSimpleQuery(
+  table: string,
+  query: {
+    relation_ir?: unknown;
+    conditions?: unknown;
+    limit?: unknown;
+    offset?: unknown;
+    orderBy?: unknown;
+  },
+): {
+  predicates: DirectQueryPredicate[];
+  limit?: number;
+  offset: number;
+  orderBy: DirectQueryOrder[];
+} | null {
+  if (query.relation_ir != null) return unwrapSimpleRelation(table, query.relation_ir);
+  const predicates = readLegacyConditions(query.conditions);
+  const orderBy = readLegacyOrderBy(query.orderBy);
+  if (!predicates || !orderBy) return null;
+  return {
+    predicates,
+    limit: query.limit == null ? undefined : readLimit(query.limit),
+    offset: query.offset == null ? 0 : readOffset(query.offset),
+    orderBy,
+  };
 }
 
 function unwrapSimpleRelation(
@@ -1068,6 +1130,101 @@ function unwrapSimpleRelation(
   return predicates ? { ...input, predicates: input.predicates.concat(predicates) } : null;
 }
 
+function readLegacyConditions(value: unknown): DirectQueryPredicate[] | null {
+  if (value == null) return [];
+  if (!Array.isArray(value)) return null;
+  const predicates: DirectQueryPredicate[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") return null;
+    const condition = entry as { column?: unknown; op?: unknown; value?: unknown };
+    if (typeof condition.column !== "string" || typeof condition.op !== "string") return null;
+    switch (condition.op) {
+      case "eq":
+      case "ne":
+      case "gt":
+      case "gte":
+      case "lt":
+      case "lte": {
+        const op = readLegacyPredicateOp(condition.op);
+        const literal = literalFromPlainValue(condition.value);
+        if (!op || !literal) return null;
+        predicates.push({ column: condition.column, op, value: literal });
+        break;
+      }
+      case "in": {
+        if (!Array.isArray(condition.value)) return null;
+        const values = condition.value.map(literalFromPlainValue);
+        if (!values.every((literal): literal is DirectQueryLiteral => literal != null)) return null;
+        predicates.push({ column: condition.column, op: "In", values });
+        break;
+      }
+      case "contains": {
+        const literal = literalFromPlainValue(condition.value);
+        if (!literal) return null;
+        predicates.push({ column: condition.column, op: "Contains", value: literal });
+        break;
+      }
+      case "isNull":
+        predicates.push({ column: condition.column, op: "IsNull" });
+        break;
+      case "isNotNull":
+        predicates.push({ column: condition.column, op: "IsNotNull" });
+        break;
+      default:
+        return null;
+    }
+  }
+  return predicates;
+}
+
+function readLegacyOrderBy(value: unknown): DirectQueryOrder[] | null {
+  if (value == null) return [];
+  if (!Array.isArray(value)) return null;
+  const terms: DirectQueryOrder[] = [];
+  for (const entry of value) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") return null;
+    if (entry[1] !== "asc" && entry[1] !== "desc") return null;
+    terms.push({ column: entry[0], direction: entry[1] === "asc" ? "Asc" : "Desc" });
+  }
+  return terms;
+}
+
+function readLegacyPredicateOp(value: string): DirectQueryPredicateOp | null {
+  switch (value) {
+    case "eq":
+      return "Eq";
+    case "ne":
+      return "Ne";
+    case "gt":
+      return "Gt";
+    case "gte":
+      return "Gte";
+    case "lt":
+      return "Lt";
+    case "lte":
+      return "Lte";
+    default:
+      return null;
+  }
+}
+
+function literalFromPlainValue(value: unknown): DirectQueryLiteral | null {
+  if (value == null) return { type: "Nullable", value: null };
+  if (typeof value === "boolean") return { type: "Boolean", value };
+  if (typeof value === "number" && Number.isSafeInteger(value)) {
+    return { type: "Integer", value };
+  }
+  if (typeof value === "string") return { type: "Text", value };
+  if (value instanceof Uint8Array) return { type: "Bytea", value };
+  if (Array.isArray(value)) {
+    const values = value.map(literalFromPlainValue);
+    return values.every((literal): literal is DirectQueryLiteral => literal != null)
+      ? { type: "Array", value: values }
+      : null;
+  }
+  return null;
+}
+
 function readOrderByTerms(value: unknown): DirectQueryOrder[] | null {
   if (!Array.isArray(value)) return null;
   const terms: DirectQueryOrder[] = [];
@@ -1087,24 +1244,64 @@ function coerceQueryLiteral(
   value: DirectQueryLiteral,
   schema: WasmSchema,
 ): DirectQueryLiteral {
+  if (value.type === "Array") {
+    const elementType =
+      column === "id"
+        ? { type: "Uuid" as const }
+        : schema[table]?.columns.find((entry) => entry.name === column)?.column_type;
+    const elementColumnType = elementType?.type === "Array" ? elementType.element : elementType;
+    return {
+      type: "Array",
+      value: value.value.map((entry) =>
+        coerceLiteralForColumnType(entry, elementColumnType, false),
+      ),
+    };
+  }
   const columnType =
     column === "id"
-      ? { type: "Uuid" }
+      ? ({ type: "Uuid" } as const)
       : schema[table]?.columns.find((entry) => entry.name === column)?.column_type;
-  const coerced =
-    columnType?.type === "Uuid" && value.type === "Text" && isUuidString(value.value)
-      ? { type: "Uuid" as const, value: value.value }
-      : value;
-  const nullable =
-    column !== "id" && schema[table]?.columns.find((entry) => entry.name === column)?.nullable;
-  if (nullable && coerced.type !== "Nullable") {
-    return { type: "Nullable", value: coerced };
-  }
+  const coerced = coerceLiteralForColumnType(value, columnType, true);
   return coerced;
+}
+
+function coerceLiteralForColumnType(
+  value: DirectQueryLiteral,
+  columnType: ColumnType | undefined,
+  allowNullable: boolean,
+): DirectQueryLiteral {
+  if (value.type === "Nullable") {
+    return allowNullable && value.value
+      ? { type: "Nullable", value: coerceLiteralForColumnType(value.value, columnType, false) }
+      : value;
+  }
+  if (columnType?.type === "Uuid" && value.type === "Text" && isUuidString(value.value)) {
+    return { type: "Uuid", value: value.value };
+  }
+  if (columnType?.type === "Bytea" && value.type === "Array") {
+    return { type: "Bytea", value: Uint8Array.from(value.value.map(readByteLiteral)) };
+  }
+  if (columnType?.type === "Array" && value.type === "Array") {
+    return {
+      type: "Array",
+      value: value.value.map((entry) =>
+        coerceLiteralForColumnType(entry, columnType.element, false),
+      ),
+    };
+  }
+  return value;
+}
+
+function readByteLiteral(value: DirectQueryLiteral): number {
+  if (value.type !== "Integer" || value.value < 0 || value.value > 255) {
+    throw new Error("Bytea values must contain integers in range 0..255");
+  }
+  return value.value;
 }
 
 function predicateToFilters(predicate: unknown): DirectQueryPredicate[] | null {
   if (predicate === "True") return [];
+  if (predicate === "False") return [{ column: "id", op: "In", values: [] }];
   if (!predicate || typeof predicate !== "object") return null;
   const record = predicate as Record<string, unknown>;
   if (Array.isArray(record.And)) {
@@ -1116,6 +1313,35 @@ function predicateToFilters(predicate: unknown): DirectQueryPredicate[] | null {
     }
     return filters;
   }
+  if (Array.isArray(record.Or)) return null;
+  if (record.Not) return null;
+  const isNull = record.IsNull;
+  if (isNull && typeof isNull === "object") {
+    const column = readColumnRef((isNull as { column?: unknown }).column);
+    return column ? [{ column, op: "IsNull" }] : null;
+  }
+  const isNotNull = record.IsNotNull;
+  if (isNotNull && typeof isNotNull === "object") {
+    const column = readColumnRef((isNotNull as { column?: unknown }).column);
+    return column ? [{ column, op: "IsNotNull" }] : null;
+  }
+  const contains = record.Contains;
+  if (contains && typeof contains === "object") {
+    const containsRecord = contains as { left?: unknown; right?: unknown };
+    const column = readColumnRef(containsRecord.left);
+    const value = readLiteral(containsRecord.right);
+    return column && value ? [{ column, op: "Contains", value }] : null;
+  }
+  const inPredicate = record.In;
+  if (inPredicate && typeof inPredicate === "object") {
+    const inRecord = inPredicate as { left?: unknown; values?: unknown };
+    const column = readColumnRef(inRecord.left);
+    if (!column || !Array.isArray(inRecord.values)) return null;
+    const values = inRecord.values.map(readLiteral);
+    return values.every((value): value is DirectQueryLiteral => value != null)
+      ? [{ column, op: "In", values }]
+      : null;
+  }
   const cmp = record.Cmp;
   if (!cmp || typeof cmp !== "object") return null;
   const cmpRecord = cmp as { left?: unknown; op?: unknown; right?: unknown };
@@ -1123,10 +1349,10 @@ function predicateToFilters(predicate: unknown): DirectQueryPredicate[] | null {
   if (!op) return null;
   const column = readColumnRef(cmpRecord.left);
   const value = readLiteral(cmpRecord.right);
-  return column && value ? [{ column, op, value }] : null;
+  return column && value ? [{ column, op: op as DirectQueryPredicateOp, value }] : null;
 }
 
-function readPredicateOp(value: unknown): DirectQueryPredicate["op"] | null {
+function readPredicateOp(value: unknown): DirectQueryPredicateOp | null {
   switch (value) {
     case "Eq":
     case "Ne":
@@ -1159,6 +1385,25 @@ function readLiteral(value: unknown): DirectQueryLiteral | null {
   if (record.type === "Boolean" && typeof record.value === "boolean") {
     return { type: "Boolean", value: record.value };
   }
+  if (
+    (record.type === "Integer" || record.type === "BigInt" || record.type === "Timestamp") &&
+    typeof record.value === "number" &&
+    Number.isSafeInteger(record.value)
+  ) {
+    return { type: "Integer", value: record.value };
+  }
+  if (record.type === "Bytea" && Array.isArray(record.value)) {
+    return { type: "Bytea", value: Uint8Array.from(record.value.map(Number)) };
+  }
+  if (record.type === "Null") {
+    return { type: "Nullable", value: null };
+  }
+  if (record.type === "Array" && Array.isArray(record.value)) {
+    const values = record.value.map((entry) => readLiteral({ Literal: entry }));
+    if (values.every((entry): entry is DirectQueryLiteral => entry != null)) {
+      return { type: "Array", value: values };
+    }
+  }
   if (record.type === "Uuid" && typeof record.value === "string") {
     return { type: "Uuid", value: record.value };
   }
@@ -1187,14 +1432,18 @@ function readOffset(value: unknown): number {
 }
 
 function queryFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[] {
-  const parsed = JSON.parse(queryJson) as { table?: unknown; relation_ir?: unknown };
+  const parsed = JSON.parse(queryJson) as {
+    table?: unknown;
+    relation_ir?: unknown;
+    conditions?: unknown;
+    limit?: unknown;
+    offset?: unknown;
+    orderBy?: unknown;
+  };
   if (typeof parsed.table !== "string") return [];
-  return unwrapSimpleRelationOrThrow(parsed.table, parsed.relation_ir)
-    .predicates.filter((filter) => filter.op === "Eq")
-    .map((filter) => ({
-      ...filter,
-      value: coerceQueryLiteral(parsed.table as string, filter.column, filter.value, schema),
-    }));
+  return unwrapSimpleRelationOrThrow(parsed.table, parsed).predicates.map((filter) =>
+    coerceQueryPredicate(parsed.table as string, filter, schema),
+  );
 }
 
 function filterRows(rows: RowState[], filters: RowFilter[], schema: WasmSchema): RowState[] {
@@ -1203,30 +1452,85 @@ function filterRows(rows: RowState[], filters: RowFilter[], schema: WasmSchema):
 }
 
 function rowMatchesFilter(row: RowState, filter: RowFilter, schema: WasmSchema): boolean {
-  if (filter.column === "id") {
-    return literalString(filter.value) === row.id;
+  const value =
+    filter.column === "id"
+      ? { type: "Uuid" as const, value: row.id }
+      : rowValue(row, filter.column, schema);
+  switch (filter.op) {
+    case "Eq":
+      return compareValueToLiteral(value, filter.value) === 0;
+    case "Ne":
+      return compareValueToLiteral(value, filter.value) !== 0;
+    case "Gt":
+      return compareValueToLiteral(value, filter.value) > 0;
+    case "Gte":
+      return compareValueToLiteral(value, filter.value) >= 0;
+    case "Lt":
+      return compareValueToLiteral(value, filter.value) < 0;
+    case "Lte":
+      return compareValueToLiteral(value, filter.value) <= 0;
+    case "In":
+      return filter.values.some((literal) => compareValueToLiteral(value, literal) === 0);
+    case "Contains":
+      return valueContainsLiteral(value, filter.value);
+    case "IsNull":
+      return !value || value.type === "Null";
+    case "IsNotNull":
+      return !!value && value.type !== "Null";
   }
-  const index =
-    schema[row.table]?.columns.findIndex((column) => column.name === filter.column) ?? -1;
-  if (index < 0) return false;
-  return valueMatchesLiteral(row.values[index], filter.value);
 }
 
-function valueMatchesLiteral(value: Value | undefined, literal: DirectQueryLiteral): boolean {
+function rowValue(row: RowState, column: string, schema: WasmSchema): Value | undefined {
+  const index = schema[row.table]?.columns.findIndex((entry) => entry.name === column) ?? -1;
+  return index < 0 ? undefined : row.values[index];
+}
+
+function compareValueToLiteral(value: Value | undefined, literal: DirectQueryLiteral): number {
   if (literal.type === "Nullable") {
-    if (literal.value == null) return !value || value.type === "Null";
-    return valueMatchesLiteral(value, literal.value);
+    if (literal.value == null) return !value || value.type === "Null" ? 0 : 1;
+    return compareValueToLiteral(value, literal.value);
   }
-  if (!value || value.type === "Null") return false;
-  if (literal.type === "Boolean") {
-    return value.type === "Boolean" && value.value === literal.value;
+  if (!value || value.type === "Null") return -1;
+  if (literal.type === "Boolean" && value.type === "Boolean") {
+    return value.value === literal.value ? 0 : value.value ? 1 : -1;
   }
+  if (literal.type === "Integer" && isNumericValue(value)) {
+    return value.value === literal.value ? 0 : value.value > literal.value ? 1 : -1;
+  }
+  if (literal.type === "Bytea" && value.type === "Bytea") {
+    return bytesEqual(value.value, literal.value) ? 0 : -1;
+  }
+  if (literal.type === "Array" && value.type === "Array") {
+    return value.value.length === literal.value.length &&
+      value.value.every((entry, index) => compareValueToLiteral(entry, literal.value[index]!) === 0)
+      ? 0
+      : -1;
+  }
+  const actual = value.type === "Text" || value.type === "Uuid" ? value.value : undefined;
   const expected = literalString(literal);
+  if (actual == null || expected == null) return -1;
+  return actual === expected ? 0 : actual > expected ? 1 : -1;
+}
+
+function isNumericValue(value: Value): value is Extract<Value, { value: number }> {
   return (
-    (value.type === "Text" || value.type === "Uuid") &&
-    typeof value.value === "string" &&
-    value.value === expected
+    value.type === "Integer" ||
+    value.type === "BigInt" ||
+    value.type === "Double" ||
+    value.type === "Timestamp"
   );
+}
+
+function valueContainsLiteral(value: Value | undefined, literal: DirectQueryLiteral): boolean {
+  if (!value || value.type === "Null") return false;
+  if (value.type === "Text") {
+    const expected = literalString(literal);
+    return expected != null && value.value.includes(expected);
+  }
+  if (value.type === "Array") {
+    return value.value.some((entry) => compareValueToLiteral(entry, literal) === 0);
+  }
+  return false;
 }
 
 function literalString(literal: DirectQueryLiteral): string | null {
@@ -1573,13 +1877,77 @@ function isReadableSubscriptionReader(
   return "read" in source && typeof source.read === "function";
 }
 
-function nativeDeltaFromRows(rows: RowState[]): SubscriptionWireDelta {
-  return rows.map((row, index) => ({
-    kind: 0,
-    id: row.id,
-    index,
-    row: { id: row.id, values: row.values },
-  }));
+function nativeDeltaFromRows(
+  rows: RowState[],
+  previousRows: RowState[] = [],
+): SubscriptionWireDelta {
+  const previousByKey = new Map(
+    previousRows.map((row, index) => [rowKey(row.table, row.id), { row, index }]),
+  );
+  const nextKeys = new Set<string>();
+  const delta: SubscriptionWireDelta = [];
+
+  rows.forEach((row, index) => {
+    const key = rowKey(row.table, row.id);
+    nextKeys.add(key);
+    const previous = previousByKey.get(key);
+    if (!previous) {
+      delta.push({
+        kind: 0,
+        id: row.id,
+        index,
+        row: { id: row.id, values: row.values },
+      });
+      return;
+    }
+    if (previous.index !== index || !rowValuesEqual(previous.row.values, row.values)) {
+      delta.push({
+        kind: 2,
+        id: row.id,
+        index,
+        row: { id: row.id, values: row.values },
+      });
+    }
+  });
+
+  previousRows.forEach((row, index) => {
+    if (!nextKeys.has(rowKey(row.table, row.id))) {
+      delta.push({ kind: 1, id: row.id, index });
+    }
+  });
+
+  return delta;
+}
+
+function rowValuesEqual(left: Value[], right: Value[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => valueEqual(value, right[index]));
+}
+
+function valueEqual(left: Value, right: Value | undefined): boolean {
+  if (!right || left.type !== right.type) return false;
+  switch (left.type) {
+    case "Bytea":
+      return right.type === "Bytea" && bytesEqual(left.value, right.value);
+    case "Array":
+      return right.type === "Array" && rowValuesEqual(left.value, right.value);
+    case "Null":
+      return right.type === "Null";
+    case "Boolean":
+    case "Text":
+    case "Uuid":
+    case "Integer":
+    case "BigInt":
+    case "Double":
+    case "Timestamp":
+    case "Row":
+      return "value" in right && left.value === right.value;
+  }
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((byte, index) => byte === right[index]);
 }
 
 export function parseUuid(value: string): Uint8Array {
