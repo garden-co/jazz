@@ -278,9 +278,11 @@ Until deleted, treat them as replacement targets only.
   modules may still import compatibility aliases from it until they are deleted
   or ported.
 - Rust `JazzClient` no longer has a `ClientEngine::{Legacy, DirectCore}` split:
-  server-backed direct-core memory clients are the only live construction path,
-  and offline/persistent client construction fails closed until direct-core
-  storage is wired in.
+  direct-core clients are the only live construction path. Server-backed
+  clients still connect over the direct websocket route; offline persistent
+  clients now use vendored core RocksDB storage at `jazz-core.rocksdb` and have
+  first public row rehydrate coverage. Legacy catalogue rehydrate is
+  intentionally not revived as a parallel engine.
 - Rust `JazzClient` mergeable transactions now stage writes on the direct-core
   path, expose open transaction writes through transaction-scoped reads, and
   commit to a direct mergeable transaction instead of falling back to the old
