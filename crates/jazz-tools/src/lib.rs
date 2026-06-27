@@ -14,10 +14,7 @@ pub(crate) mod query_manager;
 pub mod row_format;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod row_histories;
-#[cfg(feature = "test-utils")]
-#[allow(dead_code, unused_imports)]
-pub(crate) mod runtime_core;
-#[cfg(not(feature = "test-utils"))]
+#[cfg(feature = "legacy-alpha-engine")]
 #[allow(dead_code, unused_imports)]
 pub(crate) mod runtime_core;
 pub mod schema_manager;
@@ -38,7 +35,7 @@ pub mod test_support;
 #[allow(dead_code)]
 pub(crate) mod wire_types;
 
-#[cfg(feature = "runtime-tokio")]
+#[cfg(feature = "legacy-alpha-engine")]
 #[allow(dead_code)]
 pub(crate) mod runtime_tokio;
 

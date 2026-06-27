@@ -14,8 +14,10 @@ use crate::query_manager::parse_query_json;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::Schema;
+#[cfg(feature = "legacy-alpha-engine")]
 use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
+#[cfg(feature = "legacy-alpha-engine")]
 use crate::runtime_core::{MutationErrorEvent, ReadDurabilityOptions, SubscriptionDelta};
 use crate::sync_manager::{DurabilityTier, QueryPropagation};
 
@@ -261,6 +263,7 @@ pub fn serialize_local_batch_records(records: &[LocalBatchRecord]) -> JsonValue 
     JsonValue::Array(records.iter().map(serialize_local_batch_record).collect())
 }
 
+#[cfg(feature = "legacy-alpha-engine")]
 pub fn serialize_mutation_error_event(event: &MutationErrorEvent) -> JsonValue {
     json!({
         "code": event.code.as_str(),
@@ -269,6 +272,7 @@ pub fn serialize_mutation_error_event(event: &MutationErrorEvent) -> JsonValue {
     })
 }
 
+#[cfg(feature = "legacy-alpha-engine")]
 pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
     ReadDurabilityOptions {
         tier,
@@ -276,6 +280,7 @@ pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDura
     }
 }
 
+#[cfg(feature = "legacy-alpha-engine")]
 pub fn parse_read_durability_options(
     tier: Option<&str>,
     options_json: Option<&str>,
@@ -326,6 +331,7 @@ pub fn parse_read_durability_options(
     ))
 }
 
+#[cfg(feature = "legacy-alpha-engine")]
 pub fn subscription_delta_to_json(delta: &SubscriptionDelta) -> serde_json::Value {
     let row_to_json = |row: &crate::query_manager::types::Row,
                        descriptor: &crate::query_manager::types::RowDescriptor|
