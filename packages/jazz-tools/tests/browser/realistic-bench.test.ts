@@ -2240,13 +2240,13 @@ describe("realistic browser benchmark harness", () => {
       const client = anyDb.getClient(schema);
       const phases: Array<{ phase: string; ms: number }> = [];
 
-      const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
-      anyDb.ensureQueryReady = async (...args: unknown[]) => {
+      const originalQuery = client.query.bind(client);
+      client.query = async (...args: unknown[]) => {
         const startedAt = performance.now();
         try {
-          return await originalEnsureQueryReady(...args);
+          return await originalQuery(...args);
         } finally {
-          phases.push({ phase: "db.ensureQueryReady", ms: performance.now() - startedAt });
+          phases.push({ phase: "client.query", ms: performance.now() - startedAt });
         }
       };
 
@@ -2411,13 +2411,13 @@ describe("realistic browser benchmark harness", () => {
       const client = anyDb.getClient(permissionSchema);
       const phases: Array<{ phase: string; ms: number }> = [];
 
-      const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
-      anyDb.ensureQueryReady = async (...args: unknown[]) => {
+      const originalQuery = client.query.bind(client);
+      client.query = async (...args: unknown[]) => {
         const startedAt = performance.now();
         try {
-          return await originalEnsureQueryReady(...args);
+          return await originalQuery(...args);
         } finally {
-          phases.push({ phase: "db.ensureQueryReady", ms: performance.now() - startedAt });
+          phases.push({ phase: "client.query", ms: performance.now() - startedAt });
         }
       };
 

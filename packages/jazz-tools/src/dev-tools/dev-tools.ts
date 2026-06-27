@@ -325,12 +325,6 @@ function hookRegistration(
             throw new Error("No Jazz runtime client is initialized yet.");
           }
 
-          const ensureBridgeReady = (db as unknown as { ensureBridgeReady?: () => Promise<void> })
-            .ensureBridgeReady;
-          if (typeof ensureBridgeReady === "function") {
-            await ensureBridgeReady.call(db);
-          }
-
           return client;
         };
 
