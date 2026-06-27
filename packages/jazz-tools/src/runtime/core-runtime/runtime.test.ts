@@ -1396,7 +1396,209 @@ describe("CoreRuntime server transport", () => {
     ]);
   });
 
-  it("applies range id comparisons as post-filters", async () => {
+  it("encodes public id equality relation filters into prepared direct queries", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () =>
+              encodeRows([
+                {
+                  table: "todos",
+                  rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                  title: "native returned requested",
+                },
+                {
+                  table: "todos",
+                  rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+                  title: "native returned extra",
+                },
+              ]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          relation_ir: {
+            Filter: {
+              input: { TableScan: { table: "todos" } },
+              predicate: {
+                Cmp: {
+                  left: { column: "id" },
+                  op: "Eq",
+                  right: {
+                    Literal: { type: "Uuid", value: "00000000-0000-0000-0000-000000000001" },
+                  },
+                },
+              },
+            },
+          },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Text", value: "native returned requested" }],
+      },
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000002",
+        values: [{ type: "Text", value: "native returned extra" }],
+      },
+    ]);
+    expect(readPreparedUuidComparison(preparedBytes!)).toEqual({
+      table: "todos",
+      predicateTag: 3,
+      column: "id",
+      literalTag: 8,
+      value: "00000000-0000-0000-0000-000000000001",
+      limit: undefined,
+    });
+  });
+
+  it("encodes public id in conditions into prepared direct queries", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        conditions: [
+          {
+            column: "id",
+            op: "in",
+            value: ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"],
+          },
+        ],
+      }),
+    );
+
+    expect(readPreparedUuidIn(preparedBytes!)).toEqual({
+      table: "todos",
+      column: "id",
+      values: ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"],
+    });
+  });
+
+  it("does not filter native subscription snapshots by public id in JS", async () => {
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            subscribe: () =>
+              new ReadableStream({
+                start(streamController) {
+                  controller = streamController;
+                },
+              }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const deltas: unknown[] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({
+        table: "todos",
+        relation_ir: {
+          Filter: {
+            input: { TableScan: { table: "todos" } },
+            predicate: {
+              Cmp: {
+                left: { column: "id" },
+                op: "Eq",
+                right: {
+                  Literal: { type: "Uuid", value: "00000000-0000-0000-0000-000000000001" },
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      deltas.push(delta);
+    });
+
+    controller!.enqueue({
+      type: "snapshot",
+      rows: encodeRows([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "requested",
+        },
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          title: "extra from native",
+        },
+      ]),
+    });
+    await Promise.resolve();
+
+    expect(deltas[0]).toHaveLength(2);
+    expect(readPreparedUuidComparison(preparedBytes!)).toMatchObject({
+      table: "todos",
+      predicateTag: 3,
+      column: "id",
+      literalTag: 8,
+      value: "00000000-0000-0000-0000-000000000001",
+    });
+  });
+
+  it("encodes range id comparisons into prepared direct queries", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
@@ -1455,14 +1657,25 @@ describe("CoreRuntime server transport", () => {
     ).resolves.toEqual([
       {
         table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Text", value: "drop" }],
+      },
+      {
+        table: "todos",
         id: "00000000-0000-0000-0000-000000000002",
         values: [{ type: "Text", value: "keep" }],
       },
     ]);
-    expect(readPreparedPredicateCount(preparedBytes!)).toBe(0);
+    expect(readPreparedUuidComparison(preparedBytes!)).toMatchObject({
+      table: "todos",
+      predicateTag: 6,
+      column: "id",
+      literalTag: 8,
+      value: "00000000-0000-0000-0000-000000000001",
+    });
   });
 
-  it("does not push limits below post-filtered id predicates", async () => {
+  it("pushes limits with native id predicates", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
@@ -1511,7 +1724,7 @@ describe("CoreRuntime server transport", () => {
       }),
     );
 
-    expect(readPreparedLimit(preparedBytes!)).toBeUndefined();
+    expect(readPreparedLimit(preparedBytes!)).toBe(1);
   });
 
   it("lowers root order and pagination into the prepared core query", async () => {
@@ -1654,16 +1867,61 @@ function readPreparedComparison(query: Uint8Array): {
   return { table, predicateTag, column, literalTag, value, limit };
 }
 
+function readPreparedUuidComparison(query: Uint8Array): {
+  table: string;
+  predicateTag: number;
+  column: string;
+  literalTag: number;
+  value: string;
+  limit: number | undefined;
+} {
+  const reader = new PostcardReader(query);
+  const table = reader.string();
+  const predicateCount = reader.u64();
+  expect(predicateCount).toBe(1);
+  const predicateTag = reader.u64();
+  const leftOperandTag = reader.u64();
+  expect(leftOperandTag).toBe(0);
+  const column = reader.string();
+  const rightOperandTag = reader.u64();
+  expect(rightOperandTag).toBe(3);
+  const literalTag = reader.u64();
+  const value = formatUuidForTest(reader.bytes());
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  const limit = reader.option((optionReader) => optionReader.u64());
+  return { table, predicateTag, column, literalTag, value, limit };
+}
+
+function readPreparedUuidIn(query: Uint8Array): {
+  table: string;
+  column: string;
+  values: string[];
+} {
+  const reader = new PostcardReader(query);
+  const table = reader.string();
+  const predicateCount = reader.u64();
+  expect(predicateCount).toBe(1);
+  expect(reader.u64()).toBe(5);
+  expect(reader.u64()).toBe(0);
+  const column = reader.string();
+  const values = reader.readVec((valueReader) => {
+    expect(valueReader.u64()).toBe(3);
+    expect(valueReader.u64()).toBe(8);
+    return formatUuidForTest(valueReader.bytes());
+  });
+  return { table, column, values };
+}
+
 function readPreparedLimit(query: Uint8Array): number | undefined {
   const reader = new PostcardReader(query);
   reader.string();
   reader.readVec(() => {
-    reader.u64();
-    reader.u64();
-    reader.string();
-    reader.u64();
-    reader.u64();
-    reader.string();
+    skipPreparedPredicate(reader);
   });
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
@@ -1674,10 +1932,58 @@ function readPreparedLimit(query: Uint8Array): number | undefined {
   return reader.option((optionReader) => optionReader.u64());
 }
 
-function readPreparedPredicateCount(query: Uint8Array): number {
-  const reader = new PostcardReader(query);
-  reader.string();
-  return reader.u64();
+function skipPreparedPredicate(reader: PostcardReader): void {
+  const predicateTag = reader.u64();
+  if (predicateTag === 5) {
+    skipPreparedOperand(reader);
+    reader.readVec(() => {
+      skipPreparedOperand(reader);
+    });
+    return;
+  }
+  skipPreparedOperand(reader);
+  skipPreparedOperand(reader);
+}
+
+function skipPreparedOperand(reader: PostcardReader): void {
+  const operandTag = reader.u64();
+  if (operandTag === 0) {
+    reader.string();
+    return;
+  }
+  expect(operandTag).toBe(3);
+  skipPreparedLiteral(reader);
+}
+
+function skipPreparedLiteral(reader: PostcardReader): void {
+  const literalTag = reader.u64();
+  switch (literalTag) {
+    case 2:
+      reader.u64();
+      return;
+    case 5:
+      reader.bool();
+      return;
+    case 6:
+      reader.string();
+      return;
+    case 7:
+    case 8:
+      reader.bytes();
+      return;
+    case 11:
+      reader.readVec(() => {
+        skipPreparedLiteral(reader);
+      });
+      return;
+    case 12:
+      reader.option(() => {
+        skipPreparedLiteral(reader);
+      });
+      return;
+    default:
+      throw new Error(`unsupported prepared literal tag ${literalTag}`);
+  }
 }
 
 function readPreparedSelect(query: Uint8Array): string[] | undefined {

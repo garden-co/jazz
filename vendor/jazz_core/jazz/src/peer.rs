@@ -2752,8 +2752,7 @@ mod tests {
         let restore_tx = core
             .commit_mergeable_many(vec![
                 MergeableCommit::new("todos", row_uuid, 1_002).cells(title_cells("restored")),
-                MergeableCommit::new("todos", row_uuid, 1_003)
-                    .deletion(DeletionEvent::Restored),
+                MergeableCommit::new("todos", row_uuid, 1_003).deletion(DeletionEvent::Restored),
             ])
             .unwrap();
         accept_edge(&mut core, restore_tx);
