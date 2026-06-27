@@ -14,9 +14,9 @@ use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
 use crate::query_manager::types::Schema;
-use crate::schema_manager::AppId;
 #[cfg(test)]
-use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
+use crate::query_manager::types::{ComposedBranchName, SchemaHash};
+use crate::schema_manager::AppId;
 use crate::server::routes;
 use crate::server::{
     ConnectionEventHub, DirectCatalogueStore, DynStorage, ServerState, ServerTopology,
@@ -27,9 +27,7 @@ use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
 use crate::storage::SqliteStorage;
 #[cfg(test)]
-use crate::storage::Storage;
-#[cfg(test)]
-use crate::sync_manager::{DurabilityTier, SyncManager};
+use crate::sync::DurabilityTier;
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
@@ -238,14 +236,15 @@ impl ServerBuilder {
 
         #[cfg(test)]
         let store = {
-            let schema_manager = self.build_schema_manager(storage.as_ref())?;
-            let test_sync_manager = server_sync_manager(self.local_durability_tier());
-            DirectCatalogueStore::with_test_schema_manager(
+            let schema_branches = test_schema_branches(initial_schema.as_ref());
+            let local_durability_tiers =
+                std::collections::HashSet::from([self.local_durability_tier()]);
+            DirectCatalogueStore::with_test_observability(
                 self.app_id,
                 initial_schema,
                 storage,
-                schema_manager,
-                test_sync_manager,
+                schema_branches,
+                local_durability_tiers,
             )
         };
         #[cfg(not(test))]
@@ -255,30 +254,6 @@ impl ServerBuilder {
             .latest_published_schema()
             .map_err(|error| format!("failed to read latest catalogue schema: {error:?}"))?;
         Ok((store, latest_catalogue_schema))
-    }
-
-    #[cfg(test)]
-    fn build_schema_manager(&self, storage: &dyn Storage) -> Result<SchemaManager, String> {
-        let sync_manager = server_sync_manager(self.local_durability_tier());
-
-        match &self.schema_mode {
-            ServerSchemaMode::Dynamic => {
-                let mut schema_manager =
-                    SchemaManager::new_server(sync_manager, self.app_id, "prod");
-                rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, self.app_id)
-                    .map_err(|e| format!("failed to rehydrate schema manager: {e}"))?;
-                // Dynamic servers fail closed until an explicit permissions head
-                // is available for the active app.
-                schema_manager
-                    .query_manager_mut()
-                    .require_authorization_schema();
-                Ok(schema_manager)
-            }
-            ServerSchemaMode::Fixed(schema) => {
-                SchemaManager::new(sync_manager, schema.clone(), self.app_id, "prod", "main")
-                    .map_err(|e| format!("failed to initialize schema manager: {e:?}"))
-            }
-        }
     }
 
     fn build_core_server(
@@ -408,22 +383,16 @@ impl ServerBuilder {
 }
 
 #[cfg(test)]
-fn server_sync_manager(local_tier: DurabilityTier) -> SyncManager {
-    let sync_manager = SyncManager::new().with_durability_tier(local_tier);
-
-    if should_allow_unprivileged_schema_catalogue_writes() {
-        sync_manager.with_unprivileged_schema_catalogue_writes()
-    } else {
-        sync_manager
-    }
-}
-
-#[cfg(test)]
-fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
-    !matches!(
-        std::env::var("NODE_ENV"),
-        Ok(value) if value.eq_ignore_ascii_case("production")
-    )
+fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
+    schema
+        .map(|schema| {
+            ComposedBranchName::new("prod", SchemaHash::compute(schema), "main")
+                .to_branch_name()
+                .as_str()
+                .to_string()
+        })
+        .into_iter()
+        .collect()
 }
 
 async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
@@ -683,8 +652,8 @@ mod tests {
         let tiers = built
             .state
             .catalogue_store
-            .with_sync_manager(|sync| sync.local_durability_tiers())
-            .expect("read sync manager");
+            .local_durability_tiers_for_test()
+            .expect("read catalogue durability tiers");
 
         assert_eq!(
             tiers,
