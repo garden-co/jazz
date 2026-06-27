@@ -9,7 +9,7 @@ use crate::query_manager::types::SchemaHash;
 use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 use crate::row_format::{decode_row, encode_row};
 use crate::row_histories::BatchId;
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 
 pub const BATCH_FATE_STORAGE_FORMAT_V2: i32 = 2;
 

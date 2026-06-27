@@ -21,7 +21,8 @@ use crate::query_manager::types::{
 };
 use crate::schema_manager::rehydrate::latest_catalogue_content;
 use crate::storage::Storage;
-use crate::sync_manager::{ConnectionSchemaDiagnostics, SyncManager};
+use crate::sync::vocabulary::ConnectionSchemaDiagnostics;
+use crate::sync_manager::SyncManager;
 use uuid::Uuid;
 
 use super::auto_lens::generate_lens;

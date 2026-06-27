@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::schema_manager::{AppId, Lens};
 use jazz_tools::server::{JazzServer, ServerState};
-use jazz_tools::sync_manager::ClientId;
+use jazz_tools::sync::ClientId;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, Value,
@@ -82,7 +82,7 @@ pub struct TestingClient<'a> {
     storage: TestingClientStorage,
     ready_table: Option<String>,
     ready_timeout: Option<Duration>,
-    sync_tracer: Option<(jazz_tools::sync_manager::sync_tracer::SyncTracer, String)>,
+    sync_tracer: Option<(jazz_tools::sync::sync_tracer::SyncTracer, String)>,
 }
 
 #[allow(dead_code)]
@@ -151,7 +151,7 @@ impl<'a> TestingClient<'a> {
 
     pub fn with_tracer(
         mut self,
-        tracer: &jazz_tools::sync_manager::sync_tracer::SyncTracer,
+        tracer: &jazz_tools::sync::sync_tracer::SyncTracer,
         name: impl Into<String>,
     ) -> Self {
         self.sync_tracer = Some((tracer.clone(), name.into()));

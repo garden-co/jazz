@@ -22,7 +22,7 @@ async fn wait_for_protected_rows(
     wait_for_query(
         client,
         query,
-        Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        Some(crate::sync::DurabilityTier::EdgeServer),
         Duration::from_secs(5),
         description,
         |rows| predicate(&rows).then_some(rows),
@@ -147,7 +147,7 @@ async fn synced_soft_delete_should_use_delete_policy() {
             .filter_eq("id", Value::Uuid(admin_id))
             .select(&["user_id"])
             .build(),
-        Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        Some(crate::sync::DurabilityTier::EdgeServer),
         Duration::from_secs(5),
         "bob sees alice's admin row",
         |rows| (rows == [(admin_id, vec![Value::Text("alice".into())])]).then_some(rows),
@@ -167,7 +167,7 @@ async fn synced_soft_delete_should_use_delete_policy() {
     let bob_delete = bob
         .wait_for_batch(
             bob_delete_batch,
-            crate::sync_manager::DurabilityTier::EdgeServer,
+            crate::sync::DurabilityTier::EdgeServer,
         )
         .await;
     assert!(

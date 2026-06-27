@@ -14,7 +14,7 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::Schema;
 use crate::row_histories::BatchId;
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeSchemaInput {
