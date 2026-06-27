@@ -63,7 +63,7 @@ pub(super) struct SchemaConnectivityParams {
 pub(super) struct AdminSubscriptionIntrospectionResponse {
     app_id: String,
     generated_at: u64,
-    queries: Vec<crate::server::catalogue::ServerSubscriptionTelemetryGroup>,
+    queries: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1282,11 +1282,10 @@ pub(super) async fn admin_subscription_introspection_handler(
             .into_response();
     }
 
-    let queries = state.catalogue_store.server_subscription_telemetry();
     Json(AdminSubscriptionIntrospectionResponse {
         app_id: state.app_id.to_string(),
         generated_at: unix_timestamp_millis(),
-        queries,
+        queries: Vec::new(),
     })
     .into_response()
 }
