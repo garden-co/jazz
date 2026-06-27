@@ -95,6 +95,17 @@ export class SubscriptionManager<T extends { id: string }> {
     return this.handleWireDelta(delta, transform);
   }
 
+  seed(rows: T[]): SubscriptionDelta<T> {
+    return this.handleTypedDelta(
+      rows.map((item, index) => ({
+        kind: RowChangeKind.Added,
+        id: item.id,
+        index,
+        item,
+      })),
+    );
+  }
+
   private handleWireDelta(
     delta: WireRowDelta,
     transform: (row: WasmRow) => T,
