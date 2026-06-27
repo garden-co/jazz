@@ -120,7 +120,8 @@ function normalizeFrames(frames: unknown): Uint8Array[] {
 export class WorkerBridge {
   private readonly worker: Worker;
   private readonly runtime: RuntimeWithDirectTransport;
-  private transport: DirectTransport | null = null;
+  // Local peer between the page's in-memory runtime and the worker's durable runtime.
+  private localSyncTransport: DirectTransport | null = null;
   private readonly listeners: ListenerSlots = {};
   private pendingForwarder: ServerPayloadForwarder | null = null;
   private serverCarrier: DirectWebSocketCarrier | null = null;
@@ -133,10 +134,10 @@ export class WorkerBridge {
   private clearPendingInit: (() => void) | null = null;
   private rejectPendingInit: ((error: Error) => void) | null = null;
   private disposed = false;
-  private unsubscribeSyncNeeded: (() => void) | null = null;
+  private unsubscribeLocalSyncNeeded: (() => void) | null = null;
 
-  private pumpScheduled = false;
-  private pumpAgain = false;
+  private localSyncPumpScheduled = false;
+  private localSyncPumpAgain = false;
   private shutdownResolve: (() => void) | null = null;
   private nextSettleId = 1;
   private nextQueryId = 1;
@@ -178,9 +179,9 @@ export class WorkerBridge {
       return this.clientIdPromise;
     }
 
-    this.transport = connectUpstreamPeer.call(this.runtime);
-    this.unsubscribeSyncNeeded =
-      this.runtime.onDirectSyncNeeded?.(() => this.schedulePump()) ?? null;
+    this.localSyncTransport = connectUpstreamPeer.call(this.runtime);
+    this.unsubscribeLocalSyncNeeded =
+      this.runtime.onDirectSyncNeeded?.(() => this.scheduleLocalSyncPump()) ?? null;
     const directOpen = getDirectOpenPayload.call(this.runtime);
     const initOptions: WorkerBridgeOptions = {
       ...options,
@@ -204,7 +205,7 @@ export class WorkerBridge {
         if (msg.type === "init-ok") {
           clearPendingInit();
           this.workerClientId = msg.clientId;
-          this.schedulePump();
+          this.scheduleLocalSyncPump();
           resolve(msg.clientId);
         } else if (msg.type === "error") {
           clearPendingInit();
@@ -215,7 +216,7 @@ export class WorkerBridge {
       this.worker.addEventListener("message", onMessage);
       this.postToWorker({ type: "init", options: initOptions });
       this.openServerCarrier(initOptions);
-      this.schedulePump();
+      this.scheduleLocalSyncPump();
     });
     return this.clientIdPromise;
   }
@@ -243,15 +244,15 @@ export class WorkerBridge {
 
   async shutdown(): Promise<void> {
     if (this.disposed) return;
-    this.pumpTransport();
+    this.pumpLocalSyncTransport();
     this.disposed = true;
     const rejectPendingInit = this.rejectPendingInit;
     this.clearPendingInit?.();
     this.clearPendingInit = null;
     rejectPendingInit?.(new Error("WorkerBridge init was shut down"));
     this.rejectPendingInit = null;
-    this.unsubscribeSyncNeeded?.();
-    this.unsubscribeSyncNeeded = null;
+    this.unsubscribeLocalSyncNeeded?.();
+    this.unsubscribeLocalSyncNeeded = null;
     this.closeServerCarrier();
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(resolve, 1_000);
@@ -261,8 +262,8 @@ export class WorkerBridge {
       };
       this.postToWorker({ type: "shutdown" });
     });
-    this.transport?.close();
-    this.transport = null;
+    this.localSyncTransport?.close();
+    this.localSyncTransport = null;
   }
 
   getWorkerClientId(): string | null {
@@ -280,12 +281,12 @@ export class WorkerBridge {
 
   async waitForDurableSettle(): Promise<void> {
     if (this.disposed) return;
-    if (!this.transport) {
+    if (!this.localSyncTransport) {
       await this.clientIdPromise;
     }
-    if (!this.transport || this.disposed) return;
+    if (!this.localSyncTransport || this.disposed) return;
 
-    this.pumpTransport();
+    this.pumpLocalSyncTransport();
     const id = this.nextSettleId++;
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -294,7 +295,7 @@ export class WorkerBridge {
       }, 30_000);
       this.pendingSettles.set(id, { resolve, reject, timeout });
       this.postToWorker({ type: "settle", id });
-      this.schedulePump();
+      this.scheduleLocalSyncPump();
     });
   }
 
@@ -311,7 +312,7 @@ export class WorkerBridge {
     await this.waitForDurableSettle();
     if (this.disposed) return [];
 
-    this.pumpTransport();
+    this.pumpLocalSyncTransport();
     const id = this.nextQueryId++;
     const query = encodeDirectQuery.call(this.runtime, queryJson);
     const identity = session ? parseUuid(session.user_id) : undefined;
@@ -325,7 +326,7 @@ export class WorkerBridge {
         { type: "query", id, query, identity },
         identity ? [query.buffer, identity.buffer] : [query.buffer],
       );
-      this.schedulePump();
+      this.scheduleLocalSyncPump();
     });
   }
 
@@ -335,7 +336,7 @@ export class WorkerBridge {
 
   replayServerConnection(): void {
     void this.reopenServerCarrier();
-    this.schedulePump();
+    this.scheduleLocalSyncPump();
   }
 
   disconnectUpstream(): void {
@@ -344,7 +345,7 @@ export class WorkerBridge {
 
   reconnectUpstream(): void {
     void this.reopenServerCarrier();
-    this.schedulePump();
+    this.scheduleLocalSyncPump();
   }
 
   replayWorkerUpstreamConnection(): void {
@@ -399,9 +400,9 @@ export class WorkerBridge {
     switch (message.type) {
       case "sync":
         for (const frame of normalizeFrames(message.frames)) {
-          this.transport?.sendWireFrame(frame);
+          this.localSyncTransport?.sendWireFrame(frame);
         }
-        this.schedulePump();
+        this.scheduleLocalSyncPump();
         return;
       case "server-out":
         this.forwardServerFrames(normalizeFrames(message.frames));
@@ -461,21 +462,21 @@ export class WorkerBridge {
     }
   }
 
-  private schedulePump(): void {
-    if (!this.transport || this.pumpScheduled || this.disposed) return;
-    this.pumpScheduled = true;
+  private scheduleLocalSyncPump(): void {
+    if (!this.localSyncTransport || this.localSyncPumpScheduled || this.disposed) return;
+    this.localSyncPumpScheduled = true;
     queueMicrotask(() => {
-      this.pumpScheduled = false;
-      this.pumpTransport();
-      if (this.pumpAgain) {
-        this.pumpAgain = false;
-        this.schedulePump();
+      this.localSyncPumpScheduled = false;
+      this.pumpLocalSyncTransport();
+      if (this.localSyncPumpAgain) {
+        this.localSyncPumpAgain = false;
+        this.scheduleLocalSyncPump();
       }
     });
   }
 
-  private pumpTransport(): void {
-    const transport = this.transport;
+  private pumpLocalSyncTransport(): void {
+    const transport = this.localSyncTransport;
     if (!transport || this.disposed) return;
     for (let round = 0; round < 32; round += 1) {
       transport.tick();
@@ -490,7 +491,7 @@ export class WorkerBridge {
         return;
       }
     }
-    this.pumpAgain = true;
+    this.localSyncPumpAgain = true;
   }
 
   private postToWorker(message: WorkerInbound, transfer: Transferable[] = []): void {
@@ -508,7 +509,7 @@ export class WorkerBridge {
       authJson: buildWorkerBridgeAuthJson(options),
       onFrame: (frame) => {
         this.applyIncomingServerPayload(frame);
-        this.schedulePump();
+        this.scheduleLocalSyncPump();
       },
       onError: (error) => {
         const reason = directWireAuthFailureReason(error);
@@ -534,7 +535,7 @@ export class WorkerBridge {
     if (!options) return;
     this.closeServerCarrier();
     this.openServerCarrier(options);
-    this.schedulePump();
+    this.scheduleLocalSyncPump();
   }
 
   private closeServerCarrier(): void {
