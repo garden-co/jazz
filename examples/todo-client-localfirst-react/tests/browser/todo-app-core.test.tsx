@@ -223,4 +223,63 @@ describe("React Todo App core browser canary", () => {
 
     expect(todoTitles(secondSession)).toContain(title);
   });
+
+  it("reopened persistent OPFS client catches up a locally durable write after websocket reconnect", async () => {
+    const writerDbName = uniqueDbName("core-reconnect-writer");
+    const readerDbName = uniqueDbName("core-reconnect-reader");
+    const writerSecret = "71E6G0xpMXIiQ_dFv6tCLVCEt33kivVHtQ7FD-fkYlc";
+    const readerSecret = "Hw5MHsjqxaP82KsnDXOB9V_7bRWGip1wDRY70fVr8Z8";
+    const onlineTitle = "Core reconnect online todo";
+    const offlineTitle = "Core reconnect offline todo";
+
+    const writer = await mountApp({
+      appId: APP_ID,
+      driver: { type: "persistent", dbName: writerDbName },
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      secret: writerSecret,
+    });
+    const reader = await mountApp({
+      appId: APP_ID,
+      driver: { type: "persistent", dbName: readerDbName },
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      secret: readerSecret,
+    });
+
+    await new Promise((r) => setTimeout(r, 750));
+
+    await addTodo(writer, onlineTitle);
+    await waitFor(
+      () => hasTodoTitle(reader, onlineTitle),
+      20000,
+      "reader should observe the writer before the offline window",
+    );
+
+    await unmountApp(reader, readerDbName);
+
+    await addTodoAndWaitForLocalDurability(writer, offlineTitle);
+    await waitFor(
+      () => hasTodoTitle(writer, offlineTitle),
+      3000,
+      "writer should render the locally durable todo while reader is offline",
+    );
+
+    const reconnectedReader = await mountApp({
+      appId: APP_ID,
+      driver: { type: "persistent", dbName: readerDbName },
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      secret: readerSecret,
+    });
+    await waitFor(
+      () => hasTodoTitle(reconnectedReader, offlineTitle),
+      20000,
+      "reopened reader should catch up the offline-window write after websocket reconnect",
+    );
+
+    expect(todoTitles(reconnectedReader)).toEqual(
+      expect.arrayContaining([onlineTitle, offlineTitle]),
+    );
+  });
 });
