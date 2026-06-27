@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { Db, createDbFromClient, type TableProxy } from "./db.js";
+import { Db, type DbConfig, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import {
   WriteResult,
@@ -9,14 +9,35 @@ import {
   type Row,
 } from "./client.js";
 import type { Session } from "./context.js";
+import { CoreSource, type CoreClientContext } from "./core-source.js";
+
+class TestCoreSource extends CoreSource<DbConfig> {
+  constructor(private readonly client: JazzClient) {
+    super();
+  }
+
+  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
+    return this.client;
+  }
+}
 
 class TestDb extends Db {
-  constructor(private readonly testClient: JazzClient) {
-    super({ appId: "persisted-db-test" }, null);
+  constructor(
+    private readonly testClient: JazzClient,
+    private readonly context: { session?: Session; attribution?: string } | null = null,
+  ) {
+    super({ appId: "persisted-db-test" }, new TestCoreSource(testClient));
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
     return this.testClient;
+  }
+
+  protected override getRuntimeOperationContext(): {
+    session?: Session;
+    attribution?: string;
+  } | null {
+    return this.context;
   }
 }
 
@@ -196,12 +217,10 @@ describe("Db write handles", () => {
       delete: deleteRow,
     };
 
-    const db = createDbFromClient(
-      { appId: "client-backed-persisted" },
-      runtimeClient as unknown as JazzClient,
+    const db = new TestDb(runtimeClient as unknown as JazzClient, {
       session,
-      "alice@writer",
-    );
+      attribution: "alice@writer",
+    });
 
     const inserted = db.insert(table, { title: "With session", done: true });
     const updated = db.update(table, "todo-2", { done: false });

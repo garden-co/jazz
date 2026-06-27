@@ -591,8 +591,7 @@ export class JazzClient {
   /**
    * Create client from a pre-constructed runtime.
    *
-   * This allows server-side apps to use the native NAPI backend directly
-   * without WASM loading.
+   * CoreSource implementations use this after selecting the platform runtime.
    *
    * @param runtime A runtime implementing the Runtime interface
    * @param context Application context

@@ -23,8 +23,7 @@ test = false
 default = []
 rocksdb = ["dep:rocksdb", "jazz-server/rocksdb"]
 sqlite = ["dep:rusqlite"]
-client = ["client-engine"]
-client-engine = ["dep:thiserror", "server"]
+client = ["dep:thiserror", "server"]
 server = [
   "dep:tokio",
   "dep:tokio-tungstenite",

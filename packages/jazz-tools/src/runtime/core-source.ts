@@ -26,31 +26,20 @@ export interface CoreTelemetryContext<RuntimeConfig extends DbConfig = DbConfig>
  * Internal source for loading and wiring the core runtime.
  *
  * This keeps platform/source differences (WASM, NAPI, browser storage, React
- * Native support status) out of Db without presenting alternate database
- * engines as a public extension point.
+ * Native support status) out of Db. The active database path is core-only:
+ * implementations preload the runtime, then create JazzClient instances for
+ * concrete schemas.
  */
 export abstract class CoreSource<RuntimeConfig extends DbConfig = DbConfig> {
   /** Set to false when the core must receive schemas exactly as declared. */
   readonly supportsPolicyBypass: boolean = true;
-  private hasLoadedCore = false;
-  private loadedCoreValue: unknown;
 
   async load(config: RuntimeConfig): Promise<void> {
-    if (this.hasLoadedCore) {
-      return;
-    }
-
-    this.loadedCoreValue = await this.loadCore(config);
-    this.hasLoadedCore = true;
+    await this.loadCore(config);
   }
 
-  protected abstract loadCore(config: RuntimeConfig): Promise<unknown>;
-
-  protected get loadedCore(): unknown {
-    if (!this.hasLoadedCore) {
-      throw new Error("Db core source is not loaded");
-    }
-    return this.loadedCoreValue;
+  protected async loadCore(_config: RuntimeConfig): Promise<unknown> {
+    return undefined;
   }
 
   abstract createClient(context: CoreClientContext<RuntimeConfig>): JazzClient;
