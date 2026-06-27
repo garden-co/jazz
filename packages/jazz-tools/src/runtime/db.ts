@@ -1579,34 +1579,22 @@ export class Db {
 
     const queryOptions = ordinaryDbQueryOptions(options);
     const context = this.getRuntimeOperationContext();
-    let unsubscribed = false;
-    let subId: number | null = null;
-    let traceId: string | null = null;
-
-    const startSubscription = () => {
-      if (unsubscribed) return;
-      subId = client.subscribe(
-        wasmQuery,
-        handleDelta,
-        queryOptions,
-        context?.readSession ?? context?.session ?? session,
-      );
-      traceId = this.registerActiveQuerySubscriptionTrace(
-        wasmQuery,
-        builtQuery.table,
-        queryOptions,
-      );
-    };
-
-    startSubscription();
+    const subId = client.subscribe(
+      wasmQuery,
+      handleDelta,
+      queryOptions,
+      context?.readSession ?? context?.session ?? session,
+    );
+    const traceId = this.registerActiveQuerySubscriptionTrace(
+      wasmQuery,
+      builtQuery.table,
+      queryOptions,
+    );
 
     // Return unsubscribe function
     return () => {
-      unsubscribed = true;
       this.unregisterActiveQuerySubscriptionTrace(traceId);
-      if (subId !== null) {
-        client.unsubscribe(subId);
-      }
+      client.unsubscribe(subId);
       manager.clear();
     };
   }
