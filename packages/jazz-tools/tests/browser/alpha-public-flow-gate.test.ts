@@ -188,7 +188,7 @@ describe("alpha public package flow", () => {
     ).toBe(true);
   });
 
-  it.skip("TODO(alpha direct core): opens public createDb with persistent OPFS and direct websocket server config, then converges todo CRUD; blocked on direct browser persistence/reopen and cross-client subscription convergence", async () => {
+  it("opens public createDb with persistent OPFS and direct websocket server config, then converges todo CRUD", async () => {
     const requestedAppId = uniqueDbName("alpha-public-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);

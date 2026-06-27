@@ -22,8 +22,8 @@ const schema = {
   },
 } satisfies WasmSchema;
 
-const fileSchema = {
-  file_parts: {
+const binaryLargeValueSchema = {
+  binary_large_values: {
     columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
   },
 } satisfies WasmSchema;
@@ -253,19 +253,19 @@ describe("CoreRuntime server convergence", () => {
       appId,
       inMemory: true,
       adminSecret: "core-runtime-bytea-convergence-admin",
-      schema: encodeDirectSchema(fileSchema),
+      schema: encodeDirectSchema(binaryLargeValueSchema),
     });
 
     const writer = await createClient({
       appId,
       serverUrl: server.url,
       peer: "bytea-writer",
-      schema: fileSchema,
+      schema: binaryLargeValueSchema,
     });
     clients.push(writer);
     writer.connectTransport(server.url, { admin_secret: server.adminSecret });
 
-    const inserted = writer.insert("file_parts", {
+    const inserted = writer.insert("binary_large_values", {
       data: { type: "Bytea", value: Uint8Array.from([1, 2, 3, 4]) },
     });
     await waitForPromise(inserted.wait({ tier: "edge" }), "BYTEA insert did not settle at edge");
@@ -276,14 +276,14 @@ describe("CoreRuntime server convergence", () => {
       appId,
       serverUrl: server.url,
       peer: "bytea-reader",
-      schema: fileSchema,
+      schema: binaryLargeValueSchema,
     });
     clients.push(reader);
     reader.connectTransport(server.url, { admin_secret: server.adminSecret });
 
     const replayedToSubscription = new Promise<Uint8Array>((resolve) => {
       reader.subscribe(
-        JSON.stringify({ table: "file_parts" }),
+        JSON.stringify({ table: "binary_large_values" }),
         (delta) => {
           if (!Array.isArray(delta)) return;
           for (const change of delta) {

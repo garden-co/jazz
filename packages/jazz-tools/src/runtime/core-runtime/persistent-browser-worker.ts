@@ -1,5 +1,10 @@
 import type { RuntimeSourcesConfig } from "../context.js";
-import { loadWasmModule, type Runtime, type WasmModule } from "../client.js";
+import {
+  loadWasmModule,
+  type MutationErrorEvent,
+  type Runtime,
+  type WasmModule,
+} from "../client.js";
 import { openConfig } from "./direct-codec.js";
 import { encodeDirectSchema } from "./direct-schema-codec.js";
 import { CoreRuntime } from "./runtime.js";
@@ -22,7 +27,6 @@ type OpenMessage = RequestMessage & {
 };
 
 let runtime: Runtime | null = null;
-const transactionAliases = new Map<string, string>();
 
 const workerScope = self as unknown as {
   onmessage: ((event: MessageEvent<RequestMessage>) => void) | null;
@@ -56,22 +60,17 @@ async function handleMessage(message: RequestMessage): Promise<void> {
     }
 
     if (isWriteMethod(message.method)) {
-      const desiredTransactionId = message.args.at(-1);
       const runtimeArgs = message.args.slice(0, -1);
       const result = target[message.method]!.apply(runtime, runtimeArgs) as {
         transactionId: string;
       };
-      if (typeof desiredTransactionId === "string") {
-        transactionAliases.set(desiredTransactionId, result.transactionId);
-      }
       postResult(message.id, result);
       return;
     }
 
     if (message.method === "waitForTransaction") {
       const [transactionId, tier] = message.args as [string, string];
-      const actualTransactionId = transactionAliases.get(transactionId) ?? transactionId;
-      const result = await runtime.waitForTransaction(actualTransactionId, tier);
+      const result = await runtime.waitForTransaction(transactionId, tier);
       postResult(message.id, result);
       return;
     }
@@ -116,6 +115,12 @@ async function openRuntime(message: OpenMessage): Promise<void> {
     1,
     true,
   );
+  runtime.onMutationError((payload: MutationErrorEvent) => {
+    workerScope.postMessage({ event: "mutationError", payload });
+  });
+  runtime.onAuthFailure((reason: string) => {
+    workerScope.postMessage({ event: "authFailure", reason });
+  });
 }
 
 function postResult(id: number, result: unknown): void {
