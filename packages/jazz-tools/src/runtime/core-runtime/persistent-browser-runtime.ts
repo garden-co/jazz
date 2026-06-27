@@ -124,7 +124,7 @@ export type { WorkerRequest as PersistentBrowserWorkerRequest };
 export class PersistentBrowserRuntime implements Runtime {
   private readonly worker: Worker;
   private readonly pending = new Map<number, PendingCall>();
-  private readonly writes = new Map<string, Promise<unknown>>();
+  private readonly writes = new Map<string, Promise<string>>();
   private readonly subscriptions = new Map<number, Function>();
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
   private readonly subscriptionLocalHandles = new Map<number, number>();
@@ -229,8 +229,8 @@ export class PersistentBrowserRuntime implements Runtime {
 
   async waitForTransaction(transactionId: string, tier: string): Promise<void> {
     await this.opened;
-    await this.writes.get(transactionId);
-    await this.call("waitForTransaction", transactionId, tier);
+    const workerTransactionId = (await this.writes.get(transactionId)) ?? transactionId;
+    await this.call("waitForTransaction", workerTransactionId, tier);
   }
 
   async query(
@@ -369,9 +369,13 @@ export class PersistentBrowserRuntime implements Runtime {
     method: Method,
     ...args: RequestArgs<Method>
   ): void {
-    // Public writes stay synchronous for React/local state ergonomics; the
-    // worker owns OPFS durability and settles the returned write handle.
-    const write = this.opened.then(() => this.send(method, args));
+    // This class is an OPFS worker proxy, not a separate runtime semantics
+    // layer. Public writes stay synchronous while the worker returns the real
+    // CoreRuntime transaction id that durability waits must use.
+    const write = this.opened.then(async () => {
+      const result = (await this.send(method, args)) as { transactionId: string };
+      return result.transactionId;
+    });
     this.writes.set(transactionId, write);
     void write.catch(() => undefined);
   }
