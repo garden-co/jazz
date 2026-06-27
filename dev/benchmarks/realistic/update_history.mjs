@@ -233,10 +233,7 @@ function criterionBenchmarkId(benchmark, storageEngine) {
   const exactMap = new Map([
     ["realistic_phase1_core/r1_crud", "native-criterion:r1_crud"],
     ["realistic_phase1_core/r2_reads", "native-criterion:r2_reads"],
-    [
-      "realistic_phase1_core/r3_rocksdb_cold_load",
-      "native-criterion:rocksdb:r3_rocksdb_cold_load",
-    ],
+    ["realistic_phase1_core/r3_rocksdb_cold_load", "native-criterion:rocksdb:r3_rocksdb_cold_load"],
     ["realistic_phase1_core/r4_hot_task_history", "native-criterion:r4_hot_task_history"],
     ["realistic_phase1_core/r9_subscribed_write", "native-criterion:r9_subscribed_write"],
     ["realistic_phase1_core/r10_core_sync_fanout", "native-criterion:r10_core_sync_fanout"],
