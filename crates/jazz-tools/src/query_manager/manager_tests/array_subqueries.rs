@@ -3,31 +3,31 @@ use super::*;
 #[test]
 fn uuid_array_fk_forward_materialization_preserves_order_and_duplicates() {
     let sync_manager = SyncManager::new();
-    let schema = file_storage_schema();
+    let schema = bundle_items_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
-    let part_a = qm
-        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
+    let item_a = qm
+        .insert(&mut storage, "bundle_items", &[Value::Text("A".into())])
         .unwrap();
-    let part_b = qm
-        .insert(&mut storage, "file_parts", &[Value::Text("B".into())])
+    let item_b = qm
+        .insert(&mut storage, "bundle_items", &[Value::Text("B".into())])
         .unwrap();
 
     qm.insert(
         &mut storage,
-        "files",
+        "bundles",
         &[Value::Array(vec![
-            Value::Uuid(part_b.row_id),
-            Value::Uuid(part_a.row_id),
-            Value::Uuid(part_b.row_id),
+            Value::Uuid(item_b.row_id),
+            Value::Uuid(item_a.row_id),
+            Value::Uuid(item_b.row_id),
         ])],
     )
     .unwrap();
 
     let query = qm
-        .query("files")
-        .with_array("part_rows", |sub| {
-            sub.from("file_parts").correlate("id", "files.parts")
+        .query("bundles")
+        .with_array("item_rows", |sub| {
+            sub.from("bundle_items").correlate("id", "bundles.items")
         })
         .build();
     let sub_id = qm.subscribe(query).unwrap();
@@ -37,16 +37,19 @@ fn uuid_array_fk_forward_materialization_preserves_order_and_duplicates() {
         .take_updates()
         .into_iter()
         .find(|u| u.subscription_id == sub_id)
-        .expect("files subscription should produce one update");
-    let row_values =
-        decode_row(&files_with_parts_descriptor(), &update.delta.added[0].data).unwrap();
-    let part_rows = row_values[1]
+        .expect("bundles subscription should produce one update");
+    let row_values = decode_row(
+        &bundles_with_items_descriptor(),
+        &update.delta.added[0].data,
+    )
+    .unwrap();
+    let item_rows = row_values[1]
         .as_array()
-        .expect("part_rows should be an array");
-    let labels: Vec<String> = part_rows
+        .expect("item_rows should be an array");
+    let labels: Vec<String> = item_rows
         .iter()
         .map(|row| {
-            let values = row.as_row().expect("part row");
+            let values = row.as_row().expect("item row");
             assert!(row.row_id().is_some(), "row should have an id");
             match &values[0] {
                 Value::Text(label) => label.clone(),
@@ -60,32 +63,32 @@ fn uuid_array_fk_forward_materialization_preserves_order_and_duplicates() {
 #[test]
 fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
     let sync_manager = SyncManager::new();
-    let schema = file_storage_schema();
+    let schema = bundle_items_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
-    let part_a = qm
-        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
+    let item_a = qm
+        .insert(&mut storage, "bundle_items", &[Value::Text("A".into())])
         .unwrap();
-    let part_b = qm
-        .insert(&mut storage, "file_parts", &[Value::Text("B".into())])
+    let item_b = qm
+        .insert(&mut storage, "bundle_items", &[Value::Text("B".into())])
         .unwrap();
-    let file = qm
+    let bundle = qm
         .insert(
             &mut storage,
-            "files",
+            "bundles",
             &[Value::Array(vec![
-                Value::Uuid(part_a.row_id),
-                Value::Uuid(part_b.row_id),
-                Value::Uuid(part_b.row_id),
+                Value::Uuid(item_a.row_id),
+                Value::Uuid(item_b.row_id),
+                Value::Uuid(item_b.row_id),
             ])],
         )
         .unwrap();
 
     let query = qm
-        .query("file_parts")
-        .with_array("files", |sub| {
-            sub.from("files").correlate("parts", "file_parts.id")
+        .query("bundle_items")
+        .with_array("bundles", |sub| {
+            sub.from("bundles").correlate("items", "bundle_items.id")
         })
         .build();
     let before = execute_query(&mut qm, &mut storage, query.clone()).unwrap();
@@ -98,7 +101,7 @@ fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
             };
             let count = values[1]
                 .as_array()
-                .expect("files include should be array")
+                .expect("bundles include should be array")
                 .len();
             (label, count)
         })
@@ -107,16 +110,16 @@ fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
     assert_eq!(before_counts.get("B"), Some(&1));
 
     let ids_for_a_before =
-        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_a.row_id));
+        storage.index_lookup("bundles", "items", &branch, &Value::Uuid(item_a.row_id));
     let ids_for_b_before =
-        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_b.row_id));
-    assert!(ids_for_a_before.contains(&file.row_id));
-    assert!(ids_for_b_before.contains(&file.row_id));
+        storage.index_lookup("bundles", "items", &branch, &Value::Uuid(item_b.row_id));
+    assert!(ids_for_a_before.contains(&bundle.row_id));
+    assert!(ids_for_b_before.contains(&bundle.row_id));
 
     qm.update(
         &mut storage,
-        file.row_id,
-        &[Value::Array(vec![Value::Uuid(part_b.row_id)])],
+        bundle.row_id,
+        &[Value::Array(vec![Value::Uuid(item_b.row_id)])],
     )
     .unwrap();
 
@@ -130,7 +133,7 @@ fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
             };
             let count = values[1]
                 .as_array()
-                .expect("files include should be array")
+                .expect("bundles include should be array")
                 .len();
             (label, count)
         })
@@ -139,14 +142,14 @@ fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
     assert_eq!(after_counts.get("B"), Some(&1));
 
     let ids_for_a_after =
-        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_a.row_id));
+        storage.index_lookup("bundles", "items", &branch, &Value::Uuid(item_a.row_id));
     let ids_for_b_after =
-        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_b.row_id));
+        storage.index_lookup("bundles", "items", &branch, &Value::Uuid(item_b.row_id));
     assert!(
-        !ids_for_a_after.contains(&file.row_id),
+        !ids_for_a_after.contains(&bundle.row_id),
         "removed array members should be removed from membership index"
     );
-    assert!(ids_for_b_after.contains(&file.row_id));
+    assert!(ids_for_b_after.contains(&bundle.row_id));
 }
 
 #[test]

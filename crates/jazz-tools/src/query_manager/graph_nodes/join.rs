@@ -588,16 +588,16 @@ mod tests {
         ])
     }
 
-    fn files_descriptor() -> RowDescriptor {
+    fn bundles_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![ColumnDescriptor::new(
-            "parts",
+            "items",
             ColumnType::Array {
                 element: Box::new(ColumnType::Uuid),
             },
         )])
     }
 
-    fn file_parts_descriptor() -> RowDescriptor {
+    fn bundle_items_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)])
     }
 
@@ -661,11 +661,11 @@ mod tests {
         }])
     }
 
-    fn make_file_tuple(id: ObjectId, parts: Vec<ObjectId>) -> Tuple {
-        let descriptor = files_descriptor();
+    fn make_bundle_tuple(id: ObjectId, items: Vec<ObjectId>) -> Tuple {
+        let descriptor = bundles_descriptor();
         let data = encode_row(
             &descriptor,
-            &[Value::Array(parts.into_iter().map(Value::Uuid).collect())],
+            &[Value::Array(items.into_iter().map(Value::Uuid).collect())],
         )
         .unwrap();
         Tuple::new(vec![TupleElement::Row {
@@ -676,8 +676,8 @@ mod tests {
         }])
     }
 
-    fn make_file_part_tuple(id: ObjectId, name: &str) -> Tuple {
-        let descriptor = file_parts_descriptor();
+    fn make_bundle_item_tuple(id: ObjectId, name: &str) -> Tuple {
+        let descriptor = bundle_items_descriptor();
         let data = encode_row(&descriptor, &[Value::Text(name.into())]).unwrap();
         Tuple::new(vec![TupleElement::Row {
             id,
@@ -690,25 +690,25 @@ mod tests {
     #[test]
     fn join_matches_array_membership_for_forward_fk_hops() {
         let mut node = JoinNode::from_row_descriptors(
-            "files",
-            files_descriptor(),
-            "file_parts",
-            file_parts_descriptor(),
-            "parts",
+            "bundles",
+            bundles_descriptor(),
+            "bundle_items",
+            bundle_items_descriptor(),
+            "items",
             "id",
         )
         .expect("array-fk forward join should compile");
 
-        let file_id = ObjectId::new();
-        let part_a = ObjectId::new();
-        let part_b = ObjectId::new();
+        let bundle_id = ObjectId::new();
+        let item_a = ObjectId::new();
+        let item_b = ObjectId::new();
 
-        let file = make_file_tuple(file_id, vec![part_a, part_b, part_a]);
-        let row_a = make_file_part_tuple(part_a, "A");
-        let row_b = make_file_part_tuple(part_b, "B");
+        let bundle = make_bundle_tuple(bundle_id, vec![item_a, item_b, item_a]);
+        let row_a = make_bundle_item_tuple(item_a, "A");
+        let row_b = make_bundle_item_tuple(item_b, "B");
 
         node.process_left(TupleDelta {
-            added: vec![file],
+            added: vec![bundle],
             ..Default::default()
         });
         let delta = node.process_right(TupleDelta {
@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(
             delta.added.len(),
             2,
-            "membership join should match both part ids"
+            "membership join should match both item ids"
         );
         assert_eq!(
             node.current_tuples().len(),
@@ -731,25 +731,25 @@ mod tests {
     #[test]
     fn join_matches_array_membership_for_reverse_fk_hops() {
         let mut node = JoinNode::from_row_descriptors(
-            "file_parts",
-            file_parts_descriptor(),
-            "files",
-            files_descriptor(),
+            "bundle_items",
+            bundle_items_descriptor(),
+            "bundles",
+            bundles_descriptor(),
             "id",
-            "parts",
+            "items",
         )
         .expect("array-fk reverse join should compile");
 
-        let file_id = ObjectId::new();
-        let part_a = ObjectId::new();
-        let part_b = ObjectId::new();
+        let bundle_id = ObjectId::new();
+        let item_a = ObjectId::new();
+        let item_b = ObjectId::new();
 
-        let file = make_file_tuple(file_id, vec![part_a, part_b]);
-        let row_a = make_file_part_tuple(part_a, "A");
-        let row_b = make_file_part_tuple(part_b, "B");
+        let bundle = make_bundle_tuple(bundle_id, vec![item_a, item_b]);
+        let row_a = make_bundle_item_tuple(item_a, "A");
+        let row_b = make_bundle_item_tuple(item_b, "B");
 
         node.process_right(TupleDelta {
-            added: vec![file],
+            added: vec![bundle],
             ..Default::default()
         });
         let delta = node.process_left(TupleDelta {
@@ -760,7 +760,7 @@ mod tests {
         assert_eq!(
             delta.added.len(),
             2,
-            "reverse membership join should match file rows containing each part id"
+            "reverse membership join should match bundle rows containing each item id"
         );
     }
 

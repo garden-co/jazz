@@ -1,6 +1,6 @@
 # Built-in File Storage: CASCADE Integration — TODO
 
-Integrate `ON DELETE CASCADE` with the built-in file storage tables. When this lands, app developers no longer need to manually delete files and file_parts — deletion cascades automatically from parent rows.
+Integrate `ON DELETE CASCADE` with the built-in file storage table. When this lands, app developers no longer need to manually delete file rows referenced by parent rows.
 
 Depends on the future row-level cascade semantics work. Can be deferred to `c_later/` if cascade isn't ready at launch.
 
@@ -13,12 +13,7 @@ The built-in schema gains `ON DELETE CASCADE` declarations:
 ```sql
 create table files (
   name text,
-  mime text not null,
-  parts uuid[] references file_parts not null on delete cascade,
-  part_sizes integer[] not null
-);
-
-create table file_parts (
+  mime_type text not null,
   data bytea
 );
 
@@ -30,14 +25,14 @@ create table todos (
 );
 ```
 
-Deleting a todo cascades to its file, which cascades to its file_parts.
+Deleting a todo cascades to its file row.
 
 ## Reference-Counted Cascade
 
-Content-addressed parts can be shared across multiple files (same bytes = same UUIDv5 = same row). Cascade must be refcount-aware:
+Shared binary rows would need refcount-aware cascade behavior:
 
-- Only soft-delete a part when ALL live references to it are soft-deleted.
-- Only hard-delete a part when ALL references (including soft-deleted ones) are hard-deleted.
+- Only soft-delete a file row when ALL live references to it are soft-deleted.
+- Only hard-delete a file row when ALL references (including soft-deleted ones) are hard-deleted.
 
 This likely needs distributed refcounting semantics (eager soft delete, authoritative hard delete) rather than a naive FK-only implementation.
 
@@ -46,6 +41,6 @@ This likely needs distributed refcounting semantics (eager soft delete, authorit
 Apps that manually delete files can:
 
 1. Add `ON DELETE CASCADE` to their FK declarations in schema.
-2. Remove manual file/file_parts deletion code.
+2. Remove manual file deletion code.
 
 No data migration needed — the schema change adds cascade behavior to existing FKs.

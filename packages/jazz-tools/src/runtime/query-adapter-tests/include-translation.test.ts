@@ -129,17 +129,17 @@ describe("include translation", () => {
 
   it("translates UUID[] forward and reverse includes using membership columns", () => {
     const arrayFkSchema: WasmSchema = {
-      files: {
+      bundles: {
         columns: [
           {
-            name: "parts",
+            name: "items",
             column_type: { type: "Array", element: { type: "Uuid" } },
             nullable: false,
-            references: "file_parts",
+            references: "bundle_items",
           },
         ],
       },
-      file_parts: {
+      bundle_items: {
         columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
       },
     };
@@ -147,9 +147,9 @@ describe("include translation", () => {
     const forward = JSON.parse(
       translateQuery(
         JSON.stringify({
-          table: "files",
+          table: "bundles",
           conditions: [],
-          includes: { parts: true },
+          includes: { items: true },
           orderBy: [],
         }),
         arrayFkSchema,
@@ -157,10 +157,10 @@ describe("include translation", () => {
     );
     expect(forward.array_subqueries).toEqual([
       {
-        column_name: "parts",
-        table: "file_parts",
+        column_name: "items",
+        table: "bundle_items",
         inner_column: "id",
-        outer_column: "files.parts",
+        outer_column: "bundles.items",
         filters: [],
         joins: [],
         select_columns: null,
@@ -173,9 +173,9 @@ describe("include translation", () => {
     const reverse = JSON.parse(
       translateQuery(
         JSON.stringify({
-          table: "file_parts",
+          table: "bundle_items",
           conditions: [],
-          includes: { filesViaParts: true },
+          includes: { bundlesViaItems: true },
           orderBy: [],
         }),
         arrayFkSchema,
@@ -183,10 +183,10 @@ describe("include translation", () => {
     );
     expect(reverse.array_subqueries).toEqual([
       {
-        column_name: "filesViaParts",
-        table: "files",
-        inner_column: "parts",
-        outer_column: "file_parts.id",
+        column_name: "bundlesViaItems",
+        table: "bundles",
+        inner_column: "items",
+        outer_column: "bundle_items.id",
         filters: [],
         joins: [],
         select_columns: null,
@@ -199,17 +199,17 @@ describe("include translation", () => {
 
   it("marks UUID[] forward includes with cardinality requirement when requested", () => {
     const arrayFkSchema: WasmSchema = {
-      files: {
+      bundles: {
         columns: [
           {
-            name: "parts",
+            name: "items",
             column_type: { type: "Array", element: { type: "Uuid" } },
             nullable: false,
-            references: "file_parts",
+            references: "bundle_items",
           },
         ],
       },
-      file_parts: {
+      bundle_items: {
         columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
       },
     };
@@ -217,9 +217,9 @@ describe("include translation", () => {
     const forward = JSON.parse(
       translateQuery(
         JSON.stringify({
-          table: "files",
+          table: "bundles",
           conditions: [],
-          includes: { parts: true },
+          includes: { items: true },
           __jazz_requireIncludes: true,
           orderBy: [],
         }),
@@ -228,10 +228,10 @@ describe("include translation", () => {
     );
     expect(forward.array_subqueries).toEqual([
       {
-        column_name: "parts",
-        table: "file_parts",
+        column_name: "items",
+        table: "bundle_items",
         inner_column: "id",
-        outer_column: "files.parts",
+        outer_column: "bundles.items",
         filters: [],
         joins: [],
         select_columns: null,

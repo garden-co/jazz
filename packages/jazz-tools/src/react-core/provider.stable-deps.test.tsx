@@ -26,7 +26,7 @@ describe("JazzProvider — stable config deps", () => {
    *   cleanup → releaseClient (schedules setTimeout(0) to shut down the client)
    *   re-run  → acquireClient (clears the timer — but only if it runs in time)
    * Under production timing the timer could fire before the re-run, tearing the
-   * client down and surfacing as 'Worker load error: undefined'.
+   * client down and surfacing as a runtime initialization error.
    *
    * We detect the cleanup firing by spying on setTimeout: releaseClient calls
    * setTimeout(0) to schedule the deferred shutdown. If the effect re-runs

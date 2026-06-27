@@ -39,11 +39,11 @@ fn subquery_schema() -> Schema {
                 .column("name", ColumnType::Text)
                 .array_fk_column("member_ids", "users"),
         )
-        .table(TableSchema::builder("file_parts").column("label", ColumnType::Text))
+        .table(TableSchema::builder("bundle_items").column("label", ColumnType::Text))
         .table(
-            TableSchema::builder("files")
+            TableSchema::builder("bundles")
                 .column("name", ColumnType::Text)
-                .array_fk_column("parts", "file_parts"),
+                .array_fk_column("items", "bundle_items"),
         )
         .build()
 }
@@ -149,23 +149,23 @@ async fn create_group(
         .0
 }
 
-async fn create_file_part(client: &JazzClient, label: &str) -> ObjectId {
+async fn create_bundle_item(client: &JazzClient, label: &str) -> ObjectId {
     client
-        .insert("file_parts", row_input!("label" => label))
-        .expect("create file part")
+        .insert("bundle_items", row_input!("label" => label))
+        .expect("create bundle item")
         .0
 }
 
-async fn create_file(client: &JazzClient, name: &str, parts: &[ObjectId]) -> ObjectId {
+async fn create_bundle(client: &JazzClient, name: &str, items: &[ObjectId]) -> ObjectId {
     client
         .insert(
-            "files",
+            "bundles",
             row_input!(
                 "name" => name,
-                "parts" => Value::Array(parts.iter().copied().map(Value::Uuid).collect()),
+                "items" => Value::Array(items.iter().copied().map(Value::Uuid).collect()),
             ),
         )
-        .expect("create file")
+        .expect("create bundle")
         .0
 }
 
@@ -1041,33 +1041,33 @@ async fn array_subquery_supports_multiple_array_columns() {
 /// Verifies that a UUID-array foreign-key include materializes inner rows in
 /// the order of the outer array, including duplicate references.
 ///
-/// Actors: alice writes file parts and a file, bob reads the file with resolved
-/// part rows.
+/// Actors: alice writes bundle items and a bundle, bob reads the bundle with resolved
+/// item rows.
 #[tokio::test]
 async fn array_subquery_materializes_uuid_array_refs_in_order_with_duplicates() {
     let clients = Clients::start().await;
 
-    let part_a = create_file_part(&clients.alice, "A").await;
-    let part_b = create_file_part(&clients.alice, "B").await;
-    let file_id = create_file(&clients.alice, "bundle", &[part_b, part_a, part_b]).await;
+    let item_a = create_bundle_item(&clients.alice, "A").await;
+    let item_b = create_bundle_item(&clients.alice, "B").await;
+    let bundle_id = create_bundle(&clients.alice, "bundle", &[item_b, item_a, item_b]).await;
 
-    let query = QueryBuilder::new("files")
-        .with_array("part_rows", |sub| {
-            sub.from("file_parts").correlate("id", "files.parts")
+    let query = QueryBuilder::new("bundles")
+        .with_array("item_rows", |sub| {
+            sub.from("bundle_items").correlate("id", "bundles.items")
         })
         .build();
 
     let rows = wait_for_rows(
         &clients.bob,
         query,
-        "bob sees file parts resolved in outer-array order",
+        "bob sees bundle items resolved in outer-array order",
         |rows| {
             let has_expected_row = rows.iter().any(|(id, values)| {
-                *id == file_id
-                    && values[2].as_array().is_some_and(|parts| {
-                        let labels: Vec<&str> = parts
+                *id == bundle_id
+                    && values[2].as_array().is_some_and(|items| {
+                        let labels: Vec<&str> = items
                             .iter()
-                            .map(|part| match &row_values(part)[0] {
+                            .map(|item| match &row_values(item)[0] {
                                 Value::Text(label) => label.as_str(),
                                 _ => "",
                             })
@@ -1080,19 +1080,19 @@ async fn array_subquery_materializes_uuid_array_refs_in_order_with_duplicates() 
     )
     .await;
 
-    let values = find_row_by_id(&rows, file_id);
-    let parts = values[2].as_array().expect("part rows should be an array");
-    let labels: Vec<&str> = parts
+    let values = find_row_by_id(&rows, bundle_id);
+    let items = values[2].as_array().expect("item rows should be an array");
+    let labels: Vec<&str> = items
         .iter()
-        .map(|part| match &row_values(part)[0] {
+        .map(|item| match &row_values(item)[0] {
             Value::Text(label) => label.as_str(),
-            other => panic!("part label should be text, got {other:?}"),
+            other => panic!("item label should be text, got {other:?}"),
         })
         .collect();
     assert_eq!(labels, vec!["B", "A", "B"]);
     assert!(
-        parts.iter().all(|part| part.row_id().is_some()),
-        "included file parts should retain row ids"
+        items.iter().all(|item| item.row_id().is_some()),
+        "included bundle items should retain row ids"
     );
 
     clients.shutdown().await;
@@ -1103,28 +1103,28 @@ async fn array_subquery_materializes_uuid_array_refs_in_order_with_duplicates() 
 ///
 /// Actors and flow:
 ///
-/// alice -> insert parts A/B and file [A, B, B] -> server -> bob sees both
-/// alice -> update file to [B] -> server -> bob sees only B linked to file
+/// alice -> insert items A/B and bundle [A, B, B] -> server -> bob sees both
+/// alice -> update bundle to [B] -> server -> bob sees only B linked to bundle
 #[tokio::test]
 async fn array_subquery_reverse_uuid_array_membership_updates_when_array_changes() {
     let clients = Clients::start().await;
 
-    let part_a = create_file_part(&clients.alice, "A").await;
-    let part_b = create_file_part(&clients.alice, "B").await;
-    let file_id = create_file(&clients.alice, "bundle", &[part_a, part_b, part_b]).await;
+    let item_a = create_bundle_item(&clients.alice, "A").await;
+    let item_b = create_bundle_item(&clients.alice, "B").await;
+    let bundle_id = create_bundle(&clients.alice, "bundle", &[item_a, item_b, item_b]).await;
 
-    let query = QueryBuilder::new("file_parts")
-        .with_array("files", |sub| {
-            sub.from("files").correlate("parts", "file_parts.id")
+    let query = QueryBuilder::new("bundle_items")
+        .with_array("bundles", |sub| {
+            sub.from("bundles").correlate("items", "bundle_items.id")
         })
         .build();
 
     wait_for_rows(
         &clients.bob,
         query.clone(),
-        "bob sees both parts linked to the file",
+        "bob sees both items linked to the bundle",
         |rows| {
-            let counts = file_counts_by_part_label(&rows);
+            let counts = bundle_counts_by_item_label(&rows);
             (counts.get("A") == Some(&1) && counts.get("B") == Some(&1)).then_some(())
         },
     )
@@ -1133,41 +1133,41 @@ async fn array_subquery_reverse_uuid_array_membership_updates_when_array_changes
     clients
         .alice
         .update(
-            file_id,
-            vec![("parts".to_string(), Value::Array(vec![Value::Uuid(part_b)]))],
+            bundle_id,
+            vec![("items".to_string(), Value::Array(vec![Value::Uuid(item_b)]))],
         )
-        .expect("update file parts");
+        .expect("update bundle items");
 
     let rows = wait_for_rows(
         &clients.bob,
         query,
-        "bob sees removed part membership after file update",
+        "bob sees removed item membership after bundle update",
         |rows| {
-            let counts = file_counts_by_part_label(&rows);
+            let counts = bundle_counts_by_item_label(&rows);
             (counts.get("A") == Some(&0) && counts.get("B") == Some(&1)).then_some(rows)
         },
     )
     .await;
 
-    let counts = file_counts_by_part_label(&rows);
+    let counts = bundle_counts_by_item_label(&rows);
     assert_eq!(counts.get("A"), Some(&0));
     assert_eq!(counts.get("B"), Some(&1));
 
     clients.shutdown().await;
 }
 
-fn file_counts_by_part_label(rows: &QueryRows) -> BTreeMap<String, usize> {
+fn bundle_counts_by_item_label(rows: &QueryRows) -> BTreeMap<String, usize> {
     rows.iter()
         .map(|(_, values)| {
             let label = match &values[0] {
                 Value::Text(label) => label.clone(),
-                other => panic!("file part label should be text, got {other:?}"),
+                other => panic!("bundle item label should be text, got {other:?}"),
             };
-            let file_count = values[1]
+            let bundle_count = values[1]
                 .as_array()
-                .expect("files include should be an array")
+                .expect("bundles include should be an array")
                 .len();
-            (label, file_count)
+            (label, bundle_count)
         })
         .collect()
 }

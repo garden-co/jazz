@@ -9,7 +9,7 @@ use jazz_tools::{
     AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Schema,
     SchemaBuilder, TableSchema, Value,
 };
-use tempfile::TempDir;
+use tempbundle::TempDir;
 
 use crate::support::TestingClient;
 
@@ -62,12 +62,12 @@ pub(crate) fn subscription_schema() -> Schema {
                 )
                 .nullable_column("payload", ColumnType::Bytea),
         )
-        .table(TableSchema::builder("file_parts").column("label", ColumnType::Text))
+        .table(TableSchema::builder("bundle_items").column("label", ColumnType::Text))
         .table(
-            TableSchema::builder("files")
+            TableSchema::builder("bundles")
                 .column("name", ColumnType::Text)
                 .column(
-                    "parts",
+                    "items",
                     ColumnType::Array {
                         element: Box::new(ColumnType::Uuid),
                     },
@@ -225,29 +225,29 @@ pub(crate) async fn create_todo(client: &JazzClient, seed: TodoSeed) -> ObjectId
         .0
 }
 
-pub(crate) async fn create_file_part(client: &JazzClient, label: &str) -> ObjectId {
+pub(crate) async fn create_bundle_item(client: &JazzClient, label: &str) -> ObjectId {
     client
         .insert(
-            "file_parts",
+            "bundle_items",
             HashMap::from([("label".to_string(), Value::Text(label.to_string()))]),
         )
-        .expect("create file part")
+        .expect("create bundle item")
         .0
 }
 
-pub(crate) async fn create_file(client: &JazzClient, name: &str, parts: &[ObjectId]) -> ObjectId {
+pub(crate) async fn create_bundle(client: &JazzClient, name: &str, items: &[ObjectId]) -> ObjectId {
     client
         .insert(
-            "files",
+            "bundles",
             HashMap::from([
                 ("name".to_string(), Value::Text(name.to_string())),
                 (
-                    "parts".to_string(),
-                    Value::Array(parts.iter().copied().map(Value::Uuid).collect()),
+                    "items".to_string(),
+                    Value::Array(items.iter().copied().map(Value::Uuid).collect()),
                 ),
             ]),
         )
-        .expect("create file")
+        .expect("create bundle")
         .0
 }
 

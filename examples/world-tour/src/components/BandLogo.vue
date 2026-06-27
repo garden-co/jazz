@@ -33,7 +33,7 @@ const db = useDb();
 const session = useSession();
 const canEdit = !!session.value;
 
-const { data: bandsWithLogo } = useAll(app.bands.include({ logoFile: { parts: true } }).limit(1));
+const { data: bandsWithLogo } = useAll(app.bands.include({ logoFile: true }).limit(1));
 const logoUrl = ref<string | null>(null);
 
 watch(

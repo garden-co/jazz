@@ -39,17 +39,17 @@ const schema: WasmSchema = {
       { name: "payload", column_type: { type: "Bytea" }, nullable: true },
     ],
   },
-  file_parts: {
+  bundle_items: {
     columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
   },
-  files: {
+  bundles: {
     columns: [
       { name: "name", column_type: { type: "Text" }, nullable: false },
       {
-        name: "parts",
+        name: "items",
         column_type: { type: "Array", element: { type: "Uuid" } },
         nullable: false,
-        references: "file_parts",
+        references: "bundle_items",
       },
     ],
   },
@@ -83,15 +83,15 @@ interface Todo {
   payload?: Uint8Array;
 }
 
-interface FilePart {
+interface BundleItem {
   id: string;
   label: string;
 }
 
-interface File {
+interface Bundle {
   id: string;
   name: string;
-  parts: string[];
+  items: string[];
 }
 
 const orgs: TableProxy<Org, Omit<Org, "id">> = {
@@ -122,18 +122,18 @@ const todos: TableProxy<Todo, Omit<Todo, "id">> = {
   _initType: {} as Omit<Todo, "id">,
 };
 
-const fileParts: TableProxy<FilePart, Omit<FilePart, "id">> = {
-  _table: "file_parts",
+const bundleItems: TableProxy<BundleItem, Omit<BundleItem, "id">> = {
+  _table: "bundle_items",
   _schema: schema,
-  _rowType: {} as FilePart,
-  _initType: {} as Omit<FilePart, "id">,
+  _rowType: {} as BundleItem,
+  _initType: {} as Omit<BundleItem, "id">,
 };
 
-const files: TableProxy<File, Omit<File, "id">> = {
-  _table: "files",
+const bundles: TableProxy<Bundle, Omit<Bundle, "id">> = {
+  _table: "bundles",
   _schema: schema,
-  _rowType: {} as File,
-  _initType: {} as Omit<File, "id">,
+  _rowType: {} as Bundle,
+  _initType: {} as Omit<Bundle, "id">,
 };
 
 const CONDITION_OWNER_ID = "00000000-0000-0000-0000-000000000201";
@@ -794,20 +794,20 @@ describe("db.subscribeAll browser integration", () => {
 
     const {
       value: { id: partAId },
-    } = db.insert(fileParts, { label: "A" });
+    } = db.insert(bundleItems, { label: "A" });
     const {
       value: { id: partBId },
-    } = db.insert(fileParts, { label: "B" });
+    } = db.insert(bundleItems, { label: "B" });
     const {
-      value: { id: fileId },
-    } = db.insert(files, { name: "File", parts: [partAId] });
+      value: { id: bundleId },
+    } = db.insert(bundles, { name: "Bundle", items: [partAId] });
 
-    const deltas: Array<SubscriptionDelta<FilePart>> = [];
+    const deltas: Array<SubscriptionDelta<BundleItem>> = [];
     const unsubscribe = trackUnsubscribe(
       db.subscribeAll(
-        makeQuery<FilePart>("files", {
-          conditions: [{ column: "id", op: "eq", value: fileId }],
-          hops: ["parts"],
+        makeQuery<BundleItem>("bundles", {
+          conditions: [{ column: "id", op: "eq", value: bundleId }],
+          hops: ["items"],
         }),
         (delta) => deltas.push(delta),
       ),
@@ -822,7 +822,7 @@ describe("db.subscribeAll browser integration", () => {
       "expected initial UUID[] hop result",
     );
 
-    await db.update(files, fileId, { parts: [partBId] });
+    await db.update(bundles, bundleId, { items: [partBId] });
 
     await waitForCondition(
       () => {
