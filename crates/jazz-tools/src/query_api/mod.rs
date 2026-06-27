@@ -1,11 +1,13 @@
 #[cfg(test)]
-pub mod bindings;
-pub mod magic_columns;
-pub mod policy;
-pub mod query;
-pub mod query_wire;
-pub mod relation_ir;
-pub mod session;
-pub mod types;
+mod bindings;
+mod magic_columns;
+mod query_wire;
+mod relation_ir;
 
-pub use query_wire::{parse_query_json, parse_query_value};
+pub(crate) mod policy;
+pub(crate) mod query;
+pub(crate) mod session;
+pub(crate) mod types;
+
+#[cfg(test)]
+pub(crate) use query_wire::parse_query_json;

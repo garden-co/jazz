@@ -1,9 +1,9 @@
 use crate::query_api::types::{ColumnDescriptor, ColumnType};
 
-pub const RESERVED_MAGIC_COLUMN_PREFIX: char = '$';
+pub(super) const RESERVED_MAGIC_COLUMN_PREFIX: char = '$';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MagicColumnKind {
+pub(super) enum MagicColumnKind {
     CanRead,
     CanEdit,
     CanDelete,
@@ -14,7 +14,7 @@ pub enum MagicColumnKind {
 }
 
 impl MagicColumnKind {
-    pub fn column_name(self) -> &'static str {
+    pub(super) fn column_name(self) -> &'static str {
         match self {
             MagicColumnKind::CanRead => "$canRead",
             MagicColumnKind::CanEdit => "$canEdit",
@@ -27,7 +27,7 @@ impl MagicColumnKind {
     }
 }
 
-pub fn magic_column_kind(name: &str) -> Option<MagicColumnKind> {
+pub(super) fn magic_column_kind(name: &str) -> Option<MagicColumnKind> {
     match name {
         "$canRead" => Some(MagicColumnKind::CanRead),
         "$canEdit" => Some(MagicColumnKind::CanEdit),
@@ -62,10 +62,10 @@ pub(crate) fn magic_column_descriptor(kind: MagicColumnKind) -> ColumnDescriptor
     }
 }
 
-pub fn is_magic_column_name(name: &str) -> bool {
+pub(super) fn is_magic_column_name(name: &str) -> bool {
     magic_column_kind(name).is_some()
 }
 
-pub fn is_reserved_magic_column_name(name: &str) -> bool {
+pub(super) fn is_reserved_magic_column_name(name: &str) -> bool {
     name.starts_with(RESERVED_MAGIC_COLUMN_PREFIX)
 }
