@@ -127,10 +127,8 @@ pub fn parse_transaction_id_input(transaction_id: &str) -> Result<BatchId, Strin
 
 pub fn parse_transaction_kind_input(transaction_kind: &str) -> Result<BatchMode, String> {
     match transaction_kind {
-        "mergeable" | "Mergeable" | "direct" | "Direct" => Ok(BatchMode::Direct),
-        "exclusive" | "Exclusive" | "transactional" | "Transactional" => {
-            Ok(BatchMode::Transactional)
-        }
+        "mergeable" | "Mergeable" => Ok(BatchMode::Mergeable),
+        "exclusive" | "Exclusive" => Ok(BatchMode::Exclusive),
         other => Err(format!(
             "Invalid transaction kind '{other}'. Must be 'mergeable' or 'exclusive'."
         )),

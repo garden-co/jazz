@@ -13,7 +13,7 @@ use crate::catalogue_payload_codec::{
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::ObjectId;
 use crate::query_api::types::{Schema, SchemaHash, TableName, TablePolicies};
-use crate::schema_manager::Lens;
+use crate::schema_lens::Lens;
 use crate::server::catalogue_entry::CatalogueEntry;
 use crate::server::catalogue_storage::{
     CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,

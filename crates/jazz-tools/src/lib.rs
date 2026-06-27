@@ -14,7 +14,7 @@ pub mod otel;
 pub(crate) mod query_api;
 pub mod row_format;
 pub mod schema_api;
-pub mod schema_manager;
+pub mod schema_lens;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
 pub mod sync;
@@ -42,6 +42,7 @@ pub use schema_api::{
     SchemaBuilder, SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext,
     permissions, policy_expr,
 };
+pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};

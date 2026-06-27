@@ -759,7 +759,7 @@ describe("CoreRuntime server transport", () => {
     });
   });
 
-  it("rejects unsupported relation query shapes before preparing or reading", async () => {
+  it("rejects Join relation IR before preparing or reading", async () => {
     const calls: string[] = [];
     const runtime = new CoreRuntime(
       {
@@ -794,11 +794,13 @@ describe("CoreRuntime server transport", () => {
 
     await expect(
       runtime.query(JSON.stringify({ table: "todos", relation_ir: unsupportedJoinRelationIr() })),
-    ).rejects.toThrow("refusing to run an overbroad table query");
+    ).rejects.toThrow(
+      'Relation IR operator "Join" requires a relation-tree lowerer or native relation query API',
+    );
     expect(calls).toEqual([]);
   });
 
-  it("rejects unsupported subscription relation shapes while preparing the original query", () => {
+  it("rejects Project relation IR while preparing the original subscription query", () => {
     const calls: string[] = [];
     const runtime = new CoreRuntime(
       {
@@ -829,7 +831,9 @@ describe("CoreRuntime server transport", () => {
       runtime.createSubscription(
         JSON.stringify({ table: "todos", relation_ir: unsupportedProjectRelationIr() }),
       ),
-    ).toThrow("refusing to run an overbroad table query");
+    ).toThrow(
+      'Relation IR operator "Project" requires a relation-tree lowerer or native relation query API',
+    );
     expect(calls).toEqual([]);
   });
 
@@ -1103,7 +1107,9 @@ describe("CoreRuntime server transport", () => {
           },
         }),
       ),
-    ).toThrow("refusing to run an overbroad table query");
+    ).toThrow(
+      'Relation IR operator "Gather" requires a relation-tree lowerer or native relation query API',
+    );
     expect(calls).toEqual([]);
   });
 

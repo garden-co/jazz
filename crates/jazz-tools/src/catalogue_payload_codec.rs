@@ -14,7 +14,7 @@ use crate::query_api::types::{
     SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
-use crate::schema_manager::lens::{LensOp, LensTransform};
+use crate::schema_lens::{LensOp, LensTransform};
 
 /// Current encoding version.
 const SCHEMA_VERSION: u8 = 6;

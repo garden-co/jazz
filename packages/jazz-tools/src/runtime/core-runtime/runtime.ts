@@ -1099,10 +1099,11 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   );
 }
 
-function unsupportedRelationQueryError(): Error {
-  return new Error(
-    "Core runtime does not support this relation query shape yet; refusing to run an overbroad table query.",
-  );
+function unsupportedRelationQueryError(operator?: string): Error {
+  const detail = operator
+    ? ` Relation IR operator "${operator}" requires a relation-tree lowerer or native relation query API; the TS core runtime can currently lower only TableScan plus Filter/OrderBy/Offset/Limit into flat native predicates.`
+    : " The TS core runtime can currently lower only TableScan plus Filter/OrderBy/Offset/Limit into flat native predicates.";
+  return new Error(`Core runtime cannot lower this relation IR.${detail}`);
 }
 
 function encodeSimpleRelationQuery(
@@ -1121,7 +1122,7 @@ function encodeSimpleRelationQuery(
   orderBy: QueryOrder[];
 } {
   const unwrapped = unwrapSimpleQuery(table, query);
-  if (!unwrapped) throw unsupportedRelationQueryError();
+  if (!unwrapped) throw unsupportedRelationQueryError(relationOperator(query.relation_ir));
   return {
     hasPostFilter: false,
     limit: unwrapped.limit,
@@ -1129,6 +1130,23 @@ function encodeSimpleRelationQuery(
     orderBy: unwrapped.orderBy,
     predicates: unwrapped.predicates.map((filter) => coerceQueryPredicate(table, filter, schema)),
   };
+}
+
+function relationOperator(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  for (const operator of ["Join", "Project", "Gather", "Union"]) {
+    if (operator in record) return operator;
+  }
+  for (const operator of ["Limit", "Offset", "OrderBy", "Filter"]) {
+    const child = record[operator];
+    if (child && typeof child === "object") {
+      const input = (child as { input?: unknown }).input;
+      const nested = relationOperator(input);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
 }
 
 function coerceQueryPredicate(

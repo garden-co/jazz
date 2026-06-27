@@ -95,16 +95,18 @@ impl<'de> Deserialize<'de> for BatchId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchMode {
-    Direct,
-    Transactional,
+    Mergeable,
+    Exclusive,
 }
 
 impl BatchMode {
     pub fn parse(raw: &str) -> Result<Self, String> {
         match raw {
-            "direct" | "Direct" => Ok(Self::Direct),
-            "transactional" | "Transactional" => Ok(Self::Transactional),
-            _ => Err(format!("invalid batch mode: {raw}")),
+            "mergeable" | "Mergeable" => Ok(Self::Mergeable),
+            "exclusive" | "Exclusive" => Ok(Self::Exclusive),
+            _ => Err(format!(
+                "invalid batch mode '{raw}'. Must be 'mergeable' or 'exclusive'."
+            )),
         }
     }
 }
