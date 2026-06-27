@@ -129,14 +129,11 @@ mod tests {
     use crate::schema_manager::{AppId, LensOp};
     use std::time::Duration;
 
-    use crate::query_manager::query::QueryBuilder;
     use crate::query_manager::types::{
         ColumnType, Schema, SchemaBuilder, TableSchema, Value as QueryValue,
     };
     use crate::sync::ClientId;
-    use crate::sync_manager::{
-        ConnectionSchemaDiagnostics, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
-    };
+    use crate::sync_manager::ConnectionSchemaDiagnostics;
     use axum::body;
     use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};
@@ -1999,7 +1996,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_subscription_introspection_groups_active_server_subscriptions() {
+    async fn admin_subscription_introspection_returns_empty_direct_core_shell() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -2008,36 +2005,6 @@ mod tests {
             )
             .build();
         let state = make_state_with_schema(schema).await;
-
-        let repeated_query = QueryBuilder::new("users").build();
-        let filtered_query = QueryBuilder::new("users")
-            .filter_eq("name", QueryValue::Text("Alice".to_string()))
-            .build();
-
-        for (index, query, propagation) in [
-            (1_u64, repeated_query.clone(), QueryPropagation::Full),
-            (2_u64, repeated_query.clone(), QueryPropagation::Full),
-            (3_u64, repeated_query.clone(), QueryPropagation::LocalOnly),
-            (4_u64, filtered_query, QueryPropagation::Full),
-        ] {
-            let client_id = ClientId::new();
-            state.catalogue_store.add_client(client_id, None).unwrap();
-            state
-                .catalogue_store
-                .push_sync_inbox(InboxEntry {
-                    source: Source::Client(client_id),
-                    payload: SyncPayload::QuerySubscription {
-                        query_id: QueryId(index),
-                        query: Box::new(query),
-                        session: None,
-                        propagation,
-                        required_tier: None,
-                        policy_context_tables: vec![],
-                    },
-                })
-                .unwrap();
-        }
-        state.catalogue_store.flush().unwrap();
 
         let response = make_test_router(state.clone())
             .oneshot(
@@ -2063,33 +2030,10 @@ mod tests {
         assert!(json["generatedAt"].as_u64().is_some());
 
         let groups = json["queries"].as_array().expect("queries array");
-        assert_eq!(groups.len(), 3);
-
-        let repeated_full = groups.iter().find(|group| {
-            group["count"].as_u64() == Some(2) && group["propagation"].as_str() == Some("full")
-        });
-        let repeated_full = repeated_full.expect("expected grouped full subscriptions");
-        assert_eq!(repeated_full["table"].as_str(), Some("users"));
-        assert_eq!(
-            repeated_full["branches"]
-                .as_array()
-                .map(|branches| branches.len())
-                .unwrap_or_default(),
-            1
+        assert!(
+            groups.is_empty(),
+            "subscription introspection must stay empty until backed by direct-core telemetry"
         );
-        assert!(repeated_full["groupKey"].as_str().is_some());
-
-        assert!(groups.iter().any(|group| {
-            group["count"].as_u64() == Some(1)
-                && group["propagation"].as_str() == Some("local-only")
-        }));
-        assert!(groups.iter().any(|group| {
-            group["count"].as_u64() == Some(1)
-                && group["query"]
-                    .as_str()
-                    .map(|query| query.contains("\"name\""))
-                    .unwrap_or(false)
-        }));
     }
 
     #[tokio::test]

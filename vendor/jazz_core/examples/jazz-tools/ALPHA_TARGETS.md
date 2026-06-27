@@ -339,6 +339,10 @@ auth/admission integration gap, not a row encoding or React subscription gap.
   storage instead of `Box<dyn Storage>` or old storage backend adapters. SQLite
   remains a native/client storage implementation, but direct-core
   `jazz-tools server` rejects SQLite for catalogue and sync storage.
+  Admin subscription introspection no longer records fabricated
+  `SyncPayload::QuerySubscription` entries in the catalogue store; the endpoint
+  currently returns an authenticated empty shell until it can be backed by
+  direct-core subscription telemetry.
 
 ## Next targets
 
@@ -358,9 +362,12 @@ auth/admission integration gap, not a row encoding or React subscription gap.
    `server <APP_ID>` command, `/apps/<APP_ID>/ws` route, auth/config aliases,
    durable WebSocket restart gates, and admin schema publish/list/fetch that
    converts accepted schemas into the live runtime catalogue. The loopback HTTP
-   listener reloads active admin schemas on durable startup; next, compose that
-   admin surface with the app-scoped WebSocket command and broaden lifecycle
-   coverage before treating the Rust server as a drop-in replacement.
+   listener reloads active admin schemas on durable startup. The old
+   `SyncPayload`-backed subscription introspection shim has been deleted; next,
+   compose the admin surface with the app-scoped WebSocket command, add
+   direct-core subscription telemetry if the product still needs that endpoint,
+   and broaden lifecycle coverage before treating the Rust server as a drop-in
+   replacement.
 4. **Complete alpha-shaped auth/session admission.** Server-side signed
    local-first JWT admission, TS-side signed local-first proof generation, and
    WebSocket routing are covered for the current slice. Next, add audience/app-id
