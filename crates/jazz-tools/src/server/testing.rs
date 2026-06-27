@@ -15,7 +15,6 @@ use crate::schema_api::Schema;
 use crate::schema_manager::AppId;
 
 use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
-use crate::sync::ClientId;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -406,21 +405,6 @@ impl JazzServer {
     /// that need to inspect or drive internal server state.
     pub fn server_state(&self) -> std::sync::Arc<super::ServerState> {
         self.state.clone()
-    }
-
-    /// Set the client state TTL. Disconnected clients are reaped after this duration.
-    pub async fn set_client_ttl(&self, ttl: Duration) {
-        self.state.set_client_ttl(ttl).await;
-    }
-
-    /// Run one sweep iteration to reap expired disconnect candidates.
-    pub async fn run_sweep_once(&self) -> Vec<ClientId> {
-        self.state.run_sweep_once().await
-    }
-
-    /// Number of clients currently in the disconnect candidates list.
-    pub async fn disconnect_candidate_count(&self) -> usize {
-        self.state.disconnect_candidates.read().await.len()
     }
 
     fn require_built_in_jwt_helpers(&self) {

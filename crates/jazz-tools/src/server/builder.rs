@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,7 +5,6 @@ use std::time::Duration;
 use axum::Router;
 use jazz::schema::JazzSchema;
 use jazz_server::StorageConfig;
-use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::middleware::AuthConfig;
@@ -189,40 +187,17 @@ impl ServerBuilder {
             catalogue_store,
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
-            connections: RwLock::new(HashMap::new()),
-            next_connection_id: std::sync::atomic::AtomicU64::new(1),
             auth_config,
             upstream_http_url,
             topology,
             jwt_verifier,
             http_client,
-            disconnect_candidates: RwLock::new(HashMap::new()),
-            client_ttl: RwLock::new(Duration::from_secs(300)),
             #[cfg(any(test, feature = "test-utils"))]
             sync_tracer: self.sync_tracer.clone(),
             core_server: std::sync::RwLock::new(core_server),
             core_server_storage_config,
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
-
-        // Spawn periodic client state sweep (uses Weak so the task exits
-        // when all strong refs to ServerState are dropped, e.g. in tests).
-        {
-            let weak_state = Arc::downgrade(&state);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                loop {
-                    interval.tick().await;
-                    let Some(state) = weak_state.upgrade() else {
-                        break;
-                    };
-                    let reaped = state.run_sweep_once().await;
-                    if !reaped.is_empty() {
-                        tracing::info!(count = reaped.len(), "reaped stale disconnected clients");
-                    }
-                }
-            });
-        }
 
         let app = routes::create_router(state.clone());
         Ok(BuiltServer { state, app })
