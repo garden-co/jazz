@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
 import {
-  PersistentBrowserOpfsProxyRuntime,
+  PersistentBrowserOpfsRuntime,
   type PersistentBrowserOpfsOwnerRequest,
 } from "./persistent-browser-runtime.js";
 
@@ -42,7 +42,7 @@ class FakeWorker {
   }
 }
 
-describe("PersistentBrowserOpfsProxyRuntime", () => {
+describe("PersistentBrowserOpfsRuntime", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     FakeWorker.instances = [];
@@ -51,7 +51,7 @@ describe("PersistentBrowserOpfsProxyRuntime", () => {
   it("waits on the worker transaction id for proxied writes", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
-    const runtime = new PersistentBrowserOpfsProxyRuntime(
+    const runtime = new PersistentBrowserOpfsRuntime(
       undefined,
       schema,
       "persistent-browser-runtime-test",
@@ -91,7 +91,7 @@ describe("PersistentBrowserOpfsProxyRuntime", () => {
   it("terminates locally on close without sending an OPFS owner close command", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
-    const runtime = new PersistentBrowserOpfsProxyRuntime(
+    const runtime = new PersistentBrowserOpfsRuntime(
       undefined,
       schema,
       "persistent-browser-runtime-close-test",

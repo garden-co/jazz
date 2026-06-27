@@ -427,6 +427,7 @@ mod tests {
     use super::*;
     use crate::object::ObjectId;
     use crate::query_manager::policy::{CmpOp, PolicyValue};
+    use crate::query_manager::types::TableSchemaBuilder;
     use crate::schema_api::{
         ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, SchemaBuilder, TablePolicies,
         TableSchema,

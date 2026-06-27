@@ -117,7 +117,7 @@ type RequestArgs<Method extends WorkerMethod> = RequestForMethod<Method>["args"]
 
 export type { OpfsOwnerRequest as PersistentBrowserOpfsOwnerRequest };
 
-export class PersistentBrowserOpfsProxyRuntime implements Runtime {
+export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly worker: Worker;
   private readonly pending = new Map<number, PendingCall>();
   private readonly writes = new Map<string, Promise<string>>();
@@ -360,8 +360,8 @@ export class PersistentBrowserOpfsProxyRuntime implements Runtime {
     method: Method,
     ...args: RequestArgs<Method>
   ): void {
-    // This class is only the main-thread OPFS proxy. The worker owns the real
-    // CoreRuntime, so durability waits must use the worker's transaction id.
+    // The worker owns the real CoreRuntime, so durability waits must use the
+    // worker's transaction id.
     const write = this.opened.then(async () => {
       const result = (await this.send(method, args)) as { transactionId: string };
       return result.transactionId;

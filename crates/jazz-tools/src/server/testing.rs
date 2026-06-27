@@ -31,7 +31,6 @@ pub struct JazzServerBuilder {
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
-    sqlite_storage: bool,
     rocksdb_storage: bool,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
@@ -79,15 +78,6 @@ impl JazzServerBuilder {
     }
 
     pub fn with_persistent_storage(mut self) -> Self {
-        self.persistent_storage = true;
-        self
-    }
-
-    /// Use SQLite as the server storage backend, regardless of which other
-    /// storage features are compiled in.  Implies persistent storage.
-    #[cfg(feature = "sqlite")]
-    pub fn with_sqlite_storage(mut self) -> Self {
-        self.sqlite_storage = true;
         self.persistent_storage = true;
         self
     }
@@ -270,7 +260,6 @@ impl JazzServer {
             data_dir,
             schema,
             persistent_storage,
-            sqlite_storage,
             rocksdb_storage,
             admin_secret,
             backend_secret,
@@ -317,7 +306,6 @@ impl JazzServer {
             server_builder,
             storage_data_dir,
             persistent_storage,
-            sqlite_storage,
             rocksdb_storage,
         );
 
@@ -617,13 +605,8 @@ fn apply_storage_mode(
     builder: ServerBuilder,
     data_dir: PathBuf,
     persistent: bool,
-    #[allow(unused_variables)] sqlite: bool,
     #[allow(unused_variables)] rocksdb: bool,
 ) -> ServerBuilder {
-    #[cfg(feature = "sqlite")]
-    if sqlite {
-        return builder.with_storage(StorageBackend::Sqlite { path: data_dir });
-    }
     #[cfg(feature = "rocksdb")]
     if rocksdb {
         return builder.with_storage(StorageBackend::RocksDb { path: data_dir });
