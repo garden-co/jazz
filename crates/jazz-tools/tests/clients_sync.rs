@@ -564,7 +564,7 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
 
 #[cfg(feature = "direct-core-client")]
 #[tokio::test(flavor = "current_thread")]
-async fn wait_for_batch_reaches_edge_tier_with_direct_core_local_driver() {
+async fn wait_for_batch_reaches_edge_and_global_tiers_with_direct_core_local_driver() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
@@ -591,7 +591,11 @@ async fn wait_for_batch_reaches_edge_tier_with_direct_core_local_driver() {
             alice
                 .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
                 .await
-                .expect("wait_for_batch should resolve from scheduled direct-core progress");
+                .expect("edge wait_for_batch should resolve from scheduled direct-core progress");
+            alice
+                .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+                .await
+                .expect("global wait_for_batch should resolve from scheduled direct-core progress");
 
             alice.shutdown().await.expect("shutdown alice");
             server.shutdown().await;
