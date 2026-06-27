@@ -6,16 +6,32 @@ use std::sync::Mutex;
 
 use crate::catalogue::CatalogueEntry;
 use crate::object::ObjectId;
-use crate::storage::StorageError;
 
 pub(crate) type DynCatalogueStorage = Box<dyn CatalogueStorage + Send>;
+pub(crate) type CatalogueStorageResult<T> = Result<T, CatalogueStorageError>;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) enum CatalogueStorageError {
+    IoError(String),
+}
+
+impl std::fmt::Display for CatalogueStorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CatalogueStorageError::IoError(message) => write!(f, "IO error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for CatalogueStorageError {}
 
 pub(crate) trait CatalogueStorage {
-    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError>;
-    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError>;
-    fn flush(&self) -> Result<(), StorageError>;
-    fn flush_wal(&self) -> Result<(), StorageError>;
-    fn close(&self) -> Result<(), StorageError>;
+    fn scan_catalogue_entries(&self) -> CatalogueStorageResult<Vec<CatalogueEntry>>;
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()>;
+    fn flush(&self) -> CatalogueStorageResult<()>;
+    fn flush_wal(&self) -> CatalogueStorageResult<()>;
+    fn close(&self) -> CatalogueStorageResult<()>;
 }
 
 #[derive(Default)]
@@ -30,24 +46,24 @@ impl CatalogueMemoryStorage {
 }
 
 impl CatalogueStorage for CatalogueMemoryStorage {
-    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+    fn scan_catalogue_entries(&self) -> CatalogueStorageResult<Vec<CatalogueEntry>> {
         Ok(self.entries.values().cloned().collect())
     }
 
-    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()> {
         self.entries.insert(entry.object_id, entry.clone());
         Ok(())
     }
 
-    fn flush(&self) -> Result<(), StorageError> {
+    fn flush(&self) -> CatalogueStorageResult<()> {
         Ok(())
     }
 
-    fn flush_wal(&self) -> Result<(), StorageError> {
+    fn flush_wal(&self) -> CatalogueStorageResult<()> {
         Ok(())
     }
 
-    fn close(&self) -> Result<(), StorageError> {
+    fn close(&self) -> CatalogueStorageResult<()> {
         Ok(())
     }
 }
@@ -64,7 +80,7 @@ impl CatalogueRocksDbStorage {
     pub(crate) fn open(
         path: impl AsRef<Path>,
         cache_size_bytes: usize,
-    ) -> Result<Self, StorageError> {
+    ) -> CatalogueStorageResult<Self> {
         let mut block_opts = rocksdb::BlockBasedOptions::default();
         block_opts.set_bloom_filter(10.0, false);
         let cache = rocksdb::Cache::new_lru_cache(cache_size_bytes);
@@ -76,8 +92,9 @@ impl CatalogueRocksDbStorage {
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
 
-        let db = rocksdb::DB::open(&opts, path.as_ref())
-            .map_err(|error| StorageError::IoError(format!("catalogue rocksdb open: {error}")))?;
+        let db = rocksdb::DB::open(&opts, path.as_ref()).map_err(|error| {
+            CatalogueStorageError::IoError(format!("catalogue rocksdb open: {error}"))
+        })?;
         Ok(Self {
             db: Mutex::new(Some(db)),
         })
@@ -85,14 +102,13 @@ impl CatalogueRocksDbStorage {
 
     fn with_db<T>(
         &self,
-        f: impl FnOnce(&rocksdb::DB) -> Result<T, StorageError>,
-    ) -> Result<T, StorageError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| StorageError::IoError("catalogue rocksdb mutex poisoned".to_string()))?;
+        f: impl FnOnce(&rocksdb::DB) -> CatalogueStorageResult<T>,
+    ) -> CatalogueStorageResult<T> {
+        let db = self.db.lock().map_err(|_| {
+            CatalogueStorageError::IoError("catalogue rocksdb mutex poisoned".to_string())
+        })?;
         let db = db.as_ref().ok_or_else(|| {
-            StorageError::IoError("catalogue rocksdb storage already closed".to_string())
+            CatalogueStorageError::IoError("catalogue rocksdb storage already closed".to_string())
         })?;
         f(db)
     }
@@ -107,7 +123,7 @@ impl CatalogueRocksDbStorage {
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 impl CatalogueStorage for CatalogueRocksDbStorage {
-    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+    fn scan_catalogue_entries(&self) -> CatalogueStorageResult<Vec<CatalogueEntry>> {
         self.with_db(|db| {
             let mut read_opts = rocksdb::ReadOptions::default();
             read_opts.set_iterate_upper_bound(b"cat;".to_vec());
@@ -118,21 +134,21 @@ impl CatalogueStorage for CatalogueRocksDbStorage {
             let mut entries = Vec::new();
             for item in iter {
                 let (key, value) = item.map_err(|error| {
-                    StorageError::IoError(format!("catalogue rocksdb iter: {error}"))
+                    CatalogueStorageError::IoError(format!("catalogue rocksdb iter: {error}"))
                 })?;
                 let Some(hex_id) = key.strip_prefix(Self::ENTRY_PREFIX) else {
                     continue;
                 };
                 let uuid = uuid::Uuid::parse_str(std::str::from_utf8(hex_id).map_err(|error| {
-                    StorageError::IoError(format!("catalogue rocksdb key utf8: {error}"))
+                    CatalogueStorageError::IoError(format!("catalogue rocksdb key utf8: {error}"))
                 })?)
                 .map_err(|error| {
-                    StorageError::IoError(format!("catalogue rocksdb key uuid: {error}"))
+                    CatalogueStorageError::IoError(format!("catalogue rocksdb key uuid: {error}"))
                 })?;
                 let object_id = ObjectId::from_uuid(uuid);
                 let entry =
                     CatalogueEntry::decode_storage_row(object_id, &value).map_err(|error| {
-                        StorageError::IoError(format!("decode catalogue entry: {error}"))
+                        CatalogueStorageError::IoError(format!("decode catalogue entry: {error}"))
                     })?;
                 entries.push(entry);
             }
@@ -141,36 +157,41 @@ impl CatalogueStorage for CatalogueRocksDbStorage {
         })
     }
 
-    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()> {
         self.with_db(|db| {
             let bytes = entry.encode_storage_row().map_err(|error| {
-                StorageError::IoError(format!("encode catalogue entry: {error}"))
+                CatalogueStorageError::IoError(format!("encode catalogue entry: {error}"))
             })?;
             db.put(Self::entry_key(entry.object_id), bytes)
-                .map_err(|error| StorageError::IoError(format!("catalogue rocksdb put: {error}")))
+                .map_err(|error| {
+                    CatalogueStorageError::IoError(format!("catalogue rocksdb put: {error}"))
+                })
         })
     }
 
-    fn flush(&self) -> Result<(), StorageError> {
+    fn flush(&self) -> CatalogueStorageResult<()> {
         self.with_db(|db| {
-            db.flush()
-                .map_err(|error| StorageError::IoError(format!("catalogue rocksdb flush: {error}")))
-        })
-    }
-
-    fn flush_wal(&self) -> Result<(), StorageError> {
-        self.with_db(|db| {
-            db.flush_wal(true).map_err(|error| {
-                StorageError::IoError(format!("catalogue rocksdb flush_wal: {error}"))
+            db.flush().map_err(|error| {
+                CatalogueStorageError::IoError(format!("catalogue rocksdb flush: {error}"))
             })
         })
     }
 
-    fn close(&self) -> Result<(), StorageError> {
+    fn flush_wal(&self) -> CatalogueStorageResult<()> {
+        self.with_db(|db| {
+            db.flush_wal(true).map_err(|error| {
+                CatalogueStorageError::IoError(format!("catalogue rocksdb flush_wal: {error}"))
+            })
+        })
+    }
+
+    fn close(&self) -> CatalogueStorageResult<()> {
         let Some(db) = self
             .db
             .lock()
-            .map_err(|_| StorageError::IoError("catalogue rocksdb mutex poisoned".to_string()))?
+            .map_err(|_| {
+                CatalogueStorageError::IoError("catalogue rocksdb mutex poisoned".to_string())
+            })?
             .take()
         else {
             return Ok(());

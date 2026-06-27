@@ -21,7 +21,6 @@ mod storage_core;
 mod storage_trait;
 #[allow(unused_imports)]
 pub use memory::MemoryStorage;
-pub use storage_trait::SchemaCatalogueStorage;
 pub use storage_trait::Storage;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 mod rocksdb;

@@ -19,8 +19,8 @@ use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
     Value,
 };
+use crate::schema_manager::catalogue_storage::SchemaManagerCatalogueStorage;
 use crate::schema_manager::rehydrate::latest_catalogue_content;
-use crate::storage::SchemaCatalogueStorage;
 use crate::sync::clock::MonotonicClock;
 use crate::sync::vocabulary::ConnectionSchemaDiagnostics;
 use uuid::Uuid;
@@ -619,7 +619,7 @@ impl SchemaManager {
     // Catalogue Persistence
     // =========================================================================
 
-    fn persist_catalogue_object_if_changed<H: SchemaCatalogueStorage>(
+    fn persist_catalogue_object_if_changed<H: SchemaManagerCatalogueStorage>(
         &mut self,
         storage: &mut H,
         object_id: ObjectId,
@@ -653,7 +653,7 @@ impl SchemaManager {
         self.catalogue_clock.reserve_timestamp()
     }
 
-    fn upsert_catalogue_entry<H: SchemaCatalogueStorage>(
+    fn upsert_catalogue_entry<H: SchemaManagerCatalogueStorage>(
         &mut self,
         storage: &mut H,
         entry: CatalogueEntry,
@@ -675,7 +675,7 @@ impl SchemaManager {
         self.pending_catalogue_updates.push(entry);
     }
 
-    pub fn ensure_current_schema_persisted<H: SchemaCatalogueStorage>(
+    pub fn ensure_current_schema_persisted<H: SchemaManagerCatalogueStorage>(
         &mut self,
         storage: &mut H,
     ) -> bool {
@@ -707,7 +707,10 @@ impl SchemaManager {
     /// will receive this via catalogue sync.
     ///
     /// Returns the ObjectId of the stored schema object.
-    pub fn persist_schema<H: SchemaCatalogueStorage>(&mut self, storage: &mut H) -> ObjectId {
+    pub fn persist_schema<H: SchemaManagerCatalogueStorage>(
+        &mut self,
+        storage: &mut H,
+    ) -> ObjectId {
         let schema_hash = self.context.current_hash;
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
@@ -731,7 +734,7 @@ impl SchemaManager {
     /// Persist any schema to the catalogue as an Object.
     ///
     /// Used when seeding or syncing historical schema versions.
-    pub fn persist_schema_object<H: SchemaCatalogueStorage>(
+    pub fn persist_schema_object<H: SchemaManagerCatalogueStorage>(
         &mut self,
         storage: &mut H,
         schema: &Schema,
@@ -764,7 +767,7 @@ impl SchemaManager {
     /// will receive this via catalogue sync.
     ///
     /// Returns the ObjectId of the stored lens object.
-    pub fn persist_lens<H: SchemaCatalogueStorage>(
+    pub fn persist_lens<H: SchemaManagerCatalogueStorage>(
         &mut self,
         storage: &mut H,
         lens: &Lens,
@@ -788,7 +791,7 @@ impl SchemaManager {
         object_id
     }
 
-    pub fn persist_current_permissions<H: SchemaCatalogueStorage>(
+    pub fn persist_current_permissions<H: SchemaManagerCatalogueStorage>(
         &mut self,
         storage: &mut H,
     ) -> Option<ObjectId> {
@@ -832,7 +835,7 @@ impl SchemaManager {
         Some(head_object_id)
     }
 
-    pub fn publish_permissions_bundle<H: SchemaCatalogueStorage>(
+    pub fn publish_permissions_bundle<H: SchemaManagerCatalogueStorage>(
         &mut self,
         storage: &mut H,
         schema_hash: SchemaHash,
@@ -887,7 +890,7 @@ impl SchemaManager {
 
     /// Register a reviewed lens in memory, activate any newly reachable schemas,
     /// and persist the corresponding catalogue object for sync.
-    pub fn publish_lens<H: SchemaCatalogueStorage>(
+    pub fn publish_lens<H: SchemaManagerCatalogueStorage>(
         &mut self,
         storage: &mut H,
         lens: &Lens,
@@ -1344,7 +1347,7 @@ impl SchemaManager {
     }
 
     /// Process pending catalogue operations published by this manager.
-    pub fn process<H: SchemaCatalogueStorage>(&mut self, storage: &mut H) {
+    pub fn process<H: SchemaManagerCatalogueStorage>(&mut self, storage: &mut H) {
         let _ = storage;
         let _span = tracing::debug_span!("SM::process").entered();
 
@@ -1364,7 +1367,7 @@ impl SchemaManager {
     }
 }
 
-fn latest_catalogue_content_matches<H: SchemaCatalogueStorage + ?Sized>(
+fn latest_catalogue_content_matches<H: SchemaManagerCatalogueStorage + ?Sized>(
     storage: &H,
     object_id: ObjectId,
     expected: &[u8],
