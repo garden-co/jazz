@@ -91,18 +91,26 @@ describe("direct websocket include subscriptions", () => {
     await ensureDirectRuntimeReady(dbB);
 
     const snapshots: OrgWithDeepIncludes[][] = [];
+    const selectedIncludeQuery = app.orgs
+      .include({
+        todosViaOrg: app.todos.select("title").include({
+          user_checksViaTodo: { check_notesViaUser_check: true },
+        }),
+      })
+      .requireIncludes();
     const unsubscribe = ctx.trackSubscription(
       dbB.subscribeAll(
-        app.orgs
-          .include({
-            todosViaOrg: { user_checksViaTodo: { check_notesViaUser_check: true } },
-          })
-          .requireIncludes(),
+        selectedIncludeQuery,
         (delta) => {
           snapshots.push(delta.all as OrgWithDeepIncludes[]);
         },
         { tier: "global" },
       ),
+    );
+    await waitForCondition(
+      async () => snapshots.length > 0,
+      10_000,
+      "client B subscribeAll did not produce an initial snapshot",
     );
 
     const org = await withTimeout(
@@ -134,9 +142,28 @@ describe("direct websocket include subscriptions", () => {
 
     await waitForCondition(
       async () =>
-        snapshots.some((rows) => includesNote(rows, org.id, todo.id, userCheck.id, note.id)),
+        snapshots.some(
+          (rows) =>
+            includesNote(rows, org.id, todo.id, userCheck.id, note.id) &&
+            hasProjectedTodo(rows, org.id, todo.id, "ship it"),
+        ),
       15_000,
-      `client B subscribeAll received client A's depth-3 reverse include check_note; snapshots=${JSON.stringify(
+      `client B subscribeAll received client A's projected depth-3 reverse include; snapshots=${JSON.stringify(
+        snapshots.slice(-3),
+      )}`,
+    );
+
+    await withTimeout(
+      dbA.update(app.todos, todo.id, { title: "ship it again" }).wait({ tier: "global" }),
+      10_000,
+      "client A todo update did not reach the server",
+    );
+
+    await waitForCondition(
+      async () =>
+        snapshots.some((rows) => hasProjectedTodo(rows, org.id, todo.id, "ship it again")),
+      15_000,
+      `client B subscribeAll received projected client A todo update; snapshots=${JSON.stringify(
         snapshots.slice(-3),
       )}`,
     );
@@ -145,6 +172,9 @@ describe("direct websocket include subscriptions", () => {
     expect(
       snapshots.some((rows) => includesNote(rows, org.id, todo.id, userCheck.id, note.id)),
     ).toBe(true);
+    expect(snapshots.some((rows) => hasProjectedTodo(rows, org.id, todo.id, "ship it again"))).toBe(
+      true,
+    );
   }, 60_000);
 });
 
@@ -200,16 +230,38 @@ function includesNote(
   return rows.some(
     (org) =>
       org.id === orgId &&
-      org.todosViaOrg?.some(
+      Array.isArray(org.todosViaOrg) &&
+      org.todosViaOrg.some(
         (todo) =>
           todo.id === todoId &&
-          todo.user_checksViaTodo?.some(
+          Array.isArray(todo.user_checksViaTodo) &&
+          todo.user_checksViaTodo.some(
             (userCheck) =>
               userCheck.id === userCheckId &&
-              userCheck.check_notesViaUser_check?.some((note) => note.id === noteId),
+              Array.isArray(userCheck.check_notesViaUser_check) &&
+              userCheck.check_notesViaUser_check.some((note) => note.id === noteId),
           ),
       ),
   );
+}
+
+function hasProjectedTodo(
+  rows: OrgWithDeepIncludes[],
+  orgId: string,
+  todoId: string,
+  title: string,
+): boolean {
+  return rows.some((org) => {
+    if (org.id !== orgId) return false;
+    if (!Array.isArray(org.todosViaOrg)) return false;
+    const todo = org.todosViaOrg.find((candidate) => candidate.id === todoId);
+    return (
+      todo?.title === title &&
+      !("org_id" in todo) &&
+      !("org" in todo) &&
+      Array.isArray(todo.user_checksViaTodo)
+    );
+  });
 }
 
 async function ensureDirectRuntimeReady(db: Db): Promise<void> {
