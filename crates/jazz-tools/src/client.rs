@@ -7,8 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-#[cfg(feature = "test-utils")]
-use crate::public_api::types::RowPolicyMode;
 use crate::public_schema::OrderedRowDelta;
 use crate::public_schema::Schema;
 use crate::public_schema::TableName;
@@ -1277,14 +1275,6 @@ impl JazzClient {
         }
     }
 
-    #[cfg(feature = "test-utils")]
-    pub async fn connect_with_row_policy_mode(
-        context: AppContext,
-        _row_policy_mode: RowPolicyMode,
-    ) -> Result<Self> {
-        Self::connect_inner(context).await
-    }
-
     /// Subscribe to a query.
     ///
     /// Returns a stream of row deltas as the data changes.
@@ -1486,14 +1476,6 @@ impl JazzClient {
         crate::JazzClient::connect(context)
             .await
             .expect("connect local JazzClient")
-    }
-    pub async fn permissive_test_client(schema: Schema) -> crate::JazzClient {
-        crate::JazzClient::connect_with_row_policy_mode(
-            crate::AppContext::test(schema),
-            RowPolicyMode::PermissiveLocal,
-        )
-        .await
-        .expect("connect permissive local JazzClient")
     }
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadWasmModule } from "../../src/runtime/client.js";
-import { NativeRuntimeAdapter } from "../../src/runtime/core-runtime/native-runtime-adapter.js";
+import { NativeRuntimeAdapter } from "../../src/runtime/native-runtime/native-runtime-adapter.js";
 import {
   createSyntheticRuntimeSchema,
   runSchemaMarshallingBench,
