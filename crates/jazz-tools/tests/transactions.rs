@@ -391,7 +391,7 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
     server.shutdown().await;
 }
 
-/// Client local runtime inserts one staged transactional row.
+/// Client inserts one staged transactional row.
 /// The transaction updates that same row again before sealing.
 /// The latest accepted row should reflect the update.
 #[tokio::test]

@@ -9,9 +9,9 @@ mod builder;
 mod catalogue;
 mod catalogue_entry;
 mod catalogue_storage;
-mod local_engine;
 pub mod routes;
 pub(crate) mod schema_convert;
+mod server_shell;
 mod shutdown;
 #[cfg(feature = "test-utils")]
 mod testing;
@@ -54,9 +54,7 @@ impl ServerTopology {
 
 /// Server state shared across request handlers.
 pub struct ServerState {
-    /// Direct, storage-backed admin catalogue store. Production websocket sync,
-    /// row storage, query execution, and client lifecycle are owned by
-    /// the local-owner engine handle.
+    /// Direct, storage-backed admin catalogue store.
     pub(crate) catalogue_store: StoredCatalogue,
     pub(crate) catalogue: ServerCatalogue,
     #[allow(dead_code)]
@@ -71,35 +69,35 @@ pub struct ServerState {
     pub http_client: reqwest::Client,
     /// Configured verifier for external JWTs.
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
-    /// Sendable handle to the local-owner engine peer loop for the websocket route.
-    pub(crate) local_engine: StdRwLock<Option<local_engine::LocalEngineHandle>>,
-    pub(crate) local_engine_storage_config: Option<StorageConfig>,
+    /// Sendable handle to the local-owner server shell for the websocket route.
+    pub(crate) server_shell: StdRwLock<Option<server_shell::ServerShellHandle>>,
+    pub(crate) server_shell_storage_config: Option<StorageConfig>,
     pub shutdown: ShutdownController,
 }
 
 impl ServerState {
-    pub(crate) fn local_engine(&self) -> Option<local_engine::LocalEngineHandle> {
-        self.local_engine.read().unwrap().clone()
+    pub(crate) fn server_shell(&self) -> Option<server_shell::ServerShellHandle> {
+        self.server_shell.read().unwrap().clone()
     }
 
-    pub(crate) fn start_local_engine(
+    pub(crate) fn start_server_shell(
         &self,
         schema: jazz::schema::JazzSchema,
-    ) -> Result<local_engine::LocalEngineHandle, String> {
-        if let Some(local_engine) = self.local_engine() {
-            return Ok(local_engine);
+    ) -> Result<server_shell::ServerShellHandle, String> {
+        if let Some(server_shell) = self.server_shell() {
+            return Ok(server_shell);
         }
 
         let storage_config = self
-            .local_engine_storage_config
+            .server_shell_storage_config
             .clone()
-            .ok_or_else(|| "local engine storage is not configured".to_owned())?;
-        let mut local_engine = self.local_engine.write().unwrap();
-        if let Some(existing) = local_engine.clone() {
+            .ok_or_else(|| "server shell storage is not configured".to_owned())?;
+        let mut server_shell = self.server_shell.write().unwrap();
+        if let Some(existing) = server_shell.clone() {
             return Ok(existing);
         }
-        let started = local_engine::LocalEngineHandle::start_with_storage(schema, storage_config)?;
-        *local_engine = Some(started.clone());
+        let started = server_shell::ServerShellHandle::start_with_storage(schema, storage_config)?;
+        *server_shell = Some(started.clone());
         Ok(started)
     }
 
@@ -243,8 +241,8 @@ mod tests {
                 .build()
                 .expect("build HTTP client"),
             jwt_verifier: None,
-            local_engine: StdRwLock::new(None),
-            local_engine_storage_config: None,
+            server_shell: StdRwLock::new(None),
+            server_shell_storage_config: None,
             shutdown: ShutdownController::new(timeout),
         })
     }

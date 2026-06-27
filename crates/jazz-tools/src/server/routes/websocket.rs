@@ -538,7 +538,7 @@ async fn handle_ws_connection(
         }
     };
 
-    let Some(local_engine) = state.local_engine() else {
+    let Some(server_shell) = state.server_shell() else {
         send_ws_error(
             &mut socket,
             WireError::new(
@@ -551,7 +551,7 @@ async fn handle_ws_connection(
         let _ = socket.close().await;
         return;
     };
-    let session = match local_engine
+    let session = match server_shell
         .open(admission.identity, admission.claims, admission.trust)
         .await
     {
@@ -598,12 +598,12 @@ async fn handle_ws_connection(
         "websocket negotiated"
     );
 
-    let mut activity_rx = local_engine.subscribe_activity();
-    if drain_ws_outbound(&mut socket, &local_engine, session)
+    let mut activity_rx = server_shell.subscribe_activity();
+    if drain_ws_outbound(&mut socket, &server_shell, session)
         .await
         .is_err()
     {
-        local_engine.close(session);
+        server_shell.close(session);
         let _ = socket.close().await;
         return;
     }
@@ -648,7 +648,7 @@ async fn handle_ws_connection(
                             break;
                         }
                     };
-                    let outbound = match local_engine.receive_tick_take(session, frames).await {
+                    let outbound = match server_shell.receive_tick_take(session, frames).await {
                         Ok(frames) => frames,
                         Err(error) => {
                             send_ws_error(
@@ -675,23 +675,23 @@ async fn handle_ws_connection(
                 if changed.is_err() {
                     break;
                 }
-                if drain_ws_outbound(&mut socket, &local_engine, session).await.is_err() {
+                if drain_ws_outbound(&mut socket, &server_shell, session).await.is_err() {
                     break;
                 }
             }
         }
     }
 
-    local_engine.close(session);
+    server_shell.close(session);
     let _ = socket.close().await;
 }
 
 async fn drain_ws_outbound(
     socket: &mut WebSocket,
-    local_engine: &crate::server::local_engine::LocalEngineHandle,
+    server_shell: &crate::server::server_shell::ServerShellHandle,
     session: jazz_server::ServerSession,
 ) -> Result<(), ()> {
-    let outbound = local_engine.tick_take(session).await.map_err(|_| ())?;
+    let outbound = server_shell.tick_take(session).await.map_err(|_| ())?;
     if outbound.is_empty() {
         return Ok(());
     }
@@ -952,7 +952,7 @@ mod tests {
             })
             .with_storage(StorageBackend::InMemory)
             .with_schema(Schema::new())
-            .with_local_engine_schema(schema)
+            .with_server_shell_schema(schema)
             .build()
             .await
             .expect("build websocket convergence test state")
@@ -987,10 +987,10 @@ mod tests {
         );
     }
 
-    // Internal admission-boundary test: local engine policy reads are not yet
+    // Internal admission-boundary test: server-shell policy reads are not yet
     // observable through a public websocket client helper, so this pins
     // the security invariant at the route admission point that feeds
-    // LocalEngineHandle::open(identity, claims, trust).
+    // ServerShellHandle::open(identity, claims, trust).
     #[tokio::test]
     async fn ws_backend_session_admits_session_claims_for_policy_reads() {
         let state = make_ws_test_state().await;
@@ -1609,7 +1609,7 @@ mod tests {
     }
 
     // Internal route-boundary test: identity isolation is enforced before the
-    // local engine has a higher-level public client surface to observe.
+    // server shell has a higher-level public client surface to observe.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn peer_identity_eviction_does_not_affect_other_identities() {
         let state = make_ws_convergence_test_state().await;
