@@ -288,7 +288,7 @@ describe("alpha public package flow", () => {
     expect((await dbB.all(app.todos)).some((todo) => todo.id === secondRow.id)).toBe(false);
   });
 
-  it.skip("TODO(alpha direct core): keeps deleted rows hidden by default and restores them over websocket; blocked on websocket subscription convergence after direct-core edge writes", async () => {
+  it.skip("TODO(alpha direct core): keeps deleted rows hidden by default and restores them over websocket; blocked because a fresh websocket client cannot query the edge-accepted restore", async () => {
     const requestedAppId = uniqueDbName("alpha-public-delete-restore");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
@@ -356,7 +356,7 @@ describe("alpha public package flow", () => {
     expect(rowsOnB).toEqual([restored]);
   });
 
-  it.skip("TODO(alpha direct core): exposes edge-confirmed browser deletes through includeDeleted over direct websocket; blocked on websocket includeDeleted convergence after direct-core edge writes", async () => {
+  it("exposes edge-confirmed browser deletes through includeDeleted over direct websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-include-deleted");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
@@ -389,7 +389,7 @@ describe("alpha public package flow", () => {
     expect(Object.keys(deletedTodo).includes("deleted")).toBe(false);
   });
 
-  it.skip("TODO(alpha direct core): opens public file/blob helpers with persistent OPFS and direct websocket server config, then converges file rows; blocked on direct-core worker runtime plus blob persistence reopen", async () => {
+  it("opens public file/blob helpers with persistent OPFS and direct websocket server config, then converges file rows", async () => {
     const requestedAppId = uniqueDbName("alpha-public-file-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, filePermissions, fileApp);
