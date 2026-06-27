@@ -355,7 +355,9 @@ export class PostcardWriter {
 
   bytes(value: Uint8Array, withLength = true): void {
     if (withLength) this.u64(value.length);
-    this.chunks.push(...value);
+    for (let offset = 0; offset < value.length; offset += 16_384) {
+      this.chunks.push(...value.subarray(offset, offset + 16_384));
+    }
   }
 
   vec(writeItem: (writer: PostcardWriter, index: number) => void, length: number): void {
