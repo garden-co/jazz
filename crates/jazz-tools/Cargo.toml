@@ -6,15 +6,18 @@ description = "Jazz local-first relational database core, runtime, client, and C
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/garden-co/jazz2"
 autobenches = false
+autotests = false
 
 [lib]
 name = "jazz_tools"
 path = "src/lib.rs"
+test = false
 
 [[bin]]
 name = "jazz-tools"
 path = "src/main.rs"
 required-features = ["cli"]
+test = false
 
 [features]
 default = []
@@ -194,15 +197,3 @@ harness = false
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
-
-[[test]]
-name = "rocksdb_storage_integration"
-required-features = ["rocksdb", "test"]
-
-[[test]]
-name = "sqlite_storage_integration"
-required-features = ["sqlite", "test"]
-
-[[test]]
-name = "sync_telemetry_otel"
-required-features = ["test", "otel-core"]

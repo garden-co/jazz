@@ -120,10 +120,10 @@ The grafted package now also has a browser alpha public-flow gate in
 slice proves public `schema.defineApp`, `createDb({ driver: "persistent" })`,
 direct in-process core construction, CRUD, `db.one`, `subscribeAll`, and
 read-your-writes in one browser session. The same file keeps skipped TODO gates
-for the remaining honest blockers: browser edge waits need the WASM
-`nextWriteStateChange` write-state bridge, and direct in-process browser
-persistence needs a durable flush/reopen gate before OPFS reload parity can be
-claimed.
+for the remaining honest blockers: direct in-process browser persistence needs
+a durable flush/reopen gate before OPFS reload parity can be claimed, and the
+websocket gates still need cross-client subscription convergence over the real
+Rust server boundary.
 
 ## Current gaps versus alpha
 
@@ -266,13 +266,10 @@ claimed.
   `loadFileAsBlob`/`loadFileAsStream`, with NAPI persistence coverage for
   `files.data`. This is still not upload routing, bounded streaming, durable
   object storage, resumable transfer, or full public file API compatibility.
-- The browser worker smoke also exercises `dbCanUpdateEncodedForIdentity` over
-  the worker boundary for the basic owner-policy todo flow, allowing the owner
-  and denying a different deterministic identity.
-- The browser worker example now owns its local direct worker helpers instead of
-  importing the deleted alpha `abi-helpers` package fragment. The worker now
-  owns direct `WasmDb` and transport objects, with rows/cells crossing the
-  worker boundary as Record-encoded bytes.
+- The old browser worker/broker package path has been deleted from the graft.
+  The package currently opens direct in-process browser `WasmDb` instances; the
+  next browser architecture work should reintroduce a worker only as the real
+  persistent-client owner, not as a parallel broker compatibility layer.
 - Node HTTP, todo WebSocket, shared-todo WebSocket, and chat WebSocket smokes
   now run directly on `createDb`/`WasmDb.connectUpstream()`. WebSocket frames are
   opaque byte batches; row decoding stays at the app/test edge.
@@ -326,8 +323,8 @@ claimed.
 8. **Polish WebSocket protocol details later.** Current batched raw
    `WireFrame` bytes are good enough unless they block another target; full
    handshake/resume/control envelope design can wait.
-   The immediate browser blocker is not frame shape but the missing WASM
-   `nextWriteStateChange` bridge used by `WriteResult.wait({ tier: "edge" })`.
+   The immediate browser blockers are direct-core OPFS reopen durability and
+   cross-client subscription convergence over the real Rust server boundary.
 9. **Defer React Native; keep NAPI as a parity gate.** NAPI now has direct-core
    CRUD/subscription/policy/persistence/edge-sync coverage and should stay in
    the green path. React Native remains deferred until the browser/server/API
@@ -349,7 +346,9 @@ positive two-load smoke for that shape backed by real OPFS storage.
 `Survive reload`, waits for local durability, and closes the DB/storage after
 the write flushes. `?smoke=reload-verify&ns=...` starts a fresh worker,
 reopens the same browser storage namespace, subscribes to `todos`, asserts
-`Survive reload:open`, and removes the OPFS file for that namespace.
+`Survive reload:open`, and removes the OPFS file for that namespace. The
+grafted `jazz-tools` package has not yet proved the same reopen behavior through
+the public `createDb` facade; that is the current browser storage gate.
 
 The old temporary reload path has been removed, and there is no separate
 TypeScript OPFS adapter in this example. Remaining browser durability work is

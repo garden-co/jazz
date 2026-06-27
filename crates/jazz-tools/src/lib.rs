@@ -1,10 +1,3 @@
-#![allow(
-    dead_code,
-    unused_imports,
-    clippy::await_holding_refcell_ref,
-    clippy::wrong_self_convention
-)]
-
 pub mod batch_fate;
 pub mod catalogue;
 pub mod commit;
@@ -25,10 +18,12 @@ pub(crate) mod row_histories;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod runtime_core;
 #[cfg(not(feature = "test-utils"))]
+#[allow(dead_code, unused_imports)]
 pub(crate) mod runtime_core;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
+#[allow(dead_code)]
 pub mod storage;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod sync_manager;
@@ -48,6 +43,7 @@ pub mod transport_protocol;
 pub(crate) mod ws_stream;
 
 #[cfg(feature = "client")]
+#[allow(clippy::await_holding_refcell_ref)]
 mod client;
 
 #[cfg(feature = "client")]
