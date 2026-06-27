@@ -308,16 +308,21 @@ auth/admission integration gap, not a row encoding or React subscription gap.
   `files.data`. This is still not upload routing, bounded streaming, durable
   object storage, resumable transfer, or full public file API compatibility.
 - The old browser worker/broker package path has been deleted from the graft.
-  The package currently opens direct in-process browser `WasmDb` instances; the
-  next browser architecture work should reintroduce a worker only as the real
-  persistent-client owner, not as a parallel broker compatibility layer.
+  Browser memory clients still use the in-process direct `CoreRuntime` path, but
+  persistent browser clients now use one dedicated OPFS-owner worker through
+  `PersistentBrowserOpfsProxyRuntime`. That worker owns the real
+  `WasmDb.openBrowser(...)` database because OPFS requires worker ownership; it
+  is not a compatibility broker, tab leader, or second engine.
 - Node HTTP, todo WebSocket, shared-todo WebSocket, and chat WebSocket smokes
   now run directly on `createDb`/`WasmDb.connectUpstream()`. WebSocket frames are
   opaque byte batches; row decoding stays at the app/test edge.
 - Legacy alpha websocket transport has been deleted from the graft. The old
   `runtime_core`/`runtime_tokio` runtime modules remain quarantined behind
   `legacy-alpha-engine` for migration tests and binding fallout. Production-facing
-  direct-core client/server checks compile without that feature. Remaining old
+  direct-core client/server checks compile without that feature. The desired
+  end state is deletion, not long-term quarantine: each remaining use should
+  either become a direct-core regression test, move behind a high-level API shell
+  that talks to `CoreRuntime`/`Db`, or disappear. Remaining old
   `query_manager`/`sync_manager`/storage code should be treated as public
   schema/query facade or catalogue scaffolding until it is ported to core-native
   types, not as a second engine to extend.
