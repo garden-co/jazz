@@ -32,6 +32,9 @@ type OpenRequest = {
   ];
 };
 
+// This protocol exists because OPFS-backed browser storage must be opened and
+// used from a dedicated worker. The main thread keeps the Runtime shape and
+// proxies calls to the worker that owns the real CoreRuntime instance.
 type WriteRequest =
   | {
       id: number;
@@ -79,7 +82,7 @@ type WriteRequest =
       args: [table: string, objectId: string, writeContext: string | null | undefined];
     };
 
-type WorkerRequest =
+type OpfsOwnerRequest =
   | OpenRequest
   | WriteRequest
   | {
@@ -109,19 +112,18 @@ type WorkerRequest =
     }
   | { id: number; method: "executeSubscription"; args: [handle: number] }
   | { id: number; method: "unsubscribe"; args: [handle: number] }
-  | { id: number; method: "close"; args: [] }
   | { id: number; method: "clearClientStorage"; args: [] }
   | { id: number; method: "connect"; args: [url: string, authJson: string] }
   | { id: number; method: "disconnect"; args: [] }
   | { id: number; method: "updateAuth"; args: [authJson: string] };
 
-type WorkerMethod = WorkerRequest["method"];
-type RequestForMethod<Method extends WorkerMethod> = Extract<WorkerRequest, { method: Method }>;
+type WorkerMethod = OpfsOwnerRequest["method"];
+type RequestForMethod<Method extends WorkerMethod> = Extract<OpfsOwnerRequest, { method: Method }>;
 type RequestArgs<Method extends WorkerMethod> = RequestForMethod<Method>["args"];
 
-export type { WorkerRequest as PersistentBrowserWorkerRequest };
+export type { OpfsOwnerRequest as PersistentBrowserOpfsOwnerRequest };
 
-export class PersistentBrowserRuntime implements Runtime {
+export class PersistentBrowserOpfsProxyRuntime implements Runtime {
   private readonly worker: Worker;
   private readonly pending = new Map<number, PendingCall>();
   private readonly writes = new Map<string, Promise<string>>();
@@ -342,13 +344,13 @@ export class PersistentBrowserRuntime implements Runtime {
   }
 
   private send(method: WorkerMethod, args: readonly unknown[]): Promise<unknown> {
-    if (this.closed && method !== "close") {
+    if (this.closed) {
       return Promise.reject(new Error("Persistent browser core runtime is closed"));
     }
     const id = this.nextCallId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method, args } as WorkerRequest);
+      this.worker.postMessage({ id, method, args } as OpfsOwnerRequest);
     });
   }
 
@@ -369,9 +371,8 @@ export class PersistentBrowserRuntime implements Runtime {
     method: Method,
     ...args: RequestArgs<Method>
   ): void {
-    // This class is an OPFS worker proxy, not a separate runtime semantics
-    // layer. Public writes stay synchronous while the worker returns the real
-    // CoreRuntime transaction id that durability waits must use.
+    // This class is only the main-thread OPFS proxy. The worker owns the real
+    // CoreRuntime, so durability waits must use the worker's transaction id.
     const write = this.opened.then(async () => {
       const result = (await this.send(method, args)) as { transactionId: string };
       return result.transactionId;
