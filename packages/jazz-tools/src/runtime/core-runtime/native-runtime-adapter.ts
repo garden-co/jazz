@@ -1080,6 +1080,7 @@ function rejectionReason(message: string): string {
 
 function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   const parsed = JSON.parse(queryJson) as {
+    conditions?: unknown;
     table?: unknown;
     limit?: unknown;
     relation_ir?: unknown;
@@ -1114,6 +1115,7 @@ function unsupportedRelationQueryError(operator?: string): Error {
 function encodeSimpleRelationQuery(
   table: string,
   query: {
+    conditions?: unknown;
     relation_ir?: unknown;
     limit?: unknown;
     offset?: unknown;
@@ -1128,12 +1130,16 @@ function encodeSimpleRelationQuery(
 } {
   const unwrapped = unwrapSimpleQuery(table, query);
   if (!unwrapped) throw unsupportedRelationQueryError(relationOperator(query.relation_ir));
+  const rootPredicates = readFlatConditions(query.conditions);
+  if (!rootPredicates) throw unsupportedRelationQueryError();
   return {
     hasPostFilter: false,
     limit: unwrapped.limit,
     offset: unwrapped.offset,
     orderBy: unwrapped.orderBy,
-    predicates: unwrapped.predicates.map((filter) => coerceQueryPredicate(table, filter, schema)),
+    predicates: unwrapped.predicates
+      .concat(rootPredicates)
+      .map((filter) => coerceQueryPredicate(table, filter, schema)),
   };
 }
 
@@ -1185,8 +1191,8 @@ function unwrapSimpleQuery(
   offset: number;
   orderBy: QueryOrder[];
 } | null {
-  if (query.relation_ir != null) return unwrapSimpleRelation(table, query.relation_ir);
-  return null;
+  if (query.relation_ir == null) return { predicates: [], offset: 0, orderBy: [] };
+  return unwrapSimpleRelation(table, query.relation_ir);
 }
 
 function unwrapSimpleRelation(
@@ -1374,6 +1380,75 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
   const column = readColumnRef(cmpRecord.left);
   const value = readLiteral(cmpRecord.right);
   return column && value ? [{ column, op: op as QueryPredicateOp, value }] : null;
+}
+
+function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
+  if (conditions == null) return [];
+  if (!Array.isArray(conditions)) return null;
+  const predicates: QueryPredicate[] = [];
+  for (const condition of conditions) {
+    if (!condition || typeof condition !== "object") return null;
+    const record = condition as { column?: unknown; op?: unknown; value?: unknown };
+    if (typeof record.column !== "string" || typeof record.op !== "string") return null;
+    const column = record.column.split(".").at(-1) ?? record.column;
+    switch (record.op) {
+      case "eq":
+        if (record.value === null) {
+          predicates.push({ column, op: "IsNull" });
+        } else {
+          predicates.push({ column, op: "Eq", value: valueToQueryLiteral(record.value) });
+        }
+        break;
+      case "ne":
+        if (record.value === null) {
+          predicates.push({ column, op: "IsNotNull" });
+        } else {
+          predicates.push({ column, op: "Ne", value: valueToQueryLiteral(record.value) });
+        }
+        break;
+      case "gt":
+        predicates.push({ column, op: "Gt", value: valueToQueryLiteral(record.value) });
+        break;
+      case "gte":
+        predicates.push({ column, op: "Gte", value: valueToQueryLiteral(record.value) });
+        break;
+      case "lt":
+        predicates.push({ column, op: "Lt", value: valueToQueryLiteral(record.value) });
+        break;
+      case "lte":
+        predicates.push({ column, op: "Lte", value: valueToQueryLiteral(record.value) });
+        break;
+      case "contains":
+        predicates.push({ column, op: "Contains", value: valueToQueryLiteral(record.value) });
+        break;
+      case "isNull":
+        if (typeof record.value !== "boolean") return null;
+        predicates.push({ column, op: record.value ? "IsNull" : "IsNotNull" });
+        break;
+      case "in":
+        if (!Array.isArray(record.value)) return null;
+        predicates.push({
+          column,
+          op: "In",
+          values: record.value.map(valueToQueryLiteral),
+        });
+        break;
+      default:
+        return null;
+    }
+  }
+  return predicates;
+}
+
+function valueToQueryLiteral(value: unknown): QueryLiteral {
+  if (value === null || value === undefined) return { type: "Nullable", value: null };
+  if (typeof value === "boolean") return { type: "Boolean", value };
+  if (typeof value === "number" && Number.isSafeInteger(value)) return { type: "Integer", value };
+  if (typeof value === "string")
+    return isUuidString(value) ? { type: "Uuid", value } : { type: "Text", value };
+  if (value instanceof Uint8Array) return { type: "Bytea", value };
+  if (Array.isArray(value)) return { type: "Array", value: value.map(valueToQueryLiteral) };
+  throw unsupportedRelationQueryError();
 }
 
 function readPredicateOp(value: unknown): QueryPredicateOp | null {
