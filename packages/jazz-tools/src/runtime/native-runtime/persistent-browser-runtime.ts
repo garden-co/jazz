@@ -1,6 +1,12 @@
 import type { InsertResult, MutationResult, Runtime } from "../client.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
+import type {
+  PersistentBrowserOpfsOwnerRequest,
+  PersistentBrowserRequestArgs,
+  PersistentBrowserWorkerMethod,
+  PersistentBrowserWriteRequest,
+} from "./persistent-browser-protocol.js";
 import {
   encodeCellsForPatch,
   encodeCellsForRow,
@@ -19,108 +25,7 @@ type WorkerResponse =
   | { subscription: number; args: unknown[] }
   | { event: "authFailure"; reason: string };
 
-type OpenRequest = {
-  id: number;
-  method: "open";
-  args: [
-    runtimeSources: RuntimeSourcesConfig | undefined,
-    dbName: string,
-    schema: WasmSchema,
-    node: Uint8Array,
-    author: Uint8Array,
-  ];
-};
-
-// This protocol exists because OPFS-backed browser storage must be opened and
-// used from a dedicated worker. The main thread keeps the Runtime shape and
-// proxies calls to the worker that owns the real NativeRuntimeAdapter instance.
-type WriteRequest =
-  | {
-      id: number;
-      method: "insert";
-      args: [
-        table: string,
-        values: InsertValues,
-        writeContext: string | null | undefined,
-        objectId: string,
-      ];
-    }
-  | {
-      id: number;
-      method: "restore";
-      args: [
-        table: string,
-        objectId: string,
-        values: InsertValues,
-        writeContext: string | null | undefined,
-      ];
-    }
-  | {
-      id: number;
-      method: "update";
-      args: [
-        table: string,
-        objectId: string,
-        values: Record<string, Value>,
-        writeContext: string | null | undefined,
-      ];
-    }
-  | {
-      id: number;
-      method: "upsert";
-      args: [
-        table: string,
-        objectId: string,
-        values: InsertValues,
-        writeContext: string | null | undefined,
-      ];
-    }
-  | {
-      id: number;
-      method: "delete";
-      args: [table: string, objectId: string, writeContext: string | null | undefined];
-    };
-
-type OpfsOwnerRequest =
-  | OpenRequest
-  | WriteRequest
-  | {
-      id: number;
-      method: "waitForTransaction";
-      args: [transactionId: string, tier: string];
-    }
-  | {
-      id: number;
-      method: "query";
-      args: [
-        queryJson: string,
-        sessionJson: string | null | undefined,
-        tier: string | null | undefined,
-        optionsJson: string | null | undefined,
-      ];
-    }
-  | {
-      id: number;
-      method: "createSubscription";
-      args: [
-        queryJson: string,
-        sessionJson: string | null | undefined,
-        tier: string | null | undefined,
-        optionsJson: string | null | undefined,
-      ];
-    }
-  | { id: number; method: "executeSubscription"; args: [handle: number] }
-  | { id: number; method: "unsubscribe"; args: [handle: number] }
-  | { id: number; method: "clearClientStorage"; args: [] }
-  | { id: number; method: "connect"; args: [url: string, authJson: string] }
-  | { id: number; method: "disconnect"; args: [] }
-  | { id: number; method: "updateAuth"; args: [authJson: string] };
-
-type WorkerMethod = OpfsOwnerRequest["method"];
-type RequestForMethod<Method extends WorkerMethod> = Extract<OpfsOwnerRequest, { method: Method }>;
-type RequestArgs<Method extends WorkerMethod> = RequestForMethod<Method>["args"];
-
-export type { OpfsOwnerRequest as PersistentBrowserOpfsOwnerRequest };
+export type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-protocol.js";
 
 export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly worker: Worker;
@@ -163,7 +68,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       }
       this.rejectAll(new Error(event.message));
     };
-    this.opened = this.call("open", runtimeSources, dbName, schema, node, author).then(
+    this.opened = this.send("open", [runtimeSources, dbName, schema, node, author]).then(
       () => undefined,
     );
   }
@@ -230,7 +135,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     await this.opened;
     const pendingWrite = this.writes.get(transactionId);
     const workerTransactionId = pendingWrite ? await pendingWrite : transactionId;
-    await this.call("waitForTransaction", workerTransactionId, tier);
+    await this.send("waitForTransaction", [workerTransactionId, tier]);
   }
 
   async query(
@@ -240,7 +145,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     optionsJson?: string | null,
   ): Promise<unknown> {
     await this.opened;
-    return this.call("query", queryJson, sessionJson, tier, optionsJson);
+    return this.send("query", [queryJson, sessionJson, tier, optionsJson]);
   }
 
   createSubscription(
@@ -252,13 +157,12 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const localHandle = this.nextSubscriptionId++;
     const remoteHandle = this.opened.then(
       () =>
-        this.call(
-          "createSubscription",
+        this.send("createSubscription", [
           queryJson,
           sessionJson,
           tier,
           optionsJson,
-        ) as Promise<number>,
+        ]) as Promise<number>,
     );
     void remoteHandle
       .then((remote) => {
@@ -275,7 +179,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const remoteHandle = this.remoteSubscriptions.get(handle);
     if (!remoteHandle) return;
     void remoteHandle
-      .then((remote) => this.call("executeSubscription", remote))
+      .then((remote) => this.send("executeSubscription", [remote]))
       .catch(ignoreExpectedShutdown);
   }
 
@@ -285,7 +189,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.remoteSubscriptions.delete(handle);
     if (remoteHandle) {
       void remoteHandle
-        .then((remote) => this.call("unsubscribe", remote))
+        .then((remote) => this.send("unsubscribe", [remote]))
         .catch(ignoreExpectedShutdown);
     }
   }
@@ -303,7 +207,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     if (this.closed) return;
     this.closing = true;
     try {
-      await this.call("clearClientStorage");
+      await this.send("clearClientStorage", []);
     } catch (error) {
       if (!isExpectedShutdownError(error)) throw error;
     } finally {
@@ -334,27 +238,23 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     return `pending-worker-write-${this.nextCallId++}`;
   }
 
-  private call<Method extends WorkerMethod>(
+  private send<Method extends PersistentBrowserWorkerMethod>(
     method: Method,
-    ...args: RequestArgs<Method>
+    args: PersistentBrowserRequestArgs<Method>,
   ): Promise<unknown> {
-    return this.send(method, args);
-  }
-
-  private send(method: WorkerMethod, args: readonly unknown[]): Promise<unknown> {
     if (this.closed) {
       return Promise.reject(new Error("Persistent browser native runtime is closed"));
     }
     const id = this.nextCallId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method, args } as OpfsOwnerRequest);
+      this.worker.postMessage({ id, method, args } as PersistentBrowserOpfsOwnerRequest);
     });
   }
 
-  private fireAndForget<Method extends WorkerMethod>(
+  private fireAndForget<Method extends PersistentBrowserWorkerMethod>(
     method: Method,
-    ...args: RequestArgs<Method>
+    ...args: PersistentBrowserRequestArgs<Method>
   ): void {
     if (this.closed) return;
     void this.opened
@@ -364,10 +264,10 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       .catch(() => undefined);
   }
 
-  private queueWrite<Method extends WriteRequest["method"]>(
+  private queueWrite<Method extends PersistentBrowserWriteRequest["method"]>(
     transactionId: string,
     method: Method,
-    ...args: RequestArgs<Method>
+    ...args: PersistentBrowserRequestArgs<Method>
   ): void {
     // The worker owns the real NativeRuntimeAdapter, so durability waits must use the
     // worker's transaction id. The public Runtime API is synchronous, so the
