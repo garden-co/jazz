@@ -1,8 +1,8 @@
-import { loadWasmModule, type Runtime } from "../client.js";
+import { loadWasmModule } from "../client.js";
 import { openConfig } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
-import type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-runtime.js";
+import type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-protocol.js";
 
 type OpenMessage = Extract<PersistentBrowserOpfsOwnerRequest, { method: "open" }>;
 type WriteMessage = Extract<
@@ -10,7 +10,7 @@ type WriteMessage = Extract<
   { method: "insert" | "restore" | "update" | "upsert" | "delete" }
 >;
 
-let runtime: Runtime | null = null;
+let runtime: NativeRuntimeAdapter | null = null;
 let runtimeNamespace: string | null = null;
 let runtimeWasmModule: Awaited<ReturnType<typeof loadWasmModule>> | null = null;
 const pendingWriteTransactionIds = new Set<string>();
@@ -174,7 +174,7 @@ async function settlePendingWrites(): Promise<void> {
   }
 }
 
-function getRuntime(): Runtime {
+function getRuntime(): NativeRuntimeAdapter {
   if (!runtime) {
     throw new Error("Persistent browser native runtime is not open");
   }
