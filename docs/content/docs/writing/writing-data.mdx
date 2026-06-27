@@ -172,13 +172,7 @@ try {
 }
 ```
 
-You can also set a global `onMutationError` handler that will be notified anytime a write that was not explicitly awaited fails:
-
-```ts
-db.onMutationError((error) => {
-  console.error("DB mutation failed: ", error);
-});
-```
+Writes that are not explicitly awaited remain fire-and-forget. Keep the returned write handle and call `wait(...)` when the application needs to observe durability or policy rejection.
 
 ## Transactions
 

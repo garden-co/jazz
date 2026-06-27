@@ -3,7 +3,6 @@ import {
   ExclusiveWriteHandle,
   JazzClient,
   resolveDefaultDurabilityTier,
-  type MutationErrorEvent,
   type Runtime,
   type TransactionalRuntime,
   PersistedWriteRejectedError,
@@ -12,7 +11,6 @@ import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 function makeFakeRuntime() {
-  let mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   let nextTransactionNumber = 0;
 
   function transactionIdFromWriteContext(writeContextJson?: string | null): string | undefined {
@@ -80,9 +78,6 @@ function makeFakeRuntime() {
       >(),
     executeSubscription: vi.fn<(handle: number, on_update: Function) => void>(),
     unsubscribe: vi.fn<(handle: number) => void>(),
-    onMutationError: vi.fn<Runtime["onMutationError"]>((callback) => {
-      mutationErrorCallback = callback;
-    }),
     beginTransaction: vi.fn<TransactionalRuntime["beginTransaction"]>((kind) => {
       nextTransactionNumber += 1;
       return `transaction-${kind}-${nextTransactionNumber}`;
@@ -95,11 +90,7 @@ function makeFakeRuntime() {
     close: vi.fn(),
   } satisfies TransactionalRuntime;
 
-  return Object.assign(runtime, {
-    emitMutationError(event: MutationErrorEvent) {
-      mutationErrorCallback?.(event);
-    },
-  });
+  return runtime;
 }
 
 function makeContext(): AppContext {
@@ -343,7 +334,7 @@ describe("JazzClient runtime transaction waits", () => {
     expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-exclusive", "local");
   });
 
-  it("lets a runtime wait handle rejection without replaying onMutationError", async () => {
+  it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {
     const runtime = makeFakeRuntime();
     const transactionId = "transaction-runtime-rejected";
     let rejectWait!: (error: unknown) => void;
@@ -354,10 +345,6 @@ describe("JazzClient runtime transaction waits", () => {
         }),
     );
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const seen: MutationErrorEvent[] = [];
-    client.onMutationError((event) => {
-      seen.push(event);
-    });
 
     const waitPromise = client.waitForTransaction(transactionId, "edge");
     await Promise.resolve();
@@ -370,93 +357,5 @@ describe("JazzClient runtime transaction waits", () => {
     });
 
     await expect(waitPromise).rejects.toBeInstanceOf(PersistedWriteRejectedError);
-    expect(seen).toEqual([]);
-  });
-});
-
-describe("JazzClient mutation error handling", () => {
-  function makeRejectedTransactionRecord(transactionId: string) {
-    return {
-      transactionId,
-      kind: "mergeable" as const,
-      sealed: true,
-      latestSettlement: {
-        kind: "rejected" as const,
-        transactionId,
-        code: "permission_denied",
-        reason: "write rejected by policy",
-      },
-    };
-  }
-
-  it("receives pushed runtime mutation errors without scanning all transaction records", async () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, {
-      appId: "queued-rejection-app",
-      schema: {},
-    });
-
-    const seen: MutationErrorEvent[] = [];
-
-    client.onMutationError((event) => {
-      seen.push(event);
-    });
-
-    runtime.emitMutationError({
-      code: "permission_denied",
-      reason: "write rejected by policy",
-      transaction: makeRejectedTransactionRecord("transaction-rejected"),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(seen).toEqual([
-      {
-        code: "permission_denied",
-        reason: "write rejected by policy",
-        transaction: makeRejectedTransactionRecord("transaction-rejected"),
-      },
-    ]);
-  });
-
-  it("logs pushed runtime mutation errors when no listener is registered", async () => {
-    const runtime = makeFakeRuntime();
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    JazzClient.connectWithRuntime(runtime as any, {
-      appId: "sync-rejection-app",
-      schema: {},
-    });
-
-    const event: MutationErrorEvent = {
-      code: "permission_denied",
-      reason: "write rejected by policy",
-      transaction: makeRejectedTransactionRecord("transaction-rejected"),
-    };
-    runtime.emitMutationError(event);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
-
-    consoleError.mockRestore();
-  });
-
-  it("flushes pending runtime mutation errors during callback registration", async () => {
-    const runtime = makeFakeRuntime();
-    runtime.onMutationError = vi.fn((callback) => {
-      callback({
-        code: "permission_denied",
-        reason: "write rejected by policy",
-        transaction: makeRejectedTransactionRecord("transaction-rejected"),
-      });
-    });
-
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    JazzClient.connectWithRuntime(runtime as any, {
-      appId: "startup-rejection-app",
-      schema: {},
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(consoleError).toHaveBeenCalledTimes(1);
-    consoleError.mockRestore();
   });
 });

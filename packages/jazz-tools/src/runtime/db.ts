@@ -24,7 +24,6 @@ import {
   ExclusiveWriteResult,
   WriteResult,
   JazzClient,
-  type MutationErrorEvent,
   WriteHandle,
   type TransactionKind,
   type CreateOptions,
@@ -914,17 +913,6 @@ export class Db {
   >();
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
-  /**
-   * Listeners attached with {@link Db.onMutationError} that are notified when a write operation
-   * (insert, update, delete) is rejected. Errors from all {@link Db.clients} (including those
-   * added after the listeners are attached) are forwarded to all Db listeners.
-   */
-  private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
-  /**
-   * Persists mutation errors thrown before an {@link onMutationError} listener was attached.
-   * Those mutation errors are replayed when `onMutationError` is called.
-   */
-  private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
 
   /**
@@ -1067,7 +1055,6 @@ export class Db {
         },
       });
 
-      this.attachMutationErrorHandler(client);
       if (this.config.serverUrl) {
         client.connectTransport(this.config.serverUrl, {
           jwt_token: this.config.jwtToken,
@@ -1087,22 +1074,6 @@ export class Db {
     return null;
   }
 
-  /**
-   * Attaches a mutation error handler to the given client, ensuring all listeners in
-   * {@link Db.mutationErrorListeners} are notified.
-   */
-  private attachMutationErrorHandler(client: JazzClient): void {
-    client.onMutationError((event) => {
-      if (this.mutationErrorListeners.size === 0) {
-        console.error("Unhandled Jazz mutation error", event);
-        this.pendingMutationErrorEvents.push(event);
-        return;
-      }
-      for (const listener of this.mutationErrorListeners) {
-        listener(event);
-      }
-    });
-  }
   private installMainThreadWasmTelemetry(): void {
     const collectorUrl = this.resolveTelemetryCollectorUrl();
     if (!collectorUrl || !this.runtimeModule || this.disposeWasmTelemetry) {
@@ -1151,26 +1122,6 @@ export class Db {
     return this.authStateStore.onChange((state) => {
       listener(state);
     });
-  }
-
-  /**
-   * Attach a fallback listener to be notified when a write operation
-   * (insert, update, delete) is rejected.
-   * This callback is only called if the write error is not surfaced by
-   * {@link WriteHandle.wait}.
-   * This callback is called even after app restarts (which does not
-   * happen with {@link WriteHandle.wait}).
-   * @returns an unsubscribe callback
-   */
-  onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
-    this.mutationErrorListeners.add(listener);
-    while (this.pendingMutationErrorEvents.length > 0) {
-      const event = this.pendingMutationErrorEvents.shift()!;
-      listener(event);
-    }
-    return () => {
-      this.mutationErrorListeners.delete(listener);
-    };
   }
 
   getConfig(): DbConfig {
@@ -1680,7 +1631,6 @@ export class Db {
     }
     this.clearActiveQuerySubscriptionTraces();
 
-    this.mutationErrorListeners.clear();
     this.disposeWasmTelemetry?.();
     this.disposeWasmTelemetry = null;
     for (const client of this.clients.values()) {
@@ -1813,13 +1763,6 @@ class ClientBackedDb extends Db {
     }
 
     this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
-  }
-
-  override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
-    this.runtimeClient.onMutationError(listener);
-    return () => {
-      /* Do nothing */
-    };
   }
 
   override updateCookieSession(cookieSession: Session | null): void {

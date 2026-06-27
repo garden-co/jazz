@@ -79,7 +79,6 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     },
     query: async () => [],
     waitForTransaction: async () => {},
-    onMutationError: () => {},
     connect: () => {},
     disconnect: () => {},
     updateAuth: () => {},

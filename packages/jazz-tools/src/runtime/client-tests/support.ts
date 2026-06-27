@@ -49,7 +49,6 @@ export const runtimeTransactionRecordStubs = {
   commitTransaction: () => {},
   waitForTransaction: async () => {},
   rollbackTransaction: () => false,
-  onMutationError: () => {},
   connect: () => {},
   disconnect: () => {},
   updateAuth: () => {},
