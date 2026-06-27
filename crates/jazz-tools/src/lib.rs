@@ -1,4 +1,3 @@
-pub mod batch_fate;
 pub mod catalogue;
 pub mod commit;
 pub mod digest;
@@ -12,23 +11,14 @@ pub mod otel;
 #[allow(dead_code, unused_imports, clippy::wrong_self_convention)]
 pub(crate) mod query_manager;
 pub mod row_format;
-#[allow(dead_code, unused_imports)]
-pub(crate) mod row_histories;
 pub mod schema_api;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
 pub mod sync;
-pub mod transaction;
-// Legacy alpha storage is still used internally by the admin catalogue runtime.
-// Keep it out of the public API, including `test-utils`, so new callers do not
-// build against it as a second sync/storage engine. Storage-specific regression
-// coverage should live in crate-internal tests, or expose narrow public helpers
-// from `test_support` when behavior must be asserted from integration tests.
-#[allow(dead_code)]
-pub(crate) mod storage;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
+pub mod transaction;
 #[allow(dead_code)]
 pub(crate) mod wire_types;
 

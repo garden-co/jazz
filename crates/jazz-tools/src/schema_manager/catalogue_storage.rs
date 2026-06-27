@@ -41,29 +41,52 @@ pub trait SchemaManagerCatalogueStorage {
     ) -> Result<(), CatalogueStorageError>;
 }
 
-impl<T: crate::storage::Storage + ?Sized> SchemaManagerCatalogueStorage for T {
-    fn storage_cache_namespace(&self) -> usize {
-        crate::storage::Storage::storage_cache_namespace(self)
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::collections::HashMap;
+
+    use crate::catalogue::CatalogueEntry;
+    use crate::object::ObjectId;
+
+    use super::{CatalogueStorageError, SchemaManagerCatalogueStorage};
+
+    #[derive(Debug, Default)]
+    pub(crate) struct CatalogueMemoryStorage {
+        entries: HashMap<ObjectId, CatalogueEntry>,
+        cache_namespace: usize,
     }
 
-    fn load_catalogue_entry(
-        &self,
-        object_id: ObjectId,
-    ) -> Result<Option<CatalogueEntry>, CatalogueStorageError> {
-        crate::storage::Storage::load_catalogue_entry(self, object_id)
-            .map_err(|error| CatalogueStorageError::new(error.to_string()))
+    impl CatalogueMemoryStorage {
+        pub(crate) fn new() -> Self {
+            Self {
+                entries: HashMap::new(),
+                cache_namespace: 1,
+            }
+        }
     }
 
-    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, CatalogueStorageError> {
-        crate::storage::Storage::scan_catalogue_entries(self)
-            .map_err(|error| CatalogueStorageError::new(error.to_string()))
-    }
+    impl SchemaManagerCatalogueStorage for CatalogueMemoryStorage {
+        fn storage_cache_namespace(&self) -> usize {
+            self.cache_namespace
+        }
 
-    fn upsert_catalogue_entry(
-        &mut self,
-        entry: &CatalogueEntry,
-    ) -> Result<(), CatalogueStorageError> {
-        crate::storage::Storage::upsert_catalogue_entry(self, entry)
-            .map_err(|error| CatalogueStorageError::new(error.to_string()))
+        fn load_catalogue_entry(
+            &self,
+            object_id: ObjectId,
+        ) -> Result<Option<CatalogueEntry>, CatalogueStorageError> {
+            Ok(self.entries.get(&object_id).cloned())
+        }
+
+        fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, CatalogueStorageError> {
+            Ok(self.entries.values().cloned().collect())
+        }
+
+        fn upsert_catalogue_entry(
+            &mut self,
+            entry: &CatalogueEntry,
+        ) -> Result<(), CatalogueStorageError> {
+            self.entries.insert(entry.object_id, entry.clone());
+            Ok(())
+        }
     }
 }
