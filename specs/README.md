@@ -11,10 +11,10 @@ The easiest way to picture the runtime is:
 - history, replay, sync, and durability all speak the same row-batch language
 
 These docs are being migrated with the alpha graft. The authoritative engine
-is the vendored `jazz_core` core path; older `jazz-tools` RuntimeCore,
-QueryManager, SyncManager, and storage docs are retained as legacy/status-quo
-notes for API shape, tests, and integration scaffolding while their behavior is
-ported or deleted.
+now lives in the first-class Rust crates under `crates/`; older `jazz-tools`
+RuntimeCore, QueryManager, SyncManager, and storage docs are retained as
+legacy/status-quo notes for API shape, tests, and integration scaffolding while
+their behavior is ported or deleted.
 
 ## Reading Order
 

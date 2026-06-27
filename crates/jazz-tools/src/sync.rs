@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub(crate) mod clock;
-pub(crate) mod types;
 pub mod vocabulary;
 
 /// Persistence tier — declaration order defines Ord (Local < EdgeServer < GlobalServer).
@@ -62,7 +61,4 @@ impl std::fmt::Display for ClientId {
     }
 }
 
-pub use types::{
-    ConnectionSchemaDiagnostics, Destination, QueryId, QueryPropagation, SchemaWarning, Source,
-    SyncError,
-};
+pub use vocabulary::ConnectionSchemaDiagnostics;

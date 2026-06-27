@@ -1490,7 +1490,7 @@ fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
             }
             _ => batches.push(WasmRowBatch {
                 table: row.table(),
-                descriptor: descriptor.clone(),
+                descriptor: *descriptor,
                 rows: vec![wasm_row(row, raw)],
             }),
         }

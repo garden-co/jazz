@@ -88,7 +88,7 @@ test("jazz-sim command runs the requested benchmark quietly", () => {
     "cargo",
     "bench",
     "--manifest-path",
-    "vendor/jazz_core/Cargo.toml",
+    "Cargo.toml",
     "-p",
     "jazz-sim",
     "--bench",

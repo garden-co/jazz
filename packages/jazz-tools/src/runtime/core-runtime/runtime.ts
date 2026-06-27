@@ -8,7 +8,6 @@ import type {
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
-import { analyzeRelations, type Relation } from "../../codegen/relation-analyzer.js";
 import type { InsertResult, MutationResult, Runtime, TransactionKind } from "../client.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import {
@@ -144,12 +143,6 @@ type CompletedTx = {
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
-  relationQuery?: {
-    queryJson: string;
-    identity?: Uint8Array;
-    tier?: string | null;
-    optionsJson?: string | null;
-  };
   callback?: Function;
   cancelled: boolean;
 };
@@ -164,21 +157,6 @@ type RowState = {
   id: string;
   values: Value[];
   valuesByColumn?: Map<string, Value>;
-};
-
-type RuntimeQueryJson = {
-  table?: unknown;
-  relation_ir?: unknown;
-  array_subqueries?: unknown;
-};
-
-type RuntimeArraySubquery = {
-  column_name: string;
-  table: string;
-  inner_column: string;
-  outer_column: string;
-  select_columns?: string[] | null;
-  nested_arrays?: unknown;
 };
 
 const textEncoder = new TextEncoder();
@@ -471,8 +449,6 @@ export class CoreRuntime implements Runtime {
   ): Promise<unknown> {
     assertSupportedReadOptions(tier, optionsJson);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
-    const relationRows = await this.queryRelationShape(queryJson, sessionJson, tier, optionsJson);
-    if (relationRows) return relationRows;
     const query = this.prepareQuery(queryJson);
     const session = readSession(sessionJson);
     const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
@@ -480,208 +456,6 @@ export class CoreRuntime implements Runtime {
     const rows = session
       ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
       : this.db.all(query, opts);
-    return rowsFromBatches(readRowBatches(rows), this.schema);
-  }
-
-  private async queryRelationShape(
-    queryJson: string,
-    sessionJson?: string | null,
-    tier?: string | null,
-    optionsJson?: string | null,
-    identityOverride?: Uint8Array,
-  ): Promise<RowState[] | null> {
-    const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
-    if (typeof parsed.table !== "string") return null;
-    const hasArraySubqueries =
-      Array.isArray(parsed.array_subqueries) && parsed.array_subqueries.length > 0;
-    const relation = parsed.relation_ir;
-    const relationKind = relationKindOf(relation);
-    if (!hasArraySubqueries && relationKind !== "Project" && relationKind !== "Gather") return null;
-
-    const session = readSession(sessionJson);
-    const identity = identityOverride ?? (session ? parseUuid(session.user_id) : undefined);
-    let rows =
-      relationKind === "Project" || relationKind === "Gather"
-        ? await this.evaluateRelation(relation, identity, tier, optionsJson)
-        : await this.queryPreparedRows(queryJson, identity, tier, optionsJson);
-
-    if (hasArraySubqueries) {
-      rows = await this.attachArraySubqueries(
-        rows,
-        parsed.array_subqueries,
-        identity,
-        tier,
-        optionsJson,
-      );
-    }
-    return rows;
-  }
-
-  private async evaluateRelation(
-    relation: unknown,
-    identity: Uint8Array | undefined,
-    tier?: string | null,
-    optionsJson?: string | null,
-  ): Promise<RowState[]> {
-    if (!relation || typeof relation !== "object") throw unsupportedRelationQueryError();
-    const record = relation as Record<string, unknown>;
-    if (record.Project && typeof record.Project === "object") {
-      return this.evaluateProject(record.Project, identity, tier, optionsJson);
-    }
-    if (record.Gather && typeof record.Gather === "object") {
-      return this.evaluateGather(record.Gather, identity, tier, optionsJson);
-    }
-    return await this.queryPreparedRows(
-      JSON.stringify({ table: tableFromRelation(relation), relation_ir: relation }),
-      identity,
-      tier,
-      optionsJson,
-    );
-  }
-
-  private async evaluateProject(
-    project: unknown,
-    identity: Uint8Array | undefined,
-    tier?: string | null,
-    optionsJson?: string | null,
-  ): Promise<RowState[]> {
-    const input = (project as { input?: unknown }).input;
-    const chain = readJoinChain(input);
-    if (!chain || chain.hops.length === 0) throw unsupportedRelationQueryError();
-    let rows = await this.evaluateRelation(chain.seed, identity, tier, optionsJson);
-    const relations = analyzeRelations(this.schema);
-    let currentTable = rows[0]?.table ?? tableFromRelation(chain.seed);
-    for (const hop of chain.hops) {
-      const relation = relationForTables(relations, currentTable, hop.table, hop.on);
-      if (!relation) throw unsupportedRelationQueryError();
-      rows = await this.followRelation(rows, relation, identity, tier, optionsJson);
-      currentTable = relation.toTable;
-    }
-    return rows;
-  }
-
-  private async evaluateGather(
-    gather: unknown,
-    identity: Uint8Array | undefined,
-    tier?: string | null,
-    optionsJson?: string | null,
-  ): Promise<RowState[]> {
-    const record = gather as { seed?: unknown; step?: unknown; max_depth?: unknown };
-    if (typeof record.max_depth !== "number") throw unsupportedRelationQueryError();
-    const seedRows = await this.evaluateRelation(record.seed, identity, tier, optionsJson);
-    const chain = readJoinChain((record.step as { Project?: { input?: unknown } })?.Project?.input);
-    if (!chain || chain.hops.length !== 1) throw unsupportedRelationQueryError();
-    const stepTable = tableFromRelation(chain.seed);
-    const relation = relationForTables(
-      analyzeRelations(this.schema),
-      stepTable,
-      chain.hops[0]!.table,
-      chain.hops[0]!.on,
-    );
-    if (!relation || relation.type !== "forward") throw unsupportedRelationQueryError();
-    const byKey = new Map(seedRows.map((row) => [rowKey(row.table, row.id), row]));
-    let frontier = seedRows;
-    for (let depth = 0; depth < record.max_depth && frontier.length > 0; depth += 1) {
-      const next = (
-        await this.followRelation(frontier, relation, identity, tier, optionsJson)
-      ).filter((row) => !byKey.has(rowKey(row.table, row.id)));
-      for (const row of next) byKey.set(rowKey(row.table, row.id), row);
-      frontier = next;
-    }
-    return Array.from(byKey.values());
-  }
-
-  private async followRelation(
-    rows: RowState[],
-    relation: Relation,
-    identity: Uint8Array | undefined,
-    tier?: string | null,
-    optionsJson?: string | null,
-  ): Promise<RowState[]> {
-    const ids = uniqueStrings(
-      rows.flatMap((row) => relationValues(row, relation.fromColumn, this.schema)),
-    );
-    if (ids.length === 0) return [];
-    const query =
-      relation.toColumn === "id"
-        ? { table: relation.toTable, conditions: [{ column: "id", op: "in", value: ids }] }
-        : {
-            table: relation.toTable,
-            conditions: [{ column: relation.toColumn, op: "in", value: ids }],
-          };
-    return this.queryPreparedRows(JSON.stringify(query), identity, tier, optionsJson);
-  }
-
-  private async attachArraySubqueries(
-    rows: RowState[],
-    subqueries: unknown,
-    identity: Uint8Array | undefined,
-    tier?: string | null,
-    optionsJson?: string | null,
-  ): Promise<RowState[]> {
-    if (!Array.isArray(subqueries)) return rows;
-    let result = rows;
-    for (const raw of subqueries) {
-      const subquery = readRuntimeArraySubquery(raw);
-      const outerColumn = subquery.outer_column.split(".").at(-1)!;
-      const next: RowState[] = [];
-      for (const row of result) {
-        const values = relationValues(row, outerColumn, this.schema);
-        const select = directSelectForArraySubquery(subquery);
-        let included =
-          values.length === 0
-            ? []
-            : await this.queryPreparedRows(
-                JSON.stringify({
-                  table: subquery.table,
-                  conditions: [{ column: subquery.inner_column, op: "in", value: values }],
-                  select: select?.columns,
-                }),
-                identity,
-                tier,
-                optionsJson,
-              );
-        if (select) {
-          included = projectRowsForSelect(included, select.columns, select.publicColumns);
-        }
-        included = await this.attachArraySubqueries(
-          included,
-          subquery.nested_arrays,
-          identity,
-          tier,
-          optionsJson,
-        );
-        next.push({
-          ...row,
-          values: row.values.concat({
-            type: "Array",
-            value: included.map((child) => ({
-              type: "Row",
-              value: { id: child.id, values: child.values },
-            })),
-          } as Value),
-        });
-      }
-      result = next;
-    }
-    return result;
-  }
-
-  private async queryPreparedRows(
-    queryJson: string,
-    identity: Uint8Array | undefined,
-    tier?: string | null,
-    optionsJson?: string | null,
-  ): Promise<RowState[]> {
-    const query = this.prepareQuery(queryJson);
-    await this.propagateQueryIfNeeded(tier, optionsJson, query);
-    const rows = identity
-      ? this.db.allForIdentity(
-          query,
-          identity,
-          readOptions(tier, queryIncludesDeleted(queryJson), optionsJson),
-        )
-      : this.db.all(query, readOptions(tier, queryIncludesDeleted(queryJson), optionsJson));
     return rowsFromBatches(readRowBatches(rows), this.schema);
   }
 
@@ -702,18 +476,6 @@ export class CoreRuntime implements Runtime {
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
     const identity = session ? parseUuid(session.user_id) : undefined;
-    const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
-    const relationKind = relationKindOf(parsed.relation_ir);
-    if (relationKind === "Project" || relationKind === "Gather") {
-      this.assertSupportedRelationSubscription(parsed.relation_ir);
-      this.subscriptions.set(handle, {
-        sources: [{ source: relationRefreshSource(), reading: false }],
-        rows: [],
-        relationQuery: { queryJson, identity, tier, optionsJson },
-        cancelled: false,
-      });
-      return handle;
-    }
     const query = this.prepareQuery(queryJson);
     let nativeSubscription: ReadableStream<unknown> | Subscription;
     try {
@@ -736,33 +498,6 @@ export class CoreRuntime implements Runtime {
       cancelled: false,
     });
     return handle;
-  }
-
-  private assertSupportedRelationSubscription(relation: unknown): void {
-    const kind = relationKindOf(relation);
-    if (kind === "Project") {
-      const project = (relation as { Project?: { input?: unknown } }).Project;
-      const chain = readJoinChain(project?.input);
-      if (!chain || chain.hops.length === 0) throw unsupportedRelationQueryError();
-      return;
-    }
-    if (kind === "Gather") {
-      const gather = (relation as { Gather?: { step?: unknown; max_depth?: unknown } }).Gather;
-      if (!gather || typeof gather.max_depth !== "number") throw unsupportedRelationQueryError();
-      const chain = readJoinChain(
-        (gather.step as { Project?: { input?: unknown } })?.Project?.input,
-      );
-      if (!chain || chain.hops.length !== 1) throw unsupportedRelationQueryError();
-      const stepRelation = relationForTables(
-        analyzeRelations(this.schema),
-        tableFromRelation(chain.seed),
-        chain.hops[0]!.table,
-        chain.hops[0]!.on,
-      );
-      if (!stepRelation || stepRelation.type !== "forward") throw unsupportedRelationQueryError();
-      return;
-    }
-    throw unsupportedRelationQueryError();
   }
 
   executeSubscription(handle: number, onUpdate: Function): void {
@@ -1058,19 +793,6 @@ export class CoreRuntime implements Runtime {
     subscription: SubscriptionState,
     value: unknown,
   ): Promise<void> {
-    if (subscription.relationQuery) {
-      const previousRows = subscription.rows;
-      subscription.rows =
-        (await this.queryRelationShape(
-          subscription.relationQuery.queryJson,
-          null,
-          subscription.relationQuery.tier,
-          subscription.relationQuery.optionsJson,
-          subscription.relationQuery.identity,
-        )) ?? [];
-      subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
-      return;
-    }
     const chunk = normalizeSubscriptionChunk(value);
     if (chunk.type === "closed") {
       subscription.cancelled = true;
@@ -1276,17 +998,6 @@ function closeSubscriptionSource(source: SubscriptionSourceState["source"]): voi
   }
 }
 
-function relationRefreshSource(): Subscription {
-  let closed = false;
-  return {
-    close: () => {
-      closed = true;
-      return true;
-    },
-    readAll: () => (closed ? [] : [{ type: "relation-refresh" }]),
-  };
-}
-
 function readSupportedReadOptions(optionsJson: string): void {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
   const propagation = parsed.propagation;
@@ -1367,9 +1078,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     table?: unknown;
     limit?: unknown;
     relation_ir?: unknown;
-    conditions?: unknown;
     offset?: unknown;
-    orderBy?: unknown;
     select?: unknown;
   };
   if (typeof parsed.table !== "string") {
@@ -1396,199 +1105,12 @@ function unsupportedRelationQueryError(): Error {
   );
 }
 
-function relationKindOf(relation: unknown): string | null {
-  if (!relation || typeof relation !== "object") return null;
-  const record = relation as Record<string, unknown>;
-  return Object.keys(record)[0] ?? null;
-}
-
-function readRuntimeArraySubquery(raw: unknown): RuntimeArraySubquery {
-  if (!raw || typeof raw !== "object") throw unsupportedRelationQueryError();
-  const subquery = raw as {
-    column_name?: unknown;
-    table?: unknown;
-    inner_column?: unknown;
-    outer_column?: unknown;
-    select_columns?: unknown;
-    nested_arrays?: unknown;
-  };
-  if (
-    typeof subquery.column_name !== "string" ||
-    typeof subquery.table !== "string" ||
-    typeof subquery.inner_column !== "string" ||
-    typeof subquery.outer_column !== "string"
-  ) {
-    throw unsupportedRelationQueryError();
-  }
-  return {
-    column_name: subquery.column_name,
-    table: subquery.table,
-    inner_column: subquery.inner_column,
-    outer_column: subquery.outer_column,
-    select_columns: readRuntimeArraySubquerySelect(subquery.select_columns),
-    nested_arrays: subquery.nested_arrays,
-  };
-}
-
-function readRuntimeArraySubquerySelect(selectColumns: unknown): string[] | null | undefined {
-  if (selectColumns == null) return selectColumns;
-  if (!Array.isArray(selectColumns)) throw unsupportedRelationQueryError();
-  if (!selectColumns.every((column): column is string => typeof column === "string")) {
-    throw unsupportedRelationQueryError();
-  }
-  return selectColumns;
-}
-
-function directSelectForArraySubquery(
-  subquery: RuntimeArraySubquery,
-): { columns: string[]; publicColumns: string[] } | undefined {
-  if (subquery.select_columns == null) return undefined;
-  const nestedArrays = Array.isArray(subquery.nested_arrays) ? subquery.nested_arrays : [];
-  const columns: string[] = [];
-  const publicColumns: string[] = [];
-
-  if (subquery.inner_column !== "id") {
-    columns.push(subquery.inner_column);
-  }
-
-  for (const column of subquery.select_columns) {
-    if (!isHiddenIncludeColumn(column)) {
-      if (!columns.includes(column)) columns.push(column);
-      publicColumns.push(column);
-      continue;
-    }
-    const nested = nestedArrays
-      .map((raw) => {
-        try {
-          return readRuntimeArraySubquery(raw);
-        } catch {
-          return null;
-        }
-      })
-      .find((candidate) => candidate?.column_name === column);
-    const carrierColumn = nested?.outer_column.split(".").at(-1);
-    if (!carrierColumn || carrierColumn === "id" || columns.includes(carrierColumn)) {
-      continue;
-    }
-    columns.push(carrierColumn);
-  }
-
-  return { columns, publicColumns };
-}
-
-function tableFromRelation(relation: unknown): string {
-  if (!relation || typeof relation !== "object") throw unsupportedRelationQueryError();
-  const record = relation as Record<string, unknown>;
-  const scan = record.TableScan;
-  if (scan && typeof scan === "object" && typeof (scan as { table?: unknown }).table === "string") {
-    return (scan as { table: string }).table;
-  }
-  const filter = record.Filter;
-  if (filter && typeof filter === "object")
-    return tableFromRelation((filter as { input?: unknown }).input);
-  const limit = record.Limit;
-  if (limit && typeof limit === "object")
-    return tableFromRelation((limit as { input?: unknown }).input);
-  const offset = record.Offset;
-  if (offset && typeof offset === "object")
-    return tableFromRelation((offset as { input?: unknown }).input);
-  const orderBy = record.OrderBy;
-  if (orderBy && typeof orderBy === "object")
-    return tableFromRelation((orderBy as { input?: unknown }).input);
-  const gather = record.Gather;
-  if (gather && typeof gather === "object")
-    return tableFromRelation((gather as { seed?: unknown }).seed);
-  throw unsupportedRelationQueryError();
-}
-
-function readJoinChain(relation: unknown): {
-  seed: unknown;
-  hops: Array<{ table: string; on: Array<{ left: string; right: string }> }>;
-} | null {
-  const hops: Array<{ table: string; on: Array<{ left: string; right: string }> }> = [];
-  let current = relation;
-  while (current && typeof current === "object" && "Join" in current) {
-    const join = (current as { Join?: unknown }).Join as
-      | { left?: unknown; right?: unknown; on?: unknown }
-      | undefined;
-    if (!join || !Array.isArray(join.on)) return null;
-    const table = tableFromRelation(join.right);
-    const on = join.on.map((entry) => {
-      const record = entry as { left?: unknown; right?: unknown };
-      const left = readColumnRef(record.left);
-      const right = readColumnRef(record.right);
-      return left && right ? { left, right } : null;
-    });
-    if (!on.every((entry): entry is { left: string; right: string } => entry != null)) return null;
-    hops.unshift({ table, on });
-    current = join.left;
-  }
-  return current ? { seed: current, hops } : null;
-}
-
-function relationForTables(
-  relations: Map<string, Relation[]>,
-  fromTable: string,
-  toTable: string,
-  on: Array<{ left: string; right: string }>,
-): Relation | undefined {
-  return (relations.get(fromTable) ?? []).find((relation) => {
-    if (relation.toTable !== toTable || on.length !== 1) return false;
-    const join = on[0]!;
-    return relation.type === "forward"
-      ? join.left === relation.fromColumn && join.right === "id"
-      : join.left === "id" && join.right === relation.toColumn;
-  });
-}
-
-function relationValues(row: RowState, column: string, schema: WasmSchema): string[] {
-  if (column === "id") return [row.id];
-  const value = row.valuesByColumn?.get(column) ?? rowValue(row, column, schema);
-  if (!value || value.type === "Null") return [];
-  if (value.type === "Uuid" || value.type === "Text") return [value.value];
-  if (value.type === "Array") {
-    return value.value.flatMap((entry) =>
-      entry.type === "Uuid" || entry.type === "Text" ? [entry.value] : [],
-    );
-  }
-  return [];
-}
-
-function projectRowsForSelect(
-  rows: RowState[],
-  columns: readonly string[],
-  publicColumns: readonly string[],
-): RowState[] {
-  const publicSet = new Set(publicColumns);
-  return rows.map((row) => {
-    const valuesByColumn =
-      row.valuesByColumn ?? new Map(columns.map((column, index) => [column, row.values[index]!]));
-    return withValuesByColumn(
-      {
-        ...row,
-        values: columns.flatMap((column) => {
-          if (!publicSet.has(column)) return [];
-          const value = valuesByColumn.get(column);
-          return value === undefined ? [] : [value];
-        }),
-      },
-      valuesByColumn,
-    );
-  });
-}
-
-function uniqueStrings(values: string[]): string[] {
-  return Array.from(new Set(values));
-}
-
 function encodeSimpleRelationQuery(
   table: string,
   query: {
     relation_ir?: unknown;
-    conditions?: unknown;
     limit?: unknown;
     offset?: unknown;
-    orderBy?: unknown;
   },
   schema: WasmSchema,
 ): {
@@ -1631,10 +1153,8 @@ function unwrapSimpleQuery(
   table: string,
   query: {
     relation_ir?: unknown;
-    conditions?: unknown;
     limit?: unknown;
     offset?: unknown;
-    orderBy?: unknown;
   },
 ): {
   predicates: QueryPredicate[];
@@ -1643,15 +1163,7 @@ function unwrapSimpleQuery(
   orderBy: QueryOrder[];
 } | null {
   if (query.relation_ir != null) return unwrapSimpleRelation(table, query.relation_ir);
-  const predicates = readLegacyConditions(query.conditions);
-  const orderBy = readLegacyOrderBy(query.orderBy);
-  if (!predicates || !orderBy) return null;
-  return {
-    predicates,
-    limit: query.limit == null ? undefined : readLimit(query.limit),
-    offset: query.offset == null ? 0 : readOffset(query.offset),
-    orderBy,
-  };
+  return null;
 }
 
 function unwrapSimpleRelation(
@@ -1705,65 +1217,6 @@ function unwrapSimpleRelation(
   return predicates ? { ...input, predicates: input.predicates.concat(predicates) } : null;
 }
 
-function readLegacyConditions(value: unknown): QueryPredicate[] | null {
-  if (value == null) return [];
-  if (!Array.isArray(value)) return null;
-  const predicates: QueryPredicate[] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object") return null;
-    const condition = entry as { column?: unknown; op?: unknown; value?: unknown };
-    if (typeof condition.column !== "string" || typeof condition.op !== "string") return null;
-    switch (condition.op) {
-      case "eq":
-      case "ne":
-      case "gt":
-      case "gte":
-      case "lt":
-      case "lte": {
-        const op = readLegacyPredicateOp(condition.op);
-        const literal = literalFromPlainValue(condition.value);
-        if (!op || !literal) return null;
-        predicates.push({ column: condition.column, op, value: literal });
-        break;
-      }
-      case "in": {
-        if (!Array.isArray(condition.value)) return null;
-        const values = condition.value.map(literalFromPlainValue);
-        if (!values.every((literal): literal is QueryLiteral => literal != null)) return null;
-        predicates.push({ column: condition.column, op: "In", values });
-        break;
-      }
-      case "contains": {
-        const literal = literalFromPlainValue(condition.value);
-        if (!literal) return null;
-        predicates.push({ column: condition.column, op: "Contains", value: literal });
-        break;
-      }
-      case "isNull":
-        predicates.push({ column: condition.column, op: "IsNull" });
-        break;
-      case "isNotNull":
-        predicates.push({ column: condition.column, op: "IsNotNull" });
-        break;
-      default:
-        return null;
-    }
-  }
-  return predicates;
-}
-
-function readLegacyOrderBy(value: unknown): QueryOrder[] | null {
-  if (value == null) return [];
-  if (!Array.isArray(value)) return null;
-  const terms: QueryOrder[] = [];
-  for (const entry of value) {
-    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") return null;
-    if (entry[1] !== "asc" && entry[1] !== "desc") return null;
-    terms.push({ column: entry[0], direction: entry[1] === "asc" ? "Asc" : "Desc" });
-  }
-  return terms;
-}
-
 function readSelectColumns(value: unknown): string[] | undefined {
   if (value == null) return undefined;
   if (!Array.isArray(value)) throw unsupportedRelationQueryError();
@@ -1771,42 +1224,6 @@ function readSelectColumns(value: unknown): string[] | undefined {
     throw unsupportedRelationQueryError();
   }
   return value;
-}
-
-function readLegacyPredicateOp(value: string): QueryPredicateOp | null {
-  switch (value) {
-    case "eq":
-      return "Eq";
-    case "ne":
-      return "Ne";
-    case "gt":
-      return "Gt";
-    case "gte":
-      return "Gte";
-    case "lt":
-      return "Lt";
-    case "lte":
-      return "Lte";
-    default:
-      return null;
-  }
-}
-
-function literalFromPlainValue(value: unknown): QueryLiteral | null {
-  if (value == null) return { type: "Nullable", value: null };
-  if (typeof value === "boolean") return { type: "Boolean", value };
-  if (typeof value === "number" && Number.isSafeInteger(value)) {
-    return { type: "Integer", value };
-  }
-  if (typeof value === "string") return { type: "Text", value };
-  if (value instanceof Uint8Array) return { type: "Bytea", value };
-  if (Array.isArray(value)) {
-    const values = value.map(literalFromPlainValue);
-    return values.every((literal): literal is QueryLiteral => literal != null)
-      ? { type: "Array", value: values }
-      : null;
-  }
-  return null;
 }
 
 function readOrderByTerms(value: unknown): QueryOrder[] | null {
@@ -2013,11 +1430,6 @@ function readOffset(value: unknown): number {
     throw new Error("query offset must be a non-negative safe integer");
   }
   return value;
-}
-
-function rowValue(row: RowState, column: string, schema: WasmSchema): Value | undefined {
-  const index = schema[row.table]?.columns.findIndex((entry) => entry.name === column) ?? -1;
-  return index < 0 ? undefined : row.values[index];
 }
 
 function isUuidString(value: string): boolean {

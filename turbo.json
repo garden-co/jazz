@@ -35,8 +35,7 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/crates/**/*.rs",
-        "$TURBO_ROOT$/vendor/jazz_core/**/*.rs",
-        "$TURBO_ROOT$/vendor/jazz_core/**/Cargo.toml",
+        "$TURBO_ROOT$/crates/**/Cargo.toml",
         "$TURBO_ROOT$/Cargo.toml",
         "$TURBO_ROOT$/Cargo.lock"
       ],
