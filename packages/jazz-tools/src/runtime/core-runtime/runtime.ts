@@ -145,7 +145,7 @@ type PendingTx = {
 };
 
 type SubscriptionState = {
-  source: ReadableStreamDefaultReader<unknown> | DirectSubscription;
+  sources: SubscriptionSourceState[];
   rows: RowState[];
   filters: RowFilter[];
   recompute?: {
@@ -157,6 +157,10 @@ type SubscriptionState = {
   };
   callback?: Function;
   cancelled: boolean;
+};
+
+type SubscriptionSourceState = {
+  source: ReadableStreamDefaultReader<unknown> | DirectSubscription;
   reading: boolean;
 };
 
@@ -271,7 +275,9 @@ export class CoreRuntime implements Runtime {
   close(): void {
     this.closed = true;
     for (const subscription of this.subscriptions.values()) {
-      closeSubscriptionSource(subscription.source);
+      for (const source of subscription.sources) {
+        closeSubscriptionSource(source.source);
+      }
     }
     for (const write of this.writes.values()) {
       write.close?.();
@@ -702,18 +708,20 @@ export class CoreRuntime implements Runtime {
     }
     const handle = this.nextSubscriptionId++;
     const recomputeQueryJson = subscriptionRecomputeQueryJson(queryJson);
-    const subscriptionQueryJson =
-      recomputeQueryJson == null ? queryJson : subscriptionTriggerQueryJson(queryJson);
-    const query = this.prepareQuery(subscriptionQueryJson);
+    const subscriptionQueryJsons =
+      recomputeQueryJson == null ? [queryJson] : subscriptionTriggerQueryJsons(queryJson);
     const opts = readOptions(tier);
     const identity = session ? parseUuid(session.user_id) : undefined;
-    const nativeSubscription = identity
-      ? this.db.subscribeForIdentity!(query, identity, opts)
-      : this.db.subscribe(query, opts);
-    const source = subscriptionSource(nativeSubscription);
-    this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
+    const sources = subscriptionQueryJsons.map((subscriptionQueryJson) => {
+      const query = this.prepareQuery(subscriptionQueryJson);
+      const nativeSubscription = identity
+        ? this.db.subscribeForIdentity!(query, identity, opts)
+        : this.db.subscribe!(query, opts);
+      this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
+      return { source: subscriptionSource(nativeSubscription), reading: false };
+    });
     this.subscriptions.set(handle, {
-      source,
+      sources,
       rows: [],
       filters: recomputeQueryJson == null ? queryFiltersFromJson(queryJson, this.schema) : [],
       recompute:
@@ -727,7 +735,6 @@ export class CoreRuntime implements Runtime {
               pending: false,
             },
       cancelled: false,
-      reading: false,
     });
     return handle;
   }
@@ -743,10 +750,8 @@ export class CoreRuntime implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.cancelled = true;
-    if (isReadableSubscriptionReader(subscription.source)) {
-      void subscription.source.cancel();
-    } else {
-      subscription.source.close?.();
+    for (const source of subscription.sources) {
+      closeSubscriptionSource(source.source);
     }
     this.subscriptions.delete(handle);
   }
@@ -913,20 +918,27 @@ export class CoreRuntime implements Runtime {
   }
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
-    if (subscription.cancelled || subscription.reading || !subscription.callback) return;
-    if (!isReadableSubscriptionReader(subscription.source)) {
-      this.drainNativeSubscription(handle, subscription);
-      return;
+    if (subscription.cancelled || !subscription.callback) return;
+    for (const source of subscription.sources) {
+      if (!isReadableSubscriptionReader(source.source)) {
+        this.drainNativeSubscription(handle, subscription, source);
+        continue;
+      }
+      if (source.reading) continue;
+      source.reading = true;
+      void this.readSubscription(handle, subscription, source);
     }
-    subscription.reading = true;
-    void this.readSubscription(handle, subscription);
   }
 
-  private async readSubscription(handle: number, subscription: SubscriptionState): Promise<void> {
-    if (!isReadableSubscriptionReader(subscription.source)) return;
+  private async readSubscription(
+    handle: number,
+    subscription: SubscriptionState,
+    source: SubscriptionSourceState,
+  ): Promise<void> {
+    if (!isReadableSubscriptionReader(source.source)) return;
     try {
       while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
-        const next = await subscription.source.read();
+        const next = await source.source.read();
         if (next.done || subscription.cancelled) return;
         void this.applySubscriptionChunk(subscription, next.value).catch((error: unknown) => {
           subscription.cancelled = true;
@@ -934,13 +946,17 @@ export class CoreRuntime implements Runtime {
         });
       }
     } finally {
-      subscription.reading = false;
+      source.reading = false;
     }
   }
 
-  private drainNativeSubscription(handle: number, subscription: SubscriptionState): void {
-    if (isReadableSubscriptionReader(subscription.source)) return;
-    for (const event of subscription.source.readAll()) {
+  private drainNativeSubscription(
+    handle: number,
+    subscription: SubscriptionState,
+    source: SubscriptionSourceState,
+  ): void {
+    if (isReadableSubscriptionReader(source.source)) return;
+    for (const event of source.source.readAll()) {
       if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
       void this.applySubscriptionChunk(subscription, event).catch((error: unknown) => {
         subscription.cancelled = true;
@@ -1126,7 +1142,7 @@ function readSession(sessionJson?: string | null): { user_id: string } | null {
   return { user_id: parsed.user_id };
 }
 
-function closeSubscriptionSource(source: SubscriptionState["source"]): void {
+function closeSubscriptionSource(source: SubscriptionSourceState["source"]): void {
   if ("close" in source && typeof source.close === "function") {
     source.close();
     return;
@@ -1262,29 +1278,73 @@ function subscriptionRecomputeQueryJson(queryJson: string): string | null {
     : null;
 }
 
-function subscriptionTriggerQueryJson(queryJson: string): string {
+function subscriptionTriggerQueryJsons(queryJson: string): string[] {
   const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
   if (typeof parsed.table !== "string") throw unsupportedRelationQueryError();
+  const triggers: string[] = [];
   const relationKind = relationKindOf(parsed.relation_ir);
-  if (relationKind !== "Project" && relationKind !== "Gather") return queryJson;
-  const seed = subscriptionTriggerRelation(parsed.relation_ir);
-  return JSON.stringify({ table: tableFromRelation(seed), relation_ir: seed });
+  if (relationKind === "Project" || relationKind === "Gather") {
+    for (const relation of subscriptionTriggerRelations(parsed.relation_ir)) {
+      triggers.push(JSON.stringify({ table: tableFromRelation(relation), relation_ir: relation }));
+    }
+  } else {
+    triggers.push(queryJson);
+  }
+  for (const subquery of subscriptionTriggerArraySubqueries(parsed.array_subqueries)) {
+    triggers.push(JSON.stringify(subquery));
+  }
+  return uniqueStrings(triggers);
 }
 
-function subscriptionTriggerRelation(relation: unknown): unknown {
+function subscriptionTriggerRelations(relation: unknown): unknown[] {
   if (!relation || typeof relation !== "object") throw unsupportedRelationQueryError();
   const record = relation as Record<string, unknown>;
   if (record.Project && typeof record.Project === "object") {
     const chain = readJoinChain((record.Project as { input?: unknown }).input);
     if (!chain) throw unsupportedRelationQueryError();
-    return chain.seed;
+    return [
+      ...subscriptionTriggerRelations(chain.seed),
+      ...chain.hops.map((hop) => ({ TableScan: { table: hop.table } })),
+    ];
   }
   if (record.Gather && typeof record.Gather === "object") {
-    const seed = (record.Gather as { seed?: unknown }).seed;
+    const gather = record.Gather as { seed?: unknown; step?: unknown };
+    const seed = gather.seed;
     if (!seed) throw unsupportedRelationQueryError();
-    return seed;
+    const stepInput = (gather.step as { Project?: { input?: unknown } })?.Project?.input;
+    const chain = readJoinChain(stepInput);
+    if (!chain || chain.hops.length !== 1) throw unsupportedRelationQueryError();
+    return [
+      ...subscriptionTriggerRelations(seed),
+      { TableScan: { table: tableFromRelation(chain.seed) } },
+      ...chain.hops.map((hop) => ({ TableScan: { table: hop.table } })),
+    ];
   }
-  return relation;
+  return [relation];
+}
+
+function subscriptionTriggerArraySubqueries(
+  subqueries: unknown,
+): Array<{ table: string; conditions: Array<{ column: string; op: "isNotNull" }> }> {
+  if (subqueries == null) return [];
+  if (!Array.isArray(subqueries)) throw unsupportedRelationQueryError();
+  return subqueries
+    .map((raw) => {
+      if (!raw || typeof raw !== "object") throw unsupportedRelationQueryError();
+      const subquery = raw as { table?: unknown; inner_column?: unknown };
+      if (typeof subquery.table !== "string" || typeof subquery.inner_column !== "string") {
+        throw unsupportedRelationQueryError();
+      }
+      if (subquery.inner_column === "id") return null;
+      return {
+        table: subquery.table,
+        conditions: [{ column: subquery.inner_column, op: "isNotNull" as const }],
+      };
+    })
+    .filter(
+      (query): query is { table: string; conditions: Array<{ column: string; op: "isNotNull" }> } =>
+        query != null,
+    );
 }
 
 function tableFromRelation(relation: unknown): string {
@@ -1994,7 +2054,7 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Boolean":
       return Uint8Array.of(value.type === "Boolean" && value.value ? 1 : 0);
     case "Integer":
-      view.setUint32(0, expectNumber(value, "Integer"), true);
+      view.setUint32(0, expectU32(value, "Integer"), true);
       return new Uint8Array(view.buffer, 0, 4);
     case "BigInt":
     case "Timestamp":
@@ -2088,6 +2148,14 @@ function expectNumber(value: Value, type: string): number {
     return value.value;
   }
   throw new Error(`expected ${type} value`);
+}
+
+function expectU32(value: Value, type: string): number {
+  const number = expectNumber(value, type);
+  if (!Number.isSafeInteger(number) || number < 0 || number > 0x7fffffff) {
+    throw new Error(`${type} value must be a non-negative signed 32-bit integer`);
+  }
+  return number;
 }
 
 function expectString(value: Value, type: string): string {

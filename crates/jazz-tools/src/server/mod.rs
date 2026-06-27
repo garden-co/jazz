@@ -637,23 +637,6 @@ impl ServerState {
     pub async fn set_client_ttl(&self, ttl: Duration) {
         *self.client_ttl.write().await = ttl;
     }
-
-    /// Test-only injection point for the removed alpha `SyncPayload` websocket
-    /// protocol. Production `/apps/:app/ws` traffic uses the direct core
-    /// `WireFrame` route instead.
-    #[cfg(feature = "test-utils")]
-    pub async fn process_ws_client_frame(
-        &self,
-        client_id: ClientId,
-        payload: &[u8],
-    ) -> Result<(), String> {
-        let _ = (client_id, payload);
-        if self.shutdown.is_shutting_down() {
-            return Err("server is shutting down".to_string());
-        }
-
-        Err("legacy alpha websocket frame injection is disabled; use the direct core websocket route".to_owned())
-    }
 }
 
 #[cfg(test)]
@@ -818,19 +801,6 @@ mod tests {
             0,
             "storage must not be closed while app request guards are still active"
         );
-    }
-
-    #[tokio::test]
-    async fn websocket_frames_are_rejected_after_shutdown_is_requested() {
-        let state = build_test_state().await;
-        state.shutdown.request_shutdown();
-
-        let error = state
-            .process_ws_client_frame(ClientId::new(), b"not a sync frame")
-            .await
-            .expect_err("websocket frame should be rejected during shutdown");
-
-        assert_eq!(error, "server is shutting down");
     }
 
     #[tokio::test]

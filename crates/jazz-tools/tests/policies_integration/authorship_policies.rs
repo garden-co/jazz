@@ -6,12 +6,7 @@ use super::{pe, permissions};
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::row_input;
-use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
-use jazz_tools::schema_manager::SchemaManager;
 use jazz_tools::server::JazzServer;
-use jazz_tools::storage::MemoryStorage;
-use jazz_tools::sync_manager::{ClientId, Destination, ServerId, SyncManager};
-use jazz_tools::transport_protocol::SyncBatchRequest;
 use jazz_tools::{
     ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
@@ -53,19 +48,6 @@ async fn create_note_with_backend_attribution(
     attributed_user_id: &str,
     title: &str,
 ) -> ObjectId {
-    let schema_manager = SchemaManager::new(
-        SyncManager::new(),
-        schema.clone(),
-        server.app_id(),
-        "client",
-        "main",
-    )
-    .expect("build backend attributed schema manager");
-    let mut runtime = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
-    runtime.set_buffer_outbox_without_sync_sender(true);
-    let client_id = ClientId::new();
-    runtime.add_server(ServerId::default());
-
     let write_context = WriteContext {
         session: None,
         attribution: Some(attributed_user_id.to_string()),
@@ -74,48 +56,12 @@ async fn create_note_with_backend_attribution(
         batch_id: None,
         target_branch_name: None,
     };
-    let (note_id, _row_values) = runtime
-        .insert("notes", note_input(title), Some(&write_context))
-        .expect("create note with backend attribution")
-        .0;
-    runtime.batched_tick();
-
-    let payloads = runtime
-        .schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox()
-        .into_iter()
-        .filter_map(|entry| match entry.destination {
-            Destination::Server(_) => Some(entry.payload),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        !payloads.is_empty(),
-        "backend attributed insert should enqueue sync payloads"
-    );
-
-    let batch = SyncBatchRequest {
-        payloads,
-        client_id,
-    };
-    let frame_payload = batch
-        .encode_payload()
-        .expect("encode SyncBatchRequest payload");
-    let state = server.server_state();
-    // Ensure the client is registered as a backend client before processing.
-    state
-        .runtime
-        .ensure_client_as_backend(client_id)
-        .expect("register backend client");
-    let result = state
-        .process_ws_client_frame(client_id, &frame_payload)
-        .await;
-    assert!(
-        result.is_ok(),
-        "backend attributed sync payloads should all apply: {result:?}"
-    );
+    let backend = connect_ready_client(server, schema, "backend", "notes", READY_TIMEOUT).await;
+    let (note_id, _row_values, _batch_id) = backend
+        .with_write_context(write_context)
+        .insert("notes", note_input(title))
+        .expect("create note with backend attribution");
+    backend.shutdown().await.expect("shutdown backend");
 
     note_id
 }
