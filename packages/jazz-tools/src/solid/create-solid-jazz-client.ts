@@ -1,4 +1,6 @@
 import { type Accessor } from "solid-js";
+import type { AuthState } from "../runtime/auth-state.js";
+import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createExtensionJazzClient, createJazzClient } from "../web/create-jazz-client.js";
 import {
@@ -6,15 +8,15 @@ import {
   createSolidJazzClientInternal,
 } from "./create-solid-jazz-client-internal.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
-import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
+import { getSubscriptionStore, subscriptionStoreKey } from "../subscription-store-internal.js";
 
 const makeCreateSolidJazzClient =
   ({ factory }: { factory: JazzClientFactory }) =>
-  (config: Accessor<DbConfig>) => {
+  (config: Accessor<DbConfig>): PendingSolidJazzClient => {
     const internal = createSolidJazzClientInternal(config, factory);
     const stateStore = createSolidJazzClientStore(() => internal.client);
 
-    return {
+    const client: PendingSolidJazzClient = {
       get db() {
         return internal.client?.db;
       },
@@ -23,9 +25,6 @@ const makeCreateSolidJazzClient =
       },
       get authState() {
         return stateStore.authState;
-      },
-      get manager() {
-        return internal.client?.manager;
       },
       shutdown: () => internal.client?.shutdown() ?? Promise.resolve(),
 
@@ -39,6 +38,19 @@ const makeCreateSolidJazzClient =
         return internal.state;
       },
     };
+
+    Object.defineProperty(client, subscriptionStoreKey, {
+      configurable: false,
+      enumerable: false,
+      get() {
+        if (!internal.client) {
+          throw new Error("Jazz client is not ready yet.");
+        }
+        return getSubscriptionStore(internal.client);
+      },
+    });
+
+    return client;
   };
 
 export const createSolidJazzClient = makeCreateSolidJazzClient({
@@ -52,16 +64,24 @@ type Prettify<T> = {
   [K in keyof T]: T[K];
 } & {};
 
-export type PendingSolidJazzClient = ReturnType<typeof createSolidJazzClient>;
+export type PendingSolidJazzClient = {
+  readonly db: Db | undefined;
+  readonly session: Session | null;
+  readonly authState: AuthState | null;
+  shutdown(): Promise<void>;
+  readonly loading: boolean;
+  readonly error: unknown;
+  readonly state: unknown;
+};
+
 export type SolidJazzClient = Prettify<
   PendingSolidJazzClient & {
     db: Db;
-    manager: SubscriptionsOrchestrator;
   }
 >;
 
 export function isPendingSolidJazzClientReady(
   client: PendingSolidJazzClient,
 ): client is SolidJazzClient {
-  return client.db !== undefined && client.manager !== undefined;
+  return client.db !== undefined;
 }

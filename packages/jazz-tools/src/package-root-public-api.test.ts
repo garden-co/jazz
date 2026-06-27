@@ -203,6 +203,7 @@ const removedBrowserRuntimeExportNames = [
 const removedBrowserRuntimeExportPathFragments = [
   "browser-broker",
   "broker-worker",
+  "direct-wasm",
   "leader-lock",
   "sync-transport",
   "worker-bridge",

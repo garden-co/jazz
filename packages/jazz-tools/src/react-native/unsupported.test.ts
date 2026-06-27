@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createReactNativeDirectCoreAlphaUnsupportedError,
   REACT_NATIVE_DIRECT_CORE_ALPHA_UNSUPPORTED_MESSAGE,
-  ReactNativeRuntimeModule,
+  ReactNativeCoreSource,
 } from "./runtime-module.js";
 import { createDb } from "./db.js";
 import { createJazzClient } from "./create-jazz-client.js";
@@ -24,7 +24,7 @@ describe("react-native direct-core alpha support", () => {
   });
 
   it("does not mint tokens through the old jazz-rn native module", () => {
-    const runtime = new ReactNativeRuntimeModule();
+    const runtime = new ReactNativeCoreSource();
 
     expect(() =>
       runtime.mintLocalFirstToken({

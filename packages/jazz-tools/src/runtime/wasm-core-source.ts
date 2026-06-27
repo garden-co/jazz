@@ -6,11 +6,11 @@ import {
 } from "./client.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
 import {
-  DbRuntimeModule,
-  type DbRuntimeClientContext,
-  type DbRuntimeTelemetryContext,
+  DirectCoreSource,
+  type DirectCoreClientContext,
+  type DirectCoreTelemetryContext,
   type RuntimeTokenOptions,
-} from "./db-runtime-module.js";
+} from "./direct-core-source.js";
 import { CoreRuntime } from "./core-runtime/runtime.js";
 import { PersistentBrowserOpfsRuntime } from "./core-runtime/persistent-browser-runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
@@ -71,12 +71,12 @@ function authorBytesForSubject(subject: string, fallbackSeed: string): Uint8Arra
   return uuidBytes(subject) ?? deterministicBytes(`${fallbackSeed}:author`);
 }
 
-export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
+export class WasmCoreSource extends DirectCoreSource<DbConfig> {
   private get wasmModule(): WasmModule {
-    return this.loadedRuntime as WasmModule;
+    return this.loadedCore as WasmModule;
   }
 
-  protected override async loadRuntime(config: DbConfig): Promise<WasmModule> {
+  protected override async loadCore(config: DbConfig): Promise<WasmModule> {
     return await loadWasmModule(config.runtimeSources);
   }
 
@@ -84,7 +84,7 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
     config,
     schema,
     onAuthFailure,
-  }: DbRuntimeClientContext<DbConfig>): JazzClient {
+  }: DirectCoreClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
 
     const runtimeOptions: ConnectRuntimeOptions = {
@@ -136,7 +136,7 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
     config,
     collectorUrl,
     runtimeThread,
-  }: DbRuntimeTelemetryContext<DbConfig>): (() => void) | null {
+  }: DirectCoreTelemetryContext<DbConfig>): (() => void) | null {
     return installWasmTelemetry({
       wasmModule: this.wasmModule,
       collectorUrl,

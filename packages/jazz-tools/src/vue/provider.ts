@@ -118,8 +118,8 @@ export const JazzProvider = defineComponent({
 });
 
 /**
- * Get the current Jazz client, including the backing {@link Db}, subscription manager,
- * session snapshot, and shutdown helper.
+ * Get the current Jazz client, including the backing {@link Db}, session snapshot,
+ * and shutdown helper.
  */
 export function useJazzClient(): JazzClientContextValue {
   const ctx = inject(JazzContextKey, null);

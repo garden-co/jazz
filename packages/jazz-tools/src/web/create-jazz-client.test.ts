@@ -65,6 +65,7 @@ vi.mock("../dev-tools/index.js", () => ({
 }));
 
 import { createExtensionJazzClient, createJazzClient } from "./create-jazz-client.js";
+import { getSubscriptionStore } from "../subscription-store-internal.js";
 
 const originalWindow = (globalThis as { window?: unknown }).window;
 
@@ -123,7 +124,8 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     expect(client.db).toBe(db);
     expect(client.session).toEqual(session);
-    expect(client.manager).toBe(manager);
+    expect("manager" in client).toBe(false);
+    expect(getSubscriptionStore(client)).toBe(manager);
 
     await client.shutdown();
     expect(manager.shutdown).toHaveBeenCalledTimes(1);
@@ -185,7 +187,8 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     expect(mocks.createDb).toHaveBeenCalledTimes(1);
     expect(first.db).toBe(second.db);
-    expect(first.manager).toBe(second.manager);
+    expect("manager" in first).toBe(false);
+    expect(getSubscriptionStore(first)).toBe(getSubscriptionStore(second));
 
     await first.shutdown();
     expect(mocks.orchestratorInstances[0]!.shutdown).not.toHaveBeenCalled();
@@ -309,7 +312,8 @@ describe("framework-agnostic/createAgnosticExtensionJazzClient", () => {
     });
     expect(client.db).toBe(db);
     expect(client.session).toBeNull();
-    expect(client.manager).toBe(mocks.orchestratorInstances[0]!);
+    expect("manager" in client).toBe(false);
+    expect(getSubscriptionStore(client)).toBe(mocks.orchestratorInstances[0]!);
   });
 
   it("AGC-EXT-02: rejects when config is missing", async () => {

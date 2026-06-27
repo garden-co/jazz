@@ -41,7 +41,7 @@ pub use schema_api::{
     SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext,
 };
 pub use schema_manager::AppId;
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", feature = "test-utils"))]
 pub use sync::SyncTracer;
 
 #[cfg(feature = "client")]
@@ -83,8 +83,9 @@ pub struct AppContext {
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
 
-    /// Optional sync message tracer for test observability.
-    /// Set via `TestingClient::with_tracer()` — `None` in production.
+    /// Optional legacy sync message tracer for test observability.
+    /// Production sync uses direct websocket/core events instead.
+    #[cfg(feature = "test-utils")]
     pub sync_tracer: Option<(SyncTracer, String)>,
 }
 
@@ -101,6 +102,7 @@ impl AppContext {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
+            #[cfg(feature = "test-utils")]
             sync_tracer: None,
         }
     }

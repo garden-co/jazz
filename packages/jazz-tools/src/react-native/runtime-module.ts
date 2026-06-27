@@ -1,10 +1,10 @@
 import type { JazzClient, DurabilityTier } from "../runtime/client.js";
 import type { DbConfig as RuntimeDbConfig } from "../runtime/db.js";
 import {
-  DbRuntimeModule,
-  type DbRuntimeClientContext,
+  DirectCoreSource,
+  type DirectCoreClientContext,
   type RuntimeTokenOptions,
-} from "../runtime/db-runtime-module.js";
+} from "../runtime/direct-core-source.js";
 
 export interface ReactNativeRuntimeDbConfig extends RuntimeDbConfig {
   dataPath?: string;
@@ -19,14 +19,14 @@ export function createReactNativeDirectCoreAlphaUnsupportedError(): Error {
   return new Error(REACT_NATIVE_DIRECT_CORE_ALPHA_UNSUPPORTED_MESSAGE);
 }
 
-export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntimeDbConfig> {
+export class ReactNativeCoreSource extends DirectCoreSource<ReactNativeRuntimeDbConfig> {
   override readonly supportsPolicyBypass = false;
 
-  protected override async loadRuntime(): Promise<void> {
+  protected override async loadCore(): Promise<void> {
     throw createReactNativeDirectCoreAlphaUnsupportedError();
   }
 
-  override createClient(_context: DbRuntimeClientContext<ReactNativeRuntimeDbConfig>): JazzClient {
+  override createClient(_context: DirectCoreClientContext<ReactNativeRuntimeDbConfig>): JazzClient {
     throw createReactNativeDirectCoreAlphaUnsupportedError();
   }
 
