@@ -19,6 +19,7 @@ pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
 pub mod sync;
+pub mod transaction;
 // Legacy alpha storage is still used internally by the admin catalogue runtime.
 // Keep it out of the public API, including `test-utils`, so new callers do not
 // build against it as a second sync/storage engine. Storage-specific regression

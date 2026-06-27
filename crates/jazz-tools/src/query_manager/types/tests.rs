@@ -180,8 +180,8 @@ fn value_rejects_fractional_float_timestamp() {
 // Tuple Model Tests
 // ========================================================================
 
-fn make_commit_id(n: u8) -> crate::row_histories::BatchId {
-    crate::row_histories::BatchId([n; 16])
+fn make_commit_id(n: u8) -> crate::transaction::BatchId {
+    crate::transaction::BatchId([n; 16])
 }
 
 #[test]
