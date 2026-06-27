@@ -7,22 +7,22 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 pub use jazz_tools::metadata::SYSTEM_PRINCIPAL_ID;
-use jazz_tools::query_manager::policy::Operation;
-use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::{permissions, policy_expr as pe};
+use jazz_tools::schema_api::Operation;
+use jazz_tools::schema_api::{Session, WriteContext};
+use jazz_tools::schema_api::{permissions, policy_expr as pe};
 pub use jazz_tools::row_input;
 pub use jazz_tools::{
     AppContext, ColumnType, JazzClient, JazzError, ObjectId, OrderedRowDelta, QueryBuilder, Schema,
     SchemaBuilder, SubscriptionStream, TableSchema, Value,
 };
-pub use jazz_tools::{query_manager, server, sync, test_support};
+pub use jazz_tools::{schema_api, server, sync, test_support};
 
 #[path = "../support/mod.rs"]
 mod support;
 
 fn explicit_allow_all_policies(
-    mut policies: jazz_tools::query_manager::types::TablePolicies,
-) -> jazz_tools::query_manager::types::TablePolicies {
+    mut policies: jazz_tools::schema_api::TablePolicies,
+) -> jazz_tools::schema_api::TablePolicies {
     if policies.select.using.is_none() {
         policies.select.using = Some(pe::always());
     }

@@ -7,6 +7,7 @@ use jazz_server::StorageConfig;
 
 mod builder;
 mod catalogue;
+mod catalogue_entry;
 mod catalogue_storage;
 mod local_engine;
 pub mod routes;
@@ -163,7 +164,7 @@ mod tests {
     use super::*;
     use crate::AppId;
     use crate::middleware::AuthConfig;
-    use crate::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
+    use crate::query_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
     use crate::server::builder::{ServerBuilder, StorageBackend};
     use crate::server::catalogue_storage::CatalogueStorageResult;
 
@@ -174,13 +175,13 @@ mod tests {
     impl CatalogueStorage for CloseObservingStorage {
         fn scan_catalogue_entries(
             &self,
-        ) -> CatalogueStorageResult<Vec<crate::catalogue::CatalogueEntry>> {
+        ) -> CatalogueStorageResult<Vec<crate::server::catalogue_entry::CatalogueEntry>> {
             Ok(Vec::new())
         }
 
         fn upsert_catalogue_entry(
             &mut self,
-            _entry: &crate::catalogue::CatalogueEntry,
+            _entry: &crate::server::catalogue_entry::CatalogueEntry,
         ) -> CatalogueStorageResult<()> {
             Ok(())
         }

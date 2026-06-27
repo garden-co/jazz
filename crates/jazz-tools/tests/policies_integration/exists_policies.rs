@@ -99,7 +99,7 @@ async fn rebac_exists_clause_denies_non_matching_insert() {
     let server = JazzServer::start_with_schema(schema.clone()).await;
     let bob = JazzClient::connect_with_row_policy_mode(
         server.make_client_context_for_user(schema.clone(), "bob"),
-        crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+        jazz_tools::schema_api::RowPolicyMode::PermissiveLocal,
     )
     .await
     .expect("connect bob");
@@ -164,7 +164,7 @@ async fn rebac_update_denied_by_using_exists_policy() {
         .expect("connect alice");
     let bob = JazzClient::connect_with_row_policy_mode(
         server.make_client_context_for_user(schema.clone(), "bob"),
-        crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+        jazz_tools::schema_api::RowPolicyMode::PermissiveLocal,
     )
     .await
     .expect("connect permissive bob");

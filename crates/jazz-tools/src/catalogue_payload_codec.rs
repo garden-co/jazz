@@ -1,4 +1,4 @@
-//! Binary encoding for schemas and lenses.
+//! Binary encoding for active catalogue payloads.
 //!
 //! This module provides deterministic binary serialization for Schema and LensTransform,
 //! enabling content-addressed storage in the catalogue.
@@ -8,13 +8,13 @@
 use std::collections::HashMap;
 
 use crate::object::ObjectId;
-use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-use crate::query_manager::types::{
+use crate::query_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
+use crate::query_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, RowDescriptor, Schema,
     SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
-use super::lens::{LensOp, LensTransform};
+use crate::schema_manager::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
 const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V6 as u8;
@@ -163,49 +163,6 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     decode_schema_with_version(data, version)
 }
 
-/// Decode only one table descriptor from an encoded schema.
-///
-/// Structural schemas in large apps can be much larger than the row descriptor
-/// needed for a single incoming history row. This keeps row replay from
-/// materializing the entire schema map just to find one table.
-pub fn decode_table_descriptor_from_schema(
-    data: &[u8],
-    table_name: &str,
-) -> Result<Option<RowDescriptor>, CatalogueEncodingError> {
-    if data.is_empty() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: 1,
-            actual: 0,
-        });
-    }
-
-    let Some(version) = SchemaEncodingVersion::from_byte(data[0]) else {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: data[0],
-            expected: SCHEMA_VERSION,
-        });
-    };
-
-    let mut offset = 1;
-    let table_count = read_u32(data, &mut offset)?;
-    for _ in 0..table_count {
-        let name = read_string(data, &mut offset, "table_name")?;
-        if name == table_name {
-            return decode_row_descriptor_with_version(data, &mut offset, version).map(Some);
-        }
-
-        skip_row_descriptor_with_version(data, &mut offset, version)?;
-        if version.has_indexed_columns() {
-            skip_indexed_columns(data, &mut offset)?;
-        }
-        if version.has_table_policies() {
-            decode_table_policies(data, &mut offset)?;
-        }
-    }
-
-    Ok(None)
-}
-
 fn encode_table_entry_with_version(
     buf: &mut Vec<u8>,
     name: &TableName,
@@ -285,19 +242,6 @@ fn decode_indexed_columns(
     Ok(Some(columns))
 }
 
-fn skip_indexed_columns(data: &[u8], offset: &mut usize) -> Result<(), CatalogueEncodingError> {
-    let count = read_u32(data, offset)?;
-    if count == u32::MAX {
-        return Ok(());
-    }
-
-    for _ in 0..count {
-        let len = read_u32(data, offset)? as usize;
-        read_bytes(data, offset, len)?;
-    }
-    Ok(())
-}
-
 fn decode_schema_with_version(
     data: &[u8],
     version: SchemaEncodingVersion,
@@ -340,18 +284,6 @@ fn decode_row_descriptor_with_version(
     }
 
     Ok(RowDescriptor::new(columns))
-}
-
-fn skip_row_descriptor_with_version(
-    data: &[u8],
-    offset: &mut usize,
-    version: SchemaEncodingVersion,
-) -> Result<(), CatalogueEncodingError> {
-    let count = read_u32(data, offset)?;
-    for _ in 0..count {
-        skip_column_descriptor_with_version(data, offset, version)?;
-    }
-    Ok(())
 }
 
 fn encode_column_descriptor_with_version(
@@ -456,42 +388,6 @@ fn decode_column_descriptor_with_version(
         default,
         merge_strategy,
     })
-}
-
-fn skip_column_descriptor_with_version(
-    data: &[u8],
-    offset: &mut usize,
-    version: SchemaEncodingVersion,
-) -> Result<(), CatalogueEncodingError> {
-    skip_string(data, offset)?;
-    skip_column_type_with_version(data, offset, version)?;
-    let _nullable = read_u8(data, offset)?;
-    let has_ref = read_u8(data, offset)? != 0;
-    if has_ref {
-        skip_string(data, offset)?;
-    }
-    if version.has_legacy_inherit_policy_byte() {
-        let _legacy_inherit_policy = read_u8(data, offset)?;
-    }
-    if version.has_column_defaults() {
-        let has_default = read_u8(data, offset)? != 0;
-        if has_default {
-            skip_value(data, offset)?;
-        }
-    }
-    if version.has_column_merge_strategies() {
-        let has_merge_strategy = read_u8(data, offset)? != 0;
-        if has_merge_strategy {
-            let tag = read_u8(data, offset)?;
-            if tag != 1 {
-                return Err(CatalogueEncodingError::InvalidTypeTag {
-                    tag,
-                    context: "column_merge_strategy",
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Column type tags.
@@ -617,39 +513,6 @@ fn decode_column_type_with_version(
     }
 }
 
-fn skip_column_type_with_version(
-    data: &[u8],
-    offset: &mut usize,
-    version: SchemaEncodingVersion,
-) -> Result<(), CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        TYPE_INTEGER | TYPE_BIGINT | TYPE_DOUBLE | TYPE_BOOLEAN | TYPE_TEXT | TYPE_TIMESTAMP
-        | TYPE_UUID | TYPE_BATCH_ID | TYPE_BYTEA => Ok(()),
-        TYPE_JSON => {
-            let has_schema = read_u8(data, offset)? != 0;
-            if has_schema {
-                let len = read_u32(data, offset)? as usize;
-                read_bytes(data, offset, len)?;
-            }
-            Ok(())
-        }
-        TYPE_ENUM => {
-            let variant_count = read_u32(data, offset)? as usize;
-            for _ in 0..variant_count {
-                skip_string(data, offset)?;
-            }
-            Ok(())
-        }
-        TYPE_ARRAY => skip_column_type_with_version(data, offset, version),
-        TYPE_ROW => skip_row_descriptor_with_version(data, offset, version),
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "column_type",
-        }),
-    }
-}
-
 fn encode_row_descriptor(buf: &mut Vec<u8>, desc: &RowDescriptor) {
     encode_row_descriptor_with_version(buf, desc, SchemaEncodingVersion::V3);
 }
@@ -659,26 +522,6 @@ fn decode_row_descriptor(
     offset: &mut usize,
 ) -> Result<RowDescriptor, CatalogueEncodingError> {
     decode_row_descriptor_with_version(data, offset, SchemaEncodingVersion::V3)
-}
-
-pub fn encode_row_descriptor_bytes(desc: &RowDescriptor) -> Vec<u8> {
-    let mut buf = Vec::new();
-    encode_row_descriptor(&mut buf, desc);
-    buf
-}
-
-pub fn decode_row_descriptor_bytes(data: &[u8]) -> Result<RowDescriptor, CatalogueEncodingError> {
-    let mut offset = 0;
-    let descriptor = decode_row_descriptor(data, &mut offset)?;
-    if offset != data.len() {
-        return Err(CatalogueEncodingError::DecodeError {
-            message: format!(
-                "row descriptor bytes had trailing data: decoded {offset} of {} bytes",
-                data.len()
-            ),
-        });
-    }
-    Ok(descriptor)
 }
 
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
@@ -1268,10 +1111,7 @@ fn decode_permissions_head_v2(
     ))
 }
 
-fn encode_operation_policy(
-    buf: &mut Vec<u8>,
-    policy: &crate::query_manager::types::OperationPolicy,
-) {
+fn encode_operation_policy(buf: &mut Vec<u8>, policy: &crate::query_api::types::OperationPolicy) {
     encode_optional_policy_expr(buf, policy.using.as_ref());
     encode_optional_policy_expr(buf, policy.with_check.as_ref());
 }
@@ -1279,8 +1119,8 @@ fn encode_operation_policy(
 fn decode_operation_policy(
     data: &[u8],
     offset: &mut usize,
-) -> Result<crate::query_manager::types::OperationPolicy, CatalogueEncodingError> {
-    Ok(crate::query_manager::types::OperationPolicy {
+) -> Result<crate::query_api::types::OperationPolicy, CatalogueEncodingError> {
+    Ok(crate::query_api::types::OperationPolicy {
         using: decode_optional_policy_expr(data, offset)?,
         with_check: decode_optional_policy_expr(data, offset)?,
     })
@@ -1881,33 +1721,6 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
     }
 }
 
-fn skip_value(data: &[u8], offset: &mut usize) -> Result<(), CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        VALUE_NULL => Ok(()),
-        VALUE_INTEGER => read_bytes(data, offset, 4).map(|_| ()),
-        VALUE_BIGINT | VALUE_DOUBLE | VALUE_TIMESTAMP => read_bytes(data, offset, 8).map(|_| ()),
-        VALUE_BOOLEAN => read_u8(data, offset).map(|_| ()),
-        VALUE_TEXT => skip_string(data, offset),
-        VALUE_UUID | VALUE_BATCH_ID => read_bytes(data, offset, 16).map(|_| ()),
-        VALUE_BYTEA => {
-            let len = read_u32(data, offset)? as usize;
-            read_bytes(data, offset, len).map(|_| ())
-        }
-        VALUE_ARRAY | VALUE_ROW => {
-            let count = read_u32(data, offset)?;
-            for _ in 0..count {
-                skip_value(data, offset)?;
-            }
-            Ok(())
-        }
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "value",
-        }),
-    }
-}
-
 // ============================================================================
 // Primitive Helpers
 // ============================================================================
@@ -1974,16 +1787,11 @@ fn read_string(
     String::from_utf8(bytes.to_vec()).map_err(|_| CatalogueEncodingError::InvalidUtf8 { context })
 }
 
-fn skip_string(data: &[u8], offset: &mut usize) -> Result<(), CatalogueEncodingError> {
-    let len = read_u32(data, offset)? as usize;
-    read_bytes(data, offset, len).map(|_| ())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::policy::PolicyExpr;
-    use crate::query_manager::types::SchemaBuilder;
+    use crate::query_api::policy::PolicyExpr;
+    use crate::query_api::types::SchemaBuilder;
     use serde_json::json;
 
     #[test]
@@ -2184,36 +1992,6 @@ mod tests {
             .get(&TableName::new("todos"))
             .expect("decoded todos table");
         assert_eq!(todos.indexed_columns, Some(vec![ColumnName::new("done")]));
-    }
-
-    #[test]
-    fn table_descriptor_lookup_skips_indexed_column_metadata() {
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("a")
-                    .column("name", ColumnType::Text)
-                    .index_only(["name"]),
-            )
-            .table(
-                TableSchema::builder("b")
-                    .column("done", ColumnType::Boolean)
-                    .column("count", ColumnType::Integer),
-            )
-            .build();
-
-        let encoded = encode_schema(&schema);
-        let descriptor = decode_table_descriptor_from_schema(&encoded, "b")
-            .unwrap()
-            .expect("descriptor for b");
-
-        assert_eq!(
-            descriptor
-                .columns
-                .iter()
-                .map(|column| column.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["done", "count"]
-        );
     }
 
     #[test]
@@ -2441,10 +2219,10 @@ mod tests {
             )
             .build();
 
-        let original_hash = crate::query_manager::types::SchemaHash::compute(&schema);
+        let original_hash = crate::query_api::types::SchemaHash::compute(&schema);
         let encoded = encode_schema(&schema);
         let decoded = decode_schema(&encoded).unwrap();
-        let decoded_hash = crate::query_manager::types::SchemaHash::compute(&decoded);
+        let decoded_hash = crate::query_api::types::SchemaHash::compute(&decoded);
 
         assert_eq!(
             original_hash, decoded_hash,

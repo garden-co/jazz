@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jazz_tools::query_manager::types::SchemaHash;
+use jazz_tools::schema_api::SchemaHash;
 use jazz_tools::schema_manager::Lens;
 use jazz_tools::AppId;
 use jazz_tools::server::{JazzServer, ServerState};

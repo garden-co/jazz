@@ -6,12 +6,12 @@ use super::support::{
     wait_for_subscription_update,
 };
 use super::{pe, permissions};
-use jazz_tools::query_manager::policy::PolicyExpr;
-use jazz_tools::query_manager::relation_ir::{
+use jazz_tools::schema_api::PolicyExpr;
+use jazz_tools::schema_api::relation_ir::{
     ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr,
     RelExpr, RowIdRef, ValueRef,
 };
-use jazz_tools::query_manager::types::{TableName, TablePolicies, TableSchemaBuilder};
+use jazz_tools::schema_api::{TableName, TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,

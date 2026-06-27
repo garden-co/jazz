@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::metadata::{MetadataKey, ObjectType};
+use crate::metadata::MetadataKey;
 use crate::object::ObjectId;
-use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use crate::query_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 use crate::row_format::{decode_row, encode_row};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,15 +19,6 @@ impl CatalogueEntry {
         self.metadata
             .get(MetadataKey::Type.as_str())
             .map(String::as_str)
-    }
-
-    pub fn is_catalogue(&self) -> bool {
-        self.object_type()
-            .is_some_and(ObjectType::is_catalogue_type_str)
-    }
-
-    pub fn is_structural_schema_catalogue(&self) -> bool {
-        self.object_type() == Some(ObjectType::CatalogueSchema.as_str())
     }
 
     pub fn encode_storage_row(&self) -> Result<Vec<u8>, String> {

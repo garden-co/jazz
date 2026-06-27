@@ -7,7 +7,7 @@ use super::*;
 async fn enforcing_test_client(schema: Schema) -> JazzClient {
     JazzClient::connect_with_row_policy_mode(
         crate::AppContext::test(schema),
-        crate::query_manager::types::RowPolicyMode::Enforcing,
+        jazz_tools::schema_api::RowPolicyMode::Enforcing,
     )
     .await
     .expect("connect enforcing local JazzClient")
