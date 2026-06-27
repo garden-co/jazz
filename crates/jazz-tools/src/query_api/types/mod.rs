@@ -2,12 +2,12 @@
 pub(crate) use crate::row_format;
 
 // Sub-modules
-pub mod branch;
-pub mod descriptor;
-pub mod policy;
-pub mod row;
-pub mod schema;
-pub mod value;
+mod branch;
+mod descriptor;
+mod policy;
+mod row;
+mod schema;
+mod value;
 
 // Re-export all public items from sub-modules
 pub use branch::*;

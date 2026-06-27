@@ -2,13 +2,15 @@
 
 use std::time::Duration;
 
+mod support;
+
 use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
-use jazz_tools::test_support::wait_for_query;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value, WriteContext,
 };
+use support::wait_for_query;
 
 fn todo_schema() -> Schema {
     SchemaBuilder::new()
