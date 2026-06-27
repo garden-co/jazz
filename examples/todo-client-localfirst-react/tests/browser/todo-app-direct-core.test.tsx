@@ -6,12 +6,16 @@
  * converted by the runtime to the direct websocket endpoint.
  */
 
-import { describe, it, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
 import { APP_ID, ADMIN_SECRET, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
+
+type TestWindow = Window & {
+  __jazz?: { shutdown(namespace?: string): Promise<void> };
+};
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -58,6 +62,15 @@ async function addTodo(el: HTMLDivElement, title: string): Promise<void> {
   });
 }
 
+async function addTodoAndWaitForLocalDurability(el: HTMLDivElement, title: string): Promise<void> {
+  const localWriteDurable = new Promise<void>((resolve) => {
+    window.addEventListener("todo-app:local-write-durable", () => resolve(), { once: true });
+  });
+
+  await addTodo(el, title);
+  await localWriteDurable;
+}
+
 describe("React Todo App direct-core browser canary", () => {
   const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
 
@@ -84,6 +97,18 @@ describe("React Todo App direct-core browser canary", () => {
     );
 
     return el;
+  }
+
+  async function unmountApp(el: HTMLDivElement, dbName?: string): Promise<void> {
+    const idx = mounts.findIndex((m) => m.container === el);
+    if (idx === -1) return;
+
+    const { root } = mounts[idx];
+    await (window as TestWindow).__jazz?.shutdown(dbName);
+    await act(async () => root.unmount());
+    el.remove();
+    mounts.splice(idx, 1);
+    await new Promise((r) => setTimeout(r, 200));
   }
 
   afterEach(async () => {
@@ -161,11 +186,41 @@ describe("React Todo App direct-core browser canary", () => {
     );
   });
 
-  it.skip("reopens a persistent OPFS app instance with DOM-written todos", async () => {
-    // Blocked: the existing app-level OPFS remount test in todo-app.test.tsx
-    // currently times out after a DOM insert, and TodoList does not expose the
-    // public WriteHandle needed to wait for local durability before unmount.
-    // Keep the skipped canary here so the direct-core browser gate records the
-    // missing reopen coverage without silently exercising server replay instead.
+  it("reopens a persistent OPFS app instance with DOM-written todos", async () => {
+    const dbName = uniqueDbName("direct-core-reopen");
+    const title = "Direct-core durable todo";
+
+    const firstSession = await mountApp({
+      appId: APP_ID,
+      driver: { type: "persistent", dbName },
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      secret: "GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
+    });
+
+    await addTodoAndWaitForLocalDurability(firstSession, title);
+    await waitFor(
+      () => hasTodoTitle(firstSession, title),
+      3000,
+      "first session should render the DOM-written todo",
+    );
+
+    await unmountApp(firstSession, dbName);
+
+    const secondSession = await mountApp({
+      appId: APP_ID,
+      driver: { type: "persistent", dbName },
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      secret: "GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
+    });
+
+    await waitFor(
+      () => hasTodoTitle(secondSession, title),
+      5000,
+      "remounted app should load the locally durable todo from OPFS",
+    );
+
+    expect(todoTitles(secondSession)).toContain(title);
   });
 });

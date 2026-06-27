@@ -157,11 +157,10 @@ That gate runs the real `JazzProvider`, `useDb`, and `useAll` flow with two
 persistent OPFS clients connected to one local Rust Jazz server. It verifies
 DOM-driven create/update/delete and bidirectional subscription observation over
 the direct websocket path. The old core/edge browser setup has been collapsed
-out of this canary. A DOM-driven OPFS remount/reopen assertion remains skipped:
-the existing app-level remount test times out after a DOM insert, and the real
-`TodoList` path does not expose the public `WriteHandle` needed to wait for
-local durability before unmount. That is now tracked as a browser durability
-API/testability gap, not as covered app persistence.
+out of this canary. The DOM-driven OPFS remount/reopen assertion is now
+unskipped: `TodoList` waits for the public `db.insert(...).wait({ tier:
+"local" })` path and emits a test-observable durability event before the test
+shuts down and remounts the app.
 
 ## Current gaps versus alpha
 
@@ -447,6 +446,14 @@ API/testability gap, not as covered app persistence.
   local-update default remains documented in `Db` because immediate local
   updates still fail several public query shapes; close that as direct-core
   read/subscription completeness work, not as a facade fallback.
+- The retired alpha disconnect-marker/sweep lifecycle has been deleted from
+  server state and tests. Direct websocket lifecycle is accounted for through
+  shutdown admission/drain tracking and explicit direct-core session close, not
+  the old client TTL/reap loop.
+- Browser `useAll`/`useAllSuspense` tests now use direct-core-supported
+  `propagation: "full"` for successful QueryOptions cases and pin
+  `propagation: "local-only"` as an explicit current direct-core gap instead of
+  pretending it is supported.
 
 ## Next targets
 

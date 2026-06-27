@@ -3,6 +3,19 @@ import { useDb, useAll, useSession } from "jazz-tools/react";
 import { toast } from "sonner";
 import { app } from "../schema.js";
 
+type LocalDurabilityHandle = {
+  wait(options: { tier: "local" }): Promise<unknown>;
+};
+
+function notifyLocalWriteDurable(write: LocalDurabilityHandle) {
+  void write
+    .wait({ tier: "local" })
+    .then(() => window.dispatchEvent(new CustomEvent("todo-app:local-write-durable")))
+    .catch(() => {
+      toast.error("Could not save this task locally");
+    });
+}
+
 export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
   const [showDoneOnly, setShowDoneOnly] = useState(false);
@@ -26,7 +39,12 @@ export function TodoList() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !sessionUserId) return;
-    db.insert(app.todos, { title: title.trim(), done: false, owner_id: sessionUserId });
+    const write = db.insert(app.todos, {
+      title: title.trim(),
+      done: false,
+      owner_id: sessionUserId,
+    });
+    notifyLocalWriteDurable(write);
     setTitle("");
   };
 
