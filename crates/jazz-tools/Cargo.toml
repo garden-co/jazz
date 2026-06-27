@@ -45,7 +45,7 @@ server = [
 ]
 cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc"]
 test-utils = ["server", "client", "sqlite"]
-test = ["test-utils", "cli", "direct-core-client"]
+test = ["test-utils", "cli"]
 otel-core = [
   "server",
   "dep:opentelemetry",
