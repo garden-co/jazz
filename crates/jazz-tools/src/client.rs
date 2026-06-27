@@ -1230,14 +1230,6 @@ async fn wait_for_initial_transport_handshake(
 }
 
 impl JazzClient {
-    #[cfg_attr(feature = "direct-core-client", allow(dead_code))]
-    fn legacy_client_error() -> JazzError {
-        JazzError::Connection(
-            "JazzClient legacy runtime construction is disabled; use a server-backed direct core client"
-                .to_string(),
-        )
-    }
-
     #[cfg(feature = "direct-core-client")]
     fn check_direct_write_not_rejected(db: &DirectCoreBackend, tx_id: CoreTxId) -> Result<()> {
         let state = db
@@ -1438,8 +1430,6 @@ impl JazzClient {
         let _ = use_direct_core_local_driver;
 
         let default_session = default_session_from_context(&context);
-        #[cfg(not(feature = "direct-core-client"))]
-        let _ = &default_session;
         let has_server = !context.server_url.is_empty();
 
         #[cfg(feature = "direct-core-client")]
@@ -1477,15 +1467,7 @@ impl JazzClient {
                 subscriptions: Arc::new(RwLock::new(HashMap::new())),
                 next_handle: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             };
-            return Ok(client);
-        }
-
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            if !has_server {
-                return Err(Self::legacy_client_error());
-            }
-            Err(Self::legacy_client_error())
+            Ok(client)
         }
     }
 
@@ -1524,13 +1506,7 @@ impl JazzClient {
                     tx,
                 )
                 .await?;
-            return Ok(SubscriptionStream::new(rx));
-        }
-
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            let _ = query;
-            Err(Self::legacy_client_error())
+            Ok(SubscriptionStream::new(rx))
         }
     }
 
@@ -1558,13 +1534,7 @@ impl JazzClient {
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.apply_direct_transaction_overlay(&query, batch_id, &mut rows)?;
             }
-            return Ok(rows);
-        }
-
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            let _ = (query, durability_tier);
-            Err(Self::legacy_client_error())
+            Ok(rows)
         }
     }
 
@@ -1595,20 +1565,14 @@ impl JazzClient {
                     object_id.into(),
                     cells,
                 )?;
-                return Ok((row_id, row_values, batch_id));
+                Ok((row_id, row_values, batch_id))
             } else {
                 let (row_id, tx_id) =
                     self.engine
                         .insert(table.to_string(), object_id.into(), cells)?;
                 let batch_id = direct_batch_id(tx_id);
-                return Ok((row_id, row_values, batch_id));
+                Ok((row_id, row_values, batch_id))
             }
-        }
-
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            let _ = (table, object_id.into(), values);
-            Err(Self::legacy_client_error())
         }
     }
 
@@ -1625,16 +1589,11 @@ impl JazzClient {
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.engine
                     .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
-                return Ok(batch_id);
+                Ok(batch_id)
             } else {
                 let tx_id = self.engine.upsert(table.to_string(), object_id, cells)?;
-                return Ok(direct_batch_id(tx_id));
+                Ok(direct_batch_id(tx_id))
             }
-        }
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            let _ = (table, object_id, values);
-            Err(Self::legacy_client_error())
         }
     }
 
@@ -1645,16 +1604,11 @@ impl JazzClient {
             let cells = Self::direct_cells(updates.into_iter().collect())?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.engine.stage_update(batch_id, object_id, cells)?;
-                return Ok(batch_id);
+                Ok(batch_id)
             } else {
                 let tx_id = self.engine.update(object_id, cells)?;
-                return Ok(direct_batch_id(tx_id));
+                Ok(direct_batch_id(tx_id))
             }
-        }
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            let _ = (object_id, updates);
-            Err(Self::legacy_client_error())
         }
     }
 
@@ -1664,16 +1618,11 @@ impl JazzClient {
         {
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.engine.stage_delete(batch_id, object_id)?;
-                return Ok(batch_id);
+                Ok(batch_id)
             } else {
                 let tx_id = self.engine.delete(object_id)?;
-                return Ok(direct_batch_id(tx_id));
+                Ok(direct_batch_id(tx_id))
             }
-        }
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            let _ = object_id;
-            Err(Self::legacy_client_error())
         }
     }
 
@@ -1689,9 +1638,6 @@ impl JazzClient {
             let client = self.with_write_context(WriteContext::default().with_batch_id(batch_id));
             Ok(JazzTransaction { batch_id, client })
         }
-
-        #[cfg(not(feature = "direct-core-client"))]
-        Err(Self::legacy_client_error())
     }
 
     /// Commit an open transaction by batch id.
@@ -1699,12 +1645,6 @@ impl JazzClient {
         #[cfg(feature = "direct-core-client")]
         {
             self.engine.commit_transaction(batch_id)
-        }
-
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            let _ = batch_id;
-            Err(Self::legacy_client_error())
         }
     }
 
@@ -1716,23 +1656,12 @@ impl JazzClient {
         {
             self.engine.rollback_transaction(batch_id)
         }
-
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            let _ = batch_id;
-            Err(Self::legacy_client_error())
-        }
     }
 
     pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
         #[cfg(feature = "direct-core-client")]
         {
-            return self.engine.wait_for_batch(batch_id, tier).await;
-        }
-        #[cfg(not(feature = "direct-core-client"))]
-        {
-            let _ = (batch_id, tier);
-            Err(Self::legacy_client_error())
+            self.engine.wait_for_batch(batch_id, tier).await
         }
     }
 
@@ -1747,10 +1676,8 @@ impl JazzClient {
     pub fn schema(&self) -> Result<crate::query_manager::types::Schema> {
         #[cfg(feature = "direct-core-client")]
         {
-            return Ok(self.alpha_schema.clone());
+            Ok(self.alpha_schema.clone())
         }
-        #[cfg(not(feature = "direct-core-client"))]
-        Err(Self::legacy_client_error())
     }
 
     /// Check if connected to server.
