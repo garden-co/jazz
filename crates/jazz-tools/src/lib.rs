@@ -33,6 +33,7 @@ pub mod test_support;
 pub(crate) mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]
+#[allow(dead_code)]
 pub(crate) mod runtime_tokio;
 
 pub mod transport_auth;
@@ -41,6 +42,7 @@ pub mod transport_error;
 pub(crate) mod transport_manager;
 pub mod transport_protocol;
 #[cfg(feature = "transport-websocket")]
+#[allow(dead_code)]
 pub(crate) mod ws_stream;
 
 #[cfg(feature = "client")]
