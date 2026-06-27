@@ -1268,14 +1268,14 @@ function isUuidString(value: string): boolean {
   );
 }
 
-function encodeCellsForRow(
+export function encodeCellsForRow(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
 ): Uint8Array {
   return encodeCells(definition.columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForPatch(
+export function encodeCellsForPatch(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   patch: Record<string, Value>,
 ): Uint8Array {
@@ -1609,7 +1609,7 @@ function nativeDeltaFromRows(rows: RowState[]): SubscriptionWireDelta {
   }));
 }
 
-function parseUuid(value: string): Uint8Array {
+export function parseUuid(value: string): Uint8Array {
   const hex = value.replaceAll("-", "");
   if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
   const bytes = new Uint8Array(16);
@@ -1619,7 +1619,7 @@ function parseUuid(value: string): Uint8Array {
   return bytes;
 }
 
-function formatUuid(bytes: Uint8Array): string {
+export function formatUuid(bytes: Uint8Array): string {
   const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
     "",
   );
