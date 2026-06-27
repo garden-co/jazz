@@ -7,9 +7,9 @@ import type {
   Value,
   WasmSchema,
 } from "../../drivers/types.js";
-import { PostcardWriter, writeValueType, type ValueType } from "./direct-codec.js";
+import { PostcardWriter, writeValueType, type ValueType } from "./core-codec.js";
 
-export function encodeDirectSchema(schema: WasmSchema): Uint8Array {
+export function encodeSchema(schema: WasmSchema): Uint8Array {
   const tables = Object.entries(schema);
   const writer = new PostcardWriter();
   writer.vec((table, index) => {
@@ -65,7 +65,7 @@ export function columnTypeToValueType(type: ColumnType): ValueType {
     case "Array":
       return { tag: 11, inner: columnTypeToValueType(type.element) };
     case "Row":
-      throw new Error("Direct core runtime does not encode nested row columns yet");
+      throw new Error("Core runtime does not encode nested row columns yet");
   }
 }
 

@@ -1,6 +1,6 @@
 import type { Db, DbConfig } from "./db.js";
 import type { Session } from "../runtime/context.js";
-import { createReactNativeDirectCoreUnsupportedError } from "./runtime-module.js";
+import { createReactNativeCoreUnsupportedError } from "./runtime-module.js";
 
 export interface JazzClient {
   db: Db;
@@ -10,7 +10,7 @@ export interface JazzClient {
 
 async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   void config;
-  throw createReactNativeDirectCoreUnsupportedError();
+  throw createReactNativeCoreUnsupportedError();
 }
 
 export function createJazzClient(config: DbConfig): Promise<JazzClient> {

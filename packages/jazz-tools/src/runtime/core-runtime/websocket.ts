@@ -1,29 +1,29 @@
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
 import type { AuthFailureReason } from "../auth-state.js";
-import { PostcardReader, PostcardWriter } from "./direct-codec.js";
+import { PostcardReader, PostcardWriter } from "./core-codec.js";
 
-export type DirectWebSocketFrameHandler = (frame: Uint8Array) => void;
-export type DirectWebSocketErrorHandler = (error: DirectWireError) => void;
+export type WebSocketFrameHandler = (frame: Uint8Array) => void;
+export type WebSocketErrorHandler = (error: WireError) => void;
 
-export type DirectWireError = {
+export type WireError = {
   code: string;
   retry: string;
   message: string;
 };
 
-export type DirectWebSocketCarrierOptions = {
+export type WebSocketCarrierOptions = {
   endpointUrl: string;
   peerIdentity: Uint8Array;
   authJson?: string;
-  onFrame: DirectWebSocketFrameHandler;
-  onError?: DirectWebSocketErrorHandler;
-  WebSocket?: DirectWebSocketConstructor;
+  onFrame: WebSocketFrameHandler;
+  onError?: WebSocketErrorHandler;
+  WebSocket?: WebSocketConstructor;
 };
 
-export type DirectWebSocketConstructor = new (url: string) => DirectBrowserWebSocket;
+export type WebSocketConstructor = new (url: string) => BrowserWebSocket;
 
-export type DirectBrowserWebSocket = {
+export type BrowserWebSocket = {
   binaryType: "arraybuffer" | "blob";
   readonly readyState: number;
   send(data: Uint8Array): void;
@@ -34,22 +34,22 @@ export type DirectBrowserWebSocket = {
   addEventListener(type: "close", listener: () => void): void;
 };
 
-export function directWebSocketUrl(serverUrl: string, appId: string): string {
+export function webSocketUrl(serverUrl: string, appId: string): string {
   return httpUrlToWs(serverUrl, appId);
 }
 
-export function encodeDirectWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
+export function encodeWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec((itemWriter, index) => itemWriter.bytes(frames[index]!), frames.length);
   return writer.finish();
 }
 
-export function decodeDirectWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {
+export function decodeWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {
   const reader = new PostcardReader(batch);
   return reader.readVec((itemReader) => itemReader.bytes());
 }
 
-export function encodeDirectWireClientHello(): Uint8Array {
+export function encodeWireClientHello(): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
   writer.u64(1); // min_protocol_version
@@ -59,19 +59,19 @@ export function encodeDirectWireClientHello(): Uint8Array {
   return writer.finish();
 }
 
-export function isDirectWireHello(frame: Uint8Array): boolean {
+export function isWireHello(frame: Uint8Array): boolean {
   return new PostcardReader(frame).u64() === 0;
 }
 
-export function isDirectWireMessage(frame: Uint8Array): boolean {
+export function isWireMessage(frame: Uint8Array): boolean {
   return new PostcardReader(frame).u64() === 1;
 }
 
-export function isDirectWireError(frame: Uint8Array): boolean {
+export function isWireError(frame: Uint8Array): boolean {
   return new PostcardReader(frame).u64() === 2;
 }
 
-export function decodeDirectWireError(frame: Uint8Array): DirectWireError {
+export function decodeWireError(frame: Uint8Array): WireError {
   const reader = new PostcardReader(frame);
   const tag = reader.u64();
   if (tag !== 2) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
@@ -82,19 +82,19 @@ export function decodeDirectWireError(frame: Uint8Array): DirectWireError {
   };
 }
 
-export function directWireAuthFailureReason(error: DirectWireError): AuthFailureReason | null {
+export function wireAuthFailureReason(error: WireError): AuthFailureReason | null {
   if (error.code !== "auth_failed") return null;
   return mapAuthReason(error.message);
 }
 
-export class DirectWebSocketCarrier {
+export class WebSocketCarrier {
   readonly url: string;
-  private readonly socket: DirectBrowserWebSocket;
-  private readonly onFrame: DirectWebSocketFrameHandler;
-  private readonly onError?: DirectWebSocketErrorHandler;
+  private readonly socket: BrowserWebSocket;
+  private readonly onFrame: WebSocketFrameHandler;
+  private readonly onError?: WebSocketErrorHandler;
   private readonly opened: Promise<void>;
 
-  constructor(options: DirectWebSocketCarrierOptions) {
+  constructor(options: WebSocketCarrierOptions) {
     const WebSocketCtor = options.WebSocket ?? browserWebSocketConstructor();
     this.url = options.endpointUrl;
     this.onFrame = options.onFrame;
@@ -102,10 +102,8 @@ export class DirectWebSocketCarrier {
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
     this.opened = waitForOpen(this.socket).then(() => {
-      this.socket.send(
-        encodeDirectWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity),
-      );
-      this.socket.send(encodeDirectWebSocketFrameBatch([encodeDirectWireClientHello()]));
+      this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
+      this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
     });
     this.socket.addEventListener("message", (event) => {
       void this.handleMessage(event.data);
@@ -114,12 +112,12 @@ export class DirectWebSocketCarrier {
 
   async send(frame: Uint8Array): Promise<void> {
     await this.ready();
-    this.socket.send(encodeDirectWebSocketFrameBatch([frame]));
+    this.socket.send(encodeWebSocketFrameBatch([frame]));
   }
 
   async sendBatch(frames: readonly Uint8Array[]): Promise<void> {
     await this.ready();
-    this.socket.send(encodeDirectWebSocketFrameBatch(frames));
+    this.socket.send(encodeWebSocketFrameBatch(frames));
   }
 
   ready(): Promise<void> {
@@ -131,10 +129,10 @@ export class DirectWebSocketCarrier {
   }
 
   private async handleMessage(data: unknown): Promise<void> {
-    for (const frame of decodeDirectWebSocketFrameBatch(await bytesFromWebSocketMessage(data))) {
-      if (isDirectWireHello(frame)) continue;
-      if (isDirectWireError(frame)) {
-        this.onError?.(decodeDirectWireError(frame));
+    for (const frame of decodeWebSocketFrameBatch(await bytesFromWebSocketMessage(data))) {
+      if (isWireHello(frame)) continue;
+      if (isWireError(frame)) {
+        this.onError?.(decodeWireError(frame));
         continue;
       }
       this.onFrame(frame);
@@ -142,10 +140,7 @@ export class DirectWebSocketCarrier {
   }
 }
 
-export function encodeDirectWebSocketPrelude(
-  authJson: string,
-  peerIdentity: Uint8Array,
-): Uint8Array {
+export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): Uint8Array {
   return new TextEncoder().encode(
     JSON.stringify({
       peer_identity: bytesToHex(peerIdentity),
@@ -154,10 +149,10 @@ export function encodeDirectWebSocketPrelude(
   );
 }
 
-export async function connectDirectWebSocketCarrier(
-  options: DirectWebSocketCarrierOptions,
-): Promise<DirectWebSocketCarrier> {
-  const carrier = new DirectWebSocketCarrier(options);
+export async function connectWebSocketCarrier(
+  options: WebSocketCarrierOptions,
+): Promise<WebSocketCarrier> {
+  const carrier = new WebSocketCarrier(options);
   await carrier.ready();
   return carrier;
 }
@@ -173,8 +168,8 @@ export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Arr
   throw new Error(`expected binary websocket message, got ${typeof data}`);
 }
 
-function browserWebSocketConstructor(): DirectWebSocketConstructor {
-  const candidate = (globalThis as { WebSocket?: DirectWebSocketConstructor }).WebSocket;
+function browserWebSocketConstructor(): WebSocketConstructor {
+  const candidate = (globalThis as { WebSocket?: WebSocketConstructor }).WebSocket;
   if (!candidate) {
     throw new Error("browser WebSocket is not available");
   }
@@ -215,7 +210,7 @@ function wireRetryName(tag: number): string {
   }
 }
 
-function waitForOpen(socket: DirectBrowserWebSocket): Promise<void> {
+function waitForOpen(socket: BrowserWebSocket): Promise<void> {
   if (socket.readyState === 1) return Promise.resolve();
   return new Promise((resolve, reject) => {
     let settled = false;

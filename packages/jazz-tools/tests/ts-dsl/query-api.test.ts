@@ -98,9 +98,9 @@ describe("TS Query API", () => {
         ownerId: insertUser(db).id,
       });
 
-      const resultsDirectNull = await db.all(app.todos.where({ ownerId: null }));
+      const resultsNullMatch = await db.all(app.todos.where({ ownerId: null }));
       const resultsEqNull = await db.all(app.todos.where({ ownerId: { eq: null } }));
-      expect(resultsDirectNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
+      expect(resultsNullMatch.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
       expect(resultsEqNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
     });
 

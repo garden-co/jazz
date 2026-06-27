@@ -38,30 +38,26 @@ export interface Runtime {
     values: InsertValues,
     write_context_json?: string | null,
     object_id?: string | null,
-  ): DirectInsertResult;
+  ): InsertResult;
   restore(
     table: string,
     object_id: string,
     values: InsertValues,
     write_context_json?: string | null,
-  ): DirectInsertResult;
+  ): InsertResult;
   update(
     table: string,
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
-  ): DirectMutationResult;
+  ): MutationResult;
   upsert(
     table: string,
     object_id: string,
     values: InsertValues,
     write_context_json?: string | null,
-  ): DirectMutationResult;
-  delete(
-    table: string,
-    object_id: string,
-    write_context_json?: string | null,
-  ): DirectMutationResult;
+  ): MutationResult;
+  delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
   waitForTransaction(transactionId: string, tier: string): Promise<void>;
   query(
     query_json: string,
@@ -225,11 +221,11 @@ export interface Row {
   values: Value[];
 }
 
-export interface DirectInsertResult extends Row {
+export interface InsertResult extends Row {
   transactionId: TransactionId;
 }
 
-export interface DirectMutationResult {
+export interface MutationResult {
   transactionId: TransactionId;
 }
 
@@ -734,7 +730,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     transactionId?: TransactionId,
-  ): DirectInsertResult {
+  ): InsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
@@ -775,7 +771,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     transactionId?: TransactionId,
-  ): DirectInsertResult {
+  ): InsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
@@ -814,7 +810,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     transactionId?: TransactionId,
-  ): DirectMutationResult {
+  ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
@@ -887,7 +883,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     transactionId?: TransactionId,
-  ): DirectMutationResult {
+  ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
@@ -922,7 +918,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     transactionId?: TransactionId,
-  ): DirectMutationResult {
+  ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,

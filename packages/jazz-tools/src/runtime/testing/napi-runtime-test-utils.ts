@@ -60,14 +60,14 @@ export async function createNapiCoreRuntime(
     tier?: string;
   },
 ): Promise<TestNapiCoreRuntime> {
-  const { NapiDirectDb } = await loadNapiModule();
+  const { NapiDb } = await loadNapiModule();
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const userBranch = opts?.userBranch ?? "main";
   const runtime = new CoreRuntime(
     {
       openMemory: (schemaBytes, configBytes) =>
-        NapiDirectDb.openMemory(schemaBytes, configBytes) as never,
+        NapiDb.openMemory(schemaBytes, configBytes) as never,
     },
     schema,
     deterministicBytes(`${appId}:${env}:${userBranch}:node`),
@@ -92,16 +92,16 @@ export async function createPersistentNapiCoreRuntime(
     tier?: string;
   },
 ): Promise<TestNapiCoreRuntime> {
-  const { NapiDirectDb } = await loadNapiModule();
+  const { NapiDb } = await loadNapiModule();
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const userBranch = opts?.userBranch ?? "main";
   const runtime = new CoreRuntime(
     {
       openMemory: (schemaBytes, configBytes) =>
-        NapiDirectDb.openMemory(schemaBytes, configBytes) as never,
+        NapiDb.openMemory(schemaBytes, configBytes) as never,
       openPersistent: (path, schemaBytes, configBytes) =>
-        NapiDirectDb.openPersistent(path, schemaBytes, configBytes) as never,
+        NapiDb.openPersistent(path, schemaBytes, configBytes) as never,
     },
     schema,
     deterministicBytes(`${appId}:${env}:${userBranch}:node`),

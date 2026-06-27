@@ -50,7 +50,7 @@ const mocks = vi.hoisted(() => {
     close: vi.fn(),
   };
 
-  const MockNapiDirectDb = {
+  const MockNapiDb = {
     openMemory: vi.fn((schemaBytes: Uint8Array, configBytes: Uint8Array) => {
       openMemory(schemaBytes, configBytes);
       return fakeDb;
@@ -64,7 +64,7 @@ const mocks = vi.hoisted(() => {
   class MockCoreRuntime {
     readonly close = vi.fn();
     constructor(
-      Runtime: typeof MockNapiDirectDb,
+      Runtime: typeof MockNapiDb,
       schema: WasmSchema,
       node: Uint8Array,
       author: Uint8Array,
@@ -91,7 +91,7 @@ const mocks = vi.hoisted(() => {
   }
 
   return {
-    MockNapiDirectDb,
+    MockNapiDb,
     MockCoreRuntime,
     MockJazzClient,
     resolveRequestSession,
@@ -108,8 +108,8 @@ const mocks = vi.hoisted(() => {
       openMemory.mockReset();
       openPersistent.mockReset();
       directRuntimeCtor.mockReset();
-      MockNapiDirectDb.openMemory.mockClear();
-      MockNapiDirectDb.openPersistent.mockClear();
+      MockNapiDb.openMemory.mockClear();
+      MockNapiDb.openPersistent.mockClear();
       fakeDb.close.mockClear();
       runtimeInstances.length = 0;
       connectWithRuntime.mockClear();
@@ -121,7 +121,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock("jazz-napi", () => ({
-  NapiDirectDb: mocks.MockNapiDirectDb,
+  NapiDb: mocks.MockNapiDb,
 }));
 
 vi.mock("../runtime/core-runtime/runtime.js", () => ({
@@ -241,7 +241,7 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.createDbFromClient).toHaveBeenCalledTimes(2);
     expect(mocks.createdDbs[0]?.client).toBe(mocks.createdDbs[1]?.client);
     expect(mocks.directRuntimeCtor).toHaveBeenCalledWith(
-      mocks.MockNapiDirectDb,
+      mocks.MockNapiDb,
       SCHEMA_A,
       expect.any(Uint8Array),
       expect.any(Uint8Array),
@@ -591,7 +591,7 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.openMemory).toHaveBeenCalledTimes(1);
     expect(mocks.openPersistent).not.toHaveBeenCalled();
     expect(mocks.directRuntimeCtor).toHaveBeenCalledWith(
-      mocks.MockNapiDirectDb,
+      mocks.MockNapiDb,
       SCHEMA_A,
       expect.any(Uint8Array),
       expect.any(Uint8Array),

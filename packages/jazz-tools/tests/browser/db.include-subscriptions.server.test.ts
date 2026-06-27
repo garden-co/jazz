@@ -65,7 +65,7 @@ afterEach(async () => {
   await ctx.cleanup();
 });
 
-describe("direct websocket include subscriptions", () => {
+describe("websocket include subscriptions", () => {
   it("delivers depth-3 reverse include material from client A to client B subscribeAll", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("include-subscriptions"),
@@ -87,8 +87,8 @@ describe("direct websocket include subscriptions", () => {
       "include-subscriptions-b",
       sharedSecret,
     );
-    await ensureDirectRuntimeReady(dbA);
-    await ensureDirectRuntimeReady(dbB);
+    await ensureCoreRuntimeReady(dbA);
+    await ensureCoreRuntimeReady(dbB);
 
     const snapshots: OrgWithDeepIncludes[][] = [];
     const selectedIncludeQuery = app.orgs
@@ -264,6 +264,6 @@ function hasProjectedTodo(
   });
 }
 
-async function ensureDirectRuntimeReady(db: Db): Promise<void> {
+async function ensureCoreRuntimeReady(db: Db): Promise<void> {
   (db as unknown as { getClient(schema: unknown): unknown }).getClient(app.wasmSchema);
 }

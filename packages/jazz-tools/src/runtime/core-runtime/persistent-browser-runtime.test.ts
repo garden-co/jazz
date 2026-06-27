@@ -94,7 +94,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
-  it("rejects waits when the worker write fails before direct-core returns a transaction id", async () => {
+  it("rejects waits when the worker write fails before core returns a transaction id", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
     const runtime = new PersistentBrowserOpfsRuntime(

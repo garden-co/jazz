@@ -1,22 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { PostcardWriter } from "./direct-codec.js";
+import { PostcardWriter } from "./core-codec.js";
 import {
-  DirectWebSocketCarrier,
-  decodeDirectWireError,
-  decodeDirectWebSocketFrameBatch,
-  directWebSocketUrl,
-  encodeDirectWireClientHello,
-  encodeDirectWebSocketPrelude,
-  encodeDirectWebSocketFrameBatch,
-  isDirectWireHello,
-  isDirectWireMessage,
-} from "./direct-websocket.js";
+  WebSocketCarrier,
+  decodeWireError,
+  decodeWebSocketFrameBatch,
+  webSocketUrl,
+  encodeWireClientHello,
+  encodeWebSocketPrelude,
+  encodeWebSocketFrameBatch,
+  isWireHello,
+  isWireMessage,
+} from "./websocket.js";
 
-describe("direct websocket frame carrier", () => {
+describe("websocket frame carrier", () => {
   it("encodes websocket messages as postcard batches of encoded frames", () => {
     const frames = [Uint8Array.from([1, 2, 3]), Uint8Array.from([4, 5])];
 
-    const decoded = decodeDirectWebSocketFrameBatch(encodeDirectWebSocketFrameBatch(frames));
+    const decoded = decodeWebSocketFrameBatch(encodeWebSocketFrameBatch(frames));
 
     expect(decoded.map((frame) => [...frame])).toEqual([
       [1, 2, 3],
@@ -25,16 +25,16 @@ describe("direct websocket frame carrier", () => {
   });
 
   it("uses app-scoped websocket URLs without identity query parameters", () => {
-    expect(directWebSocketUrl("http://127.0.0.1:4200", "app-a")).toBe(
+    expect(webSocketUrl("http://127.0.0.1:4200", "app-a")).toBe(
       "ws://127.0.0.1:4200/apps/app-a/ws",
     );
   });
 
-  it("encodes peer identity and alpha-shaped auth in the direct websocket prelude", () => {
+  it("encodes peer identity and alpha-shaped auth in the websocket prelude", () => {
     expect(
       JSON.parse(
         new TextDecoder().decode(
-          encodeDirectWebSocketPrelude('{"admin_secret":"s"}', Uint8Array.from([0, 1, 10, 255])),
+          encodeWebSocketPrelude('{"admin_secret":"s"}', Uint8Array.from([0, 1, 10, 255])),
         ),
       ),
     ).toEqual({
@@ -44,14 +44,14 @@ describe("direct websocket frame carrier", () => {
   });
 
   it("encodes the client wire hello as a websocket-negotiation frame", () => {
-    const hello = encodeDirectWireClientHello();
+    const hello = encodeWireClientHello();
 
-    expect(isDirectWireHello(hello)).toBe(true);
-    expect(isDirectWireMessage(hello)).toBe(false);
+    expect(isWireHello(hello)).toBe(true);
+    expect(isWireMessage(hello)).toBe(false);
   });
 
   it("decodes structured wire error frames", () => {
-    expect(decodeDirectWireError(encodeDirectWireError(3, 1, "bad credentials"))).toEqual({
+    expect(decodeWireError(encodeWireError(3, 1, "bad credentials"))).toEqual({
       code: "auth_failed",
       retry: "after_auth",
       message: "bad credentials",
@@ -62,7 +62,7 @@ describe("direct websocket frame carrier", () => {
     let socket: MessageWebSocket | undefined;
     const frames: Uint8Array[] = [];
     const errors: unknown[] = [];
-    new DirectWebSocketCarrier({
+    new WebSocketCarrier({
       endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
       peerIdentity: new Uint8Array(16),
       onFrame: (frame) => frames.push(frame),
@@ -75,7 +75,7 @@ describe("direct websocket frame carrier", () => {
       },
     });
 
-    socket!.emitMessage(encodeDirectWebSocketFrameBatch([encodeDirectWireError(3, 1, "expired")]));
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "expired")]));
     await Promise.resolve();
 
     expect(frames).toEqual([]);
@@ -83,7 +83,7 @@ describe("direct websocket frame carrier", () => {
   });
 });
 
-function encodeDirectWireError(code: number, retry: number, message: string): Uint8Array {
+function encodeWireError(code: number, retry: number, message: string): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(2);
   writer.u64(code);

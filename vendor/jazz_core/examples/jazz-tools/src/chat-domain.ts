@@ -8,7 +8,7 @@ import {
   fieldIndex,
   writeValueType,
   utf8,
-} from "./direct-codec.js";
+} from "./core-codec.js";
 
 export type RoomInput = {
   name: string;

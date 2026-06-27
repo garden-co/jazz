@@ -10,27 +10,27 @@ export interface RuntimeTokenOptions {
   nowSeconds: bigint;
 }
 
-export interface DirectCoreClientContext<RuntimeConfig extends DbConfig = DbConfig> {
+export interface CoreClientContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   schema: WasmSchema;
   onAuthFailure: (reason: AuthFailureReason) => void;
 }
 
-export interface DirectCoreTelemetryContext<RuntimeConfig extends DbConfig = DbConfig> {
+export interface CoreTelemetryContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   collectorUrl: string;
   runtimeThread: "main" | "worker";
 }
 
 /**
- * Internal source for loading and wiring the direct core runtime.
+ * Internal source for loading and wiring the core runtime.
  *
  * This keeps platform/source differences (WASM, NAPI, browser storage, React
  * Native support status) out of Db without presenting alternate database
  * engines as a public extension point.
  */
-export abstract class DirectCoreSource<RuntimeConfig extends DbConfig = DbConfig> {
-  /** Set to false when the direct core must receive schemas exactly as declared. */
+export abstract class CoreSource<RuntimeConfig extends DbConfig = DbConfig> {
+  /** Set to false when the core must receive schemas exactly as declared. */
   readonly supportsPolicyBypass: boolean = true;
   private hasLoadedCore = false;
   private loadedCoreValue: unknown;
@@ -53,11 +53,9 @@ export abstract class DirectCoreSource<RuntimeConfig extends DbConfig = DbConfig
     return this.loadedCoreValue;
   }
 
-  abstract createClient(context: DirectCoreClientContext<RuntimeConfig>): JazzClient;
+  abstract createClient(context: CoreClientContext<RuntimeConfig>): JazzClient;
 
-  installTelemetry(
-    _context: DirectCoreTelemetryContext<RuntimeConfig>,
-  ): (() => void) | null | undefined {
+  installTelemetry(_context: CoreTelemetryContext<RuntimeConfig>): (() => void) | null | undefined {
     return null;
   }
 
