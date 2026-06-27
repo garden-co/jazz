@@ -82,8 +82,14 @@ test("render_deltas compares jazz-sim JSONL metrics from manifests", () => {
   );
 
   assert.match(output, /## Jazz Sim/);
-  assert.match(output, /\| jazz-sim\/s2_canvas\/canvas_replay\/elapsed_us \| 2500\.0 \| 2000\.0 \| -500\.00 \| -20\.00% \| better \|/);
-  assert.match(output, /\| jazz-sim\/s2_canvas\/canvas_replay\/replay_edits_per_sec \| 40000\.0 \| 50000\.0 \| 10000\.0 \| 25\.00% \| better \|/);
+  assert.match(
+    output,
+    /\| jazz-sim\/s2_canvas\/canvas_replay\/elapsed_us \| 2500\.0 \| 2000\.0 \| -500\.00 \| -20\.00% \| better \|/,
+  );
+  assert.match(
+    output,
+    /\| jazz-sim\/s2_canvas\/canvas_replay\/replay_edits_per_sec \| 40000\.0 \| 50000\.0 \| 10000\.0 \| 25\.00% \| better \|/,
+  );
   assert.doesNotMatch(output, /8888|9999|\/edits|\/seed/);
 });
 
@@ -96,15 +102,7 @@ test("render_deltas help and validation include jazz-sim kind", () => {
 
   const invalid = spawnSync(
     "node",
-    [
-      "dev/benchmarks/realistic/render_deltas.mjs",
-      "--base",
-      ".",
-      "--head",
-      ".",
-      "--kind",
-      "nope",
-    ],
+    ["dev/benchmarks/realistic/render_deltas.mjs", "--base", ".", "--head", ".", "--kind", "nope"],
     {
       cwd: REPO_ROOT,
       encoding: "utf8",
