@@ -1213,7 +1213,9 @@ fn validate_predicate(
             for value in values {
                 let value_type = operand_type(table, value, params)?;
                 match (left_type.clone(), value_type) {
-                    (Some(left_type), Some(value_type)) if left_type != value_type => {
+                    (Some(left_type), Some(value_type))
+                        if !column_types_comparable(&left_type, &value_type) =>
+                    {
                         return Err(QueryError::OperandTypeMismatch);
                     }
                     (Some(left_type), None) => infer_param(value, left_type, params)?,
@@ -1237,7 +1239,7 @@ fn validate_predicate(
         }
         Predicate::Contains(left, right) => {
             let left_type = operand_type(table, left, params)?;
-            match left_type {
+            match left_type.map(|column_type| non_null_column_type(&column_type)) {
                 Some(ColumnType::String) => {
                     validate_operand_against_type(table, right, ColumnType::String, params)
                 }
@@ -1265,7 +1267,9 @@ fn validate_comparable_operands(
     let left_type = operand_type(table, left, params)?;
     let right_type = operand_type(table, right, params)?;
     match (left_type, right_type) {
-        (Some(left_type), Some(right_type)) if left_type != right_type => {
+        (Some(left_type), Some(right_type))
+            if !column_types_comparable(&left_type, &right_type) =>
+        {
             Err(QueryError::OperandTypeMismatch)
         }
         (Some(left_type), None) => {
@@ -1295,8 +1299,9 @@ fn validate_operand_against_type(
 }
 
 fn is_orderable(column_type: &ColumnType) -> bool {
+    let column_type = non_null_column_type(column_type);
     matches!(
-        column_type,
+        &column_type,
         ColumnType::U8
             | ColumnType::U16
             | ColumnType::U32
@@ -1304,6 +1309,17 @@ fn is_orderable(column_type: &ColumnType) -> bool {
             | ColumnType::F64
             | ColumnType::String
     )
+}
+
+fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
+    left == right || non_null_column_type(left) == non_null_column_type(right)
+}
+
+fn non_null_column_type(column_type: &ColumnType) -> ColumnType {
+    match column_type {
+        ColumnType::Nullable(inner) => inner.as_ref().clone(),
+        other => other.clone(),
+    }
 }
 
 fn is_numeric(column_type: &ColumnType) -> bool {
