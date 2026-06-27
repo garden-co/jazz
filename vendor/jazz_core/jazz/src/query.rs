@@ -1214,11 +1214,17 @@ fn validate_predicate(
                 let value_type = operand_type(table, value, params)?;
                 match (left_type.clone(), value_type) {
                     (Some(left_type), Some(value_type))
-                        if !column_types_comparable(&left_type, &value_type) =>
+                        if !in_operand_types_compatible(&left_type, &value_type) =>
                     {
                         return Err(QueryError::OperandTypeMismatch);
                     }
-                    (Some(left_type), None) => infer_param(value, left_type, params)?,
+                    (Some(left_type), None) => {
+                        let expected = match non_null_column_type(&left_type) {
+                            ColumnType::Array(member) => *member,
+                            other => other,
+                        };
+                        infer_param(value, expected, params)?;
+                    }
                     (None, Some(value_type)) => infer_param(left, value_type, params)?,
                     (Some(_), Some(_)) => {}
                     (None, None) => return Err(QueryError::OperandTypeMismatch),
@@ -1313,6 +1319,16 @@ fn is_orderable(column_type: &ColumnType) -> bool {
 
 fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
     left == right || non_null_column_type(left) == non_null_column_type(right)
+}
+
+fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
+    if column_types_comparable(left, right) {
+        return true;
+    }
+    match non_null_column_type(left) {
+        ColumnType::Array(member) => column_types_comparable(&member, right),
+        _ => false,
+    }
 }
 
 fn non_null_column_type(column_type: &ColumnType) -> ColumnType {

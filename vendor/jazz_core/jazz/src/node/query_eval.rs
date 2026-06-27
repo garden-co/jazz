@@ -4277,16 +4277,27 @@ fn lower_maintained_residual_predicate(
                 return Ok(LoweredMaintainedPredicate::AlwaysFalse);
             }
             let mut residual = Vec::new();
+            let column_type = non_null_query_column_type(table_column_type(table, column)?);
             for value in values {
                 let Operand::Literal(value) = value else {
                     return Err(Error::InvalidStoredValue(
                         "unsupported query predicate shape",
                     ));
                 };
-                residual.push(PredicateExpr::eq(
-                    query_field(column),
-                    nullable_cell_value(table, column, value.clone())?,
-                ));
+                residual.push(match (column_type, value) {
+                    (groove::schema::ColumnType::Array(_), Value::Array(_)) => PredicateExpr::eq(
+                        query_field(column),
+                        nullable_cell_value(table, column, value.clone())?,
+                    ),
+                    (groove::schema::ColumnType::Array(_), _) => PredicateExpr::Contains {
+                        field: query_field(column),
+                        value: nullable_cell_value(table, column, value.clone())?.into(),
+                    },
+                    _ => PredicateExpr::eq(
+                        query_field(column),
+                        nullable_cell_value(table, column, value.clone())?,
+                    ),
+                });
             }
             Ok(LoweredMaintainedPredicate::Residual(
                 PredicateExpr::Or(residual).canonicalize(),
@@ -5261,6 +5272,15 @@ fn table_column_type<'a>(
         .find(|candidate| candidate.name == column)
         .map(|column| &column.column_type)
         .ok_or(Error::InvalidStoredValue("query column was not validated"))
+}
+
+fn non_null_query_column_type(
+    column_type: &groove::schema::ColumnType,
+) -> &groove::schema::ColumnType {
+    match column_type {
+        groove::schema::ColumnType::Nullable(inner) => inner.as_ref(),
+        other => other,
+    }
 }
 
 fn predicate_params(predicates: &[Predicate]) -> BTreeSet<String> {

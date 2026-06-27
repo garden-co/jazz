@@ -11,7 +11,9 @@ use crate::server::DynStorage;
 ///
 /// This is intentionally a thin wrapper over the legacy Tokio runtime and
 /// schema manager while catalogue storage is being moved behind direct core.
-/// Production websocket sync must not route through this store.
+/// It may read and write admin catalogue metadata only: schemas, permissions,
+/// and lenses. Production websocket sync, row storage, query execution, and
+/// client lifecycle semantics must stay on the direct `CoreServer` path.
 #[derive(Debug, Default)]
 pub struct ServerCatalogue;
 

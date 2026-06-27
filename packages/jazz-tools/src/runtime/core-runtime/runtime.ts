@@ -8,6 +8,7 @@ import type {
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
+import { analyzeRelations, type Relation } from "../../codegen/relation-analyzer.js";
 import type {
   DirectInsertResult,
   DirectMutationResult,
@@ -147,6 +148,13 @@ type SubscriptionState = {
   source: ReadableStreamDefaultReader<unknown> | DirectSubscription;
   rows: RowState[];
   filters: RowFilter[];
+  recompute?: {
+    queryJson: string;
+    identity?: Uint8Array;
+    tier?: string | null;
+    optionsJson?: string | null;
+    pending: boolean;
+  };
   callback?: Function;
   cancelled: boolean;
   reading: boolean;
@@ -158,6 +166,12 @@ type RowState = {
   table: string;
   id: string;
   values: Value[];
+};
+
+type RuntimeQueryJson = {
+  table?: unknown;
+  relation_ir?: unknown;
+  array_subqueries?: unknown;
 };
 
 const textEncoder = new TextEncoder();
@@ -453,6 +467,8 @@ export class CoreRuntime implements Runtime {
     optionsJson?: string | null,
   ): Promise<unknown> {
     assertSupportedReadOptions(tier, optionsJson);
+    const relationRows = await this.queryRelationShape(queryJson, sessionJson, tier, optionsJson);
+    if (relationRows) return relationRows;
     const query = this.prepareQuery(queryJson);
     const session = readSession(sessionJson);
     const opts = readOptions(tier, queryIncludesDeleted(queryJson));
@@ -460,6 +476,209 @@ export class CoreRuntime implements Runtime {
     const rows = session
       ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
       : this.db.all(query, opts);
+    return filterRows(
+      rowsFromBatches(readRowBatches(rows), this.schema),
+      queryFiltersFromJson(queryJson, this.schema),
+      this.schema,
+    );
+  }
+
+  private async queryRelationShape(
+    queryJson: string,
+    sessionJson?: string | null,
+    tier?: string | null,
+    optionsJson?: string | null,
+  ): Promise<RowState[] | null> {
+    const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
+    if (typeof parsed.table !== "string") return null;
+    const hasArraySubqueries =
+      Array.isArray(parsed.array_subqueries) && parsed.array_subqueries.length > 0;
+    const relation = parsed.relation_ir;
+    const relationKind = relationKindOf(relation);
+    if (!hasArraySubqueries && relationKind !== "Project" && relationKind !== "Gather") return null;
+
+    const session = readSession(sessionJson);
+    const identity = session ? parseUuid(session.user_id) : undefined;
+    let rows =
+      relationKind === "Project" || relationKind === "Gather"
+        ? await this.evaluateRelation(relation, identity, tier, optionsJson)
+        : await this.queryPreparedRows(queryJson, identity, tier, optionsJson);
+
+    if (hasArraySubqueries) {
+      rows = await this.attachArraySubqueries(
+        rows,
+        parsed.array_subqueries,
+        identity,
+        tier,
+        optionsJson,
+      );
+    }
+    return rows;
+  }
+
+  private async evaluateRelation(
+    relation: unknown,
+    identity: Uint8Array | undefined,
+    tier?: string | null,
+    optionsJson?: string | null,
+  ): Promise<RowState[]> {
+    if (!relation || typeof relation !== "object") throw unsupportedRelationQueryError();
+    const record = relation as Record<string, unknown>;
+    if (record.Project && typeof record.Project === "object") {
+      return this.evaluateProject(record.Project, identity, tier, optionsJson);
+    }
+    if (record.Gather && typeof record.Gather === "object") {
+      return this.evaluateGather(record.Gather, identity, tier, optionsJson);
+    }
+    return await this.queryPreparedRows(
+      JSON.stringify({ table: tableFromRelation(relation), relation_ir: relation }),
+      identity,
+      tier,
+      optionsJson,
+    );
+  }
+
+  private async evaluateProject(
+    project: unknown,
+    identity: Uint8Array | undefined,
+    tier?: string | null,
+    optionsJson?: string | null,
+  ): Promise<RowState[]> {
+    const input = (project as { input?: unknown }).input;
+    const chain = readJoinChain(input);
+    if (!chain) throw unsupportedRelationQueryError();
+    let rows = await this.evaluateRelation(chain.seed, identity, tier, optionsJson);
+    const relations = analyzeRelations(this.schema);
+    let currentTable = rows[0]?.table ?? tableFromRelation(chain.seed);
+    for (const hop of chain.hops) {
+      const relation = relationForTables(relations, currentTable, hop.table, hop.on);
+      if (!relation) throw unsupportedRelationQueryError();
+      rows = await this.followRelation(rows, relation, identity, tier, optionsJson);
+      currentTable = relation.toTable;
+    }
+    return rows;
+  }
+
+  private async evaluateGather(
+    gather: unknown,
+    identity: Uint8Array | undefined,
+    tier?: string | null,
+    optionsJson?: string | null,
+  ): Promise<RowState[]> {
+    const record = gather as { seed?: unknown; step?: unknown; max_depth?: unknown };
+    if (typeof record.max_depth !== "number") throw unsupportedRelationQueryError();
+    const seedRows = await this.evaluateRelation(record.seed, identity, tier, optionsJson);
+    const chain = readJoinChain((record.step as { Project?: { input?: unknown } })?.Project?.input);
+    if (!chain || chain.hops.length !== 1) throw unsupportedRelationQueryError();
+    const stepTable = tableFromRelation(chain.seed);
+    const relation = relationForTables(
+      analyzeRelations(this.schema),
+      stepTable,
+      chain.hops[0]!.table,
+      chain.hops[0]!.on,
+    );
+    if (!relation || relation.type !== "forward") throw unsupportedRelationQueryError();
+    const byKey = new Map(seedRows.map((row) => [rowKey(row.table, row.id), row]));
+    let frontier = seedRows;
+    for (let depth = 0; depth < record.max_depth && frontier.length > 0; depth += 1) {
+      const next = (
+        await this.followRelation(frontier, relation, identity, tier, optionsJson)
+      ).filter((row) => !byKey.has(rowKey(row.table, row.id)));
+      for (const row of next) byKey.set(rowKey(row.table, row.id), row);
+      frontier = next;
+    }
+    return Array.from(byKey.values());
+  }
+
+  private async followRelation(
+    rows: RowState[],
+    relation: Relation,
+    identity: Uint8Array | undefined,
+    tier?: string | null,
+    optionsJson?: string | null,
+  ): Promise<RowState[]> {
+    const ids = uniqueStrings(
+      rows.flatMap((row) => relationValues(row, relation.fromColumn, this.schema)),
+    );
+    if (ids.length === 0) return [];
+    const query =
+      relation.toColumn === "id"
+        ? { table: relation.toTable, conditions: [{ column: "id", op: "in", value: ids }] }
+        : {
+            table: relation.toTable,
+            conditions: [{ column: relation.toColumn, op: "in", value: ids }],
+          };
+    return this.queryPreparedRows(JSON.stringify(query), identity, tier, optionsJson);
+  }
+
+  private async attachArraySubqueries(
+    rows: RowState[],
+    subqueries: unknown,
+    identity: Uint8Array | undefined,
+    tier?: string | null,
+    optionsJson?: string | null,
+  ): Promise<RowState[]> {
+    if (!Array.isArray(subqueries)) return rows;
+    let result = rows;
+    for (const raw of subqueries) {
+      if (!raw || typeof raw !== "object") throw unsupportedRelationQueryError();
+      const subquery = raw as {
+        column_name?: unknown;
+        table?: unknown;
+        inner_column?: unknown;
+        outer_column?: unknown;
+      };
+      if (
+        typeof subquery.column_name !== "string" ||
+        typeof subquery.table !== "string" ||
+        typeof subquery.inner_column !== "string" ||
+        typeof subquery.outer_column !== "string"
+      ) {
+        throw unsupportedRelationQueryError();
+      }
+      const outerColumn = subquery.outer_column.split(".").at(-1)!;
+      const next: RowState[] = [];
+      for (const row of result) {
+        const values = relationValues(row, outerColumn, this.schema);
+        const included =
+          values.length === 0
+            ? []
+            : await this.queryPreparedRows(
+                JSON.stringify({
+                  table: subquery.table,
+                  conditions: [{ column: subquery.inner_column, op: "in", value: values }],
+                }),
+                identity,
+                tier,
+                optionsJson,
+              );
+        next.push({
+          ...row,
+          values: row.values.concat({
+            type: "Array",
+            value: included.map((child) => ({
+              type: "Row",
+              value: { id: child.id, values: child.values },
+            })),
+          } as Value),
+        });
+      }
+      result = next;
+    }
+    return result;
+  }
+
+  private async queryPreparedRows(
+    queryJson: string,
+    identity: Uint8Array | undefined,
+    tier?: string | null,
+    optionsJson?: string | null,
+  ): Promise<RowState[]> {
+    const query = this.prepareQuery(queryJson);
+    await this.propagateQueryIfNeeded(tier, optionsJson, query);
+    const rows = identity
+      ? this.db.allForIdentity(query, identity, readOptions(tier, queryIncludesDeleted(queryJson)))
+      : this.db.all(query, readOptions(tier, queryIncludesDeleted(queryJson)));
     return filterRows(
       rowsFromBatches(readRowBatches(rows), this.schema),
       queryFiltersFromJson(queryJson, this.schema),
@@ -482,7 +701,10 @@ export class CoreRuntime implements Runtime {
       throw new Error("Direct core runtime does not support session-scoped subscriptions");
     }
     const handle = this.nextSubscriptionId++;
-    const query = this.prepareQuery(queryJson);
+    const recomputeQueryJson = subscriptionRecomputeQueryJson(queryJson);
+    const subscriptionQueryJson =
+      recomputeQueryJson == null ? queryJson : subscriptionTriggerQueryJson(queryJson);
+    const query = this.prepareQuery(subscriptionQueryJson);
     const opts = readOptions(tier);
     const identity = session ? parseUuid(session.user_id) : undefined;
     const nativeSubscription = identity
@@ -493,7 +715,17 @@ export class CoreRuntime implements Runtime {
     this.subscriptions.set(handle, {
       source,
       rows: [],
-      filters: queryFiltersFromJson(queryJson, this.schema),
+      filters: recomputeQueryJson == null ? queryFiltersFromJson(queryJson, this.schema) : [],
+      recompute:
+        recomputeQueryJson == null
+          ? undefined
+          : {
+              queryJson: recomputeQueryJson,
+              identity,
+              tier,
+              optionsJson,
+              pending: false,
+            },
       cancelled: false,
       reading: false,
     });
@@ -696,7 +928,10 @@ export class CoreRuntime implements Runtime {
       while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
         const next = await subscription.source.read();
         if (next.done || subscription.cancelled) return;
-        this.applySubscriptionChunk(subscription, next.value);
+        void this.applySubscriptionChunk(subscription, next.value).catch((error: unknown) => {
+          subscription.cancelled = true;
+          console.error("Direct core subscription failed", error);
+        });
       }
     } finally {
       subscription.reading = false;
@@ -707,14 +942,24 @@ export class CoreRuntime implements Runtime {
     if (isReadableSubscriptionReader(subscription.source)) return;
     for (const event of subscription.source.readAll()) {
       if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
-      this.applySubscriptionChunk(subscription, event);
+      void this.applySubscriptionChunk(subscription, event).catch((error: unknown) => {
+        subscription.cancelled = true;
+        console.error("Direct core subscription failed", error);
+      });
     }
   }
 
-  private applySubscriptionChunk(subscription: SubscriptionState, value: unknown): void {
+  private async applySubscriptionChunk(
+    subscription: SubscriptionState,
+    value: unknown,
+  ): Promise<void> {
     const chunk = normalizeSubscriptionChunk(value);
     if (chunk.type === "closed") {
       subscription.cancelled = true;
+      return;
+    }
+    if (subscription.recompute) {
+      await this.recomputeSubscriptionRows(subscription);
       return;
     }
     const previousRows = subscription.rows;
@@ -729,6 +974,26 @@ export class CoreRuntime implements Runtime {
       subscription.rows = filterRows(subscription.rows, subscription.filters, this.schema);
     }
     subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
+  }
+
+  private async recomputeSubscriptionRows(subscription: SubscriptionState): Promise<void> {
+    const recompute = subscription.recompute;
+    if (!recompute || recompute.pending) return;
+    recompute.pending = true;
+    try {
+      const previousRows = subscription.rows;
+      const rows = await this.queryRelationShape(
+        recompute.queryJson,
+        recompute.identity ? JSON.stringify({ user_id: formatUuid(recompute.identity) }) : null,
+        recompute.tier,
+        recompute.optionsJson,
+      );
+      if (!rows) throw unsupportedRelationQueryError();
+      subscription.rows = rows;
+      subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
+    } finally {
+      recompute.pending = false;
+    }
   }
 
   private scheduleServerPump(): void {
@@ -978,6 +1243,127 @@ function unsupportedRelationQueryError(): Error {
   return new Error(
     "Direct core runtime does not support this relation query shape yet; refusing to run an overbroad table query.",
   );
+}
+
+function relationKindOf(relation: unknown): string | null {
+  if (!relation || typeof relation !== "object") return null;
+  const record = relation as Record<string, unknown>;
+  return Object.keys(record)[0] ?? null;
+}
+
+function subscriptionRecomputeQueryJson(queryJson: string): string | null {
+  const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
+  if (typeof parsed.table !== "string") return null;
+  const hasArraySubqueries =
+    Array.isArray(parsed.array_subqueries) && parsed.array_subqueries.length > 0;
+  const relationKind = relationKindOf(parsed.relation_ir);
+  return hasArraySubqueries || relationKind === "Project" || relationKind === "Gather"
+    ? queryJson
+    : null;
+}
+
+function subscriptionTriggerQueryJson(queryJson: string): string {
+  const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
+  if (typeof parsed.table !== "string") throw unsupportedRelationQueryError();
+  const relationKind = relationKindOf(parsed.relation_ir);
+  if (relationKind !== "Project" && relationKind !== "Gather") return queryJson;
+  const seed = subscriptionTriggerRelation(parsed.relation_ir);
+  return JSON.stringify({ table: tableFromRelation(seed), relation_ir: seed });
+}
+
+function subscriptionTriggerRelation(relation: unknown): unknown {
+  if (!relation || typeof relation !== "object") throw unsupportedRelationQueryError();
+  const record = relation as Record<string, unknown>;
+  if (record.Project && typeof record.Project === "object") {
+    const chain = readJoinChain((record.Project as { input?: unknown }).input);
+    if (!chain) throw unsupportedRelationQueryError();
+    return chain.seed;
+  }
+  if (record.Gather && typeof record.Gather === "object") {
+    const seed = (record.Gather as { seed?: unknown }).seed;
+    if (!seed) throw unsupportedRelationQueryError();
+    return seed;
+  }
+  return relation;
+}
+
+function tableFromRelation(relation: unknown): string {
+  if (!relation || typeof relation !== "object") throw unsupportedRelationQueryError();
+  const record = relation as Record<string, unknown>;
+  const scan = record.TableScan;
+  if (scan && typeof scan === "object" && typeof (scan as { table?: unknown }).table === "string") {
+    return (scan as { table: string }).table;
+  }
+  const filter = record.Filter;
+  if (filter && typeof filter === "object")
+    return tableFromRelation((filter as { input?: unknown }).input);
+  const limit = record.Limit;
+  if (limit && typeof limit === "object")
+    return tableFromRelation((limit as { input?: unknown }).input);
+  const offset = record.Offset;
+  if (offset && typeof offset === "object")
+    return tableFromRelation((offset as { input?: unknown }).input);
+  const orderBy = record.OrderBy;
+  if (orderBy && typeof orderBy === "object")
+    return tableFromRelation((orderBy as { input?: unknown }).input);
+  throw unsupportedRelationQueryError();
+}
+
+function readJoinChain(relation: unknown): {
+  seed: unknown;
+  hops: Array<{ table: string; on: Array<{ left: string; right: string }> }>;
+} | null {
+  const hops: Array<{ table: string; on: Array<{ left: string; right: string }> }> = [];
+  let current = relation;
+  while (current && typeof current === "object" && "Join" in current) {
+    const join = (current as { Join?: unknown }).Join as
+      | { left?: unknown; right?: unknown; on?: unknown }
+      | undefined;
+    if (!join || !Array.isArray(join.on)) return null;
+    const table = tableFromRelation(join.right);
+    const on = join.on.map((entry) => {
+      const record = entry as { left?: unknown; right?: unknown };
+      const left = readColumnRef(record.left);
+      const right = readColumnRef(record.right);
+      return left && right ? { left, right } : null;
+    });
+    if (!on.every((entry): entry is { left: string; right: string } => entry != null)) return null;
+    hops.unshift({ table, on });
+    current = join.left;
+  }
+  return current ? { seed: current, hops } : null;
+}
+
+function relationForTables(
+  relations: Map<string, Relation[]>,
+  fromTable: string,
+  toTable: string,
+  on: Array<{ left: string; right: string }>,
+): Relation | undefined {
+  return (relations.get(fromTable) ?? []).find((relation) => {
+    if (relation.toTable !== toTable || on.length !== 1) return false;
+    const join = on[0]!;
+    return relation.type === "forward"
+      ? join.left === relation.fromColumn && join.right === "id"
+      : join.left === "id" && join.right === relation.toColumn;
+  });
+}
+
+function relationValues(row: RowState, column: string, schema: WasmSchema): string[] {
+  if (column === "id") return [row.id];
+  const value = rowValue(row, column, schema);
+  if (!value || value.type === "Null") return [];
+  if (value.type === "Uuid" || value.type === "Text") return [value.value];
+  if (value.type === "Array") {
+    return value.value.flatMap((entry) =>
+      entry.type === "Uuid" || entry.type === "Text" ? [entry.value] : [],
+    );
+  }
+  return [];
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
 }
 
 function encodeSimpleRelationQuery(
@@ -1470,7 +1856,11 @@ function rowMatchesFilter(row: RowState, filter: RowFilter, schema: WasmSchema):
     case "Lte":
       return compareValueToLiteral(value, filter.value) <= 0;
     case "In":
-      return filter.values.some((literal) => compareValueToLiteral(value, literal) === 0);
+      return filter.values.some((literal) =>
+        value?.type === "Array" && literal.type !== "Array"
+          ? valueContainsLiteral(value, literal)
+          : compareValueToLiteral(value, literal) === 0,
+      );
     case "Contains":
       return valueContainsLiteral(value, filter.value);
     case "IsNull":

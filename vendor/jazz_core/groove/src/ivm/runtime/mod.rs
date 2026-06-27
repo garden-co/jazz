@@ -4772,6 +4772,12 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
             .map(|(left, right)| compare_values(left, right))
             .find(|ordering| !matches!(ordering, Some(std::cmp::Ordering::Equal)))
             .unwrap_or_else(|| left.len().partial_cmp(&right.len())),
+        (Value::Array(left), Value::Array(right)) => left
+            .iter()
+            .zip(right)
+            .map(|(left, right)| compare_values(left, right))
+            .find(|ordering| !matches!(ordering, Some(std::cmp::Ordering::Equal)))
+            .unwrap_or_else(|| left.len().partial_cmp(&right.len())),
         _ => None,
     }
 }
