@@ -346,7 +346,10 @@ API/testability gap, not as covered app persistence.
   its own pending catalogue updates instead of the old sync inbox bridge. Any
   old `sync_manager` code has been deleted, and remaining storage/schema-manager
   code should be treated as public schema/query vocabulary or catalogue
-  scaffolding until it is ported to core-native types, not as a second engine to extend. The
+  scaffolding until it is ported to core-native types, not as a second engine to
+  extend. `SchemaManager` now depends on a narrow `SchemaCatalogueStorage`
+  interface instead of the full old row-history `Storage` trait; row-history
+  mutation helpers are gated out of the default live build. The
   server admin catalogue now depends on dedicated catalogue-only memory/RocksDB
   storage instead of `Box<dyn Storage>` or old storage backend adapters. SQLite
   remains a native/client storage implementation, but direct-core
@@ -500,13 +503,18 @@ The landed smallest vertical slice is:
    server to a persistent OPFS worker reader, the reader observes the row via
    `subscribeAll`, then shuts down/reopens and reads the same binary-rich row
    locally.
+9. The same alpha public browser gate now covers a public reconnect/offline
+   slice: a persistent OPFS websocket client shuts down, another public memory
+   client writes while it is offline, then the OPFS client reopens and catches
+   up through `subscribeAll`, `all`, and `one` without private transport hooks.
 
 Current blockers:
 
 - Keep broadening worker-owned persistent DB and main-thread memory DB
   convergence under local writes, edge sync, subscriptions, and shutdown. The
-  mixed memory-writer/OPFS-reader canary covers the first public end-to-end
-  slice, but it is not a full transaction/reconnect matrix.
+  mixed memory-writer/OPFS-reader and shutdown/reopen reconnect canaries cover
+  the first public end-to-end slices, but they are not a full transaction,
+  auth-expiry, or short-lived transport-disconnect matrix.
 - Transactions are not implemented on the persistent worker runtime yet. A
   worker-only attempt exposed deeper missing direct-core semantics:
   transaction-scoped reads, session-scoped staged writes, and exclusive
