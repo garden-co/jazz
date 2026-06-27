@@ -14,7 +14,7 @@ use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::query_manager::types::TablePolicies;
 use jazz_tools::row_input;
-use jazz_tools::schema_manager::{Lens, LensOp, LensTransform, generate_lens};
+use jazz_tools::schema_manager::{Lens, LensOp, LensTransform};
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
@@ -43,10 +43,6 @@ fn user_values_v3(
     role: &str,
 ) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name, "email" => email, "role" => role)
-}
-
-fn draft_lens_values_v1(id: jazz_tools::ObjectId) -> HashMap<String, Value> {
-    row_input!("id" => id)
 }
 
 fn schema_v1() -> jazz_tools::Schema {
@@ -83,31 +79,29 @@ fn schema_v3() -> jazz_tools::Schema {
 }
 
 fn v1_to_v2_lens() -> Lens {
-    generate_lens(&schema_v1(), &schema_v2())
+    Lens::new(
+        SchemaHash::compute(&schema_v1()),
+        SchemaHash::compute(&schema_v2()),
+        LensTransform::with_ops(vec![LensOp::AddColumn {
+            table: "users".to_string(),
+            column: "email".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Null,
+        }]),
+    )
 }
 
 fn v2_to_v3_lens() -> Lens {
-    generate_lens(&schema_v2(), &schema_v3())
-}
-
-fn draft_lens_schema_v1() -> jazz_tools::Schema {
-    SchemaBuilder::new()
-        .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
-        .build()
-}
-
-fn draft_lens_schema_v2() -> jazz_tools::Schema {
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("org_id", ColumnType::Uuid),
-        )
-        .build()
-}
-
-fn draft_lens_v1_to_v2() -> Lens {
-    generate_lens(&draft_lens_schema_v1(), &draft_lens_schema_v2())
+    Lens::new(
+        SchemaHash::compute(&schema_v2()),
+        SchemaHash::compute(&schema_v3()),
+        LensTransform::with_ops(vec![LensOp::AddColumn {
+            table: "users".to_string(),
+            column: "role".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Null,
+        }]),
+    )
 }
 
 fn rename_chain_values_v1(id: jazz_tools::ObjectId, email: &str) -> HashMap<String, Value> {
@@ -444,11 +438,32 @@ fn removed_readded_schema_v3() -> jazz_tools::Schema {
 }
 
 fn removed_readded_v1_to_v2_lens() -> Lens {
-    generate_lens(&removed_readded_schema_v1(), &removed_readded_schema_v2())
+    Lens::new(
+        SchemaHash::compute(&removed_readded_schema_v1()),
+        SchemaHash::compute(&removed_readded_schema_v2()),
+        LensTransform::with_ops(vec![LensOp::RemoveTable {
+            table: "users".to_string(),
+            schema: TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .build(),
+        }]),
+    )
 }
 
 fn removed_readded_v2_to_v3_lens() -> Lens {
-    generate_lens(&removed_readded_schema_v2(), &removed_readded_schema_v3())
+    Lens::new(
+        SchemaHash::compute(&removed_readded_schema_v2()),
+        SchemaHash::compute(&removed_readded_schema_v3()),
+        LensTransform::with_ops(vec![LensOp::AddTable {
+            table: "users".to_string(),
+            schema: TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .nullable_column("email", ColumnType::Text)
+                .build(),
+        }]),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1419,86 +1434,6 @@ async fn cannot_read_from_old_schema_until_lens_is_added() {
             Value::Null,
         ]
     );
-
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn draft_lens_does_not_make_rows_from_old_schema_visible() {
-    let server = JazzServer::start().await;
-    let v1_schema = draft_lens_schema_v1();
-    let v2_schema = draft_lens_schema_v2();
-    let draft_lens = draft_lens_v1_to_v2();
-    assert!(
-        draft_lens.is_draft(),
-        "test fixture should use a draft lens"
-    );
-
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        "main",
-        std::slice::from_ref(&v1_schema),
-        &[],
-    )
-    .await
-    .expect("push initial draft-lens v1 catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
-
-    let alice = JazzClient::connect(
-        server.make_client_context_for_user(v1_schema.clone(), "alice-draft-lens"),
-    )
-    .await
-    .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
-
-    let user_id = jazz_tools::ObjectId::new();
-    let (row_id, _, batch_id) = alice
-        .insert("users", draft_lens_values_v1(user_id))
-        .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("alice user reaches edge");
-
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        "main",
-        &[v1_schema, v2_schema.clone()],
-        &[draft_lens],
-    )
-    .await
-    .expect("push v2 schema with draft lens");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v2_schema,
-    )
-    .await;
-
-    let bob = JazzClient::connect(server.make_client_context_for_user(v2_schema, "bob-draft-lens"))
-        .await
-        .expect("connect bob");
-    assert_edge_query_does_not_include_row(
-        &bob,
-        QueryBuilder::new("users").build(),
-        row_id,
-        Duration::from_secs(2),
-        "bob should not see v1 row through a draft lens",
-    )
-    .await;
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");

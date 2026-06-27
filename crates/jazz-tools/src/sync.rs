@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub(crate) mod clock;
 pub mod vocabulary;
 
 /// Persistence tier — declaration order defines Ord (Local < EdgeServer < GlobalServer).

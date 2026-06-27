@@ -1,7 +1,7 @@
 //! HTTP and WebSocket routes for the Jazz server.
 //!
 //! Split into submodules so each piece is independently navigable:
-//! - [`websocket`] — jazz_core wire-frame WebSocket boundary
+//! - [`websocket`] — engine wire-frame WebSocket boundary
 //! - [`http`] — HTTP endpoint handlers and their request/response types
 //! - [`utils`] — parser/validator helpers used by both
 //!

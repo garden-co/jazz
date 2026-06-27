@@ -3,7 +3,7 @@
 //! This route intentionally does not share the legacy `SyncPayload` `/ws`
 //! transport framing.
 //! It accepts postcard-encoded batches of raw `jazz::wire::WireFrame` bytes,
-//! matching the jazz_core binding/server carrier shape.
+//! matching the workspace engine binding/server carrier shape.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;

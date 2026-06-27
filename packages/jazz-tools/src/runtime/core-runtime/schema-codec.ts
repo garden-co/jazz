@@ -139,7 +139,7 @@ function writePolicyPredicate(writer: PostcardWriter, expr: PolicyExpr): void {
       writer.string(expr.column);
       return;
     default:
-      throw new Error(`Direct schema policies do not support ${expr.type} yet.`);
+      throw new Error(`Core runtime schema policies do not support ${expr.type} yet.`);
   }
 }
 
@@ -147,7 +147,7 @@ function writePolicyOperand(writer: PostcardWriter, value: PolicyValue): void {
   if (value.type === "SessionRef") {
     if (value.path.length !== 1 || value.path[0] !== "user_id") {
       throw new Error(
-        `Direct schema policies only support session.user_id references, got ${value.path.join(".")}.`,
+        `Core runtime schema policies only support session.user_id references, got ${value.path.join(".")}.`,
       );
     }
     writer.u64(2); // Operand::Claim
@@ -178,7 +178,7 @@ function writePolicyLiteral(writer: PostcardWriter, value: Value): void {
       writer.bytes(uuidBytes(value.value));
       return;
     default:
-      throw new Error(`Direct schema policies do not support ${value.type} literals yet.`);
+      throw new Error(`Core runtime schema policies do not support ${value.type} literals yet.`);
   }
 }
 
