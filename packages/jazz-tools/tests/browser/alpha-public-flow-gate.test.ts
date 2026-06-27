@@ -111,7 +111,7 @@ describe("alpha public package flow", () => {
     ).toBe(true);
   });
 
-  it.skip("TODO(alpha direct core): reopens public persistent OPFS data after local writes; blocked because WasmDb.openBrowser must run in a dedicated worker and public Db does not have a sync-compatible direct-core worker runtime yet", async () => {
+  it.skip("TODO(alpha direct core): reopens public persistent OPFS data after local writes; blocked on direct-core worker runtime preserving sync write handles", async () => {
     const appId = uniqueDbName("alpha-public-local-reopen");
     const persistentDbName = uniqueDbName("alpha-public-local-reopen-opfs");
     const sharedSecret = generateAuthSecret();
@@ -389,7 +389,7 @@ describe("alpha public package flow", () => {
     expect(Object.keys(deletedTodo).includes("deleted")).toBe(false);
   });
 
-  it.skip("TODO(alpha direct core): opens public file/blob helpers with persistent OPFS and direct websocket server config, then converges file rows; blocked by the same persistence/websocket convergence gaps as the todo gate", async () => {
+  it.skip("TODO(alpha direct core): opens public file/blob helpers with persistent OPFS and direct websocket server config, then converges file rows; blocked on direct-core worker runtime plus blob persistence reopen", async () => {
     const requestedAppId = uniqueDbName("alpha-public-file-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, filePermissions, fileApp);
