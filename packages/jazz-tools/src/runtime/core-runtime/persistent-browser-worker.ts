@@ -66,6 +66,9 @@ type PersistentBrowserCoreRuntime = {
 };
 
 let runtime: PersistentBrowserCoreRuntime | null = null;
+let runtimeNamespace: string | null = null;
+let runtimeWasmModule: Awaited<ReturnType<typeof loadWasmModule>> | null = null;
+const pendingWriteTransactionIds = new Set<string>();
 
 const workerScope = self as unknown as {
   onmessage: ((event: MessageEvent<PersistentBrowserWorkerRequest>) => void) | null;
@@ -126,6 +129,14 @@ async function handleMessage(message: PersistentBrowserWorkerRequest): Promise<v
       case "close": {
         const result = await getRuntime().close?.();
         runtime = null;
+        runtimeNamespace = null;
+        runtimeWasmModule = null;
+        pendingWriteTransactionIds.clear();
+        postResult(message.id, result);
+        return;
+      }
+      case "clearClientStorage": {
+        const result = await clearClientStorage();
         postResult(message.id, result);
         return;
       }
@@ -152,33 +163,43 @@ async function handleMessage(message: PersistentBrowserWorkerRequest): Promise<v
 
 function dispatchWrite(message: WriteMessage): { transactionId: string } {
   const runtime = getRuntime();
+  let result: { transactionId: string };
   switch (message.method) {
     case "insert": {
       const [table, values, writeContext, objectId] = message.args;
-      return runtime.insert(table, values, writeContext, objectId);
+      result = runtime.insert(table, values, writeContext, objectId);
+      break;
     }
     case "restore": {
       const [table, objectId, values, writeContext] = message.args;
-      return runtime.restore(table, objectId, values, writeContext);
+      result = runtime.restore(table, objectId, values, writeContext);
+      break;
     }
     case "update": {
       const [table, objectId, values, writeContext] = message.args;
-      return runtime.update(table, objectId, values, writeContext);
+      result = runtime.update(table, objectId, values, writeContext);
+      break;
     }
     case "upsert": {
       const [table, objectId, values, writeContext] = message.args;
-      return runtime.upsert(table, objectId, values, writeContext);
+      result = runtime.upsert(table, objectId, values, writeContext);
+      break;
     }
     case "delete": {
       const [table, objectId, writeContext] = message.args;
-      return runtime.delete(table, objectId, writeContext);
+      result = runtime.delete(table, objectId, writeContext);
+      break;
     }
   }
+  pendingWriteTransactionIds.add(result.transactionId);
+  return result;
 }
 
 async function openRuntime(message: OpenMessage): Promise<void> {
   const [runtimeSources, dbName, schema, node, author] = message.args;
   const wasmModule = await loadWasmModule(runtimeSources);
+  runtimeWasmModule = wasmModule;
+  runtimeNamespace = dbName;
   const db = await wasmModule.WasmDb.openBrowser(
     dbName,
     encodeDirectSchema(schema as never),
@@ -192,6 +213,32 @@ async function openRuntime(message: OpenMessage): Promise<void> {
   runtime.onAuthFailure((reason: string) => {
     workerScope.postMessage({ event: "authFailure", reason });
   });
+}
+
+async function clearClientStorage(): Promise<void> {
+  const namespace = runtimeNamespace;
+  if (!namespace) {
+    throw new Error("Persistent browser core runtime has no storage namespace");
+  }
+  if (!runtimeWasmModule) {
+    throw new Error("Persistent browser core runtime has no WASM module");
+  }
+
+  await settlePendingWrites();
+  await runtime?.close?.();
+  runtime = null;
+  await runtimeWasmModule.WasmDb.destroyBrowserStorage(namespace);
+  runtimeNamespace = null;
+  runtimeWasmModule = null;
+  pendingWriteTransactionIds.clear();
+}
+
+async function settlePendingWrites(): Promise<void> {
+  const runtime = getRuntime();
+  for (const transactionId of pendingWriteTransactionIds) {
+    await runtime.waitForTransaction(transactionId, "local");
+    pendingWriteTransactionIds.delete(transactionId);
+  }
 }
 
 function getRuntime(): PersistentBrowserCoreRuntime {
