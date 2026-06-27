@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
-use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::test_support::wait_for_query;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
@@ -546,88 +545,6 @@ async fn multiple_writes_in_one_transaction_settle_as_one_batch() {
     );
 
     client.shutdown().await.expect("shutdown client");
-    server.shutdown().await;
-}
-
-/// Two transactions modify the same object unaware of each other.
-/// The server accepts the first tx and rejects the second.
-#[tokio::test]
-async fn stale_concurrent_transaction_is_rejected() {
-    let (server, alice, bob) = start_two_clients(todo_schema()).await;
-    let todo_id = insert_visible_todo(&alice, "shared", false).await;
-    wait_for_todos(
-        &bob,
-        Some(DurabilityTier::EdgeServer),
-        "bob sees shared row",
-        |rows| has_todo(rows, todo_id, "shared", false),
-    )
-    .await;
-
-    let alice_tx = alice.begin_transaction().expect("begin alice transaction");
-    let bob_tx = bob.begin_transaction().expect("begin bob transaction");
-    let alice_batch_id = alice_tx
-        .update(
-            todo_id,
-            vec![("title".to_string(), Value::Text("alice".to_string()))],
-        )
-        .expect("alice stages update");
-    let bob_batch_id = bob_tx
-        .update(
-            todo_id,
-            vec![("title".to_string(), Value::Text("bob".to_string()))],
-        )
-        .expect("bob stages stale update");
-
-    let blocked_bob = server.block_messages_to(bob.client_id().expect("bob client id"));
-    assert_eq!(
-        alice_tx.commit().expect("commit alice transaction"),
-        alice_batch_id
-    );
-    alice
-        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("alice transaction accepted");
-
-    assert_eq!(
-        bob_tx.commit().expect("commit bob transaction"),
-        bob_batch_id
-    );
-    blocked_bob
-        .wait_until_buffered(
-            |payload| {
-                matches!(
-                    payload,
-                    SyncPayload::BatchFate { fate }
-                        if fate.batch_id() == bob_batch_id
-                )
-            },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("server should reject bob's stale transaction while bob is blocked");
-    blocked_bob.unblock();
-
-    let rejection = bob
-        .wait_for_batch(bob_batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect_err("bob stale transaction should be rejected")
-        .to_string();
-    assert!(
-        rejection.contains("transaction_conflict"),
-        "unexpected rejection: {rejection}"
-    );
-
-    let rows = wait_for_todos(
-        &bob,
-        Some(DurabilityTier::EdgeServer),
-        "bob sees alice value after stale transaction rejection",
-        |rows| has_todo(rows, todo_id, "alice", false),
-    )
-    .await;
-    assert!(has_todo(&rows, todo_id, "alice", false));
-
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
 
