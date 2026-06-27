@@ -13,9 +13,11 @@ use crate::middleware::AuthConfig;
 use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
-use crate::query_manager::types::Schema;
 #[cfg(test)]
-use crate::query_manager::types::{ComposedBranchName, SchemaHash};
+use crate::query_manager::types::ComposedBranchName;
+use crate::schema_api::Schema;
+#[cfg(test)]
+use crate::schema_api::SchemaHash;
 use crate::schema_manager::AppId;
 use crate::server::routes;
 use crate::server::{
@@ -682,11 +684,11 @@ mod tests {
     async fn dynamic_builder_starts_core_server_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("dynamic-core-server-rehydrate");
-        let schema = crate::query_manager::types::SchemaBuilder::new()
+        let schema = crate::schema_api::SchemaBuilder::new()
             .table(
-                crate::query_manager::types::TableSchema::builder("todos")
-                    .column("id", crate::query_manager::types::ColumnType::Uuid)
-                    .column("title", crate::query_manager::types::ColumnType::Text),
+                crate::schema_api::TableSchema::builder("todos")
+                    .column("id", crate::schema_api::ColumnType::Uuid)
+                    .column("title", crate::schema_api::ColumnType::Text),
             )
             .build();
 
@@ -728,11 +730,11 @@ mod tests {
     async fn rocksdb_builder_starts_core_server_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-core-server-restart");
-        let schema = crate::query_manager::types::SchemaBuilder::new()
+        let schema = crate::schema_api::SchemaBuilder::new()
             .table(
-                crate::query_manager::types::TableSchema::builder("todos")
-                    .column("id", crate::query_manager::types::ColumnType::Uuid)
-                    .column("title", crate::query_manager::types::ColumnType::Text),
+                crate::schema_api::TableSchema::builder("todos")
+                    .column("id", crate::schema_api::ColumnType::Uuid)
+                    .column("title", crate::schema_api::ColumnType::Text),
             )
             .build();
 
