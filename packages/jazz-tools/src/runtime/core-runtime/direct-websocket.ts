@@ -13,9 +13,7 @@ export type DirectWireError = {
 };
 
 export type DirectWebSocketCarrierOptions = {
-  serverUrl?: string;
-  endpointUrl?: string;
-  appId?: string;
+  endpointUrl: string;
   peerIdentity: Uint8Array;
   authJson?: string;
   onFrame: DirectWebSocketFrameHandler;
@@ -98,12 +96,7 @@ export class DirectWebSocketCarrier {
 
   constructor(options: DirectWebSocketCarrierOptions) {
     const WebSocketCtor = options.WebSocket ?? browserWebSocketConstructor();
-    this.url = options.endpointUrl
-      ? options.endpointUrl
-      : directWebSocketUrl(
-          required(options.serverUrl, "serverUrl"),
-          required(options.appId, "appId"),
-        );
+    this.url = options.endpointUrl;
     this.onFrame = options.onFrame;
     this.onError = options.onError;
     this.socket = new WebSocketCtor(this.url);
@@ -186,11 +179,6 @@ function browserWebSocketConstructor(): DirectWebSocketConstructor {
     throw new Error("browser WebSocket is not available");
   }
   return candidate;
-}
-
-function required(value: string | undefined, name: string): string {
-  if (value == null) throw new Error(`DirectWebSocketCarrier requires ${name}`);
-  return value;
 }
 
 function wireErrorCodeName(tag: number): string {
