@@ -66,11 +66,21 @@ impl fmt::Display for DirectCoreWebSocketClientError {
 
 impl std::error::Error for DirectCoreWebSocketClientError {}
 
-#[derive(Debug)]
 pub struct DirectCoreWebSocketTransport {
     inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
     outbound: mpsc::UnboundedSender<Vec<u8>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
     task: tokio::task::JoinHandle<()>,
+}
+
+impl fmt::Debug for DirectCoreWebSocketTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectCoreWebSocketTransport")
+            .field("inbound", &self.inbound)
+            .field("outbound", &self.outbound)
+            .field("task", &self.task)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DirectCoreWebSocketTransport {
@@ -79,6 +89,16 @@ impl DirectCoreWebSocketTransport {
         app_id: AppId,
         peer_identity: AuthorId,
         auth: AuthConfig,
+    ) -> Result<Self, DirectCoreWebSocketClientError> {
+        Self::connect_with_wake(base_url, app_id, peer_identity, auth, Arc::new(|| {})).await
+    }
+
+    pub async fn connect_with_wake(
+        base_url: impl AsRef<str>,
+        app_id: AppId,
+        peer_identity: AuthorId,
+        auth: AuthConfig,
+        wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, DirectCoreWebSocketClientError> {
         let url = direct_ws_url(base_url.as_ref(), app_id);
         let (mut ws, _) = connect_async(url)
@@ -123,11 +143,17 @@ impl DirectCoreWebSocketTransport {
 
         let inbound = Arc::new(Mutex::new(VecDeque::new()));
         let (outbound, outbound_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_direct_ws_pump(ws, inbound.clone(), outbound_rx));
+        let task = tokio::spawn(run_direct_ws_pump(
+            ws,
+            inbound.clone(),
+            outbound_rx,
+            Arc::clone(&wake),
+        ));
 
         Ok(Self {
             inbound,
             outbound,
+            wake,
             task,
         })
     }
@@ -143,7 +169,9 @@ impl WireTransport for DirectCoreWebSocketTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
         self.outbound
             .send(frame)
-            .map_err(|_| TransportError::Failed("direct websocket pump is closed".to_owned()))
+            .map_err(|_| TransportError::Failed("direct websocket pump is closed".to_owned()))?;
+        (self.wake)();
+        Ok(())
     }
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
@@ -207,6 +235,7 @@ async fn run_direct_ws_pump(
     >,
     inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
     mut outbound: mpsc::UnboundedReceiver<Vec<u8>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     loop {
         tokio::select! {
@@ -237,6 +266,8 @@ async fn run_direct_ws_pump(
                     return;
                 };
                 queue.extend(frames);
+                drop(queue);
+                wake();
             }
         }
     }

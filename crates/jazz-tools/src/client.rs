@@ -31,7 +31,7 @@ use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
     LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
     Propagation as CorePropagation, ReadOpts as CoreReadOpts,
-    SubscriptionEvent as CoreSubscriptionEvent, WireTransportAdapter,
+    SubscriptionEvent as CoreSubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
 };
 use jazz::groove::records::Value as CoreValue;
 use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
@@ -117,6 +117,7 @@ impl Clone for ClientEngine {
 
 struct DirectCoreEngine {
     inner: Rc<std::cell::RefCell<DirectCoreInner>>,
+    scheduler: Rc<DirectCoreTickScheduler>,
 }
 
 struct DirectCoreInner {
@@ -124,6 +125,34 @@ struct DirectCoreInner {
     connection: DirectCoreConnection,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
+}
+
+#[derive(Default)]
+struct DirectCoreTickScheduler {
+    immediate: std::cell::Cell<bool>,
+    deferred: std::cell::Cell<bool>,
+}
+
+impl DirectCoreTickScheduler {
+    fn take(&self) -> Option<TickUrgency> {
+        if self.immediate.replace(false) {
+            self.deferred.set(false);
+            Some(TickUrgency::Immediate)
+        } else if self.deferred.replace(false) {
+            Some(TickUrgency::Deferred)
+        } else {
+            None
+        }
+    }
+}
+
+impl TickScheduler for DirectCoreTickScheduler {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        match urgency {
+            TickUrgency::Immediate => self.immediate.set(true),
+            TickUrgency::Deferred => self.deferred.set(true),
+        }
+    }
 }
 
 impl DirectCoreEngine {
@@ -134,9 +163,19 @@ impl DirectCoreEngine {
         app_id: crate::schema_manager::AppId,
         auth: WsAuthConfig,
     ) -> Result<Rc<Self>> {
-        let inner = DirectCoreInner::open(schema, identity, server_url, app_id, auth).await?;
+        let scheduler = Rc::new(DirectCoreTickScheduler::default());
+        let inner = DirectCoreInner::open(
+            schema,
+            identity,
+            server_url,
+            app_id,
+            auth,
+            Rc::clone(&scheduler),
+        )
+        .await?;
         Ok(Rc::new(Self {
             inner: Rc::new(std::cell::RefCell::new(inner)),
+            scheduler,
         }))
     }
 
@@ -244,6 +283,7 @@ impl DirectCoreEngine {
     }
 
     fn tick(&self) -> Result<()> {
+        let _ = self.scheduler.take();
         self.inner
             .borrow()
             .connection
@@ -261,6 +301,7 @@ impl DirectCoreInner {
         server_url: String,
         app_id: crate::schema_manager::AppId,
         auth: WsAuthConfig,
+        scheduler: Rc<DirectCoreTickScheduler>,
     ) -> Result<Self> {
         let db = Rc::new(
             CoreDb::open(CoreDbConfig::new(
@@ -271,6 +312,7 @@ impl DirectCoreInner {
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?,
         );
+        db.set_tick_scheduler(Some(scheduler));
         let transport =
             DirectCoreWebSocketTransport::connect(&server_url, app_id, identity.author, auth)
                 .await
@@ -1618,8 +1660,12 @@ mod tests {
 
         let client = JazzClient::connect(context).await.expect("connect client");
 
-        let has_learned_schema = client
-            .runtime
+        let ClientEngine::Legacy { runtime } = &client.engine else {
+            panic!(
+                "offline persistent client should use legacy runtime until direct storage lands"
+            );
+        };
+        let has_learned_schema = runtime
             .known_schema_hashes()
             .expect("read known schema hashes")
             .contains(&learned_hash);
@@ -1628,8 +1674,7 @@ mod tests {
             "client should restore newer learned schema"
         );
 
-        let lens_path_len = client
-            .runtime
+        let lens_path_len = runtime
             .with_schema_manager(|manager| manager.lens_path(&learned_hash).map(|path| path.len()))
             .expect("read client schema manager")
             .expect("lens path to bundled schema");
@@ -1657,8 +1702,12 @@ mod tests {
 
         let client = JazzClient::connect(context).await.expect("connect client");
 
-        let actual_catalogue_hash = client
-            .runtime
+        let ClientEngine::Legacy { runtime } = &client.engine else {
+            panic!(
+                "offline persistent client should use legacy runtime until direct storage lands"
+            );
+        };
+        let actual_catalogue_hash = runtime
             .catalogue_state_hash()
             .expect("read client catalogue hash");
         assert_eq!(
@@ -1666,8 +1715,7 @@ mod tests {
             "client should restore learned permissions head and bundle before any network sync"
         );
 
-        let lens_path_exists = client
-            .runtime
+        let lens_path_exists = runtime
             .with_schema_manager(|manager| manager.lens_path(&learned_hash).is_ok())
             .expect("read client schema manager");
         assert!(
