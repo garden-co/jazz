@@ -258,6 +258,12 @@ auth/admission integration gap, not a row encoding or React subscription gap.
   present over the memory authority, with a small HTTP/SSE wrapper that covers
   health, list, identity-bound policy list, create, read, update, delete, and
   live snapshots. `GET /todos/as/:userId` exercises real `dbReadForIdentity`
+  The Rust server builder now keeps the old HTTP catalogue store explicitly
+  separate from the direct-core server database: catalogue metadata lives under
+  `catalogue.rocksdb`/`catalogue.sqlite`, while sync state lives under
+  `core-server.rocksdb`. The remaining cleanup is to replace or shrink that
+  legacy catalogue persistence path, not to let it grow back into a second
+  engine.
   filtering for deterministic 16-byte identities, and
   `PUT /todos/:id/as/:userId` uses `dbCanUpdateEncodedForIdentity` to allow the
   owner update while returning 403 for a non-owner without changing the row. The

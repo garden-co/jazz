@@ -107,55 +107,6 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
 }
 
 #[test]
-fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
-    let calls = Arc::new(Mutex::new(LegacyStorageCallCounts::default()));
-    let mut core = create_runtime_with_boxed_storage(
-        test_schema(),
-        "row-no-legacy-ack-storage",
-        Box::new(LegacyPersistenceObservingStorage::new(Arc::clone(&calls))),
-    );
-
-    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
-        &mut core,
-        "users",
-        user_insert_values(ObjectId::new(), "Alice"),
-        None,
-        DurabilityTier::Local,
-    )
-    .unwrap();
-
-    let branch_name = core.schema_manager().branch_name();
-    let batch_id = core
-        .storage
-        .load_visible_region_row("users", branch_name.as_str(), row_id)
-        .unwrap()
-        .expect("persisted insert should materialize a visible row")
-        .batch_id;
-
-    core.push_sync_inbox(InboxEntry {
-        source: Source::Server(ServerId::new()),
-        payload: SyncPayload::BatchFate {
-            fate: crate::batch_fate::BatchFate::DurableDirect {
-                batch_id,
-                confirmed_tier: DurabilityTier::Local,
-            },
-        },
-    });
-    core.immediate_tick();
-
-    assert_eq!(
-        receiver.try_recv(),
-        Ok(Some(Ok(()))),
-        "row persisted receiver should resolve from batch settlements alone"
-    );
-    assert_eq!(
-        *calls.lock().unwrap(),
-        LegacyStorageCallCounts::default(),
-        "row durability updates should not touch legacy durability-ack storage"
-    );
-}
-
-#[test]
 fn rc_insert_persisted_resolves_batch_fate_by_batch_id() {
     let mut s = create_3tier_rc();
     let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(

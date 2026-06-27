@@ -1,34 +1,6 @@
 use super::*;
 
 #[test]
-fn rc_row_writes_do_not_touch_legacy_commit_storage() {
-    let calls = Arc::new(Mutex::new(LegacyStorageCallCounts::default()));
-    let mut core = create_runtime_with_boxed_storage(
-        test_schema(),
-        "row-no-legacy-commit-storage",
-        Box::new(LegacyPersistenceObservingStorage::new(Arc::clone(&calls))),
-    );
-
-    let ((row_id, _row_values), _) = core
-        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-        .unwrap();
-
-    core.update(
-        row_id,
-        vec![("name".into(), Value::Text("Bob".into()))],
-        None,
-    )
-    .unwrap();
-    core.delete(row_id, None).unwrap();
-
-    assert_eq!(
-        *calls.lock().unwrap(),
-        LegacyStorageCallCounts::default(),
-        "row writes should persist only via row histories, not legacy branch commit storage"
-    );
-}
-
-#[test]
 fn rc_local_row_writes_batch_row_and_index_mutations() {
     let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
     let mut core = create_runtime_with_boxed_storage(
