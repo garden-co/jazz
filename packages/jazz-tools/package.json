@@ -161,7 +161,6 @@
     "@vitest/browser-playwright": "catalog:default",
     "better-auth": "^1.5.5",
     "fake-indexeddb": "^5.0.2",
-    "jazz-rn": "workspace:*",
     "jsdom": "^26.0.0",
     "react-dom": "^19.0.0",
     "solid-js": "^1.9.13",
@@ -181,7 +180,6 @@
     "expo": ">=54",
     "expo-crypto": ">=14.0.0",
     "expo-secure-store": ">=14.0.0",
-    "jazz-rn": "workspace:*",
     "react": ">=19",
     "react-native": ">=0.76",
     "solid-js": ">=1.9.13",
@@ -199,9 +197,6 @@
       "optional": true
     },
     "expo-secure-store": {
-      "optional": true
-    },
-    "jazz-rn": {
       "optional": true
     },
     "react": {

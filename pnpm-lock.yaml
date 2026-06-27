@@ -1564,9 +1564,6 @@ importers:
       fake-indexeddb:
         specifier: ^5.0.2
         version: 5.0.2
-      jazz-rn:
-        specifier: workspace:*
-        version: link:../../crates/jazz-rn
       jsdom:
         specifier: ^26.0.0
         version: 26.1.0
