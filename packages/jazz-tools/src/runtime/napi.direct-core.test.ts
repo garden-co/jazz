@@ -198,6 +198,26 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
       },
     ]);
 
+    runtime.update("todos", inserted.id, {
+      title: { type: "Text", value: "direct napi subscribed updated row" },
+    });
+
+    expect(updates).toHaveLength(3);
+    expect(updates[2]).toEqual([
+      {
+        kind: 0,
+        id: inserted.id,
+        index: 0,
+        row: {
+          id: inserted.id,
+          values: [
+            { type: "Text", value: "direct napi subscribed updated row" },
+            { type: "Boolean", value: false },
+          ],
+        },
+      },
+    ]);
+
     runtime.unsubscribe(handle);
   });
 
