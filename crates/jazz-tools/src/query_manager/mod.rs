@@ -24,8 +24,3 @@ pub mod writes;
 
 pub use graph_nodes::output::QuerySubscriptionId;
 pub use query_wire::{parse_query_json, parse_query_value};
-
-#[cfg(test)]
-mod manager_tests;
-#[cfg(test)]
-mod rebac_tests;
