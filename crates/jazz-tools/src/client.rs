@@ -138,7 +138,6 @@ impl Clone for ClientEngine {
 #[cfg(feature = "direct-core-client")]
 struct DirectCoreEngine {
     inner: Rc<std::cell::RefCell<DirectCoreInner>>,
-    scheduler: Rc<DirectCoreTickScheduler>,
 }
 
 #[cfg(feature = "direct-core-client")]
@@ -161,8 +160,6 @@ struct DirectCoreTickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
     notify: tokio::sync::Notify,
-    completed_ticks: std::sync::atomic::AtomicU64,
-    completed_notify: tokio::sync::Notify,
 }
 
 #[cfg(feature = "direct-core-client")]
@@ -188,32 +185,6 @@ impl DirectCoreTickScheduler {
 
     fn wake_handle(&self) -> Arc<DirectCoreTickState> {
         Arc::clone(&self.state)
-    }
-
-    fn completed_ticks(&self) -> u64 {
-        self.state.completed_ticks.load(Ordering::Acquire)
-    }
-
-    async fn wait_for_completed_tick_after_until(
-        &self,
-        previous: u64,
-        deadline: tokio::time::Instant,
-    ) -> bool {
-        loop {
-            if self.completed_ticks() > previous {
-                return true;
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return false;
-            }
-            if tokio::time::timeout_at(deadline, self.state.completed_notify.notified())
-                .await
-                .is_err()
-            {
-                return false;
-            }
-        }
     }
 }
 
@@ -245,7 +216,7 @@ impl DirectCoreEngine {
         .await?;
         let inner = Rc::new(std::cell::RefCell::new(inner));
         Self::spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
-        Ok(Rc::new(Self { inner, scheduler }))
+        Ok(Rc::new(Self { inner }))
     }
 
     async fn query_rows(
@@ -334,7 +305,7 @@ impl DirectCoreEngine {
     }
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
-        DirectCoreInner::handle_wait_for_batch(&self.inner, &self.scheduler, batch_id, tier).await
+        DirectCoreInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
     }
 
     fn spawn_local_tick_driver(
@@ -352,8 +323,6 @@ impl DirectCoreEngine {
                 if inner.borrow().connection.borrow_mut().tick().is_err() {
                     break;
                 }
-                state.completed_ticks.fetch_add(1, Ordering::AcqRel);
-                state.completed_notify.notify_waiters();
             }
         });
     }
@@ -516,7 +485,6 @@ impl DirectCoreInner {
 
     async fn handle_wait_for_batch(
         inner: &Rc<std::cell::RefCell<Self>>,
-        scheduler: &DirectCoreTickScheduler,
         batch_id: BatchId,
         tier: DurabilityTier,
     ) -> Result<()> {
@@ -547,11 +515,20 @@ impl DirectCoreInner {
                     "timed out waiting for direct core batch to reach {tier:?}"
                 )));
             }
-            let completed_ticks = scheduler.completed_ticks();
-            if !scheduler
-                .wait_for_completed_tick_after_until(completed_ticks, deadline)
-                .await
-            {
+            let db = Rc::clone(&inner.borrow().db);
+            let wait = db.next_write_state_change(tx_id);
+            let state = db
+                .write_state(tx_id)
+                .map_err(|error| JazzError::Sync(error.to_string()))?;
+            if matches!(state.fate, CoreFate::Rejected(_)) {
+                return Err(JazzError::Sync(format!(
+                    "batch was rejected before reaching {tier:?} durability"
+                )));
+            }
+            if state.durability >= desired {
+                return Ok(());
+            }
+            if tokio::time::timeout_at(deadline, wait).await.is_err() {
                 return Err(JazzError::Sync(format!(
                     "timed out waiting for direct core batch to reach {tier:?}"
                 )));
