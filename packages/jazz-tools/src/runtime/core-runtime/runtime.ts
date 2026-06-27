@@ -103,6 +103,7 @@ type CoreDb = {
   connectUpstream(): DirectTransport;
   tick(): void;
   close?(): void;
+  free?(): void;
 };
 
 type DirectPreparedQuery = object;
@@ -291,6 +292,7 @@ export class CoreRuntime implements Runtime {
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.db.close?.();
+    this.db.free?.();
   }
 
   insert(
