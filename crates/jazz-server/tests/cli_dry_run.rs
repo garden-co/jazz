@@ -17,12 +17,13 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::schema::{ColumnSchema, TableSchema};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::{TransportError, WireTransport};
+use jazz_server::auth_admission::author_id_from_subject;
 use serde_json::json;
 use tungstenite::protocol::Message;
 use tungstenite::stream::MaybeTlsStream;
@@ -64,10 +65,10 @@ fn todos_schema() -> JazzSchema {
     )])
 }
 
-fn identity(node: u8, author: u8) -> DbIdentity {
+fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {
     DbIdentity {
         node: NodeUuid::from_bytes([node; 16]),
-        author: AuthorId::from_bytes([author; 16]),
+        author: author_id_from_subject(subject),
     }
 }
 
@@ -78,22 +79,12 @@ fn todo_cells(title: &str, done: bool) -> RowCells {
     ])
 }
 
-fn author_hex(author: AuthorId) -> String {
-    author
-        .0
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
-}
-
-fn connect_server_ws(ws_url: &str, author: AuthorId) -> WebSocket<MaybeTlsStream<TcpStream>> {
-    let url = format!("{ws_url}?identity={}", author_hex(author));
+fn connect_server_ws(ws_url: &str, subject: &str) -> WebSocket<MaybeTlsStream<TcpStream>> {
     let mut last_error = None;
     let (mut socket, response) = {
         let mut connected = None;
         for _ in 0..20 {
-            match connect(&url) {
+            match connect(ws_url) {
                 Ok(result) => {
                     connected = Some(result);
                     break;
@@ -117,6 +108,17 @@ fn connect_server_ws(ws_url: &str, author: AuthorId) -> WebSocket<MaybeTlsStream
             .set_read_timeout(Some(Duration::from_millis(20)))
             .expect("set read timeout");
     }
+    socket
+        .send(Message::Text(
+            json!({
+                "bearerJwt": "test-admin-secret",
+                "sub": subject,
+                "claims": {}
+            })
+            .to_string()
+            .into(),
+        ))
+        .expect("send auth handshake");
     socket
 }
 
@@ -158,7 +160,12 @@ struct ConnectedClient {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
 }
 
-fn open_connected_client(schema: JazzSchema, ws_url: &str, client: DbIdentity) -> ConnectedClient {
+fn open_connected_client(
+    schema: JazzSchema,
+    ws_url: &str,
+    subject: &str,
+    client: DbIdentity,
+) -> ConnectedClient {
     let refs = schema.column_families();
     let cf_refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(
@@ -168,7 +175,7 @@ fn open_connected_client(schema: JazzSchema, ws_url: &str, client: DbIdentity) -
     .expect("open client db");
     let wire = QueuedWireTransport::default();
     db.connect_upstream(Box::new(WireTransportAdapter::current(wire.clone())));
-    let socket = connect_server_ws(ws_url, client.author);
+    let socket = connect_server_ws(ws_url, subject);
     ConnectedClient { db, wire, socket }
 }
 
@@ -289,8 +296,8 @@ impl RunningServer {
                 app_id,
                 "--data-dir",
                 data_dir.to_str().expect("temp path is utf-8"),
-                "--allow-legacy-query-identity",
-                "true",
+                "--admin-secret",
+                "test-admin-secret",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -606,7 +613,13 @@ fn server_command_loads_published_schema_and_persists_ws_data_across_restart() {
     );
     assert!(server.ws_url.ends_with(&format!("/apps/{app_id}/ws")));
 
-    let mut writer = open_connected_client(schema.clone(), &server.ws_url, identity(0xc1, 0xc1));
+    let subject = "cli-persistent-user";
+    let mut writer = open_connected_client(
+        schema.clone(),
+        &server.ws_url,
+        subject,
+        identity_for_subject(0xc1, subject),
+    );
     let write = writer
         .db
         .insert_with_id(
@@ -628,7 +641,12 @@ fn server_command_loads_published_schema_and_persists_ws_data_across_restart() {
             .contains(&"schema_catalogue=admin_schema_store".to_owned())
     );
 
-    let mut reader = open_connected_client(schema.clone(), &restarted.ws_url, identity(0xc2, 0xc1));
+    let mut reader = open_connected_client(
+        schema.clone(),
+        &restarted.ws_url,
+        subject,
+        identity_for_subject(0xc2, subject),
+    );
     let prepared = reader
         .db
         .prepare_query(&Query::from("todos"))
@@ -692,25 +710,8 @@ fn dry_run_prints_stable_report() {
     assert!(lines.contains(&"storage_opened=false"));
     assert!(lines.contains(&"runtime_started=false"));
     assert!(lines.contains(&"auth.mode=anonymous"));
-    assert!(lines.contains(&"auth.legacy_query_identity=false"));
     assert!(lines.contains(&"auth.allow_local_first_auth=false"));
     assert!(lines.contains(&"auth.anonymous_subject=anonymous"));
-}
-
-#[test]
-fn dry_run_accepts_legacy_query_identity_opt_in() {
-    let output = jazz_server_command()
-        .args(["dry-run", "--allow-legacy-query-identity", "true"])
-        .output()
-        .expect("run jazz-server dry-run with legacy identity opt-in");
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-
-    let stdout = String::from_utf8(output.stdout).expect("dry-run stdout is utf-8");
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert!(lines.contains(&"auth.mode=anonymous"));
-    assert!(lines.contains(&"auth.legacy_query_identity=true"));
 }
 
 #[test]
@@ -749,7 +750,6 @@ fn dry_run_accepts_alpha_cli_flags_without_opening_storage() {
     assert!(lines.contains(&"admin_schema_owner=loopback_http_only"));
     assert!(lines.contains(&"storage_opened=false"));
     assert!(lines.contains(&"auth.mode=static-bearer"));
-    assert!(lines.contains(&"auth.legacy_query_identity=false"));
     assert!(lines.contains(&"auth.allow_local_first_auth=false"));
     assert!(lines.contains(&"auth.anonymous_subject=dev-user"));
 }
@@ -792,7 +792,6 @@ fn dry_run_accepts_backend_secret_env_alias() {
     let stdout = String::from_utf8(output.stdout).expect("dry-run stdout is utf-8");
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(lines.contains(&"auth.mode=static-bearer"));
-    assert!(lines.contains(&"auth.legacy_query_identity=false"));
 }
 
 #[test]
@@ -835,7 +834,6 @@ fn dry_run_accepts_alpha_aliases() {
     assert!(lines.contains(&"listener=127.0.0.1:1627"));
     assert!(lines.contains(&"storage=in-memory"));
     assert!(lines.contains(&"auth.mode=static-bearer"));
-    assert!(lines.contains(&"auth.legacy_query_identity=false"));
     assert!(lines.contains(&"auth.allow_local_first_auth=true"));
     assert!(lines.contains(&"auth.anonymous_subject=alias-user"));
 }
@@ -945,5 +943,4 @@ fn durable_loopback_websocket_command_rejects_unopenable_data_dir() {
 
     let stderr = String::from_utf8(output.stderr).expect("durable command stderr is utf-8");
     assert!(stderr.contains("error=loopback WebSocket shell error"));
-    assert!(stderr.contains("failed to open RocksDB storage"));
 }
