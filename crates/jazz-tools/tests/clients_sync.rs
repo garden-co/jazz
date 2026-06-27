@@ -558,6 +558,42 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
         .await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn wait_for_batch_reaches_edge_tier_with_direct_core_local_driver() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = test_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let alice = JazzClient::connect_with_direct_core_local_driver(
+                server.make_client_context_for_user(schema, "alice-direct-wait-for-batch"),
+            )
+            .await
+            .expect("connect alice");
+            assert!(
+                alice.direct_core_local_driver_active(),
+                "client should exercise the direct-core local tick driver"
+            );
+
+            wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
+
+            let (_, _, batch_id) = alice
+                .insert(
+                    "todos",
+                    row_input!("title" => "scheduler confirmation", "completed" => false),
+                )
+                .expect("insert todo");
+
+            alice
+                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("wait_for_batch should resolve from scheduled direct-core progress");
+
+            alice.shutdown().await.expect("shutdown alice");
+            server.shutdown().await;
+        })
+        .await;
+}
+
 #[tokio::test]
 async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
     let schema = test_schema();
