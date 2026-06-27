@@ -15,7 +15,9 @@ use crate::middleware::auth::JwtVerifier;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
+use crate::sync_manager::{ClientId, SyncPayload};
+#[cfg(feature = "test-utils")]
+use crate::sync_manager::{InboxEntry, Source};
 use jazz_server::StorageConfig;
 
 mod builder;
@@ -658,12 +660,10 @@ impl ServerState {
         *self.client_ttl.write().await = ttl;
     }
 
-    /// Process a raw binary payload received from a WebSocket client and push it
-    /// into the runtime sync inbox.
-    ///
-    /// Frames are expected to be post-handshake postcard payloads: either an
-    /// `OutboxEntry` for a single message or a `SyncBatchRequest` for batched
-    /// messages.
+    /// Test-only injection point for the removed alpha `SyncPayload` websocket
+    /// protocol. Production `/apps/:app/ws` traffic uses the direct core
+    /// `WireFrame` route instead.
+    #[cfg(feature = "test-utils")]
     pub async fn process_ws_client_frame(
         &self,
         client_id: ClientId,
