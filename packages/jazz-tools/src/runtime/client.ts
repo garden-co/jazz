@@ -97,7 +97,7 @@ export interface Runtime {
 /**
  * Authentication configuration for connecting to a Jazz server.
  *
- * Maps directly to the Rust `AuthConfig` struct in `jazz-tools/src/transport_manager.rs`.
+ * Maps directly to the Rust `AuthConfig` struct in `jazz-tools/src/transport_auth.rs`.
  * All fields are optional; supply only the ones relevant to your auth mode.
  */
 export interface AuthConfig {

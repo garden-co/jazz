@@ -36,6 +36,7 @@ pub(crate) mod wire_types;
 pub(crate) mod runtime_tokio;
 
 pub mod transport_auth;
+pub mod transport_error;
 #[allow(dead_code)]
 pub(crate) mod transport_manager;
 pub mod transport_protocol;
