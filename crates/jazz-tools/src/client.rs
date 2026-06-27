@@ -25,7 +25,9 @@ use crate::server::direct_client::DirectCoreWebSocketTransport;
 #[cfg(feature = "direct-core-client")]
 use crate::server::direct_schema::convert_alpha_schema;
 #[cfg(feature = "test-utils")]
-use crate::sync::{ClientId, DurabilityTier};
+use crate::sync::ClientId;
+#[cfg(feature = "direct-core-client")]
+use crate::sync::DurabilityTier;
 #[cfg(feature = "direct-core-client")]
 use crate::transport_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;

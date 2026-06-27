@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub(crate) mod clock;
 pub mod sync_tracer;
 pub mod types;
 pub mod vocabulary;

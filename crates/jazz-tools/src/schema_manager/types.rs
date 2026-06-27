@@ -14,7 +14,7 @@ use crate::object::ObjectId;
 ///
 /// ```ignore
 /// let app_id = AppId::from_name("my-todo-app");
-/// let manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main")?;
+/// let manager = SchemaManager::new(schema, app_id, "dev", "main")?;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AppId(pub ObjectId);
