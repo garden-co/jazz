@@ -157,6 +157,12 @@ type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
   filters: RowFilter[];
+  relationQuery?: {
+    queryJson: string;
+    identity?: Uint8Array;
+    tier?: string | null;
+    optionsJson?: string | null;
+  };
   callback?: Function;
   cancelled: boolean;
 };
@@ -506,6 +512,7 @@ export class CoreRuntime implements Runtime {
     sessionJson?: string | null,
     tier?: string | null,
     optionsJson?: string | null,
+    identityOverride?: Uint8Array,
   ): Promise<RowState[] | null> {
     const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
     if (typeof parsed.table !== "string") return null;
@@ -516,7 +523,7 @@ export class CoreRuntime implements Runtime {
     if (!hasArraySubqueries && relationKind !== "Project" && relationKind !== "Gather") return null;
 
     const session = readSession(sessionJson);
-    const identity = session ? parseUuid(session.user_id) : undefined;
+    const identity = identityOverride ?? (session ? parseUuid(session.user_id) : undefined);
     let rows =
       relationKind === "Project" || relationKind === "Gather"
         ? await this.evaluateRelation(relation, identity, tier, optionsJson)
@@ -719,6 +726,19 @@ export class CoreRuntime implements Runtime {
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier);
     const identity = session ? parseUuid(session.user_id) : undefined;
+    const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
+    const relationKind = relationKindOf(parsed.relation_ir);
+    if (relationKind === "Project" || relationKind === "Gather") {
+      this.assertSupportedRelationSubscription(parsed.relation_ir);
+      this.subscriptions.set(handle, {
+        sources: [{ source: relationRefreshSource(), reading: false }],
+        rows: [],
+        filters: [],
+        relationQuery: { queryJson, identity, tier, optionsJson },
+        cancelled: false,
+      });
+      return handle;
+    }
     const query = this.prepareQuery(queryJson);
     let nativeSubscription: ReadableStream<unknown> | DirectSubscription;
     try {
@@ -742,6 +762,33 @@ export class CoreRuntime implements Runtime {
       cancelled: false,
     });
     return handle;
+  }
+
+  private assertSupportedRelationSubscription(relation: unknown): void {
+    const kind = relationKindOf(relation);
+    if (kind === "Project") {
+      const project = (relation as { Project?: { input?: unknown } }).Project;
+      const chain = readJoinChain(project?.input);
+      if (!chain || chain.hops.length === 0) throw unsupportedRelationQueryError();
+      return;
+    }
+    if (kind === "Gather") {
+      const gather = (relation as { Gather?: { step?: unknown; max_depth?: unknown } }).Gather;
+      if (!gather || typeof gather.max_depth !== "number") throw unsupportedRelationQueryError();
+      const chain = readJoinChain(
+        (gather.step as { Project?: { input?: unknown } })?.Project?.input,
+      );
+      if (!chain || chain.hops.length !== 1) throw unsupportedRelationQueryError();
+      const stepRelation = relationForTables(
+        analyzeRelations(this.schema),
+        tableFromRelation(chain.seed),
+        chain.hops[0]!.table,
+        chain.hops[0]!.on,
+      );
+      if (!stepRelation || stepRelation.type !== "forward") throw unsupportedRelationQueryError();
+      return;
+    }
+    throw unsupportedRelationQueryError();
   }
 
   executeSubscription(handle: number, onUpdate: Function): void {
@@ -1034,6 +1081,19 @@ export class CoreRuntime implements Runtime {
     subscription: SubscriptionState,
     value: unknown,
   ): Promise<void> {
+    if (subscription.relationQuery) {
+      const previousRows = subscription.rows;
+      subscription.rows =
+        (await this.queryRelationShape(
+          subscription.relationQuery.queryJson,
+          null,
+          subscription.relationQuery.tier,
+          subscription.relationQuery.optionsJson,
+          subscription.relationQuery.identity,
+        )) ?? [];
+      subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
+      return;
+    }
     const chunk = normalizeSubscriptionChunk(value);
     if (chunk.type === "closed") {
       subscription.cancelled = true;
@@ -1235,6 +1295,17 @@ function closeSubscriptionSource(source: SubscriptionSourceState["source"]): voi
   if ("cancel" in source && typeof source.cancel === "function") {
     void source.cancel().catch(() => {});
   }
+}
+
+function relationRefreshSource(): DirectSubscription {
+  let closed = false;
+  return {
+    close: () => {
+      closed = true;
+      return true;
+    },
+    readAll: () => (closed ? [] : [{ type: "relation-refresh" }]),
+  };
 }
 
 function readSupportedReadOptions(optionsJson: string): void {
@@ -1447,6 +1518,9 @@ function tableFromRelation(relation: unknown): string {
   const orderBy = record.OrderBy;
   if (orderBy && typeof orderBy === "object")
     return tableFromRelation((orderBy as { input?: unknown }).input);
+  const gather = record.Gather;
+  if (gather && typeof gather === "object")
+    return tableFromRelation((gather as { seed?: unknown }).seed);
   throw unsupportedRelationQueryError();
 }
 
@@ -2159,7 +2233,7 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Boolean":
       return Uint8Array.of(value.type === "Boolean" && value.value ? 1 : 0);
     case "Integer":
-      view.setUint32(0, expectU32(value, "Integer"), true);
+      view.setUint32(0, encodeSignedI32ForDirectCore(expectI32(value, "Integer")), true);
       return new Uint8Array(view.buffer, 0, 4);
     case "BigInt":
     case "Timestamp":
@@ -2255,12 +2329,20 @@ function expectNumber(value: Value, type: string): number {
   throw new Error(`expected ${type} value`);
 }
 
-function expectU32(value: Value, type: string): number {
+function expectI32(value: Value, type: string): number {
   const number = expectNumber(value, type);
-  if (!Number.isSafeInteger(number) || number < 0 || number > 0x7fffffff) {
-    throw new Error(`${type} value must be a non-negative signed 32-bit integer`);
+  if (!Number.isSafeInteger(number) || number < -0x80000000 || number > 0x7fffffff) {
+    throw new Error(`${type} value must be a signed 32-bit integer`);
   }
   return number;
+}
+
+function encodeSignedI32ForDirectCore(value: number): number {
+  return (value ^ 0x80000000) >>> 0;
+}
+
+function decodeSignedI32FromDirectCore(value: number): number {
+  return (value ^ 0x80000000) | 0;
 }
 
 function expectString(value: Value, type: string): string {
@@ -2353,7 +2435,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Boolean":
       return { type: "Boolean", value: bytes[0] !== 0 };
     case "Integer":
-      return { type: "Integer", value: view.getUint32(0, true) };
+      return { type: "Integer", value: decodeSignedI32FromDirectCore(view.getUint32(0, true)) };
     case "BigInt":
       return { type: "BigInt", value: Number(view.getBigUint64(0, true)) };
     case "Double":

@@ -1598,6 +1598,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "test-utils")]
     #[tokio::test]
     async fn anonymous_session_has_auth_mode_anonymous() {
         let app_id = AppId::from_name("test-app");
