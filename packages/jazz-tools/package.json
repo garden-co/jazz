@@ -73,33 +73,14 @@
       "types": "./dist/dev/vite.d.ts",
       "default": "./dist/dev/vite.js"
     },
-    "./dev/expo": {
-      "types": "./dist/dev/expo.d.ts",
-      "default": "./dist/dev/expo.js"
-    },
     "./dev/sveltekit": {
       "types": "./dist/dev/sveltekit.d.ts",
       "default": "./dist/dev/sveltekit.js"
-    },
-    "./react-native": {
-      "types": "./dist/react-native/index.d.ts",
-      "react-native": "./dist/react-native/index.js",
-      "default": "./dist/react-native/index.js"
     },
     "./svelte": {
       "types": "./dist/svelte/index.d.ts",
       "svelte": "./dist/svelte/index.js",
       "default": "./dist/svelte/index.js"
-    },
-    "./expo": {
-      "types": "./dist/expo/index.d.ts",
-      "react-native": "./dist/expo/index.js",
-      "default": "./dist/expo/index.js"
-    },
-    "./expo/polyfills": {
-      "types": "./dist/expo/polyfills.d.ts",
-      "react-native": "./dist/expo/polyfills.js",
-      "default": "./dist/expo/polyfills.js"
     },
     "./passphrase": {
       "types": "./dist/passphrase.d.ts",
@@ -177,11 +158,7 @@
   },
   "peerDependencies": {
     "better-auth": "^1.5.5",
-    "expo": ">=54",
-    "expo-crypto": ">=14.0.0",
-    "expo-secure-store": ">=14.0.0",
     "react": ">=19",
-    "react-native": ">=0.76",
     "solid-js": ">=1.9.13",
     "svelte": "^5.0.0",
     "vue": "^3.5.0"
@@ -190,19 +167,7 @@
     "better-auth": {
       "optional": true
     },
-    "expo": {
-      "optional": true
-    },
-    "expo-crypto": {
-      "optional": true
-    },
-    "expo-secure-store": {
-      "optional": true
-    },
     "react": {
-      "optional": true
-    },
-    "react-native": {
       "optional": true
     },
     "solid-js": {

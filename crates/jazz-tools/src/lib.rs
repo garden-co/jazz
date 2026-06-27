@@ -1,8 +1,6 @@
 pub mod app_id;
 #[cfg(any(feature = "server", test))]
 pub(crate) mod catalogue_payload_codec;
-pub mod commit;
-pub mod digest;
 pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
