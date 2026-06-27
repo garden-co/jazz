@@ -1707,9 +1707,10 @@ impl JazzServer {
             }
             #[cfg(not(feature = "rocksdb"))]
             {
-                server_builder = server_builder.with_storage(StorageBackend::Sqlite {
-                    path: data_dir.clone().into(),
-                });
+                return Err(napi::Error::from_reason(
+                    "persistent JazzServer storage requires the rocksdb feature; use inMemory for ephemeral servers"
+                        .to_string(),
+                ));
             }
         }
 

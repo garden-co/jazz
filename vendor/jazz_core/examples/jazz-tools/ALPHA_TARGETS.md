@@ -328,9 +328,10 @@ auth/admission integration gap, not a row encoding or React subscription gap.
   Remaining old `query_manager`/`sync_manager`/storage/schema-manager code
   should be treated as public schema/query facade or catalogue scaffolding until
   it is ported to core-native types, not as a second engine to extend. The
-  server admin catalogue now depends on a catalogue-only storage trait instead
-  of `Box<dyn Storage>`; the next cleanup target is replacing the adapter over
-  old storage backends with dedicated catalogue-only memory/RocksDB stores.
+  server admin catalogue now depends on dedicated catalogue-only memory/RocksDB
+  storage instead of `Box<dyn Storage>` or old storage backend adapters. SQLite
+  remains a native/client storage implementation, but direct-core
+  `jazz-tools server` rejects SQLite for catalogue and sync storage.
 
 ## Next targets
 
