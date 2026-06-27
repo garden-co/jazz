@@ -939,7 +939,7 @@ pub(super) async fn publish_permissions_handler(
             )
                 .into_response(),
         },
-        Err(crate::runtime_tokio::RuntimeError::WriteError(message))
+        Err(crate::server::catalogue::CatalogueError::WriteError(message))
             if message.starts_with("stale permissions parent") =>
         {
             (

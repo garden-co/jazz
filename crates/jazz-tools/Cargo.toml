@@ -24,6 +24,7 @@ default = []
 rocksdb = ["dep:rocksdb", "jazz-server/rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
+legacy-alpha-engine = ["runtime-tokio"]
 transport = []
 legacy-alpha-transport = [
   "transport-websocket",
@@ -36,7 +37,7 @@ transport-websocket = [
   "dep:rustls-native-certs",
   "dep:webpki-roots",
 ]
-client = ["runtime-tokio", "dep:thiserror", "dep:tokio"]
+client = ["dep:thiserror", "dep:tokio"]
 direct-core-client = ["client", "server"]
 server = [
   "runtime-tokio",
