@@ -33,11 +33,12 @@ transport-websocket = [
   "dep:rustls-native-certs",
   "dep:webpki-roots",
 ]
-client = ["runtime-tokio", "transport-websocket", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "dep:thiserror", "dep:tokio"]
 direct-core-client = ["client", "server"]
 server = [
-  "transport-websocket",
+  "runtime-tokio",
   "dep:tokio",
+  "dep:tokio-tungstenite",
   "dep:axum",
   "dep:tracing-subscriber",
   "dep:tower-http",

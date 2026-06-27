@@ -316,10 +316,12 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     storage_flush_retry_scheduled: bool,
     /// Last storage flush error recorded by a durability barrier.
     storage_flush_error: Option<StorageError>,
-    /// Transport handle for WebSocket sync.
+    /// Legacy alpha transport handle for WebSocket sync.
+    #[cfg(feature = "transport")]
     pub(crate) transport: Option<crate::transport_manager::TransportHandle>,
     /// True when an inbound catalogue sync changed local catalogue state and
     /// the transport handshake hash must be refreshed after the tick applies it.
+    #[cfg(feature = "transport")]
     transport_catalogue_state_hash_dirty: bool,
     /// Fallback outbox sender used when no `TransportHandle` is set (e.g. on
     /// the server side, where the runtime fans out via `ConnectionEventHub`
@@ -468,7 +470,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             storage_write_pending_flush: false,
             storage_flush_retry_scheduled: false,
             storage_flush_error: None,
+            #[cfg(feature = "transport")]
             transport: None,
+            #[cfg(feature = "transport")]
             transport_catalogue_state_hash_dirty: false,
             sync_sender: None,
             buffer_outbox_without_sync_sender: true,
@@ -681,6 +685,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn persist_schema(&mut self) -> ObjectId {
         let id = self.schema_manager.persist_schema(&mut self.storage);
         self.mark_storage_write_pending_flush();
+        #[cfg(feature = "transport")]
         self.refresh_transport_catalogue_state_hash();
         info!(object_id = %id, "persisted schema to catalogue");
         id
@@ -698,6 +703,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .schema_manager
             .persist_schema_object(&mut self.storage, &schema);
         self.mark_storage_write_pending_flush();
+        #[cfg(feature = "transport")]
         self.refresh_transport_catalogue_state_hash();
         self.immediate_tick();
         id
@@ -717,6 +723,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         )?;
         if id.is_some() {
             self.mark_storage_write_pending_flush();
+            #[cfg(feature = "transport")]
             self.refresh_transport_catalogue_state_hash();
         }
         self.immediate_tick();
@@ -730,6 +737,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .publish_lens(&mut self.storage, lens)
             .map_err(|error| RuntimeError::WriteError(error.to_string()))?;
         self.mark_storage_write_pending_flush();
+        #[cfg(feature = "transport")]
         self.refresh_transport_catalogue_state_hash();
         self.immediate_tick();
         Ok(id)
@@ -757,6 +765,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.schema_manager
             .persist_schema_object(&mut self.storage, &schema);
         self.schema_manager.persist_lens(&mut self.storage, &lens);
+        #[cfg(feature = "transport")]
         self.refresh_transport_catalogue_state_hash();
         Ok(())
     }
@@ -773,7 +782,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 ///
 /// Centralises the boilerplate that would otherwise be duplicated in every
 /// binding (Tokio, NAPI, RN, WASM).
-#[cfg(feature = "transport")]
+#[cfg(feature = "transport-websocket")]
 pub fn install_transport<S, Sch, W, T>(
     core: &mut RuntimeCore<S, Sch>,
     url: String,
@@ -795,7 +804,7 @@ where
     )
 }
 
-#[cfg(feature = "transport")]
+#[cfg(feature = "transport-websocket")]
 pub fn install_transport_with_retry_config<S, Sch, W, T>(
     core: &mut RuntimeCore<S, Sch>,
     url: String,
@@ -831,14 +840,17 @@ where
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Attach a transport handle. Replaces any existing transport.
+    #[cfg(feature = "transport")]
     pub fn set_transport(&mut self, handle: crate::transport_manager::TransportHandle) {
         self.transport = Some(handle);
     }
 
+    #[cfg(feature = "transport")]
     pub(crate) fn mark_transport_catalogue_state_hash_dirty(&mut self) {
         self.transport_catalogue_state_hash_dirty = true;
     }
 
+    #[cfg(feature = "transport")]
     fn refresh_transport_catalogue_state_hash(&mut self) {
         if let Some(handle) = self.transport.as_ref() {
             handle.set_catalogue_state_hash(Some(self.schema_manager.catalogue_state_hash()));
@@ -847,6 +859,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     /// Detach the transport handle and remove its server from sync state.
+    #[cfg(feature = "transport")]
     pub fn clear_transport(&mut self) {
         if let Some(h) = self.transport.take() {
             self.remove_server(h.server_id);
@@ -854,6 +867,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     /// Returns a reference to the active transport handle, if any.
+    #[cfg(feature = "transport")]
     pub fn transport(&self) -> Option<&crate::transport_manager::TransportHandle> {
         self.transport.as_ref()
     }
