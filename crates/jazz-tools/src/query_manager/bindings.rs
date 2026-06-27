@@ -7,10 +7,10 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::object::ObjectId;
-use crate::query_manager::parse_query_json;
-use crate::query_manager::query::Query;
-use crate::query_manager::session::{Session, WriteContext};
-use crate::query_manager::types::Schema;
+use crate::query_api::parse_query_json;
+use crate::query_api::query::Query;
+use crate::query_api::session::{Session, WriteContext};
+use crate::query_api::types::Schema;
 use crate::sync::DurabilityTier;
 use crate::transaction::BatchId;
 use crate::transaction::BatchMode;
@@ -195,7 +195,7 @@ pub fn current_timestamp_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{parse_runtime_schema_input, parse_write_context_input};
-    use crate::query_manager::types::TableName;
+    use crate::query_api::types::TableName;
 
     #[test]
     fn parse_external_object_id_accepts_any_valid_uuid() {

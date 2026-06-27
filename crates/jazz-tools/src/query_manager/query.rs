@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::query_manager::magic_columns::is_magic_column_name;
-use crate::query_manager::types::{ColumnType, RowDescriptor, TableName, Value};
+use crate::query_api::magic_columns::is_magic_column_name;
+use crate::query_api::types::{ColumnType, RowDescriptor, TableName, Value};
 use crate::row_format::encode_value_with_type;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -757,8 +757,7 @@ impl QueryBuilder {
     /// Start building a query for a table.
     ///
     /// Note: Branch must be explicitly specified via `.branch()` or `.branches()`.
-    /// Queries without branches will error at execution time unless a SchemaContext
-    /// is present (which provides branch expansion).
+    /// Queries without branches will fail validation.
     pub fn new(table: impl Into<TableName>) -> Self {
         Self {
             // Use new_internal which doesn't set default branch
@@ -1046,9 +1045,6 @@ impl QueryBuilder {
     /// Build the query.
     ///
     /// Branches should be specified via `.branch()` or `.branches()`.
-    /// If no branches specified:
-    /// - With SchemaManager: automatically expands to all live schema branches
-    /// - Without SchemaManager: QueryManager returns an error
     pub fn try_build(self) -> Result<Query, QueryBuildError> {
         let mut query = self.query;
         query.validate_for_engine()?;
@@ -1364,7 +1360,7 @@ impl Default for RecursiveBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType};
+    use crate::query_api::types::{ColumnDescriptor, ColumnType};
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![

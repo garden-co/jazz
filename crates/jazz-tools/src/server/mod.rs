@@ -1,8 +1,8 @@
 use std::sync::{Arc, RwLock as StdRwLock};
 
+use crate::AppId;
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
-use crate::schema_manager::AppId;
 use jazz_server::StorageConfig;
 
 mod builder;
@@ -17,7 +17,7 @@ mod testing;
 pub mod websocket_client;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
-pub(crate) use catalogue::{ServerCatalogue, StoredCatalogue};
+pub(crate) use catalogue::{PermissionsHeadSummary, ServerCatalogue, StoredCatalogue};
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 pub(crate) use catalogue_storage::CatalogueRocksDbStorage;
 #[cfg(test)]
@@ -161,9 +161,9 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::AppId;
     use crate::middleware::AuthConfig;
     use crate::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
-    use crate::schema_manager::AppId;
     use crate::server::builder::{ServerBuilder, StorageBackend};
     use crate::server::catalogue_storage::CatalogueStorageResult;
 
