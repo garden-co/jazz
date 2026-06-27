@@ -54,8 +54,10 @@ use jazz::db::{
 };
 #[cfg(feature = "direct-core-client")]
 use jazz::groove::records::Value as CoreValue;
-#[cfg(feature = "direct-core-client")]
+#[cfg(all(feature = "direct-core-client", not(feature = "rocksdb")))]
 use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
+#[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
+use jazz::groove::storage::RocksDbStorage as CoreRocksDbStorage;
 #[cfg(feature = "direct-core-client")]
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
 #[cfg(feature = "direct-core-client")]
@@ -76,8 +78,20 @@ use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, Subscri
 type DynStorage = Box<dyn Storage + Send>;
 #[cfg(all(test, feature = "transport-websocket"))]
 type ClientRuntime = crate::runtime_tokio::TokioRuntime<DynStorage>;
-#[cfg(feature = "direct-core-client")]
+#[cfg(all(feature = "direct-core-client", not(feature = "rocksdb")))]
 type DirectCoreDb = CoreDb<CoreMemoryStorage>;
+#[cfg(all(feature = "direct-core-client", not(feature = "rocksdb")))]
+type DirectCoreStorage = CoreMemoryStorage;
+#[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
+type DirectCoreDb = CoreDb<CoreRocksDbStorage>;
+#[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
+type DirectCoreStorage = CoreRocksDbStorage;
+#[cfg(feature = "direct-core-client")]
+struct DirectCoreStorageBundle {
+    storage: DirectCoreStorage,
+    #[cfg(feature = "rocksdb")]
+    _temporary_dir: Option<tempfile::TempDir>,
+}
 
 #[derive(Debug, Deserialize)]
 struct UnverifiedJwtClaims {
@@ -132,6 +146,8 @@ struct DirectCoreEngine {
 #[cfg(feature = "direct-core-client")]
 struct DirectCoreInner {
     db: Rc<DirectCoreDb>,
+    #[cfg(feature = "rocksdb")]
+    _temporary_storage_dir: Option<tempfile::TempDir>,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<BatchId, DirectTransactionState>,
@@ -201,14 +217,17 @@ impl TickScheduler for DirectCoreTickScheduler {
 impl DirectCoreEngine {
     async fn start(
         schema: jazz::schema::JazzSchema,
+        storage: DirectCoreStorageBundle,
         identity: CoreDbIdentity,
-        server_url: String,
+        server_url: Option<String>,
         app_id: crate::schema_manager::AppId,
-        auth: WsAuthConfig,
+        auth: Option<WsAuthConfig>,
     ) -> Result<Rc<Self>> {
         let scheduler = Rc::new(DirectCoreTickScheduler::default());
+        let has_upstream = server_url.is_some();
         let inner = DirectCoreInner::open(
             schema,
+            storage,
             identity,
             server_url,
             app_id,
@@ -217,7 +236,9 @@ impl DirectCoreEngine {
         )
         .await?;
         let inner = Rc::new(std::cell::RefCell::new(inner));
-        Self::spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
+        if has_upstream {
+            Self::spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
+        }
         Ok(Rc::new(Self { inner }))
     }
 
@@ -483,38 +504,44 @@ impl DirectCoreEngine {
 impl DirectCoreInner {
     async fn open(
         schema: jazz::schema::JazzSchema,
+        storage: DirectCoreStorageBundle,
         identity: CoreDbIdentity,
-        server_url: String,
+        server_url: Option<String>,
         app_id: crate::schema_manager::AppId,
-        auth: WsAuthConfig,
+        auth: Option<WsAuthConfig>,
         scheduler: Rc<DirectCoreTickScheduler>,
     ) -> Result<Self> {
         let db = Rc::new(
-            CoreDb::open(CoreDbConfig::new(
-                schema.clone(),
-                direct_core_storage(&schema),
-                identity,
-            ))
-            .await
-            .map_err(|error| JazzError::Connection(error.to_string()))?,
+            CoreDb::open(CoreDbConfig::new(schema.clone(), storage.storage, identity))
+                .await
+                .map_err(|error| JazzError::Connection(error.to_string()))?,
         );
         db.set_tick_scheduler(Some(scheduler.clone()));
-        let wake = scheduler.wake_handle();
-        let transport = DirectCoreWebSocketTransport::connect_with_wake(
-            &server_url,
-            app_id,
-            identity.author,
-            auth,
-            Arc::new(move || {
-                wake.immediate.store(true, Ordering::Release);
-                wake.notify.notify_one();
-            }),
-        )
-        .await
-        .map_err(|error| JazzError::Connection(error.to_string()))?;
-        db.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
+        if let Some(server_url) = server_url {
+            let auth = auth.ok_or_else(|| {
+                JazzError::Connection(
+                    "direct core server connection missing auth config".to_string(),
+                )
+            })?;
+            let wake = scheduler.wake_handle();
+            let transport = DirectCoreWebSocketTransport::connect_with_wake(
+                &server_url,
+                app_id,
+                identity.author,
+                auth,
+                Arc::new(move || {
+                    wake.immediate.store(true, Ordering::Release);
+                    wake.notify.notify_one();
+                }),
+            )
+            .await
+            .map_err(|error| JazzError::Connection(error.to_string()))?;
+            db.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
+        }
         Ok(Self {
             db,
+            #[cfg(feature = "rocksdb")]
+            _temporary_storage_dir: storage._temporary_dir,
             write_map: HashMap::new(),
             row_tables: HashMap::new(),
             transactions: HashMap::new(),
@@ -849,13 +876,48 @@ fn direct_core_identity(context: &AppContext, default_session: Option<&Session>)
 }
 
 #[cfg(feature = "direct-core-client")]
-fn direct_core_storage(schema: &jazz::schema::JazzSchema) -> CoreMemoryStorage {
+fn direct_core_storage(
+    schema: &jazz::schema::JazzSchema,
+    context: &AppContext,
+) -> Result<DirectCoreStorageBundle> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    CoreMemoryStorage::new(&refs)
+    #[cfg(feature = "rocksdb")]
+    {
+        match context.storage {
+            ClientStorage::Memory => {
+                let data_dir = tempfile::TempDir::new()
+                    .map_err(|error| JazzError::Connection(error.to_string()))?;
+                let db_path = data_dir.path().join("jazz-core.rocksdb");
+                let storage = CoreRocksDbStorage::open(&db_path, &refs)
+                    .map_err(|error| JazzError::Connection(error.to_string()))?;
+                Ok(DirectCoreStorageBundle {
+                    storage,
+                    _temporary_dir: Some(data_dir),
+                })
+            }
+            ClientStorage::Persistent => {
+                std::fs::create_dir_all(&context.data_dir)?;
+                let db_path = context.data_dir.join("jazz-core.rocksdb");
+                let storage = CoreRocksDbStorage::open(&db_path, &refs)
+                    .map_err(|error| JazzError::Connection(error.to_string()))?;
+                Ok(DirectCoreStorageBundle {
+                    storage,
+                    _temporary_dir: None,
+                })
+            }
+        }
+    }
+    #[cfg(not(feature = "rocksdb"))]
+    {
+        let _ = context;
+        Ok(DirectCoreStorageBundle {
+            storage: CoreMemoryStorage::new(&refs),
+        })
+    }
 }
 
 #[cfg(feature = "direct-core-client")]
@@ -954,6 +1016,7 @@ async fn wait_for_initial_transport_handshake(
 }
 
 impl JazzClient {
+    #[cfg_attr(feature = "direct-core-client", allow(dead_code))]
     fn legacy_client_error() -> JazzError {
         JazzError::Connection(
             "JazzClient legacy runtime construction is disabled; use a server-backed direct core client"
@@ -1164,22 +1227,14 @@ impl JazzClient {
         #[cfg(not(feature = "direct-core-client"))]
         let _ = &default_session;
         let has_server = !context.server_url.is_empty();
-        if !has_server {
-            return Err(Self::legacy_client_error());
-        }
 
         #[cfg(feature = "direct-core-client")]
         {
-            if !matches!(context.storage, ClientStorage::Memory) {
-                return Err(JazzError::Connection(
-                    "direct core JazzClient currently supports server-backed memory clients only"
-                        .to_string(),
-                ));
-            }
             let core_schema = convert_alpha_schema(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
             let identity = direct_core_identity(&context, default_session.as_ref());
-            let auth = WsAuthConfig {
+            let storage = direct_core_storage(&core_schema, &context)?;
+            let auth = has_server.then(|| WsAuthConfig {
                 jwt_token: if context.backend_secret.is_some() {
                     None
                 } else {
@@ -1188,11 +1243,12 @@ impl JazzClient {
                 backend_secret: context.backend_secret.clone(),
                 admin_secret: context.admin_secret.clone(),
                 backend_session: None,
-            };
+            });
             let direct_engine = DirectCoreEngine::start(
                 core_schema,
+                storage,
                 identity,
-                context.server_url.clone(),
+                has_server.then(|| context.server_url.clone()),
                 context.app_id,
                 auth,
             )
@@ -1211,7 +1267,12 @@ impl JazzClient {
         }
 
         #[cfg(not(feature = "direct-core-client"))]
-        Err(Self::legacy_client_error())
+        {
+            if !has_server {
+                return Err(Self::legacy_client_error());
+            }
+            Err(Self::legacy_client_error())
+        }
     }
 
     #[cfg(feature = "test-utils")]
@@ -1681,19 +1742,6 @@ mod tests {
     }
 
     #[cfg(feature = "rocksdb")]
-    fn expected_client_catalogue_hash(context: &AppContext) -> String {
-        #[cfg(feature = "rocksdb")]
-        let storage = {
-            let db_path = context.data_dir.join("jazz.rocksdb");
-            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
-        };
-        let schema_manager = build_client_schema_manager(&storage, context)
-            .expect("rehydrate client schema manager");
-        let catalogue_hash = schema_manager.catalogue_state_hash();
-        storage.close().expect("close seeded client storage");
-        catalogue_hash
-    }
-
     #[cfg(feature = "rocksdb")]
     #[test]
     fn seeded_client_storage_persists_learned_schema_and_lens() {
@@ -1804,10 +1852,19 @@ mod tests {
     async fn direct_core_engine_transaction_stages_and_commits() {
         let alpha_schema = declared_todo_schema();
         let core_schema = convert_alpha_schema(&alpha_schema).expect("convert schema");
+        let storage = direct_core_storage(
+            &core_schema,
+            &make_offline_context(
+                AppId::from_name("direct-core-transaction-test"),
+                TempDir::new().expect("tempdir").keep(),
+                alpha_schema.clone(),
+            ),
+        )
+        .expect("open direct core storage");
         let db = Rc::new(
             DirectCoreDb::open(CoreDbConfig::new(
                 core_schema.clone(),
-                direct_core_storage(&core_schema),
+                storage.storage,
                 CoreDbIdentity {
                     node: CoreNodeUuid::from_bytes([0x11; 16]),
                     author: CoreAuthorId::from_bytes([0xa1; 16]),
@@ -1819,6 +1876,8 @@ mod tests {
         let engine = DirectCoreEngine {
             inner: Rc::new(std::cell::RefCell::new(DirectCoreInner {
                 db,
+                #[cfg(feature = "rocksdb")]
+                _temporary_storage_dir: storage._temporary_dir,
                 write_map: HashMap::new(),
                 row_tables: HashMap::new(),
                 transactions: HashMap::new(),
@@ -1890,27 +1949,50 @@ mod tests {
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn offline_persistent_client_fails_closed_until_direct_storage_lands() {
+    async fn offline_persistent_client_rehydrates_rows_from_direct_core_storage() {
         let data_dir = TempDir::new().expect("temp client dir");
-        let app_id = AppId::from_name("client-rehydrate-lens");
-        let _ = seed_rehydrated_client_storage(data_dir.path(), app_id, false);
+        let app_id = AppId::from_name("client-direct-core-row-rehydrate");
         let context = make_offline_context(
             app_id,
             data_dir.path().to_path_buf(),
             declared_todo_schema(),
         );
 
-        let error = JazzClient::connect(context)
+        let client = JazzClient::connect(context.clone())
             .await
-            .expect_err("offline persistent legacy runtime must not be constructed");
-        assert!(
-            matches!(error, JazzError::Connection(message) if message.contains("legacy runtime construction is disabled"))
+            .expect("connect offline persistent direct core client");
+        let (row_id, _values, batch_id) = client
+            .insert(
+                "todos",
+                crate::row_input!("title" => "rehydrated", "completed" => false),
+            )
+            .expect("insert offline persistent row");
+        client
+            .wait_for_batch(batch_id, DurabilityTier::Local)
+            .await
+            .expect("wait for local durability");
+        drop(client);
+
+        let restarted = JazzClient::connect(context)
+            .await
+            .expect("reconnect offline persistent direct core client");
+        let rows = restarted
+            .query(Query::new("todos"), Some(DurabilityTier::Local))
+            .await
+            .expect("query rehydrated rows");
+
+        assert_eq!(
+            rows,
+            vec![(
+                row_id,
+                vec![Value::Text("rehydrated".to_string()), Value::Boolean(false)]
+            )]
         );
     }
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn offline_persistent_permissions_rehydrate_fails_closed_until_direct_storage_lands() {
+    async fn offline_persistent_client_does_not_reopen_legacy_catalogue_as_parallel_engine() {
         let data_dir = TempDir::new().expect("temp client dir");
         let app_id = AppId::from_name("client-rehydrate-permissions");
         let _ = seed_rehydrated_client_storage(data_dir.path(), app_id, true);
@@ -1920,11 +2002,14 @@ mod tests {
             declared_todo_schema(),
         );
 
-        let error = JazzClient::connect(context)
+        let client = JazzClient::connect(context)
             .await
-            .expect_err("offline persistent legacy runtime must not be constructed");
-        assert!(
-            matches!(error, JazzError::Connection(message) if message.contains("legacy runtime construction is disabled"))
+            .expect("connect offline persistent direct core client");
+
+        assert_eq!(
+            client.schema().expect("client schema"),
+            declared_todo_schema(),
+            "direct core clients should not rehydrate legacy catalogue storage as a parallel engine"
         );
     }
 

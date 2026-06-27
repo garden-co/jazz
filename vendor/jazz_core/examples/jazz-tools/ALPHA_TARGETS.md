@@ -125,9 +125,9 @@ also runs a persistent OPFS client through the real Rust websocket server
 boundary, reopens that client, and verifies a second persistent client converges
 over the websocket path. It now also covers includeDeleted reads after
 edge-confirmed deletes and binary-large-value file/blob persistence plus
-websocket convergence. The skipped TODO gate in this file is now delete/restore:
-the writer can edge-accept and read the restore, but a fresh websocket client
-cannot query the restored row yet.
+websocket convergence. Delete/restore over websocket is unskipped: the writer
+can edge-accept the restore, and a fresh websocket client can query the
+restored row.
 
 ## Current gaps versus alpha
 
@@ -138,10 +138,11 @@ cannot query the restored row yet.
   shutdown/reopen for a simple inserted row. It also covers persistent OPFS plus
   direct websocket convergence over a real Rust server for a todo-shaped flow,
   includeDeleted reads for edge-confirmed deletes, and binary-large-value
-  file/blob persistence plus websocket convergence. Remaining persistence gaps
-  are transaction support in direct core plus the worker runtime, delete/restore
-  websocket convergence after an edge-accepted restore, and broader
-  history/index correctness.
+  file/blob persistence plus websocket convergence. Rust `JazzClient` also has
+  a first offline persistent direct-core RocksDB rehydrate gate for public
+  row insert/query. Remaining persistence gaps are broader history/index
+  correctness and production storage coverage beyond the first browser/Rust
+  vertical slices.
   `examples/browser-wasm` still has older OPFS reload coverage for the vendored
   example path, but the package gate is the integration source of truth.
 - Public TypeScript API compatibility is intentionally thin. Since this repo is
