@@ -238,10 +238,7 @@ function criterionBenchmarkId(benchmark, storageEngine) {
     ["realistic_phase1/r9_subscribed_write", "native-criterion:r9_subscribed_write"],
     ["realistic_phase1/r10_sync_fanout", "native-criterion:r10_sync_fanout"],
     ["realistic_phase1/r11_byte_wire_resume", "native-criterion:r11_byte_wire_resume"],
-    [
-      "realistic_phase1/r12_recursive_permissions",
-      "native-criterion:r12_recursive_permissions",
-    ],
+    ["realistic_phase1/r12_recursive_permissions", "native-criterion:r12_recursive_permissions"],
   ]);
 
   if (exactMap.has(groupId)) {
