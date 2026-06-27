@@ -439,10 +439,9 @@ shuts down and remounts the app.
 - Rust client/server schema conversion names now say public-schema/core
   instead of alpha/core. The conversion boundary remains real until the public
   Rust API itself adopts core-native schema/value types.
-- The TypeScript `DbRuntimeModule` / `WasmRuntimeModule` naming has been
-  collapsed into `CoreSource` / `WasmCoreSource`. The remaining seam is a
-  platform loader/source boundary for core, not a swappable engine
-  abstraction.
+- The TypeScript runtime/source naming has been collapsed into the current
+  `Runtime` loader option and private `WasmDbFacade`. The remaining seam is a
+  platform loader boundary, not a swappable engine abstraction.
 - Public framework client objects no longer expose the subscription
   orchestrator as `.manager`. Framework hooks read an internal symbol-backed
   subscription store attached to the client, while the advanced shared package
