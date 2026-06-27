@@ -24,16 +24,12 @@ pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
 // Legacy alpha storage is still used internally by the admin catalogue runtime.
-// Keep it out of the normal public API so new callers do not build against it
-// as a second sync/storage engine. Existing Rust storage integration tests get
-// temporary access through `test-utils` until catalogue persistence moves behind
-// direct core.
-#[cfg(not(feature = "test-utils"))]
+// Keep it out of the public API, including `test-utils`, so new callers do not
+// build against it as a second sync/storage engine. Storage-specific regression
+// coverage should live in crate-internal tests, or expose narrow public helpers
+// from `test_support` when behavior must be asserted from integration tests.
 #[allow(dead_code)]
 pub(crate) mod storage;
-#[cfg(feature = "test-utils")]
-#[allow(dead_code)]
-pub mod storage;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod sync_manager;
 #[cfg(feature = "test-utils")]
