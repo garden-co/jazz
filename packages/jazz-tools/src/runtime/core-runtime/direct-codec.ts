@@ -339,7 +339,7 @@ function writeGrooveValue(writer: PostcardWriter, value: DirectQueryLiteral): vo
   }
   if (value.type === "Integer") {
     writer.u64(2); // groove::records::Value::U32
-    writer.u32Le(value.value);
+    writer.u64(value.value);
     return;
   }
   if (value.type === "Uuid") {
