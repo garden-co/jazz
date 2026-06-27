@@ -25,7 +25,7 @@
 //!         .column("name", ColumnType::Text))
 //!     .build();
 //!
-//! let mut manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main")?;
+//! let mut manager = SchemaManager::new(schema, app_id, "dev", "main")?;
 //!
 //! // Add old schema version as live (auto-generates lens)
 //! manager.add_live_schema(old_schema)?;
