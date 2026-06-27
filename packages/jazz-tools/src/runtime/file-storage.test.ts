@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  createConventionalFileStorage,
+  createBinaryLargeValueFileStorage,
   FileNotFoundError,
-  MAX_FILE_PART_BYTES,
   type FileStorageDb,
 } from "./file-storage.js";
 import { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
@@ -11,18 +10,11 @@ import { WriteResult, JazzClient } from "./client.js";
 interface StoredFile {
   id: string;
   name?: string;
-  mimeType: string;
-  partIds: string[];
-  partSizes: number[];
-}
-
-interface StoredFilePart {
-  id: string;
+  mime_type: string;
   data: Uint8Array;
 }
 
 type StoredFileInit = Omit<StoredFile, "id">;
-type StoredFilePartInit = Omit<StoredFilePart, "id">;
 
 type BuiltQuery = {
   table: string;
@@ -77,12 +69,11 @@ class FakeDb implements FileStorageDb {
   readonly queries: BuiltQuery[] = [];
   readonly queryOptions: Array<QueryOptions | undefined> = [];
   readonly files = new Map<string, StoredFile>();
-  readonly fileParts = new Map<string, StoredFilePart>();
   readonly #insertsByTransactionId = new Map<string, number>();
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): WriteResult<T> {
     const transactionId = `transaction-${this.nextTransactionId++}`;
-    const row = this.store(table, data, false);
+    const row = this.store(table, data);
     this.#insertsByTransactionId.set(transactionId, this.inserts.length - 1);
     const client = {
       waitForTransaction: async (persistedTransactionId: string, tier: string) => {
@@ -111,27 +102,14 @@ class FakeDb implements FileStorageDb {
       (condition) => condition.column === "id" && condition.op === "eq",
     )?.value;
 
-    if (typeof id !== "string") {
+    if (typeof id !== "string" || built.table !== "files") {
       return null;
     }
 
-    if (built.table === "files") {
-      return (this.files.get(id) as T | undefined) ?? null;
-    }
-
-    if (built.table === "file_parts") {
-      return (this.fileParts.get(id) as T | undefined) ?? null;
-    }
-
-    return null;
+    return (this.files.get(id) as T | undefined) ?? null;
   }
 
-  private store<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    durable: boolean,
-    tier?: string,
-  ): T {
+  private store<T, Init>(table: TableProxy<T, Init>, data: Init): T {
     const id = `${table._table}-${this.nextSyntheticId++}`;
     const row = {
       id,
@@ -141,14 +119,11 @@ class FakeDb implements FileStorageDb {
     this.inserts.push({
       table: table._table,
       data: row,
-      durable,
-      tier,
+      durable: false,
     });
 
     if (table._table === "files") {
       this.files.set(id, row as unknown as StoredFile);
-    } else if (table._table === "file_parts") {
-      this.fileParts.set(id, row as unknown as StoredFilePart);
     }
 
     return row as T;
@@ -172,161 +147,115 @@ async function blobToNumbers(blob: Blob): Promise<number[]> {
 
 describe("createFileStorage", () => {
   const filesTable = makeTable<StoredFile, StoredFileInit>("files");
-  const filePartsTable = makeTable<StoredFilePart, StoredFilePartInit>("file_parts");
-  const app = {
-    files: filesTable,
-    file_parts: filePartsTable,
-  };
+  const app = { files: filesTable };
 
-  it("chunks stream input into file parts before creating the file row", async () => {
+  it("stores stream input as one files row with binary large value data", async () => {
     const db = new FakeDb();
-    const storage = createConventionalFileStorage(db, app);
+    const storage = createBinaryLargeValueFileStorage(db, app);
 
     const file = await storage.fromStream(streamFromChunks([[1, 2], [3, 4, 5], [6]]), {
       name: "demo.bin",
       mimeType: "application/test",
-      chunkSizeBytes: 4,
     });
 
-    expect(db.inserts.map((insert) => insert.table)).toEqual(["file_parts", "file_parts", "files"]);
-    expect(Array.from((db.inserts[0]?.data.data as Uint8Array) ?? [])).toEqual([1, 2, 3, 4]);
-    expect(Array.from((db.inserts[1]?.data.data as Uint8Array) ?? [])).toEqual([5, 6]);
-    expect(file.partIds).toEqual(["file_parts-1", "file_parts-2"]);
-    expect(file.partSizes).toEqual([4, 2]);
+    expect(db.inserts.map((insert) => insert.table)).toEqual(["files"]);
+    expect(Array.from((db.inserts[0]?.data.data as Uint8Array) ?? [])).toEqual([1, 2, 3, 4, 5, 6]);
     expect(file.name).toBe("demo.bin");
-    expect(file.mimeType).toBe("application/test");
+    expect(file.mime_type).toBe("application/test");
   });
 
   it("supports durable blob writes", async () => {
     const db = new FakeDb();
-    const storage = createConventionalFileStorage(db, app);
+    const storage = createBinaryLargeValueFileStorage(db, app);
     const file = await storage.fromBlob(
       new File([Uint8Array.from([9, 8, 7])], "image.png", {
         type: "image/png",
       }),
       {
         tier: "edge",
-        chunkSizeBytes: 8,
       },
     );
 
-    expect(file.mimeType).toBe("image/png");
+    expect(file.mime_type).toBe("image/png");
     expect(file.name).toBe("image.png");
-    expect(db.inserts.every((insert) => insert.durable)).toBe(true);
-    expect(db.inserts.map((insert) => insert.tier)).toEqual(["edge", "edge"]);
+    expect(db.inserts).toHaveLength(1);
+    expect(db.inserts[0]?.durable).toBe(true);
+    expect(db.inserts[0]?.tier).toBe("edge");
   });
 
   it("omits the optional file name for unnamed blobs", async () => {
     const db = new FakeDb();
-    const storage = createConventionalFileStorage(db, app);
+    const storage = createBinaryLargeValueFileStorage(db, app);
 
-    const file = await storage.fromBlob(new Blob([Uint8Array.from([1, 2, 3])]), {
-      chunkSizeBytes: 8,
-    });
+    const file = await storage.fromBlob(new Blob([Uint8Array.from([1, 2, 3])]));
 
     expect(file.name).toBeUndefined();
-    expect(db.inserts[1]?.data.name).toBeUndefined();
+    expect(db.inserts[0]?.data.name).toBeUndefined();
   });
 
-  it("loads file metadata first and then fetches file parts sequentially", async () => {
+  it("loads file metadata and data from the files row only", async () => {
     const db = new FakeDb();
     db.files.set("file-1", {
       id: "file-1",
       name: "demo.bin",
-      mimeType: "application/test",
-      partIds: ["part-1", "part-2"],
-      partSizes: [2, 3],
+      mime_type: "application/test",
+      data: Uint8Array.from([1, 2, 3, 4, 5]),
     });
-    db.fileParts.set("part-1", { id: "part-1", data: Uint8Array.from([1, 2]) });
-    db.fileParts.set("part-2", { id: "part-2", data: Uint8Array.from([3, 4, 5]) });
 
-    const storage = createConventionalFileStorage(db, app);
-    const stream = await storage.toStream("file-1");
-    expect(db.queries.map((query) => query.table)).toEqual(["files", "file_parts"]);
-    expect(db.queries[1]?.conditions[0]?.value).toBe("part-1");
+    const storage = createBinaryLargeValueFileStorage(db, app);
+    const stream = await storage.toStream("file-1", {
+      tier: "edge",
+      propagation: "local-only",
+    });
+    expect(db.queries.map((query) => query.table)).toEqual(["files"]);
 
     const reader = stream.getReader();
     const first = await reader.read();
     expect(first.done).toBe(false);
-    expect(Array.from(first.value ?? [])).toEqual([1, 2]);
-    expect(db.queries.map((query) => query.table)).toEqual(["files", "file_parts"]);
-
-    const second = await reader.read();
-    expect(second.done).toBe(false);
-    expect(Array.from(second.value ?? [])).toEqual([3, 4, 5]);
-    expect(db.queries.map((query) => query.table)).toEqual(["files", "file_parts", "file_parts"]);
-    expect(db.queries[2]?.conditions[0]?.value).toBe("part-2");
+    expect(Array.from(first.value ?? [])).toEqual([1, 2, 3, 4, 5]);
 
     const done = await reader.read();
     expect(done.done).toBe(true);
-  });
-
-  it("reassembles a Blob from sequentially loaded parts", async () => {
-    const db = new FakeDb();
-    db.files.set("file-1", {
-      id: "file-1",
-      name: "demo.bin",
-      mimeType: "application/test",
-      partIds: ["part-1", "part-2"],
-      partSizes: [2, 3],
-    });
-    db.fileParts.set("part-1", { id: "part-1", data: Uint8Array.from([1, 2]) });
-    db.fileParts.set("part-2", { id: "part-2", data: Uint8Array.from([3, 4, 5]) });
-
-    const storage = createConventionalFileStorage(db, app);
-    const blob = await storage.toBlob("file-1", {
-      tier: "edge",
-      propagation: "local-only",
-    });
-
-    expect(blob.type).toBe("application/test");
-    expect(await blobToNumbers(blob)).toEqual([1, 2, 3, 4, 5]);
     expect(db.queryOptions).toEqual([
-      { tier: "edge", propagation: "local-only", visibility: undefined },
-      { tier: "edge", propagation: "local-only", visibility: undefined },
       { tier: "edge", propagation: "local-only", visibility: undefined },
     ]);
   });
 
-  it("fails with an incomplete-file error when a referenced part is missing", async () => {
+  it("reassembles a Blob from the binary large value", async () => {
     const db = new FakeDb();
     db.files.set("file-1", {
       id: "file-1",
       name: "demo.bin",
-      mimeType: "application/test",
-      partIds: ["part-1", "part-2"],
-      partSizes: [2, 3],
+      mime_type: "application/test",
+      data: Uint8Array.from([1, 2, 3, 4, 5]),
     });
-    db.fileParts.set("part-1", { id: "part-1", data: Uint8Array.from([1, 2]) });
 
-    const storage = createConventionalFileStorage(db, app);
-    await expect(
-      storage.toBlob("file-1", {
-        tier: "local",
-        propagation: "local-only",
-      }),
-    ).rejects.toMatchObject({
+    const storage = createBinaryLargeValueFileStorage(db, app);
+    const blob = await storage.toBlob("file-1");
+
+    expect(blob.type).toBe("application/test");
+    expect(await blobToNumbers(blob)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("fails with an incomplete-file error when the file row has no data", async () => {
+    const db = new FakeDb();
+    db.files.set("file-1", {
+      id: "file-1",
+      name: "demo.bin",
+      mime_type: "application/test",
+      data: undefined as unknown as Uint8Array,
+    });
+
+    const storage = createBinaryLargeValueFileStorage(db, app);
+    await expect(storage.toBlob("file-1")).rejects.toMatchObject({
       name: "IncompleteFileDataError",
-      fileId: "file-1",
-      reason: "missing-part",
-      partId: "part-2",
-      partIndex: 1,
     });
   });
 
   it("fails with a not-found error when the file row itself is missing", async () => {
     const db = new FakeDb();
-    const storage = createConventionalFileStorage(db, app);
+    const storage = createBinaryLargeValueFileStorage(db, app);
 
     await expect(storage.toBlob("missing-file")).rejects.toBeInstanceOf(FileNotFoundError);
-  });
-
-  it("rejects chunk sizes above the BYTEA limit", async () => {
-    const storage = createConventionalFileStorage(new FakeDb(), app);
-    await expect(
-      storage.fromStream(streamFromChunks([[1]]), {
-        chunkSizeBytes: MAX_FILE_PART_BYTES + 1,
-      }),
-    ).rejects.toThrow(`chunkSizeBytes must be <= ${MAX_FILE_PART_BYTES} bytes`);
   });
 });
