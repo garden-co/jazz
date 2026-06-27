@@ -17,7 +17,7 @@ use crate::query_manager::types::{
 };
 use crate::schema_manager::{Lens, LensOp, LensTransform};
 use crate::server::{ServerState, ShutdownPhase};
-use crate::transport_protocol::ErrorResponse;
+use crate::transport_error::ErrorResponse;
 
 use super::utils::{
     parse_app_id_param, parse_object_id_param, parse_schema_hash_param, permissions_head_view,

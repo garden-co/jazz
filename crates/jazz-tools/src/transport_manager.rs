@@ -643,7 +643,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 serde_json::from_slice::<crate::transport_protocol::ServerEvent>(&resp_payload).ok()
             });
         if let Some(crate::transport_protocol::ServerEvent::Error { message, code }) = error_event {
-            if code == crate::transport_protocol::ErrorCode::Unauthorized {
+            if code == crate::transport_error::ErrorCode::Unauthorized {
                 return HandshakeResult::AuthFailure(message);
             }
             return HandshakeResult::NetworkError(format!("server error ({code:?}): {message}"));
