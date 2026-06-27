@@ -17,6 +17,8 @@ members = [
   "dev/benchmarks/storage/bench-core",
 ]
 exclude = [
+  "examples/todo-server-rs",
+  "examples/docs/todo-server-rs",
   "vendor/jazz_core/groove",
   "vendor/jazz_core/jazz",
   "vendor/jazz_core/jazz-wasm",

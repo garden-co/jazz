@@ -57,7 +57,7 @@ pub use query_manager::query::{Query, QueryBuilder};
 pub use query_manager::session::{Session, WriteContext};
 pub use query_manager::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
-    RowDescriptor, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
+    RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 pub use row_histories::BatchId;
 pub use schema_manager::AppId;
