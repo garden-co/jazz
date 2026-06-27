@@ -549,10 +549,10 @@ pub struct QueryManager {
     /// Currently queued SyncManager batch fates whose query effects have
     /// already been applied by this manager.
     ///
-    /// RuntimeCore owns draining the pending fate queue so write waiters and
-    /// persisted fate state still see the same events. QueryManager may process
-    /// multiple times before that drain happens, so it must only apply the
-    /// subscription dirtiness effects for the newly appended suffix.
+    /// The surrounding runtime owns draining the pending fate queue so write
+    /// waiters and persisted fate state still see the same events. QueryManager
+    /// may process multiple times before that drain happens, so it must only
+    /// apply the subscription dirtiness effects for the newly appended suffix.
     pub(super) applied_pending_batch_fates: Vec<BatchFate>,
 
     /// Known schemas (for server-mode operation).
@@ -1233,8 +1233,8 @@ impl QueryManager {
             if pending_batch_fates.starts_with(&self.applied_pending_batch_fates) {
                 self.applied_pending_batch_fates.len()
             } else {
-                // RuntimeCore may have drained the queue and SyncManager may have
-                // appended new fates before QueryManager gets another process pass.
+                // The surrounding runtime may have drained the queue and SyncManager
+                // may have appended new fates before QueryManager gets another process pass.
                 // In that case, the current queue is a new sequence, not a suffix
                 // of the old one.
                 0
@@ -1409,8 +1409,8 @@ impl QueryManager {
         self.apply_pending_batch_fate_effects(storage);
 
         // 4c. Apply QuerySettled messages that do not depend on any earlier
-        // sequenced sync updates. Watermarked settlements stay queued for
-        // RuntimeCore, which tracks per-server stream progress.
+        // sequenced sync updates. Watermarked settlements stay queued for the
+        // direct-core runtime, which tracks per-server stream progress.
         let pending_query_settled = self.sync_manager.take_pending_query_settled();
         if !pending_query_settled.is_empty() {
             let mut blocked = Vec::new();

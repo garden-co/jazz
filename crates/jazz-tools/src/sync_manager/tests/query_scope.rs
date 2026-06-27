@@ -94,7 +94,7 @@ fn query_settled_from_server_can_be_relayed_to_interested_clients_after_ready() 
 
     assert!(
         sm.take_outbox().is_empty(),
-        "server QuerySettled should wait for RuntimeCore's stream watermark before relay"
+        "server QuerySettled should wait for the runtime stream watermark before relay"
     );
     sm.relay_query_settled_to_origins(server_id, query_id, DurabilityTier::Local);
 

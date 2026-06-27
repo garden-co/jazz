@@ -1657,22 +1657,8 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    use crate::runtime_core::{NoopScheduler, RuntimeCore};
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    use crate::schema_api::PolicyExpr;
     use crate::schema_api::Schema;
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    use crate::schema_api::{SchemaHash, TableName, TablePolicies};
     use crate::schema_manager::AppId;
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    use crate::schema_manager::SchemaManager;
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    use crate::storage::RocksDBStorage;
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    use crate::storage::Storage;
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    use crate::sync_manager::SyncManager;
     use crate::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
@@ -1683,18 +1669,6 @@ mod tests {
                 TableSchema::builder("todos")
                     .column("title", ColumnType::Text)
                     .column("completed", ColumnType::Boolean),
-            )
-            .build()
-    }
-
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    fn learned_runtime_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("title", ColumnType::Text)
-                    .column("completed", ColumnType::Boolean)
-                    .nullable_column("description", ColumnType::Text),
             )
             .build()
     }
@@ -1741,91 +1715,6 @@ mod tests {
             .expect("serialize jwt payload"),
         );
         format!("{header}.{payload}.sig")
-    }
-
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    fn seed_rehydrated_client_storage(
-        data_dir: &std::path::Path,
-        app_id: AppId,
-        publish_permissions: bool,
-    ) -> (SchemaHash, SchemaHash) {
-        std::fs::create_dir_all(data_dir).expect("create seeded client data dir");
-
-        let storage = {
-            let db_path = data_dir.join("jazz.rocksdb");
-            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
-        };
-        let bundled_schema = declared_todo_schema();
-        let learned_schema = learned_runtime_todo_schema();
-        let bundled_hash = SchemaHash::compute(&bundled_schema);
-        let learned_hash = SchemaHash::compute(&learned_schema);
-
-        let schema_manager = SchemaManager::new(
-            SyncManager::new(),
-            learned_schema.clone(),
-            app_id,
-            "seed",
-            "main",
-        )
-        .expect("seed schema manager");
-        let mut runtime = RuntimeCore::new(schema_manager, storage, NoopScheduler);
-        runtime.persist_schema();
-        runtime.publish_schema(bundled_schema.clone());
-        let lens = runtime
-            .schema_manager()
-            .generate_lens(&bundled_schema, &learned_schema);
-        assert!(!lens.is_draft(), "seed lens should be publishable");
-        runtime.publish_lens(&lens).expect("persist learned lens");
-
-        if publish_permissions {
-            runtime
-                .publish_permissions_bundle(
-                    learned_hash,
-                    HashMap::from([(
-                        TableName::new("todos"),
-                        TablePolicies::new().with_select(PolicyExpr::True),
-                    )]),
-                    None,
-                )
-                .expect("seed permissions bundle");
-        }
-
-        let storage = runtime.into_storage();
-        storage.flush().expect("flush seeded client storage");
-        storage.close().expect("close seeded client storage");
-
-        (bundled_hash, learned_hash)
-    }
-
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    #[test]
-    fn seeded_client_storage_persists_learned_schema_and_lens() {
-        let data_dir = TempDir::new().expect("temp client dir");
-        let app_id = AppId::from_name("client-seeded-storage");
-        let (_bundled_hash, learned_hash) =
-            seed_rehydrated_client_storage(data_dir.path(), app_id, false);
-
-        let db_path = data_dir.path().join("jazz.rocksdb");
-        let storage =
-            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
-
-        let entries = storage
-            .scan_catalogue_entries()
-            .expect("scan seeded catalogue entries");
-        let learned_object_id = learned_hash.to_object_id();
-        assert!(
-            entries
-                .iter()
-                .any(|entry| entry.object_id == learned_object_id),
-            "seeded storage should persist the learned schema object"
-        );
-        assert!(
-            entries.iter().any(|entry| entry.object_type()
-                == Some(crate::metadata::ObjectType::CatalogueLens.as_str())),
-            "seeded storage should persist at least one learned lens"
-        );
-
-        storage.close().expect("close seeded client storage");
     }
 
     #[test]
@@ -2000,29 +1889,6 @@ mod tests {
         assert!(
             !data_dir.path().join("jazz-core.rocksdb").exists(),
             "memory direct core storage should not create a RocksDB data directory"
-        );
-    }
-
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    #[tokio::test]
-    async fn offline_persistent_client_does_not_reopen_legacy_catalogue_as_parallel_engine() {
-        let data_dir = TempDir::new().expect("temp client dir");
-        let app_id = AppId::from_name("client-rehydrate-permissions");
-        let _ = seed_rehydrated_client_storage(data_dir.path(), app_id, true);
-        let context = make_offline_context(
-            app_id,
-            data_dir.path().to_path_buf(),
-            declared_todo_schema(),
-        );
-
-        let client = JazzClient::connect(context)
-            .await
-            .expect("connect offline persistent direct core client");
-
-        assert_eq!(
-            client.schema().expect("client schema"),
-            declared_todo_schema(),
-            "direct core clients should not rehydrate legacy catalogue storage as a parallel engine"
         );
     }
 }

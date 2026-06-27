@@ -9,24 +9,12 @@ use uuid::Uuid;
 
 use crate::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
 use crate::object::ObjectId;
-use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::Schema;
-#[cfg(feature = "legacy-alpha-engine")]
-use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
-#[cfg(feature = "legacy-alpha-engine")]
-use crate::runtime_core::{MutationErrorEvent, ReadDurabilityOptions, SubscriptionDelta};
-use crate::sync_manager::{DurabilityTier, QueryPropagation};
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct QueryExecutionOptionsWire {
-    propagation: Option<String>,
-    local_updates: Option<String>,
-    transaction_batch_id: Option<String>,
-}
+use crate::sync_manager::DurabilityTier;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeSchemaInput {
@@ -263,121 +251,6 @@ pub fn serialize_local_batch_records(records: &[LocalBatchRecord]) -> JsonValue 
     JsonValue::Array(records.iter().map(serialize_local_batch_record).collect())
 }
 
-#[cfg(feature = "legacy-alpha-engine")]
-pub fn serialize_mutation_error_event(event: &MutationErrorEvent) -> JsonValue {
-    json!({
-        "code": event.code.as_str(),
-        "reason": event.reason.as_str(),
-        "transaction": serialize_local_batch_record(&event.batch),
-    })
-}
-
-#[cfg(feature = "legacy-alpha-engine")]
-pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
-    ReadDurabilityOptions {
-        tier,
-        local_updates: LocalUpdates::Immediate,
-    }
-}
-
-#[cfg(feature = "legacy-alpha-engine")]
-pub fn parse_read_durability_options(
-    tier: Option<&str>,
-    options_json: Option<&str>,
-) -> Result<(ReadDurabilityOptions, QueryPropagation, Option<BatchId>), String> {
-    let parsed_tier = tier.map(parse_durability_tier).transpose()?;
-    let Some(raw) = options_json else {
-        return Ok((
-            default_read_durability_options(parsed_tier),
-            QueryPropagation::Full,
-            None,
-        ));
-    };
-
-    let options: QueryExecutionOptionsWire =
-        serde_json::from_str(raw).map_err(|err| format!("Invalid query options JSON: {}", err))?;
-
-    let propagation = match options.propagation.as_deref() {
-        None | Some("full") => Ok(QueryPropagation::Full),
-        Some("local-only") => Ok(QueryPropagation::LocalOnly),
-        Some(other) => Err(format!(
-            "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
-            other
-        )),
-    }?;
-
-    let local_updates = match options.local_updates.as_deref() {
-        None | Some("immediate") => Ok(LocalUpdates::Immediate),
-        Some("deferred") => Ok(LocalUpdates::Deferred),
-        Some(other) => Err(format!(
-            "Invalid localUpdates '{}'. Must be 'immediate' or 'deferred'.",
-            other
-        )),
-    }?;
-
-    let transaction_batch_id = options
-        .transaction_batch_id
-        .as_deref()
-        .map(parse_batch_id_input)
-        .transpose()?;
-
-    Ok((
-        ReadDurabilityOptions {
-            tier: parsed_tier,
-            local_updates,
-        },
-        propagation,
-        transaction_batch_id,
-    ))
-}
-
-#[cfg(feature = "legacy-alpha-engine")]
-pub fn subscription_delta_to_json(delta: &SubscriptionDelta) -> serde_json::Value {
-    let row_to_json = |row: &crate::query_manager::types::Row,
-                       descriptor: &crate::query_manager::types::RowDescriptor|
-     -> serde_json::Value {
-        let values = decode_row(descriptor, &row.data)
-            .map(|vals| vals.into_iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        serde_json::json!({
-            "id": row.id.uuid().to_string(),
-            "values": values,
-        })
-    };
-
-    let descriptor = &delta.descriptor;
-    let delta_obj = delta
-        .ordered_delta
-        .removed
-        .iter()
-        .map(|change| {
-            serde_json::json!({
-                "kind": 1,
-                "id": change.id.uuid().to_string(),
-                "index": change.index
-            })
-        })
-        .chain(delta.ordered_delta.updated.iter().map(|change| {
-            serde_json::json!({
-                "kind": 2,
-                "id": change.id.uuid().to_string(),
-                "index": change.new_index,
-                "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
-            })
-        }))
-        .chain(delta.ordered_delta.added.iter().map(|change| {
-            serde_json::json!({
-                "kind": 0,
-                "id": change.id.uuid().to_string(),
-                "index": change.index,
-                "row": row_to_json(&change.row, descriptor)
-            })
-        }))
-        .collect::<Vec<_>>();
-
-    serde_json::Value::Array(delta_obj)
-}
-
 pub fn generate_id() -> String {
     ObjectId::new().uuid().to_string()
 }
@@ -402,12 +275,9 @@ pub fn current_timestamp_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_read_durability_options, parse_runtime_schema_input, parse_write_context_input,
-    };
+    use super::{parse_runtime_schema_input, parse_write_context_input};
     use crate::batch_fate::BatchMode;
     use crate::query_manager::types::TableName;
-    use crate::row_histories::BatchId;
 
     #[test]
     fn parse_external_object_id_accepts_any_valid_uuid() {
@@ -418,34 +288,6 @@ mod tests {
             parsed.expect("object id").uuid().to_string(),
             "550e8400-e29b-41d4-a716-446655440000"
         );
-    }
-
-    #[test]
-    fn read_durability_options_default_to_full_and_immediate() {
-        let (durability, propagation, transaction_batch_id) =
-            parse_read_durability_options(Some("local"), None).expect("parse options");
-
-        assert_eq!(
-            durability.tier,
-            Some(crate::sync_manager::DurabilityTier::Local)
-        );
-        assert_eq!(
-            durability.local_updates,
-            crate::query_manager::manager::LocalUpdates::Immediate
-        );
-        assert_eq!(propagation, crate::sync_manager::QueryPropagation::Full);
-        assert_eq!(transaction_batch_id, None);
-    }
-
-    #[test]
-    fn read_durability_options_parse_transaction_batch_id() {
-        let batch_id = BatchId::new();
-        let options_json = format!(r#"{{"transaction_batch_id":"{batch_id}"}}"#);
-
-        let (_, _, parsed_batch_id) =
-            parse_read_durability_options(None, Some(&options_json)).expect("parse options");
-
-        assert_eq!(parsed_batch_id, Some(batch_id));
     }
 
     #[test]

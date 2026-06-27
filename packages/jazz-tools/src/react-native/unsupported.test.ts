@@ -9,7 +9,7 @@ import { createJazzClient } from "./create-jazz-client.js";
 import { loadJazzRn } from "./jazz-rn-loader.js";
 
 describe("react-native direct-core alpha support", () => {
-  it("fails fast instead of routing through the legacy RuntimeCore bridge", async () => {
+  it("fails fast instead of routing through a legacy bridge", async () => {
     expect(createReactNativeDirectCoreAlphaUnsupportedError().message).toBe(
       REACT_NATIVE_DIRECT_CORE_ALPHA_UNSUPPORTED_MESSAGE,
     );

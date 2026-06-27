@@ -161,7 +161,7 @@ fn client_durability_ack_is_not_authoritative() {
     );
     assert!(
         sm.take_pending_batch_fates().is_empty(),
-        "ignored client acknowledgements must not be replayed through RuntimeCore"
+        "ignored client acknowledgements must not be replayed through the runtime coordinator"
     );
 }
 

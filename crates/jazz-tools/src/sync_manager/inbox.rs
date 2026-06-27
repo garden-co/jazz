@@ -1360,7 +1360,7 @@ impl SyncManager {
                     through_seq,
                 });
 
-                // RuntimeCore relays this to interested clients once the
+                // The runtime coordinator relays this to interested clients once the
                 // upstream stream watermark proves the scope's rows are local.
             }
             SyncPayload::SchemaWarning(warning) => {

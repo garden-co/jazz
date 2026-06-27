@@ -4,7 +4,7 @@ import * as packageRoot from "./index.js";
 import * as runtime from "./runtime/index.js";
 
 // @ts-expect-error CoreRuntime is intentionally not part of the public runtime surface.
-import type { CoreRuntime as RuntimeCoreRuntime } from "./runtime/index.js";
+import type { CoreRuntime as InternalCoreRuntimeExport } from "./runtime/index.js";
 // @ts-expect-error CoreRuntime is intentionally not part of the package-root surface.
 import type { CoreRuntime as PackageRootCoreRuntime } from "./index.js";
 // @ts-expect-error DirectWebSocketCarrier is intentionally not part of the public runtime surface.
@@ -80,7 +80,7 @@ import type { DynamicTableRow as RuntimeDynamicTableRow } from "./runtime/index.
 // @ts-expect-error DynamicTableRow is not part of the package-root surface.
 import type { DynamicTableRow as PackageRootDynamicTableRow } from "./index.js";
 
-void (null as unknown as RuntimeCoreRuntime);
+void (null as unknown as InternalCoreRuntimeExport);
 void (null as unknown as PackageRootCoreRuntime);
 void (null as unknown as RuntimeDirectWebSocketCarrier);
 void (null as unknown as PackageRootDirectWebSocketCarrier);
