@@ -233,7 +233,23 @@ Until deleted, treat them as replacement targets only.
 - Persistent browser runtime should stay a worker-owned direct core DB, with the
   main thread acting as the public API/proxy surface. `CoreRuntime::fromDb`
   exists so the worker no longer pretends an already-open OPFS DB is
-  `openMemory`.
+  `openMemory`. The main-thread/worker write protocol no longer sends a
+  duplicate transaction id; the main thread keeps the public write handle while
+  the worker accepts direct core mutation calls over encoded row/patch-shaped
+  arguments. The worker implementation now names only the direct-core
+  capabilities it needs internally, instead of importing the full legacy
+  `Runtime` interface.
+- The public TypeScript runtime/package root no longer exports internal helper
+  plumbing such as query translators, row/value converters,
+  `SubscriptionManager`, dynamic table helpers, or client-session resolvers.
+  Public rows, query builders, `Db`, `JazzClient`, and subscription delta
+  types remain the intended high-level shell.
+- The Rust `storage` module is crate-private even under `test-utils`. Existing
+  files under `crates/jazz-tools/tests/*storage*_integration.rs` and
+  `client_restart_integration.rs` still reference the old storage API, but they
+  are inactive because the crate has `autotests = false` and no explicit
+  `[[test]]` targets for them. Any revived storage regression coverage should
+  be moved crate-internal or exposed through narrow `test_support` helpers.
 - Rust `JazzClient` no longer has a `ClientEngine::{Legacy, DirectCore}` split:
   server-backed direct-core memory clients are the only live construction path,
   and offline/persistent client construction fails closed until direct-core

@@ -35,6 +35,50 @@ import type { DbDirectBatch as PackageRootDbDirectBatch } from "./index.js";
 import type { BatchScope as RuntimeBatchScope } from "./runtime/index.js";
 // @ts-expect-error BatchScope was removed from the package-root surface.
 import type { BatchScope as PackageRootBatchScope } from "./index.js";
+// @ts-expect-error SubscriptionManager is an internal runtime helper.
+import type { SubscriptionManager as RuntimeSubscriptionManager } from "./runtime/index.js";
+// @ts-expect-error SubscriptionManager is not part of the package-root surface.
+import type { SubscriptionManager as PackageRootSubscriptionManager } from "./index.js";
+// @ts-expect-error allRowsInTableQuery is an internal runtime helper.
+import type { allRowsInTableQuery as RuntimeAllRowsInTableQuery } from "./runtime/index.js";
+// @ts-expect-error allRowsInTableQuery is not part of the package-root surface.
+import type { allRowsInTableQuery as PackageRootAllRowsInTableQuery } from "./index.js";
+// @ts-expect-error resolveClientSessionStateSync is an internal runtime helper.
+import type { resolveClientSessionStateSync as RuntimeResolveClientSessionStateSync } from "./runtime/index.js";
+// @ts-expect-error resolveClientSessionStateSync is not part of the package-root surface.
+import type { resolveClientSessionStateSync as PackageRootResolveClientSessionStateSync } from "./index.js";
+// @ts-expect-error resolveClientSessionSync is an internal runtime helper.
+import type { resolveClientSessionSync as RuntimeResolveClientSessionSync } from "./runtime/index.js";
+// @ts-expect-error resolveClientSessionSync is not part of the package-root surface.
+import type { resolveClientSessionSync as PackageRootResolveClientSessionSync } from "./index.js";
+// @ts-expect-error toValue is an internal runtime helper.
+import type { toValue as RuntimeToValue } from "./runtime/index.js";
+// @ts-expect-error toValue is not part of the package-root surface.
+import type { toValue as PackageRootToValue } from "./index.js";
+// @ts-expect-error toWriteRecord is an internal runtime helper.
+import type { toWriteRecord as RuntimeToWriteRecord } from "./runtime/index.js";
+// @ts-expect-error toWriteRecord is not part of the package-root surface.
+import type { toWriteRecord as PackageRootToWriteRecord } from "./index.js";
+// @ts-expect-error transformRows is an internal runtime helper.
+import type { transformRows as RuntimeTransformRows } from "./runtime/index.js";
+// @ts-expect-error transformRows is not part of the package-root surface.
+import type { transformRows as PackageRootTransformRows } from "./index.js";
+// @ts-expect-error translateQuery is an internal runtime helper.
+import type { translateQuery as RuntimeTranslateQuery } from "./runtime/index.js";
+// @ts-expect-error translateQuery is not part of the package-root surface.
+import type { translateQuery as PackageRootTranslateQuery } from "./index.js";
+// @ts-expect-error unwrapValue is an internal runtime helper.
+import type { unwrapValue as RuntimeUnwrapValue } from "./runtime/index.js";
+// @ts-expect-error unwrapValue is not part of the package-root surface.
+import type { unwrapValue as PackageRootUnwrapValue } from "./index.js";
+// @ts-expect-error WasmValue is an internal row-transformer detail.
+import type { WasmValue as RuntimeWasmValue } from "./runtime/index.js";
+// @ts-expect-error WasmValue is not part of the package-root surface.
+import type { WasmValue as PackageRootWasmValue } from "./index.js";
+// @ts-expect-error DynamicTableRow belongs to the internal dynamic-query helper.
+import type { DynamicTableRow as RuntimeDynamicTableRow } from "./runtime/index.js";
+// @ts-expect-error DynamicTableRow is not part of the package-root surface.
+import type { DynamicTableRow as PackageRootDynamicTableRow } from "./index.js";
 
 void (null as unknown as RuntimeCoreRuntime);
 void (null as unknown as PackageRootCoreRuntime);
@@ -52,6 +96,28 @@ void (null as unknown as RuntimeDbDirectBatch);
 void (null as unknown as PackageRootDbDirectBatch);
 void (null as unknown as RuntimeBatchScope);
 void (null as unknown as PackageRootBatchScope);
+void (null as unknown as RuntimeSubscriptionManager);
+void (null as unknown as PackageRootSubscriptionManager);
+void (null as unknown as RuntimeAllRowsInTableQuery);
+void (null as unknown as PackageRootAllRowsInTableQuery);
+void (null as unknown as RuntimeResolveClientSessionStateSync);
+void (null as unknown as PackageRootResolveClientSessionStateSync);
+void (null as unknown as RuntimeResolveClientSessionSync);
+void (null as unknown as PackageRootResolveClientSessionSync);
+void (null as unknown as RuntimeToValue);
+void (null as unknown as PackageRootToValue);
+void (null as unknown as RuntimeToWriteRecord);
+void (null as unknown as PackageRootToWriteRecord);
+void (null as unknown as RuntimeTransformRows);
+void (null as unknown as PackageRootTransformRows);
+void (null as unknown as RuntimeTranslateQuery);
+void (null as unknown as PackageRootTranslateQuery);
+void (null as unknown as RuntimeUnwrapValue);
+void (null as unknown as PackageRootUnwrapValue);
+void (null as unknown as RuntimeWasmValue);
+void (null as unknown as PackageRootWasmValue);
+void (null as unknown as RuntimeDynamicTableRow);
+void (null as unknown as PackageRootDynamicTableRow);
 
 // @ts-expect-error Db.beginBatch was removed from the public runtime surface.
 type RuntimeBeginBatch = InstanceType<typeof runtime.Db>["beginBatch"];
@@ -78,6 +144,20 @@ const internalRuntimeExports = [
 
 const removedBatchRuntimeExports = ["DbDirectBatch"] as const;
 
+const internalHelperRuntimeExports = [
+  "DynamicTableRow",
+  "SubscriptionManager",
+  "WasmValue",
+  "allRowsInTableQuery",
+  "resolveClientSessionStateSync",
+  "resolveClientSessionSync",
+  "toValue",
+  "toWriteRecord",
+  "transformRows",
+  "translateQuery",
+  "unwrapValue",
+] as const;
+
 describe("package root public API", () => {
   it("exposes intended runtime APIs without direct-core internals", () => {
     for (const publicRuntimeExport of [
@@ -88,9 +168,7 @@ describe("package root public API", () => {
       "JazzClient",
       "PersistedWriteRejectedError",
       "RowChangeKind",
-      "SubscriptionManager",
       "Transaction",
-      "allRowsInTableQuery",
       "createDb",
       "fetchSchemaHashes",
       "fetchStoredPermissions",
@@ -98,13 +176,6 @@ describe("package root public API", () => {
       "generateAuthSecret",
       "loadWasmModule",
       "publishStoredPermissions",
-      "resolveClientSessionStateSync",
-      "resolveClientSessionSync",
-      "toValue",
-      "toWriteRecord",
-      "transformRows",
-      "translateQuery",
-      "unwrapValue",
     ]) {
       expect(runtime, `runtime export ${publicRuntimeExport}`).toHaveProperty(publicRuntimeExport);
       expect(packageRoot, `package root export ${publicRuntimeExport}`).toHaveProperty(
@@ -129,6 +200,16 @@ describe("package root public API", () => {
       expect(packageRoot, `package root removed export ${removedRuntimeExport}`).not.toHaveProperty(
         removedRuntimeExport,
       );
+    }
+
+    for (const internalHelperRuntimeExport of internalHelperRuntimeExports) {
+      expect(runtime, `runtime helper export ${internalHelperRuntimeExport}`).not.toHaveProperty(
+        internalHelperRuntimeExport,
+      );
+      expect(
+        packageRoot,
+        `package root helper export ${internalHelperRuntimeExport}`,
+      ).not.toHaveProperty(internalHelperRuntimeExport);
     }
   });
 });

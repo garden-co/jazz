@@ -38,8 +38,6 @@ export {
   type QueryOptions,
   type TableProxy,
 } from "./db.js";
-export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
-export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
   fetchStoredPermissions,
@@ -58,9 +56,6 @@ export {
   type IntrospectionSubscriptionGroup,
   type IntrospectionSubscriptionResponse,
 } from "./introspection-fetch.js";
-export { translateQuery } from "./query-adapter.js";
-export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";
-export { toValue, toWriteRecord } from "./value-converter.js";
 export {
   FileNotFoundError,
   IncompleteFileDataError,
@@ -69,11 +64,6 @@ export {
   type FileReadOptions,
   type FileWriteOptions,
 } from "./file-storage.js";
-export {
-  SubscriptionManager,
-  RowChangeKind,
-  type RowDelta,
-  type SubscriptionDelta,
-} from "./subscription-manager.js";
+export { RowChangeKind, type RowDelta, type SubscriptionDelta } from "./subscription-manager.js";
 export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
