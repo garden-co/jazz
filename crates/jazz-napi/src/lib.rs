@@ -1644,7 +1644,7 @@ impl JazzServer {
         let mut opts = parse_jazz_server_start_options(options)?;
         init_jazz_server_telemetry(opts.telemetry_collector_url.as_deref());
 
-        let local_engine_schema = opts
+        let server_shell_schema = opts
             .schema
             .take()
             .map(|schema_bytes| {
@@ -1673,8 +1673,8 @@ impl JazzServer {
         };
 
         let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
-        if let Some(schema) = local_engine_schema {
-            server_builder = server_builder.with_local_engine_schema(schema);
+        if let Some(schema) = server_shell_schema {
+            server_builder = server_builder.with_server_shell_schema(schema);
         }
         if let Some(upstream_url) = opts.upstream_url.clone() {
             server_builder = server_builder.with_upstream_url(upstream_url);

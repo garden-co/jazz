@@ -1,4 +1,4 @@
-//! JazzClient implementation.
+//! Thin Rust client facade over `jazz::db`.
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -37,7 +37,6 @@ use jazz::tx::{
     TxId as CoreTxId,
 };
 use serde::Deserialize;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -70,16 +69,10 @@ pub struct JazzClient {
     default_session: Option<Session>,
     /// Write metadata applied to mutations issued through this client.
     write_context: Option<WriteContext>,
-    /// Core engine backing the public client facade.
-    engine: Rc<ClientEngine>,
+    /// Shared core database handle backing the public client facade.
+    db: Rc<ClientDb>,
     /// Public schema retained for the current public API surface.
     public_schema: Schema,
-    /// Whether a server URL was provided at construction time.
-    has_server: bool,
-    /// Active subscriptions (metadata).
-    subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
-    /// Next subscription handle ID.
-    next_handle: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Clone for JazzClient {
@@ -87,20 +80,17 @@ impl Clone for JazzClient {
         Self {
             default_session: self.default_session.clone(),
             write_context: self.write_context.clone(),
-            engine: self.engine.clone(),
+            db: self.db.clone(),
             public_schema: self.public_schema.clone(),
-            has_server: self.has_server,
-            subscriptions: Arc::clone(&self.subscriptions),
-            next_handle: Arc::clone(&self.next_handle),
         }
     }
 }
 
-struct ClientEngine {
-    inner: Rc<std::cell::RefCell<ClientEngineInner>>,
+struct ClientDb {
+    inner: Rc<std::cell::RefCell<ClientDbInner>>,
 }
 
-struct ClientEngineInner {
+struct ClientDbInner {
     db: Backend,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
@@ -394,8 +384,8 @@ impl TickScheduler for TickSchedulerImpl {
     }
 }
 
-impl ClientEngine {
-    async fn start(
+impl ClientDb {
+    async fn open(
         schema: jazz::schema::JazzSchema,
         storage: StorageBundle,
         identity: CoreDbIdentity,
@@ -405,7 +395,7 @@ impl ClientEngine {
     ) -> Result<Rc<Self>> {
         let scheduler = Rc::new(TickSchedulerImpl::default());
         let has_upstream = server_url.is_some();
-        let inner = ClientEngineInner::open(
+        let inner = ClientDbInner::open(
             schema,
             storage,
             identity,
@@ -429,7 +419,7 @@ impl ClientEngine {
         table: String,
         wait_for_coverage: bool,
     ) -> Result<Vec<jazz::node::CurrentRow>> {
-        ClientEngineInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
+        ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
     }
 
     async fn subscribe(
@@ -439,7 +429,7 @@ impl ClientEngine {
         table: String,
         tx: mpsc::UnboundedSender<OrderedRowDelta>,
     ) -> Result<()> {
-        ClientEngineInner::handle_subscribe(&self.inner, query, opts, table, tx).await
+        ClientDbInner::handle_subscribe(&self.inner, query, opts, table, tx).await
     }
 
     fn insert(
@@ -642,11 +632,11 @@ impl ClientEngine {
     }
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
-        ClientEngineInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
+        ClientDbInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
     }
 
     fn spawn_local_tick_driver(
-        inner: Rc<std::cell::RefCell<ClientEngineInner>>,
+        inner: Rc<std::cell::RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
     ) {
         let state = scheduler.wake_handle();
@@ -666,7 +656,7 @@ impl ClientEngine {
     }
 }
 
-impl ClientEngineInner {
+impl ClientDbInner {
     async fn open(
         schema: jazz::schema::JazzSchema,
         storage: StorageBundle,
@@ -942,9 +932,6 @@ impl Deref for JazzTransaction {
     }
 }
 
-/// State for an active subscription.
-struct SubscriptionState;
-
 fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     let payload = token.split('.').nth(1)?;
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1064,7 +1051,7 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
         other => Err(JazzError::Query(format!(
-            "client does not support engine value {other:?}"
+            "client does not support core value {other:?}"
         ))),
     }
 }
@@ -1214,7 +1201,7 @@ impl JazzClient {
                 .collect()
         });
 
-        let inner = self.engine.inner.borrow();
+        let inner = self.db.inner.borrow();
         let tx = inner
             .transactions
             .get(&batch_id)
@@ -1248,12 +1235,6 @@ impl JazzClient {
     }
 
     /// Connect to Jazz with the given configuration.
-    ///
-    /// This will:
-    /// 1. Open local storage
-    /// 2. Initialize the runtime
-    /// 3. Connect to the server over WebSocket (if URL provided)
-    /// 4. Wait for the initial WS handshake to complete
     pub async fn connect(context: AppContext) -> Result<Self> {
         Self::connect_inner(context).await
     }
@@ -1276,7 +1257,7 @@ impl JazzClient {
                 admin_secret: context.admin_secret.clone(),
                 backend_session: None,
             });
-            let core_engine = ClientEngine::start(
+            let db = ClientDb::open(
                 schema_convert,
                 storage,
                 identity,
@@ -1289,11 +1270,8 @@ impl JazzClient {
             let client = Self {
                 default_session,
                 write_context: None,
-                engine: core_engine,
+                db,
                 public_schema: context.schema.clone(),
-                has_server,
-                subscriptions: Arc::new(RwLock::new(HashMap::new())),
-                next_handle: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             };
             Ok(client)
         }
@@ -1312,13 +1290,9 @@ impl JazzClient {
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
         {
-            let _handle = SubscriptionHandle(
-                self.next_handle
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-            );
             let (tx, rx) = mpsc::unbounded_channel::<OrderedRowDelta>();
             let core_query = self.core_query(&query)?;
-            self.engine
+            self.db
                 .subscribe(
                     core_query,
                     Self::core_read_opts(Some(DurabilityTier::EdgeServer)),
@@ -1341,7 +1315,7 @@ impl JazzClient {
         {
             let opts = Self::core_read_opts(durability_tier);
             let rows = self
-                .engine
+                .db
                 .query_rows(
                     self.core_query(&query)?,
                     opts,
@@ -1377,17 +1351,12 @@ impl JazzClient {
             let row_values = self.core_ordered_values(table, &values)?;
             let cells = Self::core_cells(values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
-                let row_id = self.engine.stage_insert(
-                    batch_id,
-                    table.to_string(),
-                    object_id.into(),
-                    cells,
-                )?;
+                let row_id =
+                    self.db
+                        .stage_insert(batch_id, table.to_string(), object_id.into(), cells)?;
                 Ok((row_id, row_values, batch_id))
             } else {
-                let (row_id, tx_id) =
-                    self.engine
-                        .insert(table.to_string(), object_id.into(), cells)?;
+                let (row_id, tx_id) = self.db.insert(table.to_string(), object_id.into(), cells)?;
                 let batch_id = core_batch_id(tx_id);
                 Ok((row_id, row_values, batch_id))
             }
@@ -1404,11 +1373,11 @@ impl JazzClient {
         {
             let cells = Self::core_cells(values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
-                self.engine
+                self.db
                     .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
                 Ok(batch_id)
             } else {
-                let tx_id = self.engine.upsert(table.to_string(), object_id, cells)?;
+                let tx_id = self.db.upsert(table.to_string(), object_id, cells)?;
                 Ok(core_batch_id(tx_id))
             }
         }
@@ -1419,10 +1388,10 @@ impl JazzClient {
         {
             let cells = Self::core_cells(updates.into_iter().collect())?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
-                self.engine.stage_update(batch_id, object_id, cells)?;
+                self.db.stage_update(batch_id, object_id, cells)?;
                 Ok(batch_id)
             } else {
-                let tx_id = self.engine.update(object_id, cells)?;
+                let tx_id = self.db.update(object_id, cells)?;
                 Ok(core_batch_id(tx_id))
             }
         }
@@ -1432,10 +1401,10 @@ impl JazzClient {
     pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
         {
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
-                self.engine.stage_delete(batch_id, object_id)?;
+                self.db.stage_delete(batch_id, object_id)?;
                 Ok(batch_id)
             } else {
-                let tx_id = self.engine.delete(object_id)?;
+                let tx_id = self.db.delete(object_id)?;
                 Ok(core_batch_id(tx_id))
             }
         }
@@ -1448,7 +1417,7 @@ impl JazzClient {
     /// accepted by the authority.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
         {
-            let batch_id = self.engine.begin_transaction()?;
+            let batch_id = self.db.begin_transaction()?;
             let client = self.with_write_context(WriteContext::default().with_batch_id(batch_id));
             Ok(JazzTransaction { batch_id, client })
         }
@@ -1456,24 +1425,22 @@ impl JazzClient {
 
     /// Commit an open transaction by batch id.
     pub fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
-        self.engine.commit_transaction(batch_id)
+        self.db.commit_transaction(batch_id)
     }
 
     /// Roll back an open transaction by batch id.
     ///
     /// Returns whether a local batch record existed for the transaction.
     pub fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
-        self.engine.rollback_transaction(batch_id)
+        self.db.rollback_transaction(batch_id)
     }
 
     pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
-        self.engine.wait_for_batch(batch_id, tier).await
+        self.db.wait_for_batch(batch_id, tier).await
     }
 
     /// Unsubscribe from a subscription.
-    pub async fn unsubscribe(&self, handle: SubscriptionHandle) -> Result<()> {
-        let mut subs = self.subscriptions.write().await;
-        let _ = subs.remove(&handle);
+    pub async fn unsubscribe(&self, _handle: SubscriptionHandle) -> Result<()> {
         Ok(())
     }
 
@@ -1492,11 +1459,8 @@ impl JazzClient {
         JazzClient {
             default_session: self.default_session.clone(),
             write_context: Some(write_context),
-            engine: self.engine.clone(),
+            db: self.db.clone(),
             public_schema: self.public_schema.clone(),
-            has_server: self.has_server,
-            subscriptions: Arc::clone(&self.subscriptions),
-            next_handle: Arc::clone(&self.next_handle),
         }
     }
 
@@ -1516,9 +1480,6 @@ impl JazzClient {
     pub fn client_id(&self) -> Option<ClientId> {
         None
     }
-    pub fn local_driver_active(&self) -> bool {
-        true
-    }
 
     pub async fn test_client(schema: Schema) -> crate::JazzClient {
         let context = crate::AppContext::test(schema);
@@ -1526,10 +1487,6 @@ impl JazzClient {
             .await
             .expect("connect local JazzClient")
     }
-    pub async fn connect_with_local_driver(context: AppContext) -> Result<Self> {
-        Self::connect_inner(context).await
-    }
-
     pub async fn permissive_test_client(schema: Schema) -> crate::JazzClient {
         crate::JazzClient::connect_with_row_policy_mode(
             crate::AppContext::test(schema),
@@ -1658,71 +1615,6 @@ mod tests {
             "backend/admin clients should keep using explicit session scopes"
         );
     }
-    #[tokio::test]
-    async fn core_engine_transaction_stages_and_commits() {
-        let public_schema = declared_todo_schema();
-        let schema_convert = convert_public_schema(&public_schema).expect("convert schema");
-        let storage = core_storage(
-            &schema_convert,
-            &make_offline_context(
-                AppId::from_name("core-transaction-test"),
-                TempDir::new().expect("tempdir").keep(),
-                public_schema.clone(),
-            ),
-        )
-        .expect("open engine storage");
-        let engine = ClientEngine::start(
-            schema_convert.clone(),
-            storage,
-            CoreDbIdentity {
-                node: CoreNodeUuid::from_bytes([0x11; 16]),
-                author: CoreAuthorId::from_bytes([0xa1; 16]),
-            },
-            None,
-            AppId::from_name("core-transaction-test"),
-            None,
-        )
-        .await
-        .expect("open client engine");
-
-        let batch_id = engine.begin_transaction().expect("begin transaction");
-        let row_id = engine
-            .stage_insert(
-                batch_id,
-                "todos".to_string(),
-                None,
-                jazz::row! {
-                    title: "staged",
-                    completed: false,
-                },
-            )
-            .expect("stage insert");
-        assert!(
-            engine.inner.borrow().write_map.get(&batch_id).is_none(),
-            "staged transaction should not be committed yet",
-        );
-
-        engine
-            .commit_transaction(batch_id)
-            .expect("commit transaction");
-        engine
-            .wait_for_batch(batch_id, DurabilityTier::Local)
-            .await
-            .expect("wait for committed transaction");
-
-        let rows = engine
-            .query_rows(
-                jazz::query::Query::from("todos"),
-                CoreReadOpts::default(),
-                "todos".to_string(),
-                false,
-            )
-            .await
-            .expect("query committed rows");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(ObjectId::from_uuid(rows[0].row_uuid().0), row_id);
-    }
-
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn offline_persistent_client_rehydrates_rows_from_core_storage() {

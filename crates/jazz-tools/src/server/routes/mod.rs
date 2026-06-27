@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_schema_rejects_shapes_unsupported_by_local_engine() {
+    async fn publish_schema_rejects_shapes_unsupported_by_server_shell() {
         let initial_schema = Schema::new();
         let state = make_state_with_schema(initial_schema).await;
         let app = make_test_router(state);
@@ -1516,7 +1516,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_schema_rejects_bigint_columns_with_local_engine_blocker() {
+    async fn publish_schema_rejects_bigint_columns_with_server_shell_blocker() {
         let initial_schema = Schema::new();
         let state = make_state_with_schema(initial_schema).await;
         let app = make_test_router(state);
@@ -1555,7 +1555,7 @@ mod tests {
         let json: Value = serde_json::from_slice(&body).expect("schema publish json");
         let message = json["error"].as_str().expect("error message");
         assert!(
-            message.contains("$.users.partSizes: BIGINT is signed, but local engine fixed schemas only support unsigned integer columns"),
+            message.contains("$.users.partSizes: BIGINT is signed, but server shell fixed schemas only support unsigned integer columns"),
             "unexpected error: {message}"
         );
     }

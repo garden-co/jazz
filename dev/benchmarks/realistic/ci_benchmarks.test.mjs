@@ -209,7 +209,7 @@ test("benchmark workflow runs the jazz-sim benchmark suite", () => {
 
   assert.match(
     workflow,
-    /cargo bench --manifest-path vendor\/jazz_core\/Cargo.toml -p jazz-sim --bench s2_canvas --no-run/,
+    /cargo bench -p jazz-sim --bench s2_canvas --no-run/,
   );
   assert.match(workflow, /--suite jazz-sim/);
   assert.match(workflow, /bench-out\/native\/jazz-sim\/metadata\.json/);
