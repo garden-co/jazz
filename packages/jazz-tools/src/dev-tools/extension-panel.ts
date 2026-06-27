@@ -1,17 +1,15 @@
+import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import {
-  ActiveQuerySubscriptionTrace,
-  InsertValues,
   JazzClient,
-  DurabilityTier,
-  QueryExecutionOptions,
-  Row,
-  Session,
-  SubscriptionCallback,
-  Value,
-  WasmSchema,
-} from "../index.js";
-import { InsertResult, MutationResult } from "../runtime/client.js";
-import { Db, DbConfig } from "../runtime/db.js";
+  type DurabilityTier,
+  type InsertResult,
+  type MutationResult,
+  type QueryExecutionOptions,
+  type Row,
+  type SubscriptionCallback,
+} from "../runtime/client.js";
+import type { Session } from "../runtime/context.js";
+import { Db, type ActiveQuerySubscriptionTrace, type DbConfig } from "../runtime/db.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,

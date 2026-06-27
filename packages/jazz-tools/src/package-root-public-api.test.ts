@@ -86,6 +86,18 @@ import type { DynamicTableRow as PackageRootDynamicTableRow } from "./index.js";
 import type { QueryInput as RuntimeQueryInput } from "./runtime/index.js";
 // @ts-expect-error QueryInput was removed from the package-root surface.
 import type { QueryInput as PackageRootQueryInput } from "./index.js";
+// @ts-expect-error JazzClient is a concrete runtime internal, not a public runtime export.
+import type { JazzClient as RuntimeJazzClient } from "./runtime/index.js";
+// @ts-expect-error JazzClient is not exported from the package root via the runtime barrel.
+import type { JazzClient as PackageRootJazzClient } from "./index.js";
+// @ts-expect-error Runtime is a concrete runtime internal, not a public runtime export.
+import type { Runtime as RuntimeRuntime } from "./runtime/index.js";
+// @ts-expect-error Runtime is not exported from the package root via the runtime barrel.
+import type { Runtime as PackageRootRuntime } from "./index.js";
+// @ts-expect-error RequestLike is a concrete runtime internal, not a public runtime export.
+import type { RequestLike as RuntimeRequestLike } from "./runtime/index.js";
+// @ts-expect-error RequestLike is not exported from the package root via the runtime barrel.
+import type { RequestLike as PackageRootRequestLike } from "./index.js";
 
 void (null as unknown as InternalNativeRuntimeAdapterExport);
 void (null as unknown as PackageRootNativeRuntimeAdapter);
@@ -127,6 +139,12 @@ void (null as unknown as RuntimeDynamicTableRow);
 void (null as unknown as PackageRootDynamicTableRow);
 void (null as unknown as RuntimeQueryInput);
 void (null as unknown as PackageRootQueryInput);
+void (null as unknown as RuntimeJazzClient);
+void (null as unknown as PackageRootJazzClient);
+void (null as unknown as RuntimeRuntime);
+void (null as unknown as PackageRootRuntime);
+void (null as unknown as RuntimeRequestLike);
+void (null as unknown as PackageRootRequestLike);
 
 // @ts-expect-error Db.beginBatch was removed from the public runtime surface.
 type RuntimeBeginBatch = InstanceType<typeof runtime.Db>["beginBatch"];
@@ -152,6 +170,8 @@ const internalRuntimeExports = [
 ] as const;
 
 const removedBatchRuntimeExports = ["DbBatch"] as const;
+
+const removedConcreteRuntimeExports = ["JazzClient"] as const;
 
 const internalHelperRuntimeExports = [
   "DynamicTableRow",
@@ -263,7 +283,6 @@ describe("package root public API", () => {
       "Db",
       "FileNotFoundError",
       "IncompleteFileDataError",
-      "JazzClient",
       "PersistedWriteRejectedError",
       "RowChangeKind",
       "Transaction",
@@ -289,6 +308,16 @@ describe("package root public API", () => {
         packageRoot,
         `package root internal export ${internalRuntimeExport}`,
       ).not.toHaveProperty(internalRuntimeExport);
+    }
+
+    for (const removedRuntimeExport of removedConcreteRuntimeExports) {
+      expect(runtime, `runtime concrete export ${removedRuntimeExport}`).not.toHaveProperty(
+        removedRuntimeExport,
+      );
+      expect(
+        packageRoot,
+        `package root concrete export ${removedRuntimeExport}`,
+      ).not.toHaveProperty(removedRuntimeExport);
     }
 
     for (const removedRuntimeExport of removedBatchRuntimeExports) {
