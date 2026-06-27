@@ -22,19 +22,13 @@ use crate::query_manager::types::Schema;
 use crate::query_manager::types::TableName;
 use crate::query_manager::types::Value;
 use crate::row_histories::BatchId;
-use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(feature = "direct-core-client")]
 use crate::server::direct_client::DirectCoreWebSocketTransport;
 #[cfg(feature = "direct-core-client")]
 use crate::server::direct_schema::convert_alpha_schema;
-#[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
-use crate::storage::SqliteStorage;
-use crate::storage::Storage;
-#[cfg(feature = "rocksdb")]
-use crate::storage::{RocksDBStorage, StorageError};
-#[cfg(any(feature = "test-utils", feature = "rocksdb"))]
+#[cfg(feature = "test-utils")]
 use crate::sync_manager::ClientId;
-use crate::sync_manager::{DurabilityTier, SyncManager};
+use crate::sync_manager::DurabilityTier;
 #[cfg(feature = "direct-core-client")]
 use crate::transport_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;
@@ -68,7 +62,6 @@ use uuid::Uuid;
 use crate::ClientStorage;
 use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
 
-type DynStorage = Box<dyn Storage + Send>;
 #[cfg(feature = "direct-core-client")]
 type DirectCoreMemoryDb = CoreDb<CoreMemoryStorage>;
 #[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
@@ -1002,49 +995,6 @@ impl Deref for JazzTransaction {
 /// State for an active subscription.
 struct SubscriptionState;
 
-fn build_client_schema_manager<S: Storage + ?Sized>(
-    storage: &S,
-    context: &AppContext,
-) -> Result<SchemaManager> {
-    let sync_manager = SyncManager::new();
-    let mut schema_manager = SchemaManager::new(
-        sync_manager,
-        context.schema.clone(),
-        context.app_id,
-        "client",
-        "main",
-    )
-    .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
-
-    rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, context.app_id)
-        .map_err(JazzError::Storage)?;
-
-    Ok(schema_manager)
-}
-
-#[cfg(feature = "test-utils")]
-fn build_client_schema_manager_with_policy_mode<S: Storage + ?Sized>(
-    storage: &S,
-    context: &AppContext,
-    row_policy_mode: RowPolicyMode,
-) -> Result<SchemaManager> {
-    let sync_manager = SyncManager::new();
-    let mut schema_manager = SchemaManager::new_with_policy_mode(
-        sync_manager,
-        context.schema.clone(),
-        context.app_id,
-        "client",
-        "main",
-        row_policy_mode,
-    )
-    .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
-
-    rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, context.app_id)
-        .map_err(JazzError::Storage)?;
-
-    Ok(schema_manager)
-}
-
 fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     let payload = token.split('.').nth(1)?;
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1384,16 +1334,10 @@ impl JazzClient {
     /// 3. Connect to the server over WebSocket (if URL provided)
     /// 4. Wait for the initial WS handshake to complete
     pub async fn connect(context: AppContext) -> Result<Self> {
-        Self::connect_with_schema_manager(context, build_client_schema_manager, false).await
+        Self::connect_inner(context).await
     }
 
-    async fn connect_with_schema_manager(
-        context: AppContext,
-        _build_schema_manager: impl FnOnce(&DynStorage, &AppContext) -> Result<SchemaManager>,
-        use_direct_core_local_driver: bool,
-    ) -> Result<Self> {
-        let _ = use_direct_core_local_driver;
-
+    async fn connect_inner(context: AppContext) -> Result<Self> {
         let default_session = default_session_from_context(&context);
         let has_server = !context.server_url.is_empty();
 
@@ -1439,16 +1383,9 @@ impl JazzClient {
     #[cfg(feature = "test-utils")]
     pub async fn connect_with_row_policy_mode(
         context: AppContext,
-        row_policy_mode: RowPolicyMode,
+        _row_policy_mode: RowPolicyMode,
     ) -> Result<Self> {
-        Self::connect_with_schema_manager(
-            context,
-            |storage, context| {
-                build_client_schema_manager_with_policy_mode(storage, context, row_policy_mode)
-            },
-            false,
-        )
-        .await
+        Self::connect_inner(context).await
     }
 
     /// Subscribe to a query.
@@ -1696,7 +1633,7 @@ impl JazzClient {
 
     #[cfg(feature = "direct-core-client")]
     pub async fn connect_with_direct_core_local_driver(context: AppContext) -> Result<Self> {
-        Self::connect_with_schema_manager(context, build_client_schema_manager, true).await
+        Self::connect_inner(context).await
     }
 
     pub async fn permissive_test_client(schema: Schema) -> crate::JazzClient {
@@ -1722,16 +1659,22 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "rocksdb")]
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::Schema;
-    #[cfg(feature = "rocksdb")]
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     use crate::query_manager::types::{SchemaHash, TableName, TablePolicies};
-    #[cfg(feature = "rocksdb")]
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
     use crate::schema_manager::AppId;
-    #[cfg(feature = "rocksdb")]
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
+    use crate::schema_manager::SchemaManager;
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     use crate::storage::RocksDBStorage;
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
+    use crate::storage::Storage;
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
+    use crate::sync_manager::SyncManager;
     use crate::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
@@ -1746,7 +1689,7 @@ mod tests {
             .build()
     }
 
-    #[cfg(feature = "rocksdb")]
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     fn learned_runtime_todo_schema() -> Schema {
         SchemaBuilder::new()
             .table(
@@ -1802,7 +1745,7 @@ mod tests {
         format!("{header}.{payload}.sig")
     }
 
-    #[cfg(feature = "rocksdb")]
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     fn seed_rehydrated_client_storage(
         data_dir: &std::path::Path,
         app_id: AppId,
@@ -1810,7 +1753,6 @@ mod tests {
     ) -> (SchemaHash, SchemaHash) {
         std::fs::create_dir_all(data_dir).expect("create seeded client data dir");
 
-        #[cfg(feature = "rocksdb")]
         let storage = {
             let db_path = data_dir.join("jazz.rocksdb");
             RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
@@ -1857,8 +1799,7 @@ mod tests {
         (bundled_hash, learned_hash)
     }
 
-    #[cfg(feature = "rocksdb")]
-    #[cfg(feature = "rocksdb")]
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     #[test]
     fn seeded_client_storage_persists_learned_schema_and_lens() {
         let data_dir = TempDir::new().expect("temp client dir");
@@ -1887,48 +1828,6 @@ mod tests {
         );
 
         storage.close().expect("close seeded client storage");
-    }
-
-    #[cfg(feature = "rocksdb")]
-    #[tokio::test]
-    async fn boxed_client_storage_rehydrates_learned_schema_from_catalogue() {
-        let data_dir = TempDir::new().expect("temp client dir");
-        let app_id = AppId::from_name("client-boxed-rehydrate");
-        let (_bundled_hash, learned_hash) =
-            seed_rehydrated_client_storage(data_dir.path(), app_id, false);
-        let context = make_offline_context(
-            app_id,
-            data_dir.path().to_path_buf(),
-            declared_todo_schema(),
-        );
-
-        let concrete_storage = {
-            let db_path = data_dir.path().join("jazz.rocksdb");
-            RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
-                .expect("open seeded client storage concretely")
-        };
-        let concrete_manager = build_client_schema_manager(&concrete_storage, &context)
-            .expect("rehydrate schema manager from concrete storage");
-        assert!(
-            concrete_manager
-                .known_schema_hashes()
-                .contains(&learned_hash),
-            "concrete storage rehydrate should learn the newer schema"
-        );
-        concrete_storage
-            .close()
-            .expect("close seeded client storage");
-
-        let boxed_storage = open_persistent_storage(data_dir.path())
-            .await
-            .expect("open boxed client storage");
-        let boxed_manager = build_client_schema_manager(boxed_storage.as_ref(), &context)
-            .expect("rehydrate schema manager from boxed storage");
-        assert!(
-            boxed_manager.known_schema_hashes().contains(&learned_hash),
-            "boxed client storage rehydrate should learn the newer schema"
-        );
-        boxed_storage.close().expect("close boxed client storage");
     }
 
     #[test]
@@ -2106,7 +2005,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rocksdb")]
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     #[tokio::test]
     async fn offline_persistent_client_does_not_reopen_legacy_catalogue_as_parallel_engine() {
         let data_dir = TempDir::new().expect("temp client dir");
@@ -2128,123 +2027,4 @@ mod tests {
             "direct core clients should not rehydrate legacy catalogue storage as a parallel engine"
         );
     }
-
-    #[cfg(feature = "rocksdb")]
-    #[tokio::test]
-    async fn open_persistent_storage_retries_on_lock_contention() {
-        let data_dir = TempDir::new().expect("temp dir");
-        std::fs::create_dir_all(data_dir.path()).unwrap();
-
-        let db_path = data_dir.path().join("jazz.rocksdb");
-        // Hold the DB open so the next open hits a lock error.
-        let _holder =
-            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("first open should succeed");
-
-        // Spawn a task that drops the holder after a short delay, unblocking the retry.
-        let holder_handle = tokio::task::spawn_blocking({
-            let holder = _holder;
-            move || {
-                std::thread::sleep(Duration::from_millis(150));
-                drop(holder);
-            }
-        });
-
-        // open_persistent_storage retries up to 100 times at 25ms intervals.
-        // The holder is released after ~150ms, so this should succeed within a few retries.
-        let storage = open_persistent_storage(data_dir.path()).await;
-        assert!(
-            storage.is_ok(),
-            "should succeed after lock is released: {:?}",
-            storage.err()
-        );
-
-        holder_handle.await.expect("holder task should complete");
-    }
-
-    #[cfg(feature = "rocksdb")]
-    #[tokio::test]
-    async fn open_persistent_storage_fails_on_non_lock_error() {
-        // Point at a file (not a directory) so RocksDB gets a non-lock IO error.
-        let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("jazz.rocksdb");
-        // Create a regular file where rocksdb expects a directory.
-        std::fs::write(&db_path, b"not a database").unwrap();
-
-        let result = open_persistent_storage(data_dir.path()).await;
-        assert!(
-            result.is_err(),
-            "non-lock errors should not be retried and should fail immediately"
-        );
-    }
-}
-
-#[cfg(any(feature = "rocksdb", feature = "sqlite"))]
-#[allow(dead_code)]
-async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorage> {
-    #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
-    let _ = data_dir;
-
-    #[cfg(feature = "rocksdb")]
-    {
-        Ok(Box::new(open_rocksdb_storage(data_dir).await?))
-    }
-    #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
-    {
-        std::fs::create_dir_all(data_dir)?;
-        let db_path = data_dir.join("jazz.sqlite");
-        SqliteStorage::open(&db_path)
-            .map(|s| Box::new(s) as DynStorage)
-            .map_err(|e| {
-                JazzError::Connection(format!(
-                    "failed to open sqlite storage '{}': {e:?}",
-                    db_path.display()
-                ))
-            })
-    }
-    #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
-    {
-        tracing::warn!("no persistent storage backend enabled, falling back to MemoryStorage");
-        Ok(Box::new(MemoryStorage::new()))
-    }
-}
-
-#[cfg(feature = "rocksdb")]
-async fn open_rocksdb_storage(data_dir: &std::path::Path) -> Result<RocksDBStorage> {
-    const MAX_ATTEMPTS: usize = 100;
-    const RETRY_DELAY_MS: u64 = 25;
-
-    std::fs::create_dir_all(data_dir)?;
-
-    let db_path = data_dir.join("jazz.rocksdb");
-    let mut opened = None;
-    let mut last_err = None;
-
-    for attempt in 0..MAX_ATTEMPTS {
-        match RocksDBStorage::open(&db_path, 64 * 1024 * 1024) {
-            Ok(storage) => {
-                opened = Some(storage);
-                break;
-            }
-            Err(err) => {
-                let is_lock_error = matches!(
-                    &err,
-                    StorageError::IoError(msg)
-                        if msg.contains("lock") || msg.contains("Lock") || msg.contains("busy")
-                );
-                if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
-                    last_err = Some(err);
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-            }
-        }
-    }
-
-    opened.ok_or_else(|| {
-        JazzError::Connection(format!(
-            "failed to open rocksdb storage '{}': {:?}",
-            db_path.display(),
-            last_err
-        ))
-    })
 }
