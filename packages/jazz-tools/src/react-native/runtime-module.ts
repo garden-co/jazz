@@ -14,7 +14,6 @@ export interface ReactNativeRuntimeDbConfig extends RuntimeDbConfig {
 }
 
 export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntimeDbConfig> {
-  override readonly supportsBrowserWorker = false;
   override readonly supportsPolicyBypass = false;
 
   protected override async loadRuntime(): Promise<void> {

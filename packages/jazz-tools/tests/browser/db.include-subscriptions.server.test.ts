@@ -93,8 +93,8 @@ describe("direct websocket include subscriptions", () => {
       "include-subscriptions-b",
       sharedSecret,
     );
-    await ensureDirectWorkerBridgeReady(dbA);
-    await ensureDirectWorkerBridgeReady(dbB);
+    await ensureDirectRuntimeReady(dbA);
+    await ensureDirectRuntimeReady(dbB);
 
     const snapshots: OrgWithDeepIncludes[][] = [];
     const unsubscribe = ctx.trackSubscription(
@@ -218,7 +218,7 @@ function includesNote(
   );
 }
 
-async function ensureDirectWorkerBridgeReady(db: Db): Promise<void> {
+async function ensureDirectRuntimeReady(db: Db): Promise<void> {
   (db as unknown as { getClient(schema: unknown): unknown }).getClient(app.wasmSchema);
   await (db as unknown as { ensureBridgeReady(): Promise<void> }).ensureBridgeReady();
 }

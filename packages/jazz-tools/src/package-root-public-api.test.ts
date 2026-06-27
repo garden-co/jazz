@@ -3,10 +3,6 @@ import { describe, expect, it } from "vitest";
 import * as packageRoot from "./index.js";
 import * as runtime from "./runtime/index.js";
 
-// @ts-expect-error WorkerBridgeOptions is intentionally not part of the public runtime surface.
-import type { WorkerBridgeOptions as RuntimeWorkerBridgeOptions } from "./runtime/index.js";
-// @ts-expect-error WorkerBridgeOptions is intentionally not part of the package-root surface.
-import type { WorkerBridgeOptions as PackageRootWorkerBridgeOptions } from "./index.js";
 // @ts-expect-error CoreRuntime is intentionally not part of the public runtime surface.
 import type { CoreRuntime as RuntimeCoreRuntime } from "./runtime/index.js";
 // @ts-expect-error CoreRuntime is intentionally not part of the package-root surface.
@@ -32,8 +28,6 @@ import type { DirectOpenPayload as RuntimeDirectOpenPayload } from "./runtime/in
 // @ts-expect-error DirectOpenPayload is intentionally not part of the package-root surface.
 import type { DirectOpenPayload as PackageRootDirectOpenPayload } from "./index.js";
 
-void (null as unknown as RuntimeWorkerBridgeOptions);
-void (null as unknown as PackageRootWorkerBridgeOptions);
 void (null as unknown as RuntimeCoreRuntime);
 void (null as unknown as PackageRootCoreRuntime);
 void (null as unknown as RuntimeDirectWebSocketCarrier);
@@ -54,12 +48,10 @@ const internalRuntimeExports = [
   "encodeDirectWebSocketFrameBatch",
   "directWebSocketUrl",
   "DirectOpenPayload",
-  "WorkerBridge",
-  "WorkerBridgeOptions",
 ] as const;
 
 describe("package root public API", () => {
-  it("exposes intended runtime APIs without WorkerBridge internals", () => {
+  it("exposes intended runtime APIs without direct-core internals", () => {
     for (const publicRuntimeExport of [
       "BrowserAuthSecretStore",
       "Db",

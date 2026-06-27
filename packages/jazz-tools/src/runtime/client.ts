@@ -1029,7 +1029,7 @@ export class JazzClient {
   }
 
   /**
-   * Get the underlying runtime (for WorkerBridge).
+   * Get the underlying runtime for internal diagnostics and tests.
    * @internal
    */
   getRuntime(): Runtime {

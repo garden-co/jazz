@@ -31,24 +31,22 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
   override createClient({
     config,
     schema,
-    durablePeer,
     onAuthFailure,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
-    const hasDurablePeer = durablePeer !== null;
     return JazzClient.connectWithRuntime(
       makeRuntimeStub(),
       {
         appId: config.appId,
         schema,
         driver: config.driver,
-        serverUrl: hasDurablePeer ? undefined : config.serverUrl,
+        serverUrl: config.serverUrl,
         env: config.env,
         userBranch: config.userBranch,
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
         adminSecret: config.adminSecret,
-        tier: hasDurablePeer ? undefined : "local",
-        defaultDurabilityTier: hasDurablePeer ? undefined : config.serverUrl ? "edge" : undefined,
+        tier: "local",
+        defaultDurabilityTier: config.serverUrl ? "edge" : undefined,
       },
       {
         onAuthFailure,
@@ -322,7 +320,6 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect(runtimeModule.createClient).toHaveBeenCalledWith(
       expect.objectContaining({
         schema,
-        durablePeer: null,
         config: expect.objectContaining({
           appId: "facade-app",
           jwtToken: "jwt:alice-secret:facade-app:3600",
@@ -339,7 +336,7 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect(client.shutdown).toHaveBeenCalledTimes(1);
   });
 
-  it("passes the durable peer role to runtime modules", () => {
+  it("uses the direct runtime path", () => {
     const client = makeClientStub();
     class RecordingRuntimeModule extends DbRuntimeModule<DbConfig> {
       readonly createClientMock = vi.fn((_context: DbRuntimeClientContext<DbConfig>) => client);
@@ -356,43 +353,27 @@ describe("runtime/Db direct path upstream wiring", () => {
     const directRuntime = new RecordingRuntimeModule();
     new TestDb({ appId: "direct" }, directRuntime).exposeGetClient(makeSchema());
 
-    const workerRuntime = new RecordingRuntimeModule();
-    const workerDb = new TestDb({ appId: "worker" }, workerRuntime);
-    (workerDb as any).worker = {};
-    (workerDb as any).workerBridge = {};
-    workerDb.exposeGetClient(makeSchema());
-
-    const brokerRuntime = new RecordingRuntimeModule();
-    const brokerDb = new TestDb({ appId: "broker" }, brokerRuntime);
-    (brokerDb as any).brokerClient = {
-      reportSchemaReady: vi.fn(),
-    };
-    brokerDb.exposeGetClient(makeSchema());
-
-    expect(directRuntime.createClientMock.mock.calls[0]?.[0].durablePeer).toBeNull();
-    expect(workerRuntime.createClientMock.mock.calls[0]?.[0].durablePeer).toBe("worker");
-    expect(brokerRuntime.createClientMock.mock.calls[0]?.[0].durablePeer).toBe("browser-broker");
+    expect(directRuntime.createClientMock.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        config: expect.objectContaining({ appId: "direct" }),
+        schema: makeSchema(),
+        onAuthFailure: expect.any(Function),
+      }),
+    );
   });
 
-  it("does not send auth refreshes over the follower data port bridge", () => {
-    const followerPortBridge = {
-      detachForReconnect: vi.fn(),
-      shutdown: vi.fn(),
-    };
+  it("sends auth refreshes to memoized direct clients", () => {
     const db = new TestDb({
       appId: "app",
       serverUrl: "https://example.test",
       jwtToken: makeJwt({ sub: "alice" }),
     });
-
-    (db as unknown as { followerPortBridge: typeof followerPortBridge }).followerPortBridge =
-      followerPortBridge;
+    const client = db.exposeGetClient(makeSchema());
+    const updateAuthToken = vi.spyOn(client, "updateAuthToken");
 
     const refreshed = makeJwt({ sub: "alice", refresh: 1 });
     db.updateAuthToken(refreshed);
 
-    expect("updateAuth" in followerPortBridge).toBe(false);
-    expect(followerPortBridge.detachForReconnect).not.toHaveBeenCalled();
-    expect(followerPortBridge.shutdown).not.toHaveBeenCalled();
+    expect(updateAuthToken).toHaveBeenCalledWith(refreshed);
   });
 });
