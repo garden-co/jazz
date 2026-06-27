@@ -710,7 +710,7 @@ function translateBuiltRelationToRelExpr(
  * - gather => Gather with step Join + Project
  */
 export function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): RelExpr {
-  const builder = normalizeBuiltQuery(JSON.parse(builderJson), "");
+  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
   const hops = builder.hops;
 
@@ -798,7 +798,7 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
  * @returns JSON string for WASM runtime query()
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const builder = normalizeBuiltQuery(JSON.parse(builderJson), "");
+  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
   const relation = translateBuilderToRelationIr(builderJson, schema);
   const hasExplicitSelect = builder.select.length > 0;

@@ -423,6 +423,15 @@ API/testability gap, not as covered app persistence.
   direct-core transaction id only. Fully removing pending write semantics
   requires changing the synchronous runtime mutation interface or returning a
   write handle that resolves to the authoritative worker result.
+- The Rust server's direct-core authority is now named
+  `LocalCoreServerHandle`, with a private local owner around the non-`Send`
+  core server shell. This is not intended as a second engine; it is the current
+  required ownership boundary because the direct core server and underlying
+  `Db`/`Node` stack are local-owner `Rc`/`RefCell` structures while Axum shares
+  server state across tasks.
+- Rust client/server schema conversion names now say public-schema/direct-core
+  instead of alpha/core. The conversion boundary remains real until the public
+  Rust API itself adopts direct-core-native schema/value types.
 - The TypeScript `DbRuntimeModule` / `WasmRuntimeModule` naming has been
   collapsed into `DirectCoreSource` / `WasmCoreSource`. The remaining seam is a
   platform loader/source boundary for direct core, not a swappable engine
@@ -431,6 +440,13 @@ API/testability gap, not as covered app persistence.
   orchestrator as `.manager`. Framework hooks read an internal symbol-backed
   subscription store attached to the client, while the advanced shared package
   exports only the small cache/result types needed by binding authors.
+- TypeScript query normalization no longer silently falls back to a runtime
+  schema or caller-provided table when public query objects omit table/schema
+  metadata. `Db.all`, transaction reads, and `subscribeAll` now require the
+  built query's explicit table to exist in the query's schema. The deferred
+  local-update default remains documented in `Db` because immediate local
+  updates still fail several public query shapes; close that as direct-core
+  read/subscription completeness work, not as a facade fallback.
 
 ## Next targets
 
