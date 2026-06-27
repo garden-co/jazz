@@ -16,14 +16,14 @@ use crate::transaction::BatchId;
 use crate::transaction::BatchMode;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RuntimeSchemaInput {
+pub struct SchemaInput {
     pub schema: Schema,
     pub loaded_policy_bundle: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RuntimeSchemaEnvelopeWire {
+struct SchemaEnvelopeWire {
     #[serde(rename = "__jazzRuntimeSchema")]
     version: u8,
     schema: Schema,
@@ -33,8 +33,8 @@ struct RuntimeSchemaEnvelopeWire {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum RuntimeSchemaWire {
-    Envelope(RuntimeSchemaEnvelopeWire),
+enum SchemaWire {
+    Envelope(SchemaEnvelopeWire),
     Schema(Schema),
 }
 
@@ -42,21 +42,21 @@ pub fn parse_query_input(query_json: &str) -> Result<Query, String> {
     parse_query_json(query_json)
 }
 
-pub fn parse_runtime_schema_input(schema_json: &str) -> Result<RuntimeSchemaInput, String> {
-    match serde_json::from_str::<RuntimeSchemaWire>(schema_json).map_err(|err| err.to_string())? {
-        RuntimeSchemaWire::Envelope(envelope) => {
+pub fn parse_schema_input(schema_json: &str) -> Result<SchemaInput, String> {
+    match serde_json::from_str::<SchemaWire>(schema_json).map_err(|err| err.to_string())? {
+        SchemaWire::Envelope(envelope) => {
             if envelope.version != 1 {
                 return Err(format!(
-                    "unsupported runtime schema envelope version {}",
+                    "unsupported schema envelope version {}",
                     envelope.version
                 ));
             }
-            Ok(RuntimeSchemaInput {
+            Ok(SchemaInput {
                 schema: envelope.schema,
                 loaded_policy_bundle: envelope.loaded_policy_bundle,
             })
         }
-        RuntimeSchemaWire::Schema(schema) => Ok(RuntimeSchemaInput {
+        SchemaWire::Schema(schema) => Ok(SchemaInput {
             schema,
             loaded_policy_bundle: false,
         }),
@@ -194,7 +194,7 @@ pub fn current_timestamp_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_runtime_schema_input, parse_write_context_input};
+    use super::{parse_schema_input, parse_write_context_input};
     use crate::query_api::types::TableName;
 
     #[test]
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_schema_envelope_reads_ts_policy_bundle_flag() {
+    fn schema_envelope_reads_ts_policy_bundle_flag() {
         let schema_json = r#"{
             "__jazzRuntimeSchema": 1,
             "schema": {
@@ -231,14 +231,14 @@ mod tests {
             "loadedPolicyBundle": true
         }"#;
 
-        let input = parse_runtime_schema_input(schema_json).expect("parse runtime schema");
+        let input = parse_schema_input(schema_json).expect("parse schema input");
 
         assert!(input.loaded_policy_bundle);
         assert!(input.schema.contains_key(&TableName::new("todos")));
     }
 
     #[test]
-    fn runtime_schema_envelope_defaults_missing_policy_bundle_flag_to_permissive_local() {
+    fn schema_envelope_defaults_missing_policy_bundle_flag_to_permissive_local() {
         let schema_json = r#"{
             "__jazzRuntimeSchema": 1,
             "schema": {
@@ -254,7 +254,7 @@ mod tests {
             }
         }"#;
 
-        let input = parse_runtime_schema_input(schema_json).expect("parse runtime schema");
+        let input = parse_schema_input(schema_json).expect("parse schema input");
 
         assert!(!input.loaded_policy_bundle);
         assert!(input.schema.contains_key(&TableName::new("todos")));

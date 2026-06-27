@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::query_manager::encoding::decode_row;
-use jazz_tools::query_manager::types::RowDescriptor;
+use jazz_tools::schema_api::encoding::decode_row;
+use jazz_tools::schema_api::RowDescriptor;
 use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
 use jazz_tools::{

@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::object::ObjectId;
 #[cfg(test)]
-use crate::query_manager::types::ColumnDescriptor;
-use crate::query_manager::types::{ColumnType, RowDescriptor, SchemaHash, TableSchema, Value};
+use crate::query_api::types::ColumnDescriptor;
+use crate::query_api::types::{ColumnType, RowDescriptor, SchemaHash, TableSchema, Value};
 
 /// Direction for lens application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

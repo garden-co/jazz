@@ -129,7 +129,7 @@ async fn synced_soft_delete_should_use_delete_policy() {
         .expect("connect alice");
     let bob = JazzClient::connect_with_row_policy_mode(
         server.make_client_context_for_user(schema.clone(), "bob"),
-        crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+        jazz_tools::schema_api::RowPolicyMode::PermissiveLocal,
     )
     .await
     .expect("connect bob");

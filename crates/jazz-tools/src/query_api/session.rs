@@ -13,7 +13,7 @@ use crate::transaction::BatchId;
 
 /// Auth mode derived from the JWT's `iss` claim.
 ///
-/// Mirrors the TS `authMode` union in `packages/jazz-tools/src/runtime/context.ts`.
+/// Mirrors the TS `authMode` union used by the client context.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuthMode {

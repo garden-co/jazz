@@ -2,7 +2,7 @@
 
 pub use crate::query_api::policy::{Operation, PolicyExpr};
 pub use crate::query_api::query::{Query, QueryBuilder};
-pub use crate::query_api::session::{Session, WriteContext};
+pub use crate::query_api::session::{AuthMode, Session, WriteContext};
 pub use crate::query_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
     RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value,

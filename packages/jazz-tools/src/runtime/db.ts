@@ -193,9 +193,6 @@ type DbRuntimeOperationContext = {
 };
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
-  // The core runtime path still lacks parity for several public query shapes when
-  // reads run with immediate local updates. Keep the high-level Db default
-  // deferred until those shapes can execute without changing public behavior.
   return { localUpdates: "deferred", ...options };
 }
 
@@ -1766,7 +1763,7 @@ function generateEphemeralSeedBase64Url(): string {
  * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
  * Use the `wait` method when you need a Promise that resolves at a durability tier.
  *
- * Browser and backend runtimes open directly in-process.
+ * Browser and backend runtimes open the core runtime in-process.
  *
  * @param config Database configuration
  * @returns Promise resolving to Db instance ready for queries and mutations

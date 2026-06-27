@@ -4,8 +4,8 @@ use std::path::Path;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use std::sync::Mutex;
 
-use crate::catalogue::CatalogueEntry;
 use crate::object::ObjectId;
+use crate::server::catalogue_entry::CatalogueEntry;
 
 pub(crate) type DynCatalogueStorage = Box<dyn CatalogueStorage + Send>;
 pub(crate) type CatalogueStorageResult<T> = Result<T, CatalogueStorageError>;

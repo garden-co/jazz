@@ -126,15 +126,15 @@ mod tests {
     use axum::response::Json;
 
     use crate::AppId;
-    use crate::query_manager::types::{SchemaHash, TableName};
+    use crate::query_api::types::{SchemaHash, TableName};
     use crate::schema_manager::LensOp;
     use std::time::Duration;
 
-    use crate::query_manager::types::{
+    use crate::query_api::types::{
         ColumnType, Schema, SchemaBuilder, TableSchema, Value as QueryValue,
     };
+    use crate::server::catalogue::ConnectionSchemaDiagnostics;
     use crate::sync::ClientId;
-    use crate::sync::vocabulary::ConnectionSchemaDiagnostics;
     use axum::body;
     use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};
@@ -180,9 +180,7 @@ mod tests {
             .state
     }
 
-    async fn make_state_with_schema(
-        schema: crate::query_manager::types::Schema,
-    ) -> Arc<ServerState> {
+    async fn make_state_with_schema(schema: crate::query_api::types::Schema) -> Arc<ServerState> {
         ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(test_auth_config())
             .with_storage(StorageBackend::InMemory)
@@ -194,7 +192,7 @@ mod tests {
     }
 
     async fn make_edge_state_with_schema(
-        schema: crate::query_manager::types::Schema,
+        schema: crate::query_api::types::Schema,
         upstream_url: String,
     ) -> Arc<ServerState> {
         ServerBuilder::new(AppId::from_name("test-app"))

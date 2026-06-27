@@ -1,5 +1,6 @@
 pub mod app_id;
-pub mod catalogue;
+#[cfg(any(feature = "server", test))]
+pub(crate) mod catalogue_payload_codec;
 pub mod commit;
 pub mod digest;
 pub mod identity;
@@ -10,12 +11,7 @@ pub mod object;
 #[cfg(feature = "otel-core")]
 pub mod otel;
 #[allow(dead_code, unused_imports, clippy::wrong_self_convention)]
-#[path = "query_manager/mod.rs"]
 pub(crate) mod query_api;
-#[allow(dead_code, unused_imports)]
-pub(crate) mod query_manager {
-    pub(crate) use crate::query_api::*;
-}
 pub mod row_format;
 pub mod schema_api;
 pub mod schema_manager;
@@ -41,10 +37,10 @@ use thiserror::Error;
 
 pub use app_id::AppId;
 pub use schema_api::{
-    BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, OrderedRowDelta,
-    PolicyExpr, Query, QueryBuilder, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder,
-    SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext, permissions,
-    policy_expr,
+    AuthMode, BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation,
+    OrderedRowDelta, PolicyExpr, Query, QueryBuilder, Row, RowDelta, RowDescriptor, Schema,
+    SchemaBuilder, SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext,
+    permissions, policy_expr,
 };
 
 #[cfg(feature = "client")]
@@ -55,8 +51,6 @@ pub use object::ObjectId;
 pub use sync::ClientId;
 #[cfg(feature = "client")]
 pub use sync::DurabilityTier;
-#[cfg(feature = "client")]
-pub use sync::ServerId;
 
 /// Configuration for connecting to Jazz.
 #[cfg(feature = "client")]
