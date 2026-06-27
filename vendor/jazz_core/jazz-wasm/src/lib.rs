@@ -622,6 +622,7 @@ enum WasmTxWrite {
 #[wasm_bindgen]
 pub struct WasmTx {
     db: WasmDbInner,
+    author: Option<AuthorId>,
     writes: Option<Vec<WasmTxWrite>>,
 }
 
@@ -963,8 +964,18 @@ impl WasmDb {
     pub fn mergeable_tx(&self) -> WasmTx {
         WasmTx {
             db: self.inner.clone(),
+            author: None,
             writes: Some(Vec::new()),
         }
+    }
+
+    #[wasm_bindgen(js_name = mergeableTxForIdentity)]
+    pub fn mergeable_tx_for_identity(&self, author: Vec<u8>) -> Result<WasmTx, JsValue> {
+        Ok(WasmTx {
+            db: self.inner.clone(),
+            author: Some(author_id_from_bytes(&author)?),
+            writes: Some(Vec::new()),
+        })
     }
 }
 
@@ -1074,9 +1085,9 @@ impl WasmTx {
             .take()
             .ok_or_else(|| JsValue::from_str("transaction is already closed"))?;
         match &self.db {
-            WasmDbInner::Memory(db) => commit_wasm_tx_memory(db, writes),
+            WasmDbInner::Memory(db) => commit_wasm_tx_memory(db, self.author, writes),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => commit_wasm_tx_browser(db, writes),
+            WasmDbInner::Browser(db) => commit_wasm_tx_browser(db, self.author, writes),
         }
     }
 
@@ -1169,11 +1180,18 @@ where
     )))
 }
 
-fn commit_wasm_tx<S>(db: &Db<S>, writes: Vec<WasmTxWrite>) -> Result<TxId, JsValue>
+fn commit_wasm_tx<S>(
+    db: &Db<S>,
+    author: Option<AuthorId>,
+    writes: Vec<WasmTxWrite>,
+) -> Result<TxId, JsValue>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let mut tx = db.mergeable_tx();
+    let mut tx = match author {
+        Some(author) => db.mergeable_tx_for_identity(author),
+        None => db.mergeable_tx(),
+    };
     for write in writes {
         match write {
             WasmTxWrite::Insert {
@@ -1203,9 +1221,10 @@ where
 
 fn commit_wasm_tx_memory(
     db: &Rc<Db<MemoryStorage>>,
+    author: Option<AuthorId>,
     writes: Vec<WasmTxWrite>,
 ) -> Result<WasmWrite, JsValue> {
-    let tx_id = commit_wasm_tx(db, writes)?;
+    let tx_id = commit_wasm_tx(db, author, writes)?;
     wasm_tx_write(
         tx_id,
         Some(WasmWriteInner::MemoryTx {
@@ -1218,9 +1237,10 @@ fn commit_wasm_tx_memory(
 #[cfg(target_arch = "wasm32")]
 fn commit_wasm_tx_browser(
     db: &Rc<Db<OpfsStorage>>,
+    author: Option<AuthorId>,
     writes: Vec<WasmTxWrite>,
 ) -> Result<WasmWrite, JsValue> {
-    let tx_id = commit_wasm_tx(db, writes)?;
+    let tx_id = commit_wasm_tx(db, author, writes)?;
     wasm_tx_write(
         tx_id,
         Some(WasmWriteInner::BrowserTx {

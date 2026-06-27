@@ -209,7 +209,7 @@ describe("Db mergeable transactions", () => {
     await expect(allTodos()).resolves.toEqual([]);
   });
 
-  it.skip("direct-core mergeable transactions need identity-aware staging for session writes", async () => {
+  it("stages session-scoped mergeable transaction writes with direct core identity", async () => {
     const sessionDb = await createDb({
       appId: `db-transaction-session-test`,
       driver: { type: "memory" },

@@ -256,6 +256,11 @@ Until deleted, treat them as replacement targets only.
   removes throw-only transaction methods from persistent browser direct-core
   runtime while keeping real `CoreRuntime` mergeable transaction plumbing
   explicit.
+- Direct-core mergeable transactions support session-scoped writes through
+  identity-aware staging (`mergeable_tx_for_identity` /
+  `mergeableTxForIdentity`). A mergeable transaction chooses its identity on
+  first write and rejects mixed identities rather than silently writing under
+  the wrong author.
 - The Rust `storage` module is crate-private even under `test-utils`. Existing
   files under `crates/jazz-tools/tests/*storage*_integration.rs` and
   `client_restart_integration.rs` still reference the old storage API, but they
