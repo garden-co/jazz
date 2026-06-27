@@ -199,14 +199,13 @@ impl TickScheduler for DirectCoreTickScheduler {
 
 #[cfg(feature = "direct-core-client")]
 impl DirectCoreEngine {
-    const LOCAL_TICK_DRIVER_ENV: &'static str = "JAZZ_DIRECT_CORE_LOCAL_TICK_DRIVER";
-
     async fn start(
         schema: jazz::schema::JazzSchema,
         identity: CoreDbIdentity,
         server_url: String,
         app_id: crate::schema_manager::AppId,
         auth: WsAuthConfig,
+        use_local_driver: bool,
     ) -> Result<Rc<Self>> {
         let scheduler = Rc::new(DirectCoreTickScheduler::default());
         let inner = DirectCoreInner::open(
@@ -219,8 +218,11 @@ impl DirectCoreEngine {
         )
         .await?;
         let inner = Rc::new(std::cell::RefCell::new(inner));
-        let has_local_driver =
-            Self::maybe_spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
+        let has_local_driver = Self::maybe_spawn_local_tick_driver(
+            Rc::clone(&inner),
+            Rc::clone(&scheduler),
+            use_local_driver,
+        );
         Ok(Rc::new(Self {
             inner,
             scheduler,
@@ -375,8 +377,9 @@ impl DirectCoreEngine {
     fn maybe_spawn_local_tick_driver(
         inner: Rc<std::cell::RefCell<DirectCoreInner>>,
         scheduler: Rc<DirectCoreTickScheduler>,
+        use_local_driver: bool,
     ) -> bool {
-        if std::env::var_os(Self::LOCAL_TICK_DRIVER_ENV).is_none() {
+        if !use_local_driver {
             return false;
         }
 
@@ -1010,13 +1013,17 @@ impl JazzClient {
     /// 3. Connect to the server over WebSocket (if URL provided)
     /// 4. Wait for the initial WS handshake to complete
     pub async fn connect(context: AppContext) -> Result<Self> {
-        Self::connect_with_schema_manager(context, build_client_schema_manager).await
+        Self::connect_with_schema_manager(context, build_client_schema_manager, false).await
     }
 
     async fn connect_with_schema_manager(
         context: AppContext,
         build_schema_manager: impl FnOnce(&DynStorage, &AppContext) -> Result<SchemaManager>,
+        use_direct_core_local_driver: bool,
     ) -> Result<Self> {
+        #[cfg(not(feature = "direct-core-client"))]
+        let _ = use_direct_core_local_driver;
+
         let default_session = default_session_from_context(&context);
         // Loaded for its side effect of persisting the client-id file on disk;
         // the wire ClientId is assigned by `TransportManager::create` at connect
@@ -1077,6 +1084,7 @@ impl JazzClient {
                 context.server_url.clone(),
                 context.app_id,
                 auth,
+                use_direct_core_local_driver,
             )
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;
@@ -1113,9 +1121,13 @@ impl JazzClient {
         context: AppContext,
         row_policy_mode: RowPolicyMode,
     ) -> Result<Self> {
-        Self::connect_with_schema_manager(context, |storage, context| {
-            build_client_schema_manager_with_policy_mode(storage, context, row_policy_mode)
-        })
+        Self::connect_with_schema_manager(
+            context,
+            |storage, context| {
+                build_client_schema_manager_with_policy_mode(storage, context, row_policy_mode)
+            },
+            false,
+        )
         .await
     }
 
@@ -1476,6 +1488,11 @@ impl JazzClient {
         crate::JazzClient::connect(context)
             .await
             .expect("connect local JazzClient")
+    }
+
+    #[cfg(feature = "direct-core-client")]
+    pub async fn connect_with_direct_core_local_driver(context: AppContext) -> Result<Self> {
+        Self::connect_with_schema_manager(context, build_client_schema_manager, true).await
     }
 
     pub async fn permissive_test_client(schema: Schema) -> crate::JazzClient {
