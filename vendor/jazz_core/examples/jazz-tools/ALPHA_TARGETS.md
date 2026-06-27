@@ -327,10 +327,10 @@ auth/admission integration gap, not a row encoding or React subscription gap.
   for the replacement engine.
   Remaining old `query_manager`/`sync_manager`/storage/schema-manager code
   should be treated as public schema/query facade or catalogue scaffolding until
-  it is ported to core-native types, not as a second engine to extend. The next
-  cleanup target is to replace the server admin catalogue's dependency on the
-  fat old `Storage` trait with a catalogue-only store: scan/upsert catalogue
-  entries, flush, and close.
+  it is ported to core-native types, not as a second engine to extend. The
+  server admin catalogue now depends on a catalogue-only storage trait instead
+  of `Box<dyn Storage>`; the next cleanup target is replacing the adapter over
+  old storage backends with dedicated catalogue-only memory/RocksDB stores.
 
 ## Next targets
 
