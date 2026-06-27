@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod sync_tracer;
+pub mod types;
+pub mod vocabulary;
 
 /// Persistence tier — declaration order defines Ord (Local < EdgeServer < GlobalServer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
@@ -61,3 +63,7 @@ impl std::fmt::Display for ClientId {
 }
 
 pub use sync_tracer::SyncTracer;
+pub use types::{
+    ConnectionSchemaDiagnostics, Destination, QueryId, QueryPropagation, RowMetadata,
+    SchemaWarning, Source, SyncError, SyncPayload,
+};

@@ -18,9 +18,9 @@ use crate::schema_manager::{AppId, Lens};
 use crate::server::catalogue_storage::{CatalogueStorage, DynCatalogueStorage};
 use crate::storage::StorageError;
 #[cfg(test)]
-use crate::sync::{ClientId, DurabilityTier};
+use crate::sync::vocabulary::ConnectionSchemaDiagnostics;
 #[cfg(test)]
-use crate::sync_manager::ConnectionSchemaDiagnostics;
+use crate::sync::{ClientId, DurabilityTier};
 
 /// Errors from server-local catalogue operations.
 #[allow(dead_code)]

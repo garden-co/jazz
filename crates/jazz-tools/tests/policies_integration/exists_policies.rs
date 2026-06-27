@@ -6,7 +6,7 @@ use crate::JazzClient;
 #[cfg(feature = "test-utils")]
 use crate::server::JazzServer;
 #[cfg(feature = "test-utils")]
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 #[cfg(feature = "test-utils")]
 use crate::test_support::wait_for_query;
 

@@ -15,7 +15,7 @@ pub use jazz_tools::{
     AppContext, ColumnType, JazzClient, JazzError, ObjectId, OrderedRowDelta, QueryBuilder, Schema,
     SchemaBuilder, SubscriptionStream, TableSchema, Value,
 };
-pub use jazz_tools::{query_manager, server, sync_manager, test_support};
+pub use jazz_tools::{query_manager, server, sync, test_support};
 
 #[path = "../support/mod.rs"]
 mod support;

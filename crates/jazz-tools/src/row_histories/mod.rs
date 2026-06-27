@@ -49,7 +49,7 @@ mod tests {
         ColumnDescriptor, ColumnMergeStrategy, ColumnType, RowDescriptor, Value,
     };
     use crate::row_format::{decode_row, encode_row};
-    use crate::sync_manager::DurabilityTier;
+    use crate::sync::DurabilityTier;
 
     fn visible_row(updated_at: u64, confirmed_tier: Option<DurabilityTier>) -> StoredRowBatch {
         StoredRowBatch::new(

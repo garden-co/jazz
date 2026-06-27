@@ -27,7 +27,7 @@ use std::time::Instant;
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::BatchId;
 use crate::sync::ClientId;
-use crate::sync_manager::{Destination, QueryId, Source, SyncPayload};
+use crate::sync::vocabulary::{Destination, QueryId, Source, SyncPayload};
 
 // ============================================================================
 // Types

@@ -25,7 +25,7 @@ use super::{
 };
 use crate::object::ObjectId;
 use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 
 struct RocksDBInner {
     db: TransactionDB,

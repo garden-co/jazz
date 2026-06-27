@@ -10,7 +10,7 @@ use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
 use crate::schema_manager::AppId;
 use crate::sync::ClientId;
-use crate::sync_manager::SyncPayload;
+use crate::sync::vocabulary::SyncPayload;
 use jazz_server::StorageConfig;
 
 mod builder;

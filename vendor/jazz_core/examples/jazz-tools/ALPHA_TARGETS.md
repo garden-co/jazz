@@ -355,6 +355,11 @@ API/testability gap, not as covered app persistence.
   `JazzServer::block_messages_to(...)` or buffered `SyncPayload::BatchFate`
   assertions; tests should assert public query/subscription/write outcomes
   instead of pinning old semantic sync frames.
+  Stable sync vocabulary (`SyncPayload`, query ids/propagation, endpoint
+  roles, diagnostics, and tracer-facing payload names) now lives under
+  `jazz_tools::sync` / `jazz_tools::sync::vocabulary`; `sync_manager` only
+  re-exports that vocabulary while its remaining legacy implementation islands
+  are hollowed or deleted.
 
 ## Next targets
 

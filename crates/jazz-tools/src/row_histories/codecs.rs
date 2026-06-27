@@ -15,7 +15,7 @@ use crate::row_format::{
     compiled_row_layout, decode_row, encode_row_with_prefix_and_projected_tail,
     project_row_with_layout,
 };
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 
 use super::types::{BatchId, RowMetadata, RowState, StoredRowBatch, VisibleRowEntry};
 

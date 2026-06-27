@@ -17,7 +17,7 @@
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{RowDescriptor, SharedString};
 use crate::storage::{IndexMutation, PreparedRowWriteContext, RowLocator, Storage, StorageError};
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 
 use super::resolution::visible_entry_from_history_rows;
 use super::types::{
