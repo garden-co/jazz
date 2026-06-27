@@ -41,14 +41,6 @@ pub(crate) mod runtime_tokio;
 
 pub mod transport_auth;
 pub mod transport_error;
-#[cfg(feature = "legacy-alpha-transport")]
-#[allow(dead_code)]
-pub(crate) mod transport_manager;
-#[cfg(feature = "legacy-alpha-transport")]
-pub(crate) mod transport_protocol;
-#[cfg(feature = "legacy-alpha-transport")]
-#[allow(dead_code)]
-pub(crate) mod ws_stream;
 
 #[cfg(feature = "client")]
 #[allow(clippy::await_holding_refcell_ref)]

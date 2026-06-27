@@ -145,7 +145,10 @@ auth/admission integration gap, not a row encoding or React subscription gap.
   requires `Send + Sync`; the direct-core `Db` owner is local-thread by design
   (`Rc` / `RefCell`). Re-enable these examples by rebuilding them around the
   real server boundary or another explicit local-owner gateway, not by reviving
-  the legacy runtime.
+  the legacy runtime. The intended next design choice is whether Rust HTTP apps
+  should talk to the direct `jazz-server` boundary, or whether `jazz-tools`
+  should expose a small native server gateway that owns a local direct-core DB
+  on one task and presents a `Send + Sync` request handle.
 - Browser persistent creation in the grafted `jazz-tools` package now uses a
   direct-core dedicated worker for OPFS instead of the deleted broker/leader
   topology. The current positive browser gate covers public CRUD,

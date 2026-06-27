@@ -107,9 +107,9 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
                 // behind the same lock. Holding the flag high until we
                 // actually own the core caps the queue at one pending tick.
                 let Some(core_arc) = core_ref.upgrade() else {
-                    // Core is permanently gone. Leave the flag high so any
-                    // stray scheduler clones (e.g. NativeTickNotifier) short-
-                    // circuit instead of spawning more doomed tasks.
+                    // Core is permanently gone. Leave the flag high so stray
+                    // scheduler clones short-circuit instead of spawning more
+                    // doomed tasks.
                     tracing::debug!("TokioScheduler: core dropped before tick could run; skipping");
                     return;
                 };
@@ -228,7 +228,6 @@ pub struct TokioRuntime<S: Storage + Send + 'static> {
     /// backing callback outlives the core Arc's lifetime.
     _sync_sender: CallbackSyncSender,
     /// Cloned handle to the scheduler (shares Arc-based state with the one inside core).
-    /// Stored here so `connect()` can build a `NativeTickNotifier` without locking.
     scheduler: TokioScheduler<S>,
 }
 
@@ -260,8 +259,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         // Install the callback as the runtime's fallback outbox sink so
-        // server-side fanout (or any code path without a TransportHandle)
-        // still delivers OutboxEntries.
+        // legacy runtime server-side fanout still delivers OutboxEntries.
         core.set_sync_sender(Box::new(sync_sender.clone()));
 
         // Wrap in Arc<Mutex>
@@ -811,122 +809,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     /// from within the locked core.
     pub fn scheduler(&self) -> &TokioScheduler<S> {
         &self.scheduler
-    }
-}
-
-// ============================================================================
-// NativeTickNotifier
-// ============================================================================
-
-/// `TickNotifier` implementation for the native (Tokio) runtime.
-///
-/// Holds a clone of the `TokioScheduler` and calls
-/// `schedule_batched_tick()` whenever the transport layer needs to wake
-/// up `batched_tick` (on connect, on incoming sync frames, on disconnect).
-#[derive(Clone)]
-#[cfg(feature = "legacy-alpha-transport")]
-pub struct NativeTickNotifier<S: Storage + Send + 'static> {
-    scheduler: TokioScheduler<S>,
-}
-
-#[cfg(feature = "legacy-alpha-transport")]
-impl<S: Storage + Send + 'static> crate::transport_manager::TickNotifier for NativeTickNotifier<S> {
-    fn notify(&self) {
-        self.scheduler.schedule_batched_tick();
-    }
-}
-
-// ============================================================================
-// TokioRuntime connect / disconnect (WebSocket transport)
-// ============================================================================
-
-#[cfg(feature = "legacy-alpha-transport")]
-impl<S: Storage + Send + 'static> TokioRuntime<S> {
-    /// Connect to a Jazz server over WebSocket.
-    ///
-    /// Creates a `TransportHandle` / `TransportManager` pair, wires the
-    /// handle into `RuntimeCore`, and spawns the manager loop as a Tokio
-    /// task. The manager drives the WebSocket connection, reconnecting on
-    /// failure until the handle is dropped.
-    pub fn connect(&self, url: String, auth: crate::transport_manager::AuthConfig) {
-        self.connect_with_retry_config(
-            url,
-            auth,
-            crate::transport_manager::TransportRetryConfig::default(),
-        );
-    }
-
-    /// Connect to a Jazz server over WebSocket with explicit retry attempt
-    /// deadlines.
-    pub fn connect_with_retry_config(
-        &self,
-        url: String,
-        auth: crate::transport_manager::AuthConfig,
-        retry_config: crate::transport_manager::TransportRetryConfig,
-    ) {
-        let tick = NativeTickNotifier {
-            scheduler: self.scheduler.clone(),
-        };
-        let manager = {
-            let mut core = self.core.lock().unwrap();
-            crate::runtime_core::install_transport_with_retry_config::<
-                _,
-                _,
-                crate::ws_stream::NativeWsStream,
-                _,
-            >(&mut core, url, auth, tick, retry_config)
-        };
-        tokio::spawn(manager.run());
-    }
-
-    /// Disconnect from the Jazz server.
-    ///
-    /// Drops the `TransportHandle` from `RuntimeCore`. The spawned
-    /// `TransportManager` task detects the dropped handle and exits cleanly.
-    pub fn disconnect(&self) {
-        self.core.lock().unwrap().clear_transport();
-    }
-
-    /// Returns `true` once the WebSocket transport has completed at least one
-    /// successful handshake. Useful for callers that need to wait until the
-    /// initial connection is established before proceeding.
-    pub fn transport_ever_connected(&self) -> bool {
-        self.core
-            .lock()
-            .ok()
-            .and_then(|c| c.transport.as_ref().map(|h| h.has_ever_connected()))
-            .unwrap_or(false)
-    }
-
-    /// Async wait that resolves once the WebSocket transport has completed
-    /// its first successful handshake (or returns immediately if it already
-    /// has). Returns `false` when no transport is installed — callers should
-    /// either check `is_connected()`/`has_server` first or wrap this in a
-    /// timeout.
-    pub async fn transport_wait_until_connected(&self) -> bool {
-        let Some(mut rx) = self
-            .core
-            .lock()
-            .ok()
-            .and_then(|c| c.transport.as_ref().map(|h| h.connected_rx.clone()))
-        else {
-            return false;
-        };
-        if *rx.borrow() {
-            return true;
-        }
-        rx.wait_for(|connected| *connected).await.is_ok()
-    }
-
-    /// Returns the wire `ClientId` used by the active transport, if any.
-    ///
-    /// Tests use this to register the transport's client identity with a
-    /// `SyncTracer` so server-originated messages resolve to human names.
-    pub fn transport_client_id(&self) -> Option<ClientId> {
-        self.core
-            .lock()
-            .ok()
-            .and_then(|c| c.transport.as_ref().map(|h| h.client_id))
     }
 }
 
