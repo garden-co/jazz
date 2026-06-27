@@ -1,8 +1,8 @@
 # Batched Tick Orchestration - Legacy Alpha Runtime
 
-`RuntimeCore` is the old alpha runtime. In the grafted direct-core branch it is
-quarantined behind `legacy-alpha-engine` for migration tests and binding fallout,
-not the production path to extend.
+`RuntimeCore` was the old alpha runtime. In the grafted direct-core branch it
+has been deleted from active `jazz-tools`; these notes are retained only as
+historical context for behavior that must be rebuilt on the direct-core runtime.
 
 Application code wants two things at the same time:
 
@@ -107,9 +107,9 @@ without changing the relational logic itself.
 
 ## Key Files
 
-| File                                           | Purpose                        |
-| ---------------------------------------------- | ------------------------------ |
-| `crates/jazz-tools/src/runtime_core/`          | Quarantined legacy RuntimeCore |
-| `crates/jazz-tools/src/runtime_core/ticks.rs`  | Tick orchestration             |
-| `crates/jazz-tools/src/runtime_core/writes.rs` | Local write helpers            |
-| `crates/jazz-tools/src/runtime_tokio.rs`       | Quarantined Tokio wrapper      |
+| Historical file                                | Former purpose         |
+| ---------------------------------------------- | ---------------------- |
+| `crates/jazz-tools/src/runtime_core/`          | Deleted legacy runtime |
+| `crates/jazz-tools/src/runtime_core/ticks.rs`  | Tick orchestration     |
+| `crates/jazz-tools/src/runtime_core/writes.rs` | Local write helpers    |
+| `crates/jazz-tools/src/runtime_tokio.rs`       | Deleted Tokio wrapper  |

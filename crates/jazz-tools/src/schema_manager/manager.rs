@@ -2402,8 +2402,9 @@ mod tests {
 
     #[test]
     fn server_dynamic_mode_does_not_persist_empty_placeholder_schema() {
-        // Regression: RuntimeCore::new calls ensure_current_schema_persisted on
-        // every runtime construction. On a dynamic-schema server built with
+        // Regression from the deleted alpha runtime constructor, which called
+        // ensure_current_schema_persisted on every runtime construction. On a
+        // dynamic-schema server built with
         // SchemaManager::new_server(...), the context has an uninitialized
         // sentinel hash ([0; 32]) and an empty Schema. Persisting that writes
         // a bogus catalogue_schema row whose content hashes to BLAKE3("") =
