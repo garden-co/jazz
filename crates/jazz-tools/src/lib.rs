@@ -44,12 +44,12 @@ pub(crate) mod runtime_tokio;
 
 pub mod transport_auth;
 pub mod transport_error;
-#[cfg(feature = "transport")]
+#[cfg(feature = "legacy-alpha-transport")]
 #[allow(dead_code)]
 pub(crate) mod transport_manager;
-#[cfg(feature = "transport")]
+#[cfg(feature = "legacy-alpha-transport")]
 pub(crate) mod transport_protocol;
-#[cfg(feature = "transport-websocket")]
+#[cfg(feature = "legacy-alpha-transport")]
 #[allow(dead_code)]
 pub(crate) mod ws_stream;
 
