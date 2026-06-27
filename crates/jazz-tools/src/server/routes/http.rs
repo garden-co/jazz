@@ -63,7 +63,7 @@ pub(super) struct SchemaConnectivityParams {
 pub(super) struct AdminSubscriptionIntrospectionResponse {
     app_id: String,
     generated_at: u64,
-    queries: Vec<crate::query_manager::manager::ServerSubscriptionTelemetryGroup>,
+    queries: Vec<crate::server::catalogue::ServerSubscriptionTelemetryGroup>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
