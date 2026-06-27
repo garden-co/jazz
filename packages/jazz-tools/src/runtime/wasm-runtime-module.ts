@@ -58,12 +58,10 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
   override createClient({
     config,
     schema,
-    durablePeer,
     onAuthFailure,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
 
-    const hasDurablePeer = durablePeer !== null;
     const runtimeOptions: ConnectRuntimeOptions = {
       onAuthFailure,
     };
@@ -78,7 +76,7 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
         `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:author`,
       ),
       1,
-      !hasDurablePeer,
+      true,
     );
 
     return JazzClient.connectWithRuntime(
@@ -94,8 +92,8 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
         cookieSession: config.cookieSession,
         backendSecret: config.backendSecret,
         adminSecret: config.adminSecret,
-        tier: hasDurablePeer ? undefined : "local",
-        defaultDurabilityTier: hasDurablePeer ? undefined : config.serverUrl ? "edge" : undefined,
+        tier: "local",
+        defaultDurabilityTier: config.serverUrl ? "edge" : undefined,
       },
       runtimeOptions,
     );

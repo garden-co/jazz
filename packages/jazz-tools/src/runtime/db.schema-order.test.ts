@@ -152,7 +152,7 @@ describe("Db runtime schema order", () => {
     ]);
   });
 
-  it("carries session identity through worker-routed local queries", async () => {
+  it("carries session identity through direct local queries", async () => {
     const generatedSchema: WasmSchema = {
       todos: {
         columns: [
@@ -166,32 +166,25 @@ describe("Db runtime schema order", () => {
       claims: {},
       authMode: "anonymous",
     };
-    const query = vi.fn(async () => {
-      throw new Error(
-        "session-scoped worker queries should not fall back to unscoped client query",
-      );
-    });
+    const query = vi.fn(
+      async (_queryJson: string, _options: unknown, receivedSession?: Session) => {
+        expect(receivedSession).toBe(session);
+        return [
+          {
+            id: "todo-1",
+            values: [
+              { type: "Text", value: "Direct scoped" },
+              { type: "Boolean", value: false },
+            ],
+          },
+        ];
+      },
+    );
     const client = {
       getSchema: () => new Map(Object.entries(generatedSchema)),
       query,
     } as unknown as JazzClient;
     const db = new TestDb(client, { session });
-    const workerQueryLocalRows = vi.fn(async (_queryJson: string, receivedSession?: Session) => {
-      expect(receivedSession).toBe(session);
-      return [
-        {
-          id: "todo-1",
-          values: [
-            { type: "Text", value: "Worker scoped" },
-            { type: "Boolean", value: false },
-          ],
-        },
-      ] satisfies WasmRow[];
-    });
-    (db as any).workerBridge = {
-      queryLocalRows: workerQueryLocalRows,
-    };
-    (db as any).tabRole = "leader";
     const builder = {
       _table: "todos",
       _schema: generatedSchema,
@@ -207,12 +200,11 @@ describe("Db runtime schema order", () => {
 
     const rows = await db.all(builder, { tier: "local" });
 
-    expect(workerQueryLocalRows).toHaveBeenCalledTimes(1);
-    expect(query).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
     expect(rows).toEqual([
       {
         id: "todo-1",
-        title: "Worker scoped",
+        title: "Direct scoped",
         done: false,
       },
     ]);

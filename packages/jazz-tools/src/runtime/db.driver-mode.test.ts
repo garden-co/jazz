@@ -33,7 +33,6 @@ describe("runtime/createDb driver mode", () => {
     (globalThis as Record<string, unknown>).Worker = class {};
 
     const directDb = {} as Db;
-    const createWithWorkerSpy = vi.spyOn(Db, "createWithWorker").mockResolvedValue({} as Db);
     const createSpy = vi.spyOn(Db, "create").mockReturnValue(directDb);
 
     const result = await createDb({
@@ -43,7 +42,6 @@ describe("runtime/createDb driver mode", () => {
 
     expect(result).toBe(directDb);
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createWithWorkerSpy).not.toHaveBeenCalled();
   });
 
   it("uses direct in-memory path in browser when driver is memory", async () => {
@@ -51,7 +49,6 @@ describe("runtime/createDb driver mode", () => {
     (globalThis as Record<string, unknown>).Worker = class {};
 
     const directDb = {} as Db;
-    const createWithWorkerSpy = vi.spyOn(Db, "createWithWorker").mockResolvedValue({} as Db);
     const createSpy = vi.spyOn(Db, "create").mockReturnValue(directDb);
 
     const result = await createDb({
@@ -62,6 +59,5 @@ describe("runtime/createDb driver mode", () => {
 
     expect(result).toBe(directDb);
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createWithWorkerSpy).not.toHaveBeenCalled();
   });
 });

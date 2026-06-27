@@ -12,13 +12,4 @@ describe("loadWasmModule build output", () => {
     expect(builtClient).toContain('process.getBuiltinModule?.("path")');
     expect(builtClient).not.toContain('import("node:module")');
   });
-
-  it("keeps the copied worker entry on the vitest-compatible import path", async () => {
-    const builtWorkerUrl = new URL("../../dist/worker/jazz-worker.ts", import.meta.url);
-    const builtWorker = await readFile(builtWorkerUrl, "utf8");
-
-    expect(builtWorker).toContain("__vitest_browser_runner__");
-    expect(builtWorker).toContain('await import("jazz-wasm")');
-    expect(builtWorker).not.toContain('await runtimeImportModule("jazz-wasm")');
-  });
 });

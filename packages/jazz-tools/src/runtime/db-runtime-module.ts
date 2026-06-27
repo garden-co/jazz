@@ -10,12 +10,9 @@ export interface RuntimeTokenOptions {
   nowSeconds: bigint;
 }
 
-export type DbRuntimeDurablePeer = "worker" | "browser-broker";
-
 export interface DbRuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   schema: WasmSchema;
-  durablePeer: DbRuntimeDurablePeer | null;
   onAuthFailure: (reason: AuthFailureReason) => void;
 }
 
@@ -26,8 +23,6 @@ export interface DbRuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbCo
 }
 
 export abstract class DbRuntimeModule<RuntimeConfig extends DbConfig = DbConfig> {
-  /** Set to false for runtimes, such as React Native, that cannot use browser workers. */
-  readonly supportsBrowserWorker: boolean = true;
   /** Set to false when the runtime must receive schemas exactly as declared. */
   readonly supportsPolicyBypass: boolean = true;
   private hasLoadedRuntime = false;

@@ -1,3 +1,10 @@
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::await_holding_refcell_ref,
+    clippy::wrong_self_convention
+)]
+
 pub mod batch_fate;
 pub mod catalogue;
 pub mod commit;
@@ -9,30 +16,36 @@ pub mod middleware;
 pub mod object;
 #[cfg(feature = "otel-core")]
 pub mod otel;
-pub mod query_manager;
+#[allow(dead_code, unused_imports, clippy::wrong_self_convention)]
+pub(crate) mod query_manager;
 pub mod row_format;
-pub mod row_histories;
+#[allow(dead_code, unused_imports)]
+pub(crate) mod row_histories;
 #[cfg(feature = "test-utils")]
-pub mod runtime_core;
+#[allow(dead_code, unused_imports)]
+pub(crate) mod runtime_core;
 #[cfg(not(feature = "test-utils"))]
 pub(crate) mod runtime_core;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
 pub mod storage;
-pub mod sync_manager;
+#[allow(dead_code, unused_imports)]
+pub(crate) mod sync_manager;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
-pub mod wire_types;
+#[allow(dead_code)]
+pub(crate) mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]
-pub mod runtime_tokio;
+pub(crate) mod runtime_tokio;
 
 pub mod transport_auth;
-pub mod transport_manager;
+#[allow(dead_code)]
+pub(crate) mod transport_manager;
 pub mod transport_protocol;
 #[cfg(feature = "transport-websocket")]
-pub mod ws_stream;
+pub(crate) mod ws_stream;
 
 #[cfg(feature = "client")]
 mod client;
@@ -52,6 +65,8 @@ pub use query_manager::types::{
 };
 pub use row_histories::BatchId;
 pub use schema_manager::AppId;
+#[cfg(feature = "client")]
+pub use sync_manager::sync_tracer::SyncTracer;
 
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
@@ -94,7 +109,7 @@ pub struct AppContext {
 
     /// Optional sync message tracer for test observability.
     /// Set via `TestingClient::with_tracer()` — `None` in production.
-    pub sync_tracer: Option<(crate::sync_manager::sync_tracer::SyncTracer, String)>,
+    pub sync_tracer: Option<(SyncTracer, String)>,
 }
 
 #[cfg(feature = "test-utils")]
