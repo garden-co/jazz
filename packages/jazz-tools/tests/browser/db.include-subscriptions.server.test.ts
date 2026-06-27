@@ -87,8 +87,8 @@ describe("websocket include subscriptions", () => {
       "include-subscriptions-b",
       sharedSecret,
     );
-    await ensureCoreRuntimeReady(dbA);
-    await ensureCoreRuntimeReady(dbB);
+    await ensureNativeRuntimeAdapterReady(dbA);
+    await ensureNativeRuntimeAdapterReady(dbB);
 
     const snapshots: OrgWithDeepIncludes[][] = [];
     const selectedIncludeQuery = app.orgs
@@ -264,6 +264,6 @@ function hasProjectedTodo(
   });
 }
 
-async function ensureCoreRuntimeReady(db: Db): Promise<void> {
+async function ensureNativeRuntimeAdapterReady(db: Db): Promise<void> {
   (db as unknown as { getClient(schema: unknown): unknown }).getClient(app.wasmSchema);
 }
