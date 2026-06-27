@@ -4,7 +4,6 @@ import {
   type ConnectRuntimeOptions,
   type WasmModule,
 } from "./client.js";
-import { LOCAL_FIRST_JWT_ISSUER } from "./client-session.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
 import {
   DbRuntimeModule,
@@ -21,17 +20,6 @@ const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
-}
-
-function mintWasmToken(
-  wasmModule: WasmModule,
-  seedB64: string,
-  _issuer: string,
-  audience: string,
-  ttlSeconds: number,
-  nowSeconds: bigint,
-): string {
-  return wasmModule.mintLocalFirstToken(seedB64, audience, ttlSeconds, nowSeconds);
 }
 
 function deterministicBytes(seed: string): Uint8Array {
@@ -158,10 +146,8 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
   }
 
   override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return mintWasmToken(
-      this.wasmModule,
+    return this.wasmModule.mintLocalFirstToken(
       options.secret,
-      LOCAL_FIRST_JWT_ISSUER,
       options.audience,
       options.ttlSeconds,
       options.nowSeconds,

@@ -8,7 +8,6 @@ use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::ObjectId;
 use crate::query_manager::types::{Schema, SchemaHash, TableName, TablePolicies};
-use crate::runtime_tokio::RuntimeError;
 use crate::schema_manager::encoding::{
     decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
     decode_schema, encode_lens_transform, encode_permissions_bundle, encode_permissions_head,
@@ -25,6 +24,29 @@ use crate::sync_manager::ConnectionSchemaDiagnostics;
 #[cfg(test)]
 use crate::sync_manager::{InboxEntry, QueryPropagation, SyncPayload};
 
+/// Errors from server-local catalogue operations.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum CatalogueError {
+    QueryError(String),
+    WriteError(String),
+    NotFound,
+    LockError,
+}
+
+impl std::fmt::Display for CatalogueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CatalogueError::QueryError(message) => write!(f, "Query error: {message}"),
+            CatalogueError::WriteError(message) => write!(f, "Write error: {message}"),
+            CatalogueError::NotFound => write!(f, "Not found"),
+            CatalogueError::LockError => write!(f, "Lock error"),
+        }
+    }
+}
+
+impl std::error::Error for CatalogueError {}
+
 /// Server-local catalogue facade.
 ///
 /// This is intentionally a thin wrapper over the direct catalogue store.
@@ -35,26 +57,26 @@ use crate::sync_manager::{InboxEntry, QueryPropagation, SyncPayload};
 pub struct ServerCatalogue;
 
 pub(crate) trait CatalogueStore {
-    fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, RuntimeError>;
-    fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, RuntimeError>;
-    fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, RuntimeError>;
+    fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError>;
+    fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError>;
+    fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError>;
     fn are_schema_hashes_connected(
         &self,
         from_hash: SchemaHash,
         to_hash: SchemaHash,
-    ) -> Result<bool, RuntimeError>;
-    fn publish_schema(&self, schema: Schema) -> Result<ObjectId, RuntimeError>;
-    fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, RuntimeError>;
-    fn current_permissions(&self) -> Result<Option<CurrentPermissionsSummary>, RuntimeError>;
+    ) -> Result<bool, CatalogueError>;
+    fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError>;
+    fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, CatalogueError>;
+    fn current_permissions(&self) -> Result<Option<CurrentPermissionsSummary>, CatalogueError>;
     fn publish_permissions_bundle(
         &self,
         schema_hash: SchemaHash,
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
-    ) -> Result<Option<ObjectId>, RuntimeError>;
-    fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, RuntimeError>;
-    fn flush(&self) -> Result<(), RuntimeError>;
-    fn close(&self) -> Result<(), RuntimeError>;
+    ) -> Result<Option<ObjectId>, CatalogueError>;
+    fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, CatalogueError>;
+    fn flush(&self) -> Result<(), CatalogueError>;
+    fn close(&self) -> Result<(), CatalogueError>;
 }
 
 pub(crate) struct DirectCatalogueStore {
@@ -121,8 +143,8 @@ impl DirectCatalogueStore {
 
     #[cfg(any(test, feature = "test-utils"))]
     #[allow(dead_code)]
-    pub(crate) fn add_known_schema(&self, schema: Schema) -> Result<(), RuntimeError> {
-        let mut index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+    pub(crate) fn add_known_schema(&self, schema: Schema) -> Result<(), CatalogueError> {
+        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.add_schema(schema);
         Ok(())
     }
@@ -131,22 +153,22 @@ impl DirectCatalogueStore {
     pub(crate) fn client_registered_for_test(
         &self,
         client_id: ClientId,
-    ) -> Result<bool, RuntimeError> {
+    ) -> Result<bool, CatalogueError> {
         let clients = self
             .test_clients
             .lock()
-            .map_err(|_| RuntimeError::LockError)?;
+            .map_err(|_| CatalogueError::LockError)?;
         Ok(clients.contains(&client_id))
     }
 
     #[cfg(test)]
     pub(crate) fn local_durability_tiers_for_test(
         &self,
-    ) -> Result<HashSet<DurabilityTier>, RuntimeError> {
+    ) -> Result<HashSet<DurabilityTier>, CatalogueError> {
         let tiers = self
             .test_local_durability_tiers
             .lock()
-            .map_err(|_| RuntimeError::LockError)?;
+            .map_err(|_| CatalogueError::LockError)?;
         Ok(tiers.clone())
     }
 
@@ -155,11 +177,11 @@ impl DirectCatalogueStore {
         &self,
         client_id: ClientId,
         _session: Option<crate::query_manager::session::Session>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<(), CatalogueError> {
         let mut clients = self
             .test_clients
             .lock()
-            .map_err(|_| RuntimeError::LockError)?;
+            .map_err(|_| CatalogueError::LockError)?;
         clients.insert(client_id);
         Ok(())
     }
@@ -169,17 +191,20 @@ impl DirectCatalogueStore {
         &self,
         client_id: ClientId,
         _session: crate::query_manager::session::Session,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<(), CatalogueError> {
         self.add_client(client_id, None)
     }
 
     #[cfg(test)]
-    pub(crate) fn ensure_client_as_backend(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+    pub(crate) fn ensure_client_as_backend(
+        &self,
+        client_id: ClientId,
+    ) -> Result<(), CatalogueError> {
         self.add_client(client_id, None)
     }
 
     #[cfg(test)]
-    pub(crate) fn push_sync_inbox(&self, entry: InboxEntry) -> Result<(), RuntimeError> {
+    pub(crate) fn push_sync_inbox(&self, entry: InboxEntry) -> Result<(), CatalogueError> {
         if let SyncPayload::QuerySubscription {
             query, propagation, ..
         } = entry.payload
@@ -187,37 +212,39 @@ impl DirectCatalogueStore {
             let branches = self
                 .test_schema_branches
                 .lock()
-                .map_err(|_| RuntimeError::LockError)?;
+                .map_err(|_| CatalogueError::LockError)?;
             let branches = branches.clone();
             let query_json = serde_json::to_string(&query)
                 .unwrap_or_else(|_| "{\"error\":\"query serialization failed\"}".to_string());
             self.test_query_subscriptions
                 .lock()
-                .map_err(|_| RuntimeError::LockError)?
+                .map_err(|_| CatalogueError::LockError)?
                 .push((query_json, branches, propagation, *query));
         }
         Ok(())
     }
 
     #[cfg(test)]
-    pub(crate) fn flush(&self) -> Result<(), RuntimeError> {
+    pub(crate) fn flush(&self) -> Result<(), CatalogueError> {
         <Self as CatalogueStore>::flush(self)
     }
 
     #[cfg(test)]
     #[allow(dead_code)]
-    pub(crate) fn persist_schema(&self) -> Result<ObjectId, RuntimeError> {
+    pub(crate) fn persist_schema(&self) -> Result<ObjectId, CatalogueError> {
         let hash = {
-            let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+            let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
             index
                 .known_schema_hashes()
                 .into_iter()
                 .next()
-                .ok_or_else(|| RuntimeError::WriteError("no known schema to persist".to_string()))?
+                .ok_or_else(|| {
+                    CatalogueError::WriteError("no known schema to persist".to_string())
+                })?
         };
         let schema = self
             .known_schema(&hash)?
-            .ok_or_else(|| RuntimeError::WriteError("known schema disappeared".to_string()))?;
+            .ok_or_else(|| CatalogueError::WriteError("known schema disappeared".to_string()))?;
         <Self as CatalogueStore>::publish_schema(self, schema)
     }
 
@@ -226,8 +253,8 @@ impl DirectCatalogueStore {
         &self,
         source_hash: SchemaHash,
         target_hash: SchemaHash,
-    ) -> Result<Option<Lens>, RuntimeError> {
-        let storage = self.storage.lock().map_err(|_| RuntimeError::LockError)?;
+    ) -> Result<Option<Lens>, CatalogueError> {
+        let storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         let entries = storage.scan_catalogue_entries().map_err(storage_error)?;
         Ok(entries.into_iter().find_map(|entry| {
             if entry.object_type() != Some(ObjectType::CatalogueLens.as_str()) {
@@ -295,8 +322,8 @@ impl DirectCatalogueStore {
         Vec::new()
     }
 
-    pub(crate) fn latest_published_schema(&self) -> Result<Option<Schema>, RuntimeError> {
-        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+    pub(crate) fn latest_published_schema(&self) -> Result<Option<Schema>, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.latest_published_schema())
     }
 
@@ -304,14 +331,14 @@ impl DirectCatalogueStore {
     pub(crate) fn connection_schema_diagnostics(
         &self,
         client_schema_hash: SchemaHash,
-    ) -> Result<ConnectionSchemaDiagnostics, RuntimeError> {
-        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+    ) -> Result<ConnectionSchemaDiagnostics, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.connection_schema_diagnostics(client_schema_hash))
     }
 }
 
-fn storage_error(error: StorageError) -> RuntimeError {
-    RuntimeError::WriteError(error.to_string())
+fn storage_error(error: StorageError) -> CatalogueError {
+    CatalogueError::WriteError(error.to_string())
 }
 
 fn unix_timestamp_millis() -> u64 {
@@ -335,7 +362,7 @@ impl CatalogueIndex {
     fn from_storage(
         storage: &dyn crate::storage::Storage,
         app_id: AppId,
-    ) -> Result<Self, RuntimeError> {
+    ) -> Result<Self, CatalogueError> {
         let mut index = Self::default();
         for entry in storage.scan_catalogue_entries().map_err(storage_error)? {
             if entry.metadata.get(MetadataKey::AppId.as_str()) != Some(&app_id.uuid().to_string()) {
@@ -644,18 +671,18 @@ fn catalogue_metadata(app_id: AppId, object_type: ObjectType) -> HashMap<String,
 }
 
 impl CatalogueStore for DirectCatalogueStore {
-    fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, RuntimeError> {
-        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+    fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.known_schema_hashes())
     }
 
-    fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, RuntimeError> {
-        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+    fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.schemas.get(schema_hash).cloned())
     }
 
-    fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, RuntimeError> {
-        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+    fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.schema_published_at.get(schema_hash).copied())
     }
 
@@ -663,32 +690,32 @@ impl CatalogueStore for DirectCatalogueStore {
         &self,
         from_hash: SchemaHash,
         to_hash: SchemaHash,
-    ) -> Result<bool, RuntimeError> {
-        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+    ) -> Result<bool, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.are_schema_hashes_connected(from_hash, to_hash))
     }
 
-    fn publish_schema(&self, schema: Schema) -> Result<ObjectId, RuntimeError> {
+    fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError> {
         let published_at = unix_timestamp_millis();
         let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at);
-        let mut storage = self.storage.lock().map_err(|_| RuntimeError::LockError)?;
+        let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         storage
             .upsert_catalogue_entry(&entry)
             .map_err(storage_error)?;
         let object_id = entry.object_id;
-        let mut index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&entry);
         index.schema_published_at.insert(schema_hash, published_at);
         Ok(object_id)
     }
 
-    fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, RuntimeError> {
-        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+    fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.permissions_head)
     }
 
-    fn current_permissions(&self) -> Result<Option<CurrentPermissionsSummary>, RuntimeError> {
-        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+    fn current_permissions(&self) -> Result<Option<CurrentPermissionsSummary>, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.current_permissions())
     }
 
@@ -697,13 +724,13 @@ impl CatalogueStore for DirectCatalogueStore {
         schema_hash: SchemaHash,
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
-    ) -> Result<Option<ObjectId>, RuntimeError> {
+    ) -> Result<Option<ObjectId>, CatalogueError> {
         let (head, bundle_entry, head_entry) = {
-            let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+            let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
             let current_parent_bundle_object_id =
                 index.permissions_head.map(|head| head.bundle_object_id);
             if current_parent_bundle_object_id != expected_parent_bundle_object_id {
-                return Err(RuntimeError::WriteError(format!(
+                return Err(CatalogueError::WriteError(format!(
                     "stale permissions parent: expected {:?}, current {:?}",
                     expected_parent_bundle_object_id, current_parent_bundle_object_id
                 )));
@@ -756,43 +783,43 @@ impl CatalogueStore for DirectCatalogueStore {
             (head, bundle_entry, head_entry)
         };
 
-        let mut storage = self.storage.lock().map_err(|_| RuntimeError::LockError)?;
+        let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         storage
             .upsert_catalogue_entry(&bundle_entry)
             .map_err(storage_error)?;
         storage
             .upsert_catalogue_entry(&head_entry)
             .map_err(storage_error)?;
-        let mut index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&bundle_entry);
         index.permissions_head = Some(head);
         Ok(Some(head_entry.object_id))
     }
 
-    fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
+    fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, CatalogueError> {
         if lens.is_draft() {
-            return Err(RuntimeError::WriteError(
+            return Err(CatalogueError::WriteError(
                 "cannot publish draft lens".to_string(),
             ));
         }
         let entry = lens_entry(self.app_id, lens);
-        let mut storage = self.storage.lock().map_err(|_| RuntimeError::LockError)?;
+        let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         storage
             .upsert_catalogue_entry(&entry)
             .map_err(storage_error)?;
-        let mut index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&entry);
         Ok(entry.object_id)
     }
 
-    fn flush(&self) -> Result<(), RuntimeError> {
-        let storage = self.storage.lock().map_err(|_| RuntimeError::LockError)?;
+    fn flush(&self) -> Result<(), CatalogueError> {
+        let storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         storage.flush().map_err(storage_error)?;
         storage.flush_wal().map_err(storage_error)
     }
 
-    fn close(&self) -> Result<(), RuntimeError> {
-        let storage = self.storage.lock().map_err(|_| RuntimeError::LockError)?;
+    fn close(&self) -> Result<(), CatalogueError> {
+        let storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         storage.flush().map_err(storage_error)?;
         storage.flush_wal().map_err(storage_error)?;
         storage.close().map_err(storage_error)
@@ -803,7 +830,7 @@ impl ServerCatalogue {
     pub(crate) fn known_schema_hashes(
         &self,
         store: &impl CatalogueStore,
-    ) -> Result<Vec<SchemaHash>, RuntimeError> {
+    ) -> Result<Vec<SchemaHash>, CatalogueError> {
         store.known_schema_hashes()
     }
 
@@ -811,7 +838,7 @@ impl ServerCatalogue {
         &self,
         store: &impl CatalogueStore,
         schema_hash: &SchemaHash,
-    ) -> Result<Option<Schema>, RuntimeError> {
+    ) -> Result<Option<Schema>, CatalogueError> {
         store.known_schema(schema_hash)
     }
 
@@ -819,7 +846,7 @@ impl ServerCatalogue {
         &self,
         store: &impl CatalogueStore,
         schema_hash: &SchemaHash,
-    ) -> Result<Option<u64>, RuntimeError> {
+    ) -> Result<Option<u64>, CatalogueError> {
         store.schema_published_at(schema_hash)
     }
 
@@ -828,7 +855,7 @@ impl ServerCatalogue {
         store: &impl CatalogueStore,
         from_hash: SchemaHash,
         to_hash: SchemaHash,
-    ) -> Result<bool, RuntimeError> {
+    ) -> Result<bool, CatalogueError> {
         store.are_schema_hashes_connected(from_hash, to_hash)
     }
 
@@ -836,21 +863,21 @@ impl ServerCatalogue {
         &self,
         store: &impl CatalogueStore,
         schema: Schema,
-    ) -> Result<ObjectId, RuntimeError> {
+    ) -> Result<ObjectId, CatalogueError> {
         store.publish_schema(schema)
     }
 
     pub(crate) fn current_permissions_head(
         &self,
         store: &impl CatalogueStore,
-    ) -> Result<Option<PermissionsHeadSummary>, RuntimeError> {
+    ) -> Result<Option<PermissionsHeadSummary>, CatalogueError> {
         store.current_permissions_head()
     }
 
     pub(crate) fn current_permissions(
         &self,
         store: &impl CatalogueStore,
-    ) -> Result<Option<CurrentPermissionsSummary>, RuntimeError> {
+    ) -> Result<Option<CurrentPermissionsSummary>, CatalogueError> {
         store.current_permissions()
     }
 
@@ -860,7 +887,7 @@ impl ServerCatalogue {
         schema_hash: SchemaHash,
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
-    ) -> Result<Option<ObjectId>, RuntimeError> {
+    ) -> Result<Option<ObjectId>, CatalogueError> {
         store.publish_permissions_bundle(schema_hash, permissions, expected_parent_bundle_object_id)
     }
 
@@ -868,15 +895,15 @@ impl ServerCatalogue {
         &self,
         store: &impl CatalogueStore,
         lens: &Lens,
-    ) -> Result<ObjectId, RuntimeError> {
+    ) -> Result<ObjectId, CatalogueError> {
         store.publish_lens(lens)
     }
 
-    pub(crate) fn flush(&self, store: &impl CatalogueStore) -> Result<(), RuntimeError> {
+    pub(crate) fn flush(&self, store: &impl CatalogueStore) -> Result<(), CatalogueError> {
         store.flush()
     }
 
-    pub(crate) fn close(&self, store: &impl CatalogueStore) -> Result<(), RuntimeError> {
+    pub(crate) fn close(&self, store: &impl CatalogueStore) -> Result<(), CatalogueError> {
         store.close()
     }
 }

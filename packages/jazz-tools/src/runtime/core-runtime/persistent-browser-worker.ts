@@ -1,10 +1,4 @@
-import {
-  loadWasmModule,
-  type DirectInsertResult,
-  type DirectMutationResult,
-  type MutationErrorEvent,
-} from "../client.js";
-import type { InsertValues, Value } from "../../drivers/types.js";
+import { loadWasmModule, type Runtime } from "../client.js";
 import { openConfig } from "./direct-codec.js";
 import { encodeDirectSchema } from "./direct-schema-codec.js";
 import { CoreRuntime } from "./runtime.js";
@@ -16,56 +10,7 @@ type WriteMessage = Extract<
   { method: "insert" | "restore" | "update" | "upsert" | "delete" }
 >;
 
-type PersistentBrowserCoreRuntime = {
-  insert(
-    table: string,
-    values: InsertValues,
-    writeContext?: string | null,
-    objectId?: string | null,
-  ): DirectInsertResult;
-  restore(
-    table: string,
-    objectId: string,
-    values: InsertValues,
-    writeContext?: string | null,
-  ): DirectInsertResult;
-  update(
-    table: string,
-    objectId: string,
-    values: Record<string, Value>,
-    writeContext?: string | null,
-  ): DirectMutationResult;
-  upsert(
-    table: string,
-    objectId: string,
-    values: InsertValues,
-    writeContext?: string | null,
-  ): DirectMutationResult;
-  delete(table: string, objectId: string, writeContext?: string | null): DirectMutationResult;
-  waitForTransaction(transactionId: string, tier: string): Promise<void>;
-  query(
-    queryJson: string,
-    sessionJson?: string | null,
-    tier?: string | null,
-    optionsJson?: string | null,
-  ): Promise<unknown>;
-  createSubscription(
-    queryJson: string,
-    sessionJson?: string | null,
-    tier?: string | null,
-    optionsJson?: string | null,
-  ): number;
-  executeSubscription(handle: number, onUpdate: (...args: unknown[]) => void): void;
-  unsubscribe(handle: number): void;
-  close?(): void | Promise<void>;
-  connect(url: string, authJson: string): void;
-  disconnect(): void;
-  updateAuth(authJson: string): void;
-  onMutationError(callback: (event: MutationErrorEvent) => void): void;
-  onAuthFailure(callback: (reason: string) => void): void;
-};
-
-let runtime: PersistentBrowserCoreRuntime | null = null;
+let runtime: Runtime | null = null;
 let runtimeNamespace: string | null = null;
 let runtimeWasmModule: Awaited<ReturnType<typeof loadWasmModule>> | null = null;
 const pendingWriteTransactionIds = new Set<string>();
@@ -207,7 +152,7 @@ async function openRuntime(message: OpenMessage): Promise<void> {
   );
 
   runtime = CoreRuntime.fromDb(db as never, schema as never, node, author, 1, true);
-  runtime.onMutationError((payload: MutationErrorEvent) => {
+  runtime.onMutationError((payload) => {
     workerScope.postMessage({ event: "mutationError", payload });
   });
   runtime.onAuthFailure((reason: string) => {
@@ -241,7 +186,7 @@ async function settlePendingWrites(): Promise<void> {
   }
 }
 
-function getRuntime(): PersistentBrowserCoreRuntime {
+function getRuntime(): Runtime {
   if (!runtime) {
     throw new Error("Persistent browser core runtime is not open");
   }
