@@ -3,12 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz_tools::query_manager::types::SchemaHash;
-use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
+use jazz_tools::schema_manager::{AppId, Lens};
 use jazz_tools::server::{JazzServer, ServerState};
-use jazz_tools::storage::MemoryStorage;
-use jazz_tools::sync_manager::{
-    ClientId, Destination, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
-};
+use jazz_tools::sync_manager::ClientId;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, Value,
@@ -322,45 +319,6 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
     .expect("encode jwt")
 }
 
-fn flush_catalogue_outbox_to_state(
-    schema_manager: &mut SchemaManager,
-    storage: &mut MemoryStorage,
-    state: Arc<ServerState>,
-    client_id: ClientId,
-    server_id: ServerId,
-) -> Result<(), Box<dyn std::error::Error>> {
-    schema_manager
-        .query_manager_mut()
-        .sync_manager_mut()
-        .add_server_with_storage(server_id, false, storage);
-    schema_manager.process(storage);
-
-    let outbox = schema_manager
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox();
-    for entry in outbox {
-        let OutboxEntry {
-            destination,
-            payload,
-        } = entry;
-        if let Destination::Server(_) = destination {
-            state
-                .catalogue_store
-                .push_sync_inbox(InboxEntry {
-                    source: Source::Client(client_id),
-                    payload,
-                })
-                .map_err(|error| format!("push catalogue sync payload: {error}"))?;
-            state
-                .catalogue_store
-                .flush()
-                .map_err(|error| format!("flush catalogue sync payload: {error}"))?;
-        }
-    }
-    Ok(())
-}
-
 pub async fn push_catalogue_in_memory(
     state: Arc<ServerState>,
     app_id: AppId,
@@ -369,32 +327,14 @@ pub async fn push_catalogue_in_memory(
     schemas: &[Schema],
     lenses: &[Lens],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client_id = ClientId::new();
-    state
-        .catalogue_store
-        .ensure_client_as_backend(client_id)
-        .map_err(|e| format!("register admin client: {e:?}"))?;
-
-    let server_id = ServerId::default();
-
     let mut schema_by_hash: std::collections::HashMap<SchemaHash, &Schema> =
         std::collections::HashMap::with_capacity(schemas.len());
     for schema in schemas {
         schema_by_hash.insert(SchemaHash::compute(schema), schema);
-        let mut schema_manager =
-            SchemaManager::new(SyncManager::new(), schema.clone(), app_id, env, user_branch)
-                .map_err(|error| {
-                    format!("Failed to initialize schema manager for schema push: {error:?}")
-                })?;
-        let mut storage = MemoryStorage::default();
-        schema_manager.persist_schema(&mut storage);
-        flush_catalogue_outbox_to_state(
-            &mut schema_manager,
-            &mut storage,
-            state.clone(),
-            client_id,
-            server_id,
-        )?;
+        state
+            .catalogue
+            .publish_schema(&state.catalogue_store, schema.clone())
+            .map_err(|error| format!("publish schema to server catalogue: {error}"))?;
     }
 
     for lens in lenses {
@@ -404,25 +344,17 @@ pub async fn push_catalogue_in_memory(
                 lens.source_hash
             )
         })?;
-
-        let mut storage = MemoryStorage::default();
-        let mut schema_manager = SchemaManager::new(
-            SyncManager::new(),
-            (*source_schema).clone(),
-            app_id,
-            env,
-            user_branch,
-        )
-        .map_err(|error| format!("Failed to initialize schema manager for lens push: {error:?}"))?;
-        schema_manager.persist_lens(&mut storage, lens);
-        flush_catalogue_outbox_to_state(
-            &mut schema_manager,
-            &mut storage,
-            state.clone(),
-            client_id,
-            server_id,
-        )?;
+        let _ = (source_schema, app_id, env, user_branch);
+        state
+            .catalogue
+            .publish_lens(&state.catalogue_store, lens)
+            .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
     }
+
+    state
+        .catalogue
+        .flush(&state.catalogue_store)
+        .map_err(|error| format!("flush server catalogue: {error}"))?;
 
     Ok(())
 }

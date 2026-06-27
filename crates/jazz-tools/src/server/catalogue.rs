@@ -21,20 +21,6 @@ use crate::storage::StorageError;
 use crate::sync::{ClientId, DurabilityTier};
 #[cfg(test)]
 use crate::sync_manager::ConnectionSchemaDiagnostics;
-use crate::sync_manager::QueryPropagation;
-#[cfg(test)]
-use crate::sync_manager::{InboxEntry, SyncPayload};
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct ServerSubscriptionTelemetryGroup {
-    #[serde(rename = "groupKey")]
-    pub group_key: String,
-    pub count: usize,
-    pub table: String,
-    pub query: String,
-    pub branches: Vec<String>,
-    pub propagation: QueryPropagation,
-}
 
 /// Errors from server-local catalogue operations.
 #[allow(dead_code)]
@@ -101,15 +87,6 @@ pub(crate) struct DirectCatalogueStore {
     #[cfg(test)]
     test_local_durability_tiers: Mutex<HashSet<DurabilityTier>>,
     storage: Mutex<DynCatalogueStorage>,
-    #[cfg(test)]
-    test_query_subscriptions: Mutex<
-        Vec<(
-            String,
-            Vec<String>,
-            QueryPropagation,
-            crate::query_manager::query::Query,
-        )>,
-    >,
 }
 
 impl DirectCatalogueStore {
@@ -132,8 +109,6 @@ impl DirectCatalogueStore {
             #[cfg(test)]
             test_local_durability_tiers: Mutex::new(HashSet::new()),
             storage: Mutex::new(storage),
-            #[cfg(test)]
-            test_query_subscriptions: Mutex::new(Vec::new()),
         }
     }
 
@@ -220,32 +195,6 @@ impl DirectCatalogueStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn push_sync_inbox(&self, entry: InboxEntry) -> Result<(), CatalogueError> {
-        if let SyncPayload::QuerySubscription {
-            query, propagation, ..
-        } = entry.payload
-        {
-            let branches = self
-                .test_schema_branches
-                .lock()
-                .map_err(|_| CatalogueError::LockError)?;
-            let branches = branches.clone();
-            let query_json = serde_json::to_string(&query)
-                .unwrap_or_else(|_| "{\"error\":\"query serialization failed\"}".to_string());
-            self.test_query_subscriptions
-                .lock()
-                .map_err(|_| CatalogueError::LockError)?
-                .push((query_json, branches, propagation, *query));
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn flush(&self) -> Result<(), CatalogueError> {
-        <Self as CatalogueStore>::flush(self)
-    }
-
-    #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn persist_schema(&self) -> Result<ObjectId, CatalogueError> {
         let hash = {
@@ -290,48 +239,6 @@ impl DirectCatalogueStore {
             let transform = decode_lens_transform(&entry.content).ok()?;
             Some(Lens::new(source, target, transform))
         }))
-    }
-
-    pub(crate) fn server_subscription_telemetry(&self) -> Vec<ServerSubscriptionTelemetryGroup> {
-        #[cfg(test)]
-        {
-            use std::collections::HashMap;
-
-            let mut groups =
-                HashMap::<(String, Vec<String>, String), ServerSubscriptionTelemetryGroup>::new();
-            let subscriptions = self.test_query_subscriptions.lock().unwrap();
-            for (query_json, branches, propagation, query) in subscriptions.iter() {
-                let propagation_label = match propagation {
-                    QueryPropagation::Full => "full",
-                    QueryPropagation::LocalOnly => "local-only",
-                };
-                let key = (
-                    query_json.clone(),
-                    branches.clone(),
-                    propagation_label.to_string(),
-                );
-                let group_index = groups.len();
-                groups
-                    .entry(key)
-                    .and_modify(|group| group.count += 1)
-                    .or_insert_with(|| {
-                        let group_key =
-                            format!("{propagation_label}:{}:{group_index}", query.table.as_str());
-                        ServerSubscriptionTelemetryGroup {
-                            group_key,
-                            count: 1,
-                            table: query.table.as_str().to_string(),
-                            query: query_json.clone(),
-                            branches: branches.clone(),
-                            propagation: *propagation,
-                        }
-                    });
-            }
-            return groups.into_values().collect();
-        }
-
-        #[cfg(not(test))]
-        Vec::new()
     }
 
     pub(crate) fn latest_published_schema(&self) -> Result<Option<Schema>, CatalogueError> {
