@@ -207,10 +207,7 @@ test("benchmark workflow runs the jazz-sim benchmark suite", () => {
     "utf8",
   );
 
-  assert.match(
-    workflow,
-    /cargo bench -p jazz-sim --bench s2_canvas --no-run/,
-  );
+  assert.match(workflow, /cargo bench -p jazz-sim --bench s2_canvas --no-run/);
   assert.match(workflow, /--suite jazz-sim/);
   assert.match(workflow, /bench-out\/native\/jazz-sim\/metadata\.json/);
   assert.match(workflow, /kind: "realistic-bench-jazz-sim"/);
