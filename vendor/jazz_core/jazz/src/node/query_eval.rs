@@ -1014,8 +1014,8 @@ where
         rows.sort_by(|left, right| {
             for order in &query.order_by {
                 let ordering = compare_optional_values(
-                    left.cell(&table, &order.column),
-                    right.cell(&table, &order.column),
+                    query_order_value(left, &table, &order.column),
+                    query_order_value(right, &table, &order.column),
                 );
                 let ordering = match order.direction {
                     OrderDirection::Asc => ordering,
@@ -3900,7 +3900,7 @@ fn apply_maintained_view_result_limit(
     if !query.order_by.is_empty() {
         if let Some(limit) = query.limit {
             let order_cols = query.order_by.iter().map(|order| {
-                let field = format!("user_{}", order.column);
+                let field = query_field(&order.column);
                 match order.direction {
                     OrderDirection::Asc => TopByOrder::asc(field),
                     OrderDirection::Desc => TopByOrder::desc(field),
@@ -5259,6 +5259,9 @@ fn compare_order_value_slices(left: &[Value], right: &[Value]) -> Ordering {
 }
 
 fn nullable_cell_value(table: &TableSchema, column: &str, value: Value) -> Result<Value, Error> {
+    if column == "id" {
+        return Ok(value);
+    }
     let _ = table_column_type(table, column)?;
     Ok(Value::Nullable(Some(Box::new(value))))
 }
@@ -5267,6 +5270,9 @@ fn table_column_type<'a>(
     table: &'a TableSchema,
     column: &str,
 ) -> Result<&'a groove::schema::ColumnType, Error> {
+    if column == "id" {
+        return Ok(&groove::schema::ColumnType::Uuid);
+    }
     table
         .columns
         .iter()
@@ -5341,9 +5347,17 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
+        (Value::Uuid(left), Value::Uuid(right)) => left.partial_cmp(right),
         (Value::String(left), Value::String(right)) => left.partial_cmp(right),
         _ => None,
     }
+}
+
+fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Option<Value> {
+    if column == "id" {
+        return Some(Value::Uuid(row.row_uuid().0));
+    }
+    row.cell(table, column)
 }
 
 fn current_row_fields(table: &TableSchema) -> Vec<String> {
@@ -5804,6 +5818,9 @@ pub(crate) fn maintained_view_tagged_user_field(table: &str, column: &str) -> St
 }
 
 fn query_field(column: &str) -> String {
+    if column == "id" {
+        return "row_uuid".to_owned();
+    }
     format!("user_{column}")
 }
 
@@ -5825,7 +5842,7 @@ mod tests {
     use crate::node::{MergeableCommit, NodeState};
     use crate::peer::PeerState;
     use crate::protocol::{RegisterShapeOptions, ShapeAst, SyncMessage};
-    use crate::query::{Aggregate, OrderDirection, Query, col, eq, gt, lit, lte, param};
+    use crate::query::{Aggregate, OrderDirection, Query, col, eq, gt, in_list, lit, lte, param};
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
@@ -6477,6 +6494,71 @@ mod tests {
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, BTreeSet::from([row(3), row(4)]));
+    }
+
+    #[test]
+    fn public_id_equality_query_filters_rows_by_row_uuid() {
+        let (_dir, mut node) = open_node();
+        for idx in 0..4 {
+            commit_issue(&mut node, idx, "open", author(1));
+        }
+        let shape = Query::from("issues")
+            .filter(eq(col("id"), lit(Value::Uuid(row(2).0))))
+            .validate(&schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let actual = node
+            .query_rows(&shape, &binding, DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, vec![row(2)]);
+    }
+
+    #[test]
+    fn public_id_in_query_filters_rows_by_row_uuid() {
+        let (_dir, mut node) = open_node();
+        for idx in 0..5 {
+            commit_issue(&mut node, idx, "open", author(1));
+        }
+        let shape = Query::from("issues")
+            .filter(in_list(
+                col("id"),
+                [lit(Value::Uuid(row(1).0)), lit(Value::Uuid(row(3).0))],
+            ))
+            .validate(&schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let actual = node
+            .query_rows(&shape, &binding, DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, BTreeSet::from([row(1), row(3)]));
+    }
+
+    #[test]
+    fn public_id_range_query_and_order_by_use_row_uuid() {
+        let (_dir, mut node) = open_node();
+        for idx in [3, 1, 4, 0, 2] {
+            commit_issue(&mut node, idx, "open", author(1));
+        }
+        let shape = Query::from("issues")
+            .filter(gt(col("id"), lit(Value::Uuid(row(1).0))))
+            .order_by("id", OrderDirection::Desc)
+            .limit(2)
+            .validate(&schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let actual = node
+            .query_rows(&shape, &binding, DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, vec![row(4), row(3)]);
     }
 
     #[test]
