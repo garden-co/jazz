@@ -169,16 +169,6 @@ export async function runSchemaMarshallingBench(
 
   const runtime = new Proxy(options.runtime, {
     get(target, property, receiver) {
-      if (property === "getSchema") {
-        return () => {
-          const startedAt = performance.now();
-          const value = target.getSchema();
-          getSchemaCalls += 1;
-          getSchemaTotalMs += performance.now() - startedAt;
-          return value;
-        };
-      }
-
       if (property === "query") {
         return async () => cloneRows(rows);
       }
@@ -196,7 +186,7 @@ export async function runSchemaMarshallingBench(
   const query = createQuery(options.schema, tableName);
 
   for (let index = 0; index < warmupIterations; index += 1) {
-    options.runtime.getSchema();
+    client.getSchema();
     await db.all(query);
   }
 
@@ -204,7 +194,10 @@ export async function runSchemaMarshallingBench(
   getSchemaTotalMs = 0;
 
   const directGetSchema = measureSyncIterations(measuredIterations, () => {
-    options.runtime.getSchema();
+    const startedAt = performance.now();
+    client.getSchema();
+    getSchemaCalls += 1;
+    getSchemaTotalMs += performance.now() - startedAt;
   });
   const dbAll = await measureAsyncIterations(measuredIterations, async () => {
     await db.all(query);
