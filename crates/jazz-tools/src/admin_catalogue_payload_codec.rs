@@ -2231,7 +2231,7 @@ mod tests {
 
     #[test]
     fn decode_truncated_data() {
-        let data = vec![1]; // Version only, no table count
+        let data = vec![SCHEMA_VERSION]; // Version only, no table count
         let result = decode_schema(&data);
         assert!(matches!(
             result,
