@@ -58,8 +58,8 @@ import { SubscriptionManager, type SubscriptionDelta } from "./subscription-mana
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import {
-  createConventionalFileStorage,
-  type ConventionalFileApp,
+  createBinaryLargeValueFileStorage,
+  type BinaryLargeValueFileApp,
   type FileReadOptions,
   type FileWriteOptions,
 } from "./file-storage.js";
@@ -2669,52 +2669,47 @@ export class Db {
   }
 
   /**
-   * Create a conventional `files` row by chunking a browser Blob into `file_parts`.
-   *
-   * Expects `app.files` and `app.file_parts` to follow the built-in file-storage conventions.
+   * Create a `files` row whose `data` column stores the whole Blob as a binary large value.
    */
-  async createFileFromBlob<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
-    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+  async createFileFromBlob<FileRow extends { id: string }, FileInit>(
+    app: BinaryLargeValueFileApp<FileRow, FileInit>,
     blob: Blob,
     options?: FileWriteOptions,
   ): Promise<FileRow> {
-    return createConventionalFileStorage(this, app).fromBlob(blob, options);
+    return createBinaryLargeValueFileStorage(this, app).fromBlob(blob, options);
   }
 
   /**
-   * Create a conventional `files` row by chunking a browser ReadableStream into `file_parts`.
-   *
-   * Expects `app.files` and `app.file_parts` to follow the built-in file-storage conventions.
+   * Create a `files` row whose `data` column stores the whole stream as a binary large value.
    */
-  async createFileFromStream<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
-    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+  async createFileFromStream<FileRow extends { id: string }, FileInit>(
+    app: BinaryLargeValueFileApp<FileRow, FileInit>,
     stream: ReadableStream<unknown>,
     options?: FileWriteOptions,
   ): Promise<FileRow> {
-    return createConventionalFileStorage(this, app).fromStream(stream, options);
+    return createBinaryLargeValueFileStorage(this, app).fromStream(stream, options);
   }
 
   /**
-   * Load a conventional file as a browser ReadableStream by querying the file row first
-   * and then reading each referenced `file_parts` row sequentially.
+   * Load a binary-large-value file row as a browser ReadableStream.
    */
-  async loadFileAsStream<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
-    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+  async loadFileAsStream<FileRow extends { id: string }, FileInit>(
+    app: BinaryLargeValueFileApp<FileRow, FileInit>,
     fileOrId: string | FileRow,
     options?: FileReadOptions,
   ): Promise<ReadableStream<Uint8Array>> {
-    return createConventionalFileStorage(this, app).toStream(fileOrId, options);
+    return createBinaryLargeValueFileStorage(this, app).toStream(fileOrId, options);
   }
 
   /**
-   * Load a conventional file as a Blob using the same sequential part-query path as `loadFileAsStream`.
+   * Load a binary-large-value file row as a Blob.
    */
-  async loadFileAsBlob<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
-    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+  async loadFileAsBlob<FileRow extends { id: string }, FileInit>(
+    app: BinaryLargeValueFileApp<FileRow, FileInit>,
     fileOrId: string | FileRow,
     options?: FileReadOptions,
   ): Promise<Blob> {
-    return createConventionalFileStorage(this, app).toBlob(fileOrId, options);
+    return createBinaryLargeValueFileStorage(this, app).toBlob(fileOrId, options);
   }
 
   /**

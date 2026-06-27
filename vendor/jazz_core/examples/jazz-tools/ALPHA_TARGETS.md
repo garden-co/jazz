@@ -1,10 +1,10 @@
 # Alpha-style example target matrix
 
-This package is the first compatibility-shaped example for running something that
-looks like the current `garden-co/jazz` examples on `jazz_core` through the
-direct `WasmDb` bindings. It is not an API compatibility layer yet. The purpose is to
-pin the smallest app-shaped flow that alpha users and maintainers can recognize,
-then grow that flow toward the public TypeScript API.
+This repo branch is the alpha graft: the public `jazz-tools` package is being
+forced onto `jazz_core` through the shared direct-core runtime and WASM/NAPI
+bindings. The purpose is to pin app-shaped flows that alpha users and
+maintainers can recognize while deleting the old parallel engine paths, not to
+host a separate compatibility facade beside the real package.
 
 ## Alpha targets surveyed
 
@@ -67,19 +67,18 @@ the alpha API yet:
     recipient reads are granted and revoked through real `dbReadForIdentity`
     policy checks, including an alpha-style shared-with-me include view over
     already-authorized share rows and todos;
-13. add a memory-only files/blob slice that deliberately diverges from the
-    current alpha `files`/`file_parts` tables by storing each file on one
-    file-like `files` row with `mime_type` and native binary large-value
-    `data`, then exercise
+13. add a files/blob slice that deliberately diverges from the current alpha
+    `files`/`file_parts` tables by storing each file on one file-like `files`
+    row with `mime_type` and native binary-large-value `data`, then exercise
     `createFileFromBlob` -> `loadFileAsBlob`/raw byte reads -> delete in the
-    Node demo check;
+    Node demo and package runtime checks;
 14. add a TypeScript WebSocket transport smoke check that owns a local `upstream`
-    transport, passes subscriber identity through the WebSocket URL, and pumps
-    binary ABI `WireFrame` messages without decoding rows; by default it spawns
-    a Rust `jazz-server` sync server process and asserts two-client todo
-    convergence through that listener, then proves fresh reconnect catch-up by
-    closing one client's sync, writing while it is offline, and reconnecting it
-    with a new WebSocket/upstream transport;
+    transport, uses app-scoped `/apps/<app>/ws` URLs plus the auth prelude, and
+    pumps batched postcard/raw `WireFrame` bytes without decoding rows; by
+    default it spawns a Rust `jazz-server` sync server process and asserts
+    two-client todo convergence through that listener, then proves fresh
+    reconnect catch-up by closing one client's sync, writing while it is
+    offline, and reconnecting it with a new WebSocket/upstream transport;
 15. add a shared-todo WebSocket policy smoke check over the same process boundary:
     owner and recipient clients connect with deterministic identities, the owner
     creates a shared todo plus share rows, and the smoke asserts that the
@@ -110,11 +109,11 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
 
 ## Gap matrix from first upstream targets
 
-| Upstream target                                     | Covered now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Still missing                                                                                                                                                                                                                              |
-| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `crates/jazz-wasm/tests/wasm.rs`                    | WASM module loading from TypeScript, schema bytes, deterministic row IDs, `WasmDb` create/update/delete, and query reads are covered by `npm run test:alpha-public-flow` plus the broader demo.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Rust-side `wasm-pack test --node` parity, exported `generate_id`, `current_timestamp`, `parse_schema`, and public query-builder API tests are not present in this repo's WASM package.                                                     |
-| `crates/jazz-tools/src/runtime_core/tests/basic.rs` | WasmDb-shaped insert/query, update/delete, callback subscription rows, restart-by-snapshot, owner-policy reads, and Rust WebSocket server durable restart are represented in the `WasmDb` binding checks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | A local `jazz-tools` runtime_core surface, default materialization API parity, durable restart through the exact runtime_core harness, and the exact Rust runtime_core test harness are still absent.                                      |
-| `packages/jazz-tools/tests/browser/db.all.test.ts`  | `jazz-tools.ts` covers `createDb`, `defineApp`/schema tokens, table/query objects, `insert`, `update`, `delete`, `restore`, row-like write results with `.value`/`.handle`/`.wait(...)`, `all`, `one`, `allForIdentity`, `subscribe(query, callback)`, boolean/text/integer equality, scalar boolean/text/integer `in`, array-element `in`, integer/text `gt`/`gte`/`lt`/`lte`, nullable UUID `isNull`/`isNotNull`, nullable literal equality/inequality and mixed nullable `in`, text inequality, chained positional and object-style filters, one-shot text and array `contains`/`limit`, selected projections, result ordering, offset pagination, text-array insert/update/readback, whole-array `eq`/`in`, Bytea `eq`/`in`, one-shot facade include/hop/gather reads over schema references, required object-style includes, one-shot nested include selection for scalar/reference paths, and simple/nested forward include subscription callbacks rebuilt from subscription rows. The browser example now proves reload persistence through `WasmDb.openBrowser(namespace, schema, config)` OPFS storage and keeps a subscription useful after reload/update. | Full browser `jazz-tools` test runner, reverse include subscriptions, hop/gather subscriptions, selected include projection subscriptions, broader relation query lowering/subscriptions, and binary-large-value file helpers are missing. |
+| Upstream target                                     | Covered now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Still missing                                                                                                                                                                                                                                                |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `crates/jazz-wasm/tests/wasm.rs`                    | WASM module loading from TypeScript, schema bytes, deterministic row IDs, `WasmDb` create/update/delete, and query reads are covered by `npm run test:alpha-public-flow` plus the broader demo.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Rust-side `wasm-pack test --node` parity, exported `generate_id`, `current_timestamp`, `parse_schema`, and public query-builder API tests are not present in this repo's WASM package.                                                                       |
+| `crates/jazz-tools/src/runtime_core/tests/basic.rs` | WasmDb-shaped insert/query, update/delete, callback subscription rows, restart-by-snapshot, owner-policy reads, and Rust WebSocket server durable restart are represented in the `WasmDb` binding checks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | A local `jazz-tools` runtime_core surface, default materialization API parity, durable restart through the exact runtime_core harness, and the exact Rust runtime_core test harness are still absent.                                                        |
+| `packages/jazz-tools/tests/browser/db.all.test.ts`  | `jazz-tools.ts` covers `createDb`, `defineApp`/schema tokens, table/query objects, `insert`, `update`, `delete`, `restore`, row-like write results with `.value`/`.handle`/`.wait(...)`, `all`, `one`, `allForIdentity`, `subscribe(query, callback)`, boolean/text/integer equality, scalar boolean/text/integer `in`, array-element `in`, integer/text `gt`/`gte`/`lt`/`lte`, nullable UUID `isNull`/`isNotNull`, nullable literal equality/inequality and mixed nullable `in`, text inequality, chained positional and object-style filters, one-shot text and array `contains`/`limit`, selected projections, result ordering, offset pagination, text-array insert/update/readback, whole-array `eq`/`in`, Bytea `eq`/`in`, binary-large-value file helpers, one-shot facade include/hop/gather reads over schema references, required object-style includes, one-shot nested include selection for scalar/reference paths, and simple/nested forward include subscription callbacks rebuilt from subscription rows. The browser example now proves reload persistence through `WasmDb.openBrowser(namespace, schema, config)` OPFS storage and keeps a subscription useful after reload/update. | Full browser `jazz-tools` test runner, reverse include subscriptions, hop/gather subscriptions, selected include projection subscriptions, broader relation query lowering/subscriptions, and durable/upload/streaming object-storage semantics are missing. |
 
 ## Current gaps versus alpha
 
@@ -250,13 +249,13 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
   identity-scoped `user == identity` UUID query and asserts that a reader share
   can include the authorized todo but cannot update, an editor share can pass
   `dbCanUpdateEncodedForIdentity`, and revoked shares return no included todos.
-- Files/blob behavior is covered in memory only through regular rows, with an
-  intentional divergence from the current alpha `files`/`file_parts` style:
-  each file is a single file-like `files` row with `mime_type` and native
-  binary large-value `data`. The helper shape matches the alpha operation
-  names `createFileFromBlob` and `loadFileAsBlob`, but this is not upload
-  routing, streaming, durable object storage, resumable transfer, or public
-  `jazz-tools` file API compatibility.
+- Files/blob behavior intentionally diverges from the current alpha
+  `files`/`file_parts` style: each file is a single file-like `files` row with
+  `mime_type` and native binary-large-value `data`. The public package runtime
+  now uses that model for `createFileFromBlob`/`createFileFromStream` and
+  `loadFileAsBlob`/`loadFileAsStream`, with NAPI persistence coverage for
+  `files.data`. This is still not upload routing, bounded streaming, durable
+  object storage, resumable transfer, or full public file API compatibility.
 - The browser worker smoke also exercises `dbCanUpdateEncodedForIdentity` over
   the worker boundary for the basic owner-policy todo flow, allowing the owner
   and denying a different deterministic identity.
@@ -309,17 +308,17 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
    completeness.
 7. **Expand file/blob API coverage.** Keep the intentional divergence from
    alpha `files`/`file_parts`: files are single rows with `mime_type` and native
-   binary large-value `data`. Grow public upload/download/file helpers around
-   that model. Current package exports include `createFileBlobHelpers`,
-   `fileBlobTable`, and top-level `createFileFromBlob`/`loadFileAsBlob`/
-   `readFileBytes`/`readFiles`/`deleteFile` wrappers that default to the
-   single-row `files` table and never introduce `file_parts`.
+   binary-large-value `data`. The package runtime no longer exports chunk-size
+   constants or `ConventionalFile*` types. Grow public upload/download/file
+   helpers around this model and update remaining examples/docs that still
+   teach `file_parts`.
 8. **Polish WebSocket protocol details later.** Current batched raw
    `WireFrame` bytes are good enough unless they block another target; full
    handshake/resume/control envelope design can wait.
-9. **Defer NAPI and React Native.** Prioritize WASM and the native Rust CLI
-   first. Add NAPI and React Native after the browser/server/API semantics
-   above are in place.
+9. **Defer React Native; keep NAPI as a parity gate.** NAPI now has direct-core
+   CRUD/subscription/policy/persistence/edge-sync coverage and should stay in
+   the green path. React Native remains deferred until the browser/server/API
+   semantics above are in place and the storage story is clearer.
 10. **Run alpha tests as APIs appear.** Pull over the relevant upstream alpha
     tests/examples incrementally rather than waiting for a monolithic
     compatibility milestone.
