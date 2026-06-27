@@ -9,11 +9,12 @@ use jazz::schema::JazzSchema;
 use jazz_server::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, ServerSession, StorageConfig,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 #[derive(Clone)]
 pub(crate) struct CoreServer {
     commands: mpsc::Sender<CoreCommand>,
+    activity_tx: watch::Sender<u64>,
 }
 
 enum CoreCommand {
@@ -48,6 +49,8 @@ impl CoreServer {
     ) -> Result<Self, String> {
         let (commands, receiver) = mpsc::channel();
         let (started_tx, started_rx) = mpsc::channel();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let core_activity_tx = activity_tx.clone();
 
         thread::Builder::new()
             .name("jazz-core-server".to_owned())
@@ -103,6 +106,9 @@ impl CoreServer {
                                 .and_then(|()| shell.tick())
                                 .and_then(|()| shell.take_frames(session))
                                 .map_err(|error| error.to_string());
+                            if result.is_ok() {
+                                notify_core_activity(&core_activity_tx);
+                            }
                             let _ = reply.send(result);
                         }
                         CoreCommand::TickTake { session, reply } => {
@@ -123,7 +129,14 @@ impl CoreServer {
         started_rx
             .recv()
             .map_err(|_| "core server thread exited before startup".to_owned())??;
-        Ok(Self { commands })
+        Ok(Self {
+            commands,
+            activity_tx,
+        })
+    }
+
+    pub(crate) fn subscribe_activity(&self) -> watch::Receiver<u64> {
+        self.activity_tx.subscribe()
     }
 
     pub(crate) async fn open(
@@ -193,4 +206,10 @@ impl CoreServer {
     pub(crate) fn close(&self, session: ServerSession) {
         let _ = self.commands.send(CoreCommand::Close { session });
     }
+}
+
+fn notify_core_activity(activity_tx: &watch::Sender<u64>) {
+    activity_tx.send_modify(|version| {
+        *version = version.wrapping_add(1);
+    });
 }

@@ -604,7 +604,16 @@ async fn handle_direct_ws_connection(
         "direct jazz_core ws negotiated"
     );
 
-    let mut outbound_tick = tokio::time::interval(std::time::Duration::from_millis(5));
+    let mut core_activity_rx = core_server.subscribe_activity();
+    if drain_direct_ws_outbound(&mut socket, &core_server, session)
+        .await
+        .is_err()
+    {
+        core_server.close(session);
+        let _ = socket.close().await;
+        return;
+    }
+
     loop {
         tokio::select! {
             eviction = admission_registration.evict_rx.recv() => {
@@ -668,12 +677,11 @@ async fn handle_direct_ws_connection(
                 }
                 _ => {}
             },
-            _ = outbound_tick.tick() => {
-                let outbound = match core_server.tick_take(session).await {
-                    Ok(frames) => frames,
-                    Err(_) => break,
-                };
-                if !outbound.is_empty() && send_direct_encoded_frames(&mut socket, &outbound).await.is_err() {
+            changed = core_activity_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                if drain_direct_ws_outbound(&mut socket, &core_server, session).await.is_err() {
                     break;
                 }
             }
@@ -682,6 +690,20 @@ async fn handle_direct_ws_connection(
 
     core_server.close(session);
     let _ = socket.close().await;
+}
+
+async fn drain_direct_ws_outbound(
+    socket: &mut WebSocket,
+    core_server: &crate::server::core_server::CoreServer,
+    session: jazz_server::ServerSession,
+) -> Result<(), ()> {
+    let outbound = core_server.tick_take(session).await.map_err(|_| ())?;
+    if outbound.is_empty() {
+        return Ok(());
+    }
+    send_direct_encoded_frames(socket, &outbound)
+        .await
+        .map_err(|_| ())
 }
 
 fn decode_single_direct_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
