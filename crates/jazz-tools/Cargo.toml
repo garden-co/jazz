@@ -23,8 +23,8 @@ test = false
 default = []
 rocksdb = ["dep:rocksdb", "jazz-server/rocksdb"]
 sqlite = ["dep:rusqlite"]
-client = ["core-client"]
-core-client = ["dep:thiserror", "server"]
+client = ["client-engine"]
+client-engine = ["dep:thiserror", "server"]
 server = [
   "dep:tokio",
   "dep:tokio-tungstenite",
@@ -161,15 +161,15 @@ name = "observer_write_path"
 harness = false
 
 [[bench]]
-name = "core_benchmark"
+name = "db_benchmark"
 harness = false
 
 [[bench]]
-name = "core_authorization_scope_benchmark"
+name = "authorization_scope_benchmark"
 harness = false
 
 [[bench]]
-name = "realistic_phase1_core"
+name = "realistic_phase1"
 harness = false
 
 [[bench]]

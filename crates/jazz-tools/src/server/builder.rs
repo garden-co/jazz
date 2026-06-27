@@ -506,6 +506,7 @@ pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String
 mod tests {
     use super::*;
     use crate::schema_manager::AppId;
+    use crate::server::catalogue::CatalogueStore;
 
     #[tokio::test]
     async fn edge_upstream_mode_is_explicitly_unsupported() {

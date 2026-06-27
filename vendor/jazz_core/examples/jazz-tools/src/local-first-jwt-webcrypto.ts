@@ -1,7 +1,7 @@
 import {
   createLocalFirstJwtWithSignerAsync,
   type LocalFirstJwtOptions,
-} from "./local-first-jwt-core.js";
+} from "./local-first-jwt-shared.js";
 
 export async function createLocalFirstJwtAsync(options: LocalFirstJwtOptions): Promise<string> {
   return createLocalFirstJwtWithSignerAsync(options, signEd25519WithWebCrypto);

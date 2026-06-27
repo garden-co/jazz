@@ -15,7 +15,7 @@ function printHelp() {
   node dev/benchmarks/realistic/export_criterion.mjs \
     [--criterion-root target/criterion] \
     [--scenarios-dir dev/benchmarks/realistic/scenarios] \
-    [--prefix realistic_phase1_core/] \
+    [--prefix realistic_phase1/] \
     [--out bench-out/native/criterion_realistic_phase1.json] \
     [--summary-md bench-out/native/criterion_realistic_phase1.md]
 `);
@@ -27,7 +27,7 @@ function parseArgs(argv) {
   const out = {
     criterionRoot: "target/criterion",
     scenariosDir: "dev/benchmarks/realistic/scenarios",
-    prefix: "realistic_phase1_core/",
+    prefix: "realistic_phase1/",
     out: "bench-out/native/criterion_realistic_phase1.json",
     summaryMd: "bench-out/native/criterion_realistic_phase1.md",
     allowEmpty: false,

@@ -135,7 +135,7 @@ fn seed_fixture(db: &CoreDb, count: usize) -> Fixture {
 }
 
 fn update_own_documents(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core/update/own_documents");
+    let mut group = c.benchmark_group("update/own_documents");
 
     for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
@@ -172,7 +172,7 @@ fn update_own_documents(c: &mut Criterion) {
 }
 
 fn update_batch(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core/update/batch");
+    let mut group = c.benchmark_group("update/batch");
 
     for scale in [1_000usize] {
         let batch_size = 100;
