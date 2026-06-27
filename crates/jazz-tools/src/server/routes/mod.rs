@@ -133,9 +133,9 @@ mod tests {
     use crate::query_manager::types::{
         ColumnType, Schema, SchemaBuilder, TableSchema, Value as QueryValue,
     };
+    use crate::sync::ClientId;
     use crate::sync_manager::{
-        ClientId, ConnectionSchemaDiagnostics, InboxEntry, QueryId, QueryPropagation, Source,
-        SyncPayload,
+        ConnectionSchemaDiagnostics, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
     };
     use axum::body;
     use axum::routing::{get, post};
@@ -2110,7 +2110,7 @@ mod tests {
 
         let diagnostics = state
             .catalogue_store
-            .with_schema_manager(|sm| sm.connection_schema_diagnostics(declared_hash))
+            .connection_schema_diagnostics(declared_hash)
             .expect("compute diagnostics");
 
         assert!(

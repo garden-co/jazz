@@ -19,7 +19,11 @@ use crate::schema_manager::{AppId, Lens};
 use crate::server::DynStorage;
 use crate::storage::StorageError;
 #[cfg(test)]
-use crate::sync_manager::{ClientId, InboxEntry, QueryPropagation, SyncManager, SyncPayload};
+use crate::sync::{ClientId, DurabilityTier};
+#[cfg(test)]
+use crate::sync_manager::ConnectionSchemaDiagnostics;
+#[cfg(test)]
+use crate::sync_manager::{InboxEntry, QueryPropagation, SyncPayload};
 
 /// Server-local catalogue facade.
 ///
@@ -57,9 +61,11 @@ pub(crate) struct DirectCatalogueStore {
     app_id: AppId,
     index: Mutex<CatalogueIndex>,
     #[cfg(test)]
-    schema_manager: Mutex<Option<crate::schema_manager::SchemaManager>>,
+    test_schema_branches: Mutex<Vec<String>>,
     #[cfg(test)]
-    sync_manager: Mutex<SyncManager>,
+    test_clients: Mutex<HashSet<ClientId>>,
+    #[cfg(test)]
+    test_local_durability_tiers: Mutex<HashSet<DurabilityTier>>,
     storage: Mutex<DynStorage>,
     #[cfg(test)]
     test_query_subscriptions: Mutex<
@@ -82,9 +88,11 @@ impl DirectCatalogueStore {
             app_id,
             index: Mutex::new(index),
             #[cfg(test)]
-            schema_manager: Mutex::new(None),
+            test_schema_branches: Mutex::new(Vec::new()),
             #[cfg(test)]
-            sync_manager: Mutex::new(SyncManager::new()),
+            test_clients: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            test_local_durability_tiers: Mutex::new(HashSet::new()),
             storage: Mutex::new(storage),
             #[cfg(test)]
             test_query_subscriptions: Mutex::new(Vec::new()),
@@ -92,16 +100,22 @@ impl DirectCatalogueStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_test_schema_manager(
+    pub(crate) fn with_test_observability(
         app_id: AppId,
         initial_schema: Option<Schema>,
         storage: DynStorage,
-        schema_manager: crate::schema_manager::SchemaManager,
-        sync_manager: SyncManager,
+        schema_branches: Vec<String>,
+        local_durability_tiers: HashSet<DurabilityTier>,
     ) -> Self {
         let store = Self::new(app_id, initial_schema, storage);
-        *store.schema_manager.lock().expect("schema manager lock") = Some(schema_manager);
-        *store.sync_manager.lock().expect("sync manager lock") = sync_manager;
+        *store
+            .test_schema_branches
+            .lock()
+            .expect("schema branches lock") = schema_branches;
+        *store
+            .test_local_durability_tiers
+            .lock()
+            .expect("durability tiers lock") = local_durability_tiers;
         store
     }
 
@@ -113,44 +127,27 @@ impl DirectCatalogueStore {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    #[allow(dead_code)]
-    pub(crate) fn with_schema_manager<R>(
+    #[cfg(test)]
+    pub(crate) fn client_registered_for_test(
         &self,
-        f: impl FnOnce(&crate::schema_manager::SchemaManager) -> R,
-    ) -> Result<R, RuntimeError> {
-        #[cfg(test)]
-        {
-            let schema_manager = self
-                .schema_manager
-                .lock()
-                .map_err(|_| RuntimeError::LockError)?;
-            let schema_manager = schema_manager.as_ref().ok_or_else(|| {
-                RuntimeError::WriteError(
-                    "schema manager is not available in direct catalogue store".to_string(),
-                )
-            })?;
-            Ok(f(schema_manager))
-        }
-        #[cfg(not(test))]
-        {
-            let _ = f;
-            Err(RuntimeError::WriteError(
-                "schema manager is not available in direct catalogue store".to_string(),
-            ))
-        }
+        client_id: ClientId,
+    ) -> Result<bool, RuntimeError> {
+        let clients = self
+            .test_clients
+            .lock()
+            .map_err(|_| RuntimeError::LockError)?;
+        Ok(clients.contains(&client_id))
     }
 
     #[cfg(test)]
-    pub(crate) fn with_sync_manager<R>(
+    pub(crate) fn local_durability_tiers_for_test(
         &self,
-        f: impl FnOnce(&crate::sync_manager::SyncManager) -> R,
-    ) -> Result<R, RuntimeError> {
-        let sync_manager = self
-            .sync_manager
+    ) -> Result<HashSet<DurabilityTier>, RuntimeError> {
+        let tiers = self
+            .test_local_durability_tiers
             .lock()
             .map_err(|_| RuntimeError::LockError)?;
-        Ok(f(&sync_manager))
+        Ok(tiers.clone())
     }
 
     #[cfg(test)]
@@ -159,11 +156,11 @@ impl DirectCatalogueStore {
         client_id: ClientId,
         _session: Option<crate::query_manager::session::Session>,
     ) -> Result<(), RuntimeError> {
-        let mut sync_manager = self
-            .sync_manager
+        let mut clients = self
+            .test_clients
             .lock()
             .map_err(|_| RuntimeError::LockError)?;
-        sync_manager.add_client(client_id);
+        clients.insert(client_id);
         Ok(())
     }
 
@@ -187,21 +184,11 @@ impl DirectCatalogueStore {
             query, propagation, ..
         } = entry.payload
         {
-            let schema_manager = self
-                .schema_manager
+            let branches = self
+                .test_schema_branches
                 .lock()
                 .map_err(|_| RuntimeError::LockError)?;
-            let branches = schema_manager
-                .as_ref()
-                .map(|schema_manager| {
-                    schema_manager
-                        .all_branches()
-                        .into_iter()
-                        .map(|branch| branch.as_str().to_string())
-                        .collect()
-                })
-                .unwrap_or_default();
-            drop(schema_manager);
+            let branches = branches.clone();
             let query_json = serde_json::to_string(&query)
                 .unwrap_or_else(|_| "{\"error\":\"query serialization failed\"}".to_string());
             self.test_query_subscriptions
@@ -312,6 +299,15 @@ impl DirectCatalogueStore {
         let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(index.latest_published_schema())
     }
+
+    #[cfg(test)]
+    pub(crate) fn connection_schema_diagnostics(
+        &self,
+        client_schema_hash: SchemaHash,
+    ) -> Result<ConnectionSchemaDiagnostics, RuntimeError> {
+        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(index.connection_schema_diagnostics(client_schema_hash))
+    }
 }
 
 fn storage_error(error: StorageError) -> RuntimeError {
@@ -410,6 +406,62 @@ impl CatalogueIndex {
         });
         let (_, hash) = candidates.pop()?;
         self.schemas.get(&hash).cloned()
+    }
+
+    #[cfg(test)]
+    fn connection_schema_diagnostics(
+        &self,
+        client_schema_hash: SchemaHash,
+    ) -> ConnectionSchemaDiagnostics {
+        let active_permissions_hash = self
+            .permissions_head
+            .map(|head| head.schema_hash)
+            .or_else(|| self.known_schema_hashes().into_iter().next());
+        let reachable_hashes = self.non_draft_reachable_hashes(client_schema_hash);
+        let disconnected_permissions_schema_hash = active_permissions_hash
+            .filter(|permissions_hash| !reachable_hashes.contains(permissions_hash));
+
+        let mut unreachable_schema_hashes: Vec<_> = self
+            .known_schema_hashes()
+            .into_iter()
+            .filter(|hash| *hash != client_schema_hash)
+            .filter(|hash| !reachable_hashes.contains(hash))
+            .filter(|hash| Some(*hash) != disconnected_permissions_schema_hash)
+            .collect();
+        unreachable_schema_hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+        ConnectionSchemaDiagnostics {
+            client_schema_hash,
+            disconnected_permissions_schema_hash,
+            unreachable_schema_hashes,
+        }
+    }
+
+    #[cfg(test)]
+    fn non_draft_reachable_hashes(&self, schema_hash: SchemaHash) -> HashSet<SchemaHash> {
+        if !self.schemas.contains_key(&schema_hash) {
+            return HashSet::new();
+        }
+
+        let mut seen = HashSet::from([schema_hash]);
+        let mut queue = VecDeque::from([schema_hash]);
+        while let Some(current) = queue.pop_front() {
+            for &(source, target) in &self.lens_edges {
+                let next = if source == current {
+                    Some(target)
+                } else if target == current {
+                    Some(source)
+                } else {
+                    None
+                };
+                if let Some(next) = next
+                    && seen.insert(next)
+                {
+                    queue.push_back(next);
+                }
+            }
+        }
+        seen
     }
 
     fn apply_entry(&mut self, entry: &CatalogueEntry) {
