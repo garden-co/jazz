@@ -481,11 +481,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     );
     runtimes.push(runtime);
     runtime.connect(
-      directWebSocketUrl(
-        server.url,
-        appId,
-        deterministicBytes("jazz-napi-core-runtime-edge-delete-policy:author"),
-      ),
+      directWebSocketUrl(server.url, appId),
       JSON.stringify({ admin_secret: server.adminSecret }),
     );
 
@@ -580,11 +576,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
       );
       runtimes.push(runtime);
       runtime.connect(
-        directWebSocketUrl(
-          server.url,
-          appId,
-          deterministicBytes("jazz-napi-core-runtime-persistent-edge-delete-policy:author"),
-        ),
+        directWebSocketUrl(server.url, appId),
         JSON.stringify({ admin_secret: server.adminSecret }),
       );
 
@@ -767,11 +759,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
       );
       runtimes.push(runtime);
       runtime.connect(
-        directWebSocketUrl(
-          server!.url,
-          appId,
-          deterministicBytes(`jazz-napi-direct-edge:${peer}:author`),
-        ),
+        directWebSocketUrl(server!.url, appId),
         JSON.stringify({ admin_secret: server!.adminSecret }),
       );
       return runtime;
@@ -835,11 +823,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
       );
       runtimes.push(runtime);
       runtime.connect(
-        directWebSocketUrl(
-          targetServer.url,
-          appId,
-          deterministicBytes(`jazz-napi-direct-persistent-edge:${peer}:author`),
-        ),
+        directWebSocketUrl(targetServer.url, appId),
         JSON.stringify({ admin_secret: targetServer.adminSecret }),
       );
       return runtime;
