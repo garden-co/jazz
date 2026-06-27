@@ -2,9 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use jazz_tools::Schema;
-use jazz_tools::query_manager::policy::PolicyExpr;
-use jazz_tools::query_manager::types::{SchemaHash, TableName, TablePolicies};
+use jazz_tools::{PolicyExpr, Schema, SchemaHash, TableName, TablePolicies};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{Map, Value as JsonValue, json};

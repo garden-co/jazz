@@ -2,6 +2,8 @@
 //!
 //! Tests the full HTTP API end-to-end.
 
+#[path = "../src/client_worker.rs"]
+mod client_worker;
 #[path = "../../../../crates/jazz-tools/tests/support/permissions.rs"]
 mod permissions_support;
 
@@ -31,6 +33,8 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
+use client_worker::TodoClient;
+
 /// Todo item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Todo {
@@ -57,7 +61,7 @@ pub struct UpdateTodoRequest {
 
 /// Application state.
 pub struct AppState {
-    pub client: JazzClient,
+    pub client: TodoClient,
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
@@ -93,7 +97,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         sync_tracer: None,
     };
 
-    let client = JazzClient::connect(context).await.unwrap();
+    let client = TodoClient::connect(context).await.unwrap();
     let (sse_tx, _) = broadcast::channel::<Vec<Todo>>(16);
     let state = Arc::new(AppState { client, sse_tx });
 
@@ -218,7 +222,7 @@ async fn create_todo(
 ) -> impl IntoResponse {
     let description = request.description.clone().unwrap_or_default();
     let values = todo_values(request.title.clone(), description.clone());
-    match state.client.insert("todos", values) {
+    match state.client.insert("todos", values).await {
         Ok((row_id, row_values, _batch_id)) => {
             let todo = row_to_todo(row_id, &row_values);
             broadcast_todos(&state).await;
@@ -249,7 +253,7 @@ async fn update_todo(
         updates.push(("description".to_string(), Value::Text(description)));
     }
 
-    match state.client.update(object_id, updates) {
+    match state.client.update(object_id, updates).await {
         Ok(_batch_id) => {
             broadcast_todos(&state).await;
             let query = QueryBuilder::new("todos").build();
@@ -288,7 +292,7 @@ async fn delete_todo(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let object_id = ObjectId::from_uuid(id);
-    match state.client.delete(object_id) {
+    match state.client.delete(object_id).await {
         Ok(_batch_id) => {
             broadcast_todos(&state).await;
             StatusCode::NO_CONTENT.into_response()
