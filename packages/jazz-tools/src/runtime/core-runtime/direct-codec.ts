@@ -169,15 +169,37 @@ export function queryWhereStringContains(
 
 export type DirectQueryLiteral =
   | { type: "Boolean"; value: boolean }
+  | { type: "Integer"; value: number }
   | { type: "Text"; value: string }
   | { type: "Uuid"; value: string }
+  | { type: "Bytea"; value: Uint8Array }
+  | { type: "Array"; value: DirectQueryLiteral[] }
   | { type: "Nullable"; value: DirectQueryLiteral | null };
 
-export type DirectQueryPredicate = {
-  column: string;
-  op: DirectQueryPredicateOp;
-  value: DirectQueryLiteral;
-};
+export type DirectQueryPredicate =
+  | {
+      column: string;
+      op: DirectQueryPredicateOp;
+      value: DirectQueryLiteral;
+    }
+  | {
+      column: string;
+      op: "In";
+      values: DirectQueryLiteral[];
+    }
+  | {
+      column: string;
+      op: "Contains";
+      value: DirectQueryLiteral;
+    }
+  | {
+      column: string;
+      op: "IsNull";
+    }
+  | {
+      column: string;
+      op: "IsNotNull";
+    };
 
 export type DirectQueryPredicateOp = "Eq" | "Ne" | "Gt" | "Gte" | "Lt" | "Lte";
 export type DirectQueryOrder = {
@@ -214,7 +236,7 @@ export function queryWithPredicates(
   writer.string(table);
   writer.vec((filter, index) => {
     const predicate = predicates[index]!;
-    writePredicateCmpLiteral(filter, predicate.column, predicate.op, predicate.value);
+    writePredicate(filter, predicate);
   }, predicates.length);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
@@ -235,6 +257,33 @@ export function queryWithPredicates(
   return writer.finish();
 }
 
+function writePredicate(writer: PostcardWriter, predicate: DirectQueryPredicate): void {
+  if (predicate.op === "In") {
+    writer.u64(5); // Predicate::In
+    writeColumnOperand(writer, predicate.column);
+    writer.vec((valueWriter, index) => {
+      valueWriter.u64(3); // Operand::Literal
+      writeGrooveValue(valueWriter, predicate.values[index]!);
+    }, predicate.values.length);
+    return;
+  }
+  if (predicate.op === "Contains") {
+    writer.u64(10); // Predicate::Contains
+    writeColumnOperand(writer, predicate.column);
+    writeLiteralOperand(writer, predicate.value);
+    return;
+  }
+  if (predicate.op === "IsNull" || predicate.op === "IsNotNull") {
+    if (predicate.op === "IsNotNull") {
+      writer.u64(2); // Predicate::Not
+    }
+    writer.u64(11); // Predicate::IsNull
+    writeColumnOperand(writer, predicate.column);
+    return;
+  }
+  writePredicateCmpLiteral(writer, predicate.column, predicate.op, predicate.value);
+}
+
 function writePredicateCmpLiteral(
   writer: PostcardWriter,
   column: string,
@@ -242,8 +291,16 @@ function writePredicateCmpLiteral(
   value: DirectQueryLiteral,
 ): void {
   writer.u64(predicateOpTag(op));
+  writeColumnOperand(writer, column);
+  writeLiteralOperand(writer, value);
+}
+
+function writeColumnOperand(writer: PostcardWriter, column: string): void {
   writer.u64(0); // Operand::Column
   writer.string(column);
+}
+
+function writeLiteralOperand(writer: PostcardWriter, value: DirectQueryLiteral): void {
   writer.u64(3); // Operand::Literal
   writeGrooveValue(writer, value);
 }
@@ -280,9 +337,24 @@ function writeGrooveValue(writer: PostcardWriter, value: DirectQueryLiteral): vo
     writer.bool(value.value);
     return;
   }
+  if (value.type === "Integer") {
+    writer.u64(2); // groove::records::Value::U32
+    writer.u32Le(value.value);
+    return;
+  }
   if (value.type === "Uuid") {
     writer.u64(8); // groove::records::Value::Uuid
     writer.bytes(parseUuidBytes(value.value));
+    return;
+  }
+  if (value.type === "Bytea") {
+    writer.u64(7); // groove::records::Value::Bytes
+    writer.bytes(value.value);
+    return;
+  }
+  if (value.type === "Array") {
+    writer.u64(11); // groove::records::Value::Array
+    writer.vec((item, index) => writeGrooveValue(item, value.value[index]!), value.value.length);
     return;
   }
   writer.u64(6); // groove::records::Value::String
