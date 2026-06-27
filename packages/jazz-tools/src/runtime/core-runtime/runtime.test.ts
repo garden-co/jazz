@@ -836,14 +836,11 @@ describe("CoreRuntime server transport", () => {
       1,
       true,
     );
-    const snapshots: string[][] = [];
+    const deltas: unknown[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }));
-    runtime.executeSubscription(
-      handle,
-      (delta: Array<{ row: { values: Array<{ value: string }> } }>) => {
-        snapshots.push(delta.map((entry) => entry.row.values[0]!.value));
-      },
-    );
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      deltas.push(delta);
+    });
 
     controller!.enqueue({
       type: "snapshot",
@@ -889,9 +886,52 @@ describe("CoreRuntime server transport", () => {
     });
     await Promise.resolve();
 
-    expect(snapshots).toEqual([
-      ["first", "second"],
-      ["second updated", "third"],
+    expect(deltas).toEqual([
+      [
+        {
+          kind: 0,
+          id: "00000000-0000-0000-0000-000000000001",
+          index: 0,
+          row: {
+            id: "00000000-0000-0000-0000-000000000001",
+            values: [{ type: "Text", value: "first" }],
+          },
+        },
+        {
+          kind: 0,
+          id: "00000000-0000-0000-0000-000000000002",
+          index: 1,
+          row: {
+            id: "00000000-0000-0000-0000-000000000002",
+            values: [{ type: "Text", value: "second" }],
+          },
+        },
+      ],
+      [
+        {
+          kind: 2,
+          id: "00000000-0000-0000-0000-000000000002",
+          index: 0,
+          row: {
+            id: "00000000-0000-0000-0000-000000000002",
+            values: [{ type: "Text", value: "second updated" }],
+          },
+        },
+        {
+          kind: 0,
+          id: "00000000-0000-0000-0000-000000000003",
+          index: 1,
+          row: {
+            id: "00000000-0000-0000-0000-000000000003",
+            values: [{ type: "Text", value: "third" }],
+          },
+        },
+        {
+          kind: 1,
+          id: "00000000-0000-0000-0000-000000000001",
+          index: 0,
+        },
+      ],
     ]);
   });
 

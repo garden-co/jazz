@@ -622,8 +622,14 @@ enum WasmTxWrite {
 #[wasm_bindgen]
 pub struct WasmTx {
     db: WasmDbInner,
-    author: Option<AuthorId>,
+    kind: WasmTxKind,
     writes: Option<Vec<WasmTxWrite>>,
+}
+
+#[derive(Clone, Copy)]
+enum WasmTxKind {
+    Mergeable { author: Option<AuthorId> },
+    Exclusive,
 }
 
 #[wasm_bindgen]
@@ -964,7 +970,7 @@ impl WasmDb {
     pub fn mergeable_tx(&self) -> WasmTx {
         WasmTx {
             db: self.inner.clone(),
-            author: None,
+            kind: WasmTxKind::Mergeable { author: None },
             writes: Some(Vec::new()),
         }
     }
@@ -973,9 +979,20 @@ impl WasmDb {
     pub fn mergeable_tx_for_identity(&self, author: Vec<u8>) -> Result<WasmTx, JsValue> {
         Ok(WasmTx {
             db: self.inner.clone(),
-            author: Some(author_id_from_bytes(&author)?),
+            kind: WasmTxKind::Mergeable {
+                author: Some(author_id_from_bytes(&author)?),
+            },
             writes: Some(Vec::new()),
         })
+    }
+
+    #[wasm_bindgen(js_name = exclusiveTx)]
+    pub fn exclusive_tx(&self) -> WasmTx {
+        WasmTx {
+            db: self.inner.clone(),
+            kind: WasmTxKind::Exclusive,
+            writes: Some(Vec::new()),
+        }
     }
 }
 
@@ -1084,10 +1101,21 @@ impl WasmTx {
             .writes
             .take()
             .ok_or_else(|| JsValue::from_str("transaction is already closed"))?;
-        match &self.db {
-            WasmDbInner::Memory(db) => commit_wasm_tx_memory(db, self.author, writes),
+        match (&self.db, self.kind) {
+            (WasmDbInner::Memory(db), WasmTxKind::Mergeable { author }) => {
+                commit_wasm_tx_memory(db, author, writes)
+            }
+            (WasmDbInner::Memory(db), WasmTxKind::Exclusive) => {
+                commit_wasm_exclusive_tx_memory(db, writes)
+            }
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => commit_wasm_tx_browser(db, self.author, writes),
+            (WasmDbInner::Browser(db), WasmTxKind::Mergeable { author }) => {
+                commit_wasm_tx_browser(db, author, writes)
+            }
+            #[cfg(target_arch = "wasm32")]
+            (WasmDbInner::Browser(db), WasmTxKind::Exclusive) => {
+                commit_wasm_exclusive_tx_browser(db, writes)
+            }
         }
     }
 
@@ -1219,12 +1247,60 @@ where
     tx.commit().map_err(to_js_error)
 }
 
+fn commit_wasm_exclusive_tx<S>(db: &Db<S>, writes: Vec<WasmTxWrite>) -> Result<TxId, JsValue>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let tx = db.exclusive_tx().map_err(to_js_error)?;
+    for write in writes {
+        match write {
+            WasmTxWrite::Insert {
+                table,
+                row_id,
+                cells,
+            } => tx
+                .insert_with_id(&table, row_id, cells)
+                .map_err(to_js_error)?,
+            WasmTxWrite::Update {
+                table,
+                row_id,
+                patch,
+            } => tx.update(&table, row_id, patch).map_err(to_js_error)?,
+            WasmTxWrite::Delete { table, row_id } => {
+                tx.delete(&table, row_id).map_err(to_js_error)?
+            }
+            WasmTxWrite::Restore {
+                table,
+                row_id,
+                cells,
+            } => tx
+                .insert_with_id(&table, row_id, cells)
+                .map_err(to_js_error)?,
+        }
+    }
+    tx.commit().map_err(to_js_error)
+}
+
 fn commit_wasm_tx_memory(
     db: &Rc<Db<MemoryStorage>>,
     author: Option<AuthorId>,
     writes: Vec<WasmTxWrite>,
 ) -> Result<WasmWrite, JsValue> {
     let tx_id = commit_wasm_tx(db, author, writes)?;
+    wasm_tx_write(
+        tx_id,
+        Some(WasmWriteInner::MemoryTx {
+            db: Rc::clone(db),
+            tx_id,
+        }),
+    )
+}
+
+fn commit_wasm_exclusive_tx_memory(
+    db: &Rc<Db<MemoryStorage>>,
+    writes: Vec<WasmTxWrite>,
+) -> Result<WasmWrite, JsValue> {
+    let tx_id = commit_wasm_exclusive_tx(db, writes)?;
     wasm_tx_write(
         tx_id,
         Some(WasmWriteInner::MemoryTx {
@@ -1241,6 +1317,21 @@ fn commit_wasm_tx_browser(
     writes: Vec<WasmTxWrite>,
 ) -> Result<WasmWrite, JsValue> {
     let tx_id = commit_wasm_tx(db, author, writes)?;
+    wasm_tx_write(
+        tx_id,
+        Some(WasmWriteInner::BrowserTx {
+            db: Rc::clone(db),
+            tx_id,
+        }),
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn commit_wasm_exclusive_tx_browser(
+    db: &Rc<Db<OpfsStorage>>,
+    writes: Vec<WasmTxWrite>,
+) -> Result<WasmWrite, JsValue> {
+    let tx_id = commit_wasm_exclusive_tx(db, writes)?;
     wasm_tx_write(
         tx_id,
         Some(WasmWriteInner::BrowserTx {

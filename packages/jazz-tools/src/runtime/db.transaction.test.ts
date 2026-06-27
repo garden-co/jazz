@@ -41,7 +41,7 @@ function allTodos() {
 }
 
 describe("Db transactions", () => {
-  it.skip("direct-core exclusive callback transactions need an exclusive transaction API", async () => {
+  it("rolls back an exclusive callback transaction when commit is called inside the callback", async () => {
     await expect(
       db.exclusiveTransaction(async (tx) => {
         tx.insert(app.todos, { title: "Rejected callback transaction", done: false });
@@ -53,7 +53,7 @@ describe("Db transactions", () => {
     await expect(allTodos()).resolves.toEqual([]);
   });
 
-  it.skip("direct-core exclusive callback rollback needs an exclusive transaction API", async () => {
+  it("rolls back an exclusive callback transaction when rollback is called inside the callback", async () => {
     await expect(
       db.exclusiveTransaction(async (tx) => {
         tx.insert(app.todos, { title: "Rejected callback transaction", done: false });
@@ -105,7 +105,7 @@ describe("Db transactions", () => {
     );
   });
 
-  it.skip("direct-core exclusive transactions need commit lifecycle support", async () => {
+  it("rejects exclusive transaction operations after commit", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
     const transactionId = tx.transactionId();
@@ -123,7 +123,7 @@ describe("Db transactions", () => {
     );
   });
 
-  it.skip("direct-core exclusive transactions need rollback lifecycle support", async () => {
+  it("rejects exclusive transaction operations after rollback", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
     const transactionId = tx.transactionId();
@@ -141,7 +141,7 @@ describe("Db transactions", () => {
     );
   });
 
-  it.skip("direct-core exclusive transactions need schema binding support", () => {
+  it("rejects db exclusive transaction writes against a different client/schema", () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
 
