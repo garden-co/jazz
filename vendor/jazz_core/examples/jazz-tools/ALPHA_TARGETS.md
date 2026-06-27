@@ -129,6 +129,15 @@ websocket convergence. Delete/restore over websocket is unskipped: the writer
 can edge-accept the restore, and a fresh websocket client can query the
 restored row.
 
+The alpha docs React todo app now also has a direct-core browser websocket gate
+in `examples/docs/todo-client-localfirst-react/tests/browser/todo-app.test.tsx`.
+That gate runs the real `JazzProvider`, `useDb`, and `useAll` flow against the
+Rust local test server for both persistent OPFS clients and in-memory clients.
+It currently uses distinct local-first `secret` values for app identity but
+admin-backed websocket admission for server convergence. A local-first-only
+websocket convergence test with no `adminSecret` still times out and remains an
+auth/admission integration gap, not a row encoding or React subscription gap.
+
 ## Current gaps versus alpha
 
 - Browser persistent creation in the grafted `jazz-tools` package now uses a
