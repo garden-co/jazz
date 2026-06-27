@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type Runtime } from "./client.js";
+import { JazzClient, type Runtime, type TransactionalRuntime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
-function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
+function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
   const insertCalls: Array<
     [string, Record<string, unknown>, string | undefined, string | undefined]
   > = [];
@@ -11,7 +11,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const upsertCalls: Array<[string, string, Record<string, unknown>, string | undefined]> = [];
   const deleteCalls: Array<[string, string, string | undefined]> = [];
 
-  const runtimeBase: Runtime = {
+  const runtimeBase: TransactionalRuntime = {
     beginTransaction: (mode) => `transaction-${mode}`,
     insert: (
       table: string,
@@ -90,7 +90,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     commitTransaction: vi.fn(),
     rollbackTransaction: () => false,
   };
-  const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
+  const runtime: TransactionalRuntime = { ...runtimeBase, ...runtimeOverrides };
 
   const context: AppContext = {
     appId: "test-app",
