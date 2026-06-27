@@ -1,9 +1,4 @@
-import type {
-  DirectInsertResult,
-  DirectMutationResult,
-  MutationErrorEvent,
-  Runtime,
-} from "../client.js";
+import type { DirectInsertResult, DirectMutationResult, Runtime } from "../client.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
 import { encodeCellsForPatch, encodeCellsForRow, formatUuid, parseUuid } from "./runtime.js";
@@ -17,7 +12,6 @@ type WorkerResponse =
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: { name?: string; message?: string } }
   | { subscription: number; args: unknown[] }
-  | { event: "mutationError"; payload: MutationErrorEvent }
   | { event: "authFailure"; reason: string };
 
 type OpenRequest = {
@@ -130,7 +124,6 @@ export class PersistentBrowserOpfsProxyRuntime implements Runtime {
   private readonly subscriptions = new Map<number, Function>();
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
   private readonly subscriptionLocalHandles = new Map<number, number>();
-  private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
   private authFailureCallback: ((reason: string) => void) | undefined;
   private nextCallId = 1;
   private nextSubscriptionId = 1;
@@ -223,10 +216,6 @@ export class PersistentBrowserOpfsProxyRuntime implements Runtime {
     const transactionId = this.writeId();
     this.queueWrite(transactionId, "delete", table, objectId, writeContext);
     return { transactionId };
-  }
-
-  onMutationError(callback: (event: MutationErrorEvent) => void): void {
-    this.mutationErrorCallback = callback;
   }
 
   async waitForTransaction(transactionId: string, tier: string): Promise<void> {
@@ -384,11 +373,7 @@ export class PersistentBrowserOpfsProxyRuntime implements Runtime {
   private handleWorkerMessage(message: WorkerResponse): void {
     if ("event" in message) {
       try {
-        if (message.event === "mutationError") {
-          this.mutationErrorCallback?.(message.payload);
-        } else {
-          this.authFailureCallback?.(message.reason);
-        }
+        this.authFailureCallback?.(message.reason);
       } catch (error) {
         setTimeout(() => {
           throw error;

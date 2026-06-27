@@ -143,9 +143,6 @@ async function openRuntime(message: OpenMessage): Promise<void> {
   );
 
   runtime = CoreRuntime.fromDb(db as never, schema as never, node, author, 1, true);
-  runtime.onMutationError((payload) => {
-    workerScope.postMessage({ event: "mutationError", payload });
-  });
   runtime.onAuthFailure((reason: string) => {
     workerScope.postMessage({ event: "authFailure", reason });
   });
