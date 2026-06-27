@@ -81,8 +81,6 @@ export interface Runtime {
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  getSchema(): any;
-  getSchemaHash(): string;
   close?(): void | Promise<void>;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect(url: string, auth_json: string): void;
@@ -538,8 +536,6 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private shutdownPromise: Promise<void> | null = null;
-  private cachedRuntimeSchemaHash: string | null = null;
-  private cachedRuntimeSchema: WasmSchema | null = null;
 
   private resolveSessionFromContext(): Session | null {
     return resolveClientSessionStateSync({
@@ -1017,15 +1013,7 @@ export class JazzClient {
    * Get the current schema.
    */
   getSchema(): WasmSchema {
-    const schemaHash = this.runtime.getSchemaHash();
-    if (this.cachedRuntimeSchemaHash === schemaHash && this.cachedRuntimeSchema) {
-      return this.cachedRuntimeSchema;
-    }
-
-    const schema = normalizeRuntimeSchema(this.runtime.getSchema());
-    this.cachedRuntimeSchemaHash = schemaHash;
-    this.cachedRuntimeSchema = schema;
-    return schema;
+    return normalizeRuntimeSchema(this.context.schema);
   }
 
   /**

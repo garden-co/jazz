@@ -568,14 +568,6 @@ export class CoreRuntime implements Runtime {
     this.authFailureCallback = callback;
   }
 
-  getSchema(): unknown {
-    return this.schema;
-  }
-
-  getSchemaHash(): string {
-    return this.schemaHash;
-  }
-
   private finishInsert(
     table: string,
     rowId: Uint8Array,

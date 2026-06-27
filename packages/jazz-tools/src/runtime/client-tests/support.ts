@@ -118,8 +118,6 @@ export function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    getSchema: () => ({}),
-    getSchemaHash: () => "schema-hash",
   };
 
   const context: AppContext = {
@@ -169,8 +167,6 @@ export function makeClientWithContext(context: AppContext): JazzClient {
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    getSchema: () => ({}),
-    getSchemaHash: () => "schema-hash",
   };
 
   const JazzClientCtor = JazzClient as unknown as {

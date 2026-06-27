@@ -91,8 +91,6 @@ function makeFakeRuntime() {
     commitTransaction: vi.fn<(transaction_id: string) => void>(),
     waitForTransaction: vi.fn<Runtime["waitForTransaction"]>(async () => undefined),
     rollbackTransaction: vi.fn<Runtime["rollbackTransaction"]>(() => false),
-    getSchema: vi.fn().mockReturnValue({}),
-    getSchemaHash: vi.fn().mockReturnValue("hash"),
     close: vi.fn(),
   } satisfies Runtime;
 
@@ -264,52 +262,21 @@ describe("resolveDefaultDurabilityTier", () => {
   });
 });
 
-describe("JazzClient runtime schema caching", () => {
-  it("reuses the normalized runtime schema while the schema hash is unchanged", () => {
+describe("JazzClient schema access", () => {
+  it("returns the schema from the client context", () => {
     const schema: WasmSchema = {
       todos: {
         columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
       },
     };
     const runtime = makeFakeRuntime();
-    runtime.getSchema.mockReturnValue(schema);
-    runtime.getSchemaHash.mockReturnValue("schema-hash-1");
     const client = JazzClient.connectWithRuntime(runtime as any, {
-      appId: "schema-cache-app",
+      appId: "schema-context-app",
       schema,
     });
 
     expect(client.getSchema()).toBe(schema);
     expect(client.getSchema()).toBe(schema);
-
-    expect(runtime.getSchema).toHaveBeenCalledTimes(1);
-    expect(runtime.getSchemaHash).toHaveBeenCalledTimes(2);
-  });
-
-  it("refreshes the cached schema when the runtime schema hash changes", () => {
-    const firstSchema: WasmSchema = {
-      todos: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-      },
-    };
-    const secondSchema: WasmSchema = {
-      todos: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-        policies: {},
-      },
-    };
-    const runtime = makeFakeRuntime();
-    runtime.getSchema.mockReturnValueOnce(firstSchema).mockReturnValueOnce(secondSchema);
-    runtime.getSchemaHash.mockReturnValueOnce("schema-hash-1").mockReturnValueOnce("schema-hash-2");
-    const client = JazzClient.connectWithRuntime(runtime as any, {
-      appId: "schema-cache-refresh-app",
-      schema: firstSchema,
-    });
-
-    expect(client.getSchema()).toBe(firstSchema);
-    expect(client.getSchema()).toBe(secondSchema);
-
-    expect(runtime.getSchema).toHaveBeenCalledTimes(2);
   });
 });
 

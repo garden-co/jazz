@@ -197,14 +197,6 @@ export class PersistentBrowserRuntime implements Runtime {
     if (remoteHandle) void remoteHandle.then((remote) => this.call("unsubscribe", remote));
   }
 
-  getSchema(): unknown {
-    return this.schema;
-  }
-
-  getSchemaHash(): string {
-    return serializeRuntimeSchema(this.schema);
-  }
-
   async close(): Promise<void> {
     if (this.closed) return;
     try {
