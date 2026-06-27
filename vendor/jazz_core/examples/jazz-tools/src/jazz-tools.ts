@@ -19,7 +19,7 @@ import {
   decodeBase64UrlToUtf8,
   LOCAL_FIRST_JWT_ISSUER,
   type LocalFirstJwtOptions,
-} from "./local-first-jwt-core.js";
+} from "./local-first-jwt-shared.js";
 import { createLocalFirstJwtAsync } from "./local-first-jwt-webcrypto.js";
 
 export type ColumnType =

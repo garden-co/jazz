@@ -2,71 +2,71 @@
 
 use std::collections::HashMap;
 use std::ops::Deref;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use std::rc::Rc;
 use std::sync::Arc;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(feature = "core-client", feature = "rocksdb"))]
+#[cfg(any(feature = "client-engine", feature = "rocksdb"))]
 use std::time::Duration;
 
 #[cfg(feature = "test-utils")]
 use crate::query_manager::types::RowPolicyMode;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use crate::schema_api::OrderedRowDelta;
-#[cfg(any(feature = "core-client", feature = "test-utils"))]
+#[cfg(any(feature = "client-engine", feature = "test-utils"))]
 use crate::schema_api::Schema;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use crate::schema_api::TableName;
 use crate::schema_api::{Query, Session, Value, WriteContext};
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use crate::server::schema_convert::convert_public_schema;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use crate::server::websocket_client::WebSocketTransport;
 #[cfg(feature = "test-utils")]
 use crate::sync::ClientId;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use crate::sync::DurabilityTier;
 use crate::transaction::BatchId;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use crate::transport_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
     LocalUpdates as CoreLocalUpdates, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, TickScheduler, TickUrgency,
     Transport as CoreTransport, WireTransportAdapter,
 };
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use jazz::groove::records::Value as CoreValue;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
-#[cfg(all(feature = "core-client", feature = "rocksdb"))]
+#[cfg(all(feature = "client-engine", feature = "rocksdb"))]
 use jazz::groove::storage::RocksDbStorage as CoreRocksDbStorage;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use jazz::tx::{
     DeletionEvent as CoreDeletionEvent, DurabilityTier as CoreDurabilityTier, Fate as CoreFate,
     TxId as CoreTxId,
 };
 use serde::Deserialize;
 use tokio::sync::RwLock;
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-#[cfg(all(feature = "core-client", feature = "rocksdb"))]
+#[cfg(all(feature = "client-engine", feature = "rocksdb"))]
 use crate::ClientStorage;
 use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
-#[cfg(all(feature = "core-client", feature = "rocksdb"))]
+#[cfg(all(feature = "client-engine", feature = "rocksdb"))]
 type CoreRocksDb = CoreDb<CoreRocksDbStorage>;
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 enum StorageBundle {
     Memory(CoreMemoryStorage),
     #[cfg(feature = "rocksdb")]
@@ -89,10 +89,10 @@ pub struct JazzClient {
     /// Write metadata applied to mutations issued through this client.
     write_context: Option<WriteContext>,
     /// Core engine backing the public client facade.
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     engine: Rc<ClientEngine>,
     /// Public schema retained for the current public API surface.
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     public_schema: Schema,
     /// Whether a server URL was provided at construction time.
     has_server: bool,
@@ -107,9 +107,9 @@ impl Clone for JazzClient {
         Self {
             default_session: self.default_session.clone(),
             write_context: self.write_context.clone(),
-            #[cfg(feature = "core-client")]
+            #[cfg(feature = "client-engine")]
             engine: self.engine.clone(),
-            #[cfg(feature = "core-client")]
+            #[cfg(feature = "client-engine")]
             public_schema: self.public_schema.clone(),
             has_server: self.has_server,
             subscriptions: Arc::clone(&self.subscriptions),
@@ -118,12 +118,12 @@ impl Clone for JazzClient {
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 struct ClientEngine {
     inner: Rc<std::cell::RefCell<ClientEngineInner>>,
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 struct ClientEngineInner {
     db: Backend,
     write_map: HashMap<BatchId, CoreTxId>,
@@ -131,14 +131,14 @@ struct ClientEngineInner {
     transactions: HashMap<BatchId, DirectTransactionState>,
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 enum Backend {
     Memory(Rc<CoreMemoryDb>),
     #[cfg(feature = "rocksdb")]
     RocksDb(Rc<CoreRocksDb>),
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 impl Clone for Backend {
     fn clone(&self) -> Self {
         match self {
@@ -149,7 +149,7 @@ impl Clone for Backend {
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 impl Backend {
     async fn open(
         schema: jazz::schema::JazzSchema,
@@ -342,7 +342,7 @@ impl Backend {
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 fn commit_core_writes<S>(
     db: &CoreDb<S>,
     writes: Vec<DirectTransactionWrite>,
@@ -368,12 +368,12 @@ where
     Ok((tx_id, touched_rows))
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 struct DirectTransactionState {
     writes: Vec<DirectTransactionWrite>,
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 struct DirectTransactionWrite {
     table: String,
     row_id: ObjectId,
@@ -382,20 +382,20 @@ struct DirectTransactionWrite {
 }
 
 #[derive(Default)]
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 struct TickSchedulerImpl {
     state: Arc<TickState>,
 }
 
 #[derive(Default)]
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 struct TickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
     notify: tokio::sync::Notify,
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 impl TickSchedulerImpl {
     fn take(&self) -> Option<TickUrgency> {
         if self.state.immediate.swap(false, Ordering::AcqRel) {
@@ -421,14 +421,14 @@ impl TickSchedulerImpl {
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 impl TickScheduler for TickSchedulerImpl {
     fn schedule_tick(&self, urgency: TickUrgency) {
         self.wake(urgency);
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 impl ClientEngine {
     async fn start(
         schema: jazz::schema::JazzSchema,
@@ -566,9 +566,7 @@ impl ClientEngine {
     fn update(&self, row_id: ObjectId, cells: jazz::db::RowCells) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write(
-                "core update requires a row created or observed by this client".to_string(),
-            )
+            JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
         let write = inner
             .db
@@ -588,9 +586,7 @@ impl ClientEngine {
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write(
-                "core update requires a row created or observed by this client".to_string(),
-            )
+            JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
         let tx = inner
             .transactions
@@ -608,9 +604,7 @@ impl ClientEngine {
     fn delete(&self, row_id: ObjectId) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write(
-                "core delete requires a row created or observed by this client".to_string(),
-            )
+            JazzError::Write("delete requires a row created or observed by this client".to_string())
         })?;
         let write = inner
             .db
@@ -625,9 +619,7 @@ impl ClientEngine {
     fn stage_delete(&self, batch_id: BatchId, row_id: ObjectId) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write(
-                "core delete requires a row created or observed by this client".to_string(),
-            )
+            JazzError::Write("delete requires a row created or observed by this client".to_string())
         })?;
         let tx = inner
             .transactions
@@ -663,7 +655,7 @@ impl ClientEngine {
             .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
         if state.writes.is_empty() {
             return Err(JazzError::Write(
-                "core transaction cannot commit without writes".to_string(),
+                "transaction cannot commit without writes".to_string(),
             ));
         }
         let (tx_id, touched_rows) = inner
@@ -709,7 +701,7 @@ impl ClientEngine {
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 impl ClientEngineInner {
     async fn open(
         schema: jazz::schema::JazzSchema,
@@ -802,7 +794,7 @@ impl ClientEngineInner {
             let event = tokio::time::timeout_at(deadline, stream.next_event())
                 .await
                 .map_err(|_| {
-                    JazzError::Query("timed out waiting for core query coverage".to_string())
+                    JazzError::Query("timed out waiting for query coverage".to_string())
                 })?;
             match event {
                 Some(CoreSubscriptionEvent::Opened { settled, .. })
@@ -814,7 +806,7 @@ impl ClientEngineInner {
                 }
                 Some(CoreSubscriptionEvent::Closed) | None => {
                     return Err(JazzError::Query(
-                        "core query coverage subscription closed before settling".to_string(),
+                        "query coverage subscription closed before settling".to_string(),
                     ));
                 }
                 Some(_) => {}
@@ -877,13 +869,13 @@ impl ClientEngineInner {
                     drop(borrowed);
                     if tokio::time::Instant::now() >= deadline {
                         return Err(JazzError::Sync(format!(
-                            "timed out waiting for core batch {batch_id}"
+                            "timed out waiting for batch {batch_id}"
                         )));
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 } else {
-                    return Err(JazzError::Sync(format!("unknown core batch {batch_id}")));
+                    return Err(JazzError::Sync(format!("unknown batch {batch_id}")));
                 }
             };
             let state = inner
@@ -901,7 +893,7 @@ impl ClientEngineInner {
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(JazzError::Sync(format!(
-                    "timed out waiting for core batch to reach {tier:?}"
+                    "timed out waiting for batch to reach {tier:?}"
                 )));
             }
             let state = inner
@@ -923,7 +915,7 @@ impl ClientEngineInner {
                 .is_err()
             {
                 return Err(JazzError::Sync(format!(
-                    "timed out waiting for core batch to reach {tier:?}"
+                    "timed out waiting for batch to reach {tier:?}"
                 )));
             }
         }
@@ -1019,7 +1011,7 @@ fn default_session_from_context(context: &AppContext) -> Option<Session> {
         .and_then(session_from_unverified_jwt)
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 fn core_identity(context: &AppContext, default_session: Option<&Session>) -> CoreDbIdentity {
     let node_uuid = context
         .client_id
@@ -1034,7 +1026,7 @@ fn core_identity(context: &AppContext, default_session: Option<&Session>) -> Cor
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 fn core_storage(schema: &jazz::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
     let column_families = schema.column_families();
     let refs = column_families
@@ -1061,7 +1053,7 @@ fn core_storage(schema: &jazz::schema::JazzSchema, context: &AppContext) -> Resu
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 fn public_to_core_value(value: Value) -> Result<CoreValue> {
     match value {
         Value::Boolean(value) => Ok(CoreValue::Bool(value)),
@@ -1081,22 +1073,22 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
             .collect::<Result<Vec<_>>>()
             .map(CoreValue::Array),
         other => Err(JazzError::Write(format!(
-            "core client does not support public value {other:?}"
+            "client does not support public value {other:?}"
         ))),
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 fn encode_signed_i32_for_core(value: i32) -> u32 {
     u32::from_ne_bytes(value.to_ne_bytes()) ^ 0x8000_0000
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 fn decode_signed_i32_from_core(value: u32) -> i32 {
     i32::from_ne_bytes((value ^ 0x8000_0000).to_ne_bytes())
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 fn core_to_public_value(value: CoreValue) -> Result<Value> {
     match value {
         CoreValue::Bool(value) => Ok(Value::Boolean(value)),
@@ -1114,19 +1106,19 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
         other => Err(JazzError::Query(format!(
-            "core client does not support core value {other:?}"
+            "client does not support engine value {other:?}"
         ))),
     }
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 fn core_batch_id(tx_id: CoreTxId) -> BatchId {
     let mut bytes = *tx_id.node.0.as_bytes();
     bytes[..8].copy_from_slice(&tx_id.time.0.to_be_bytes());
     BatchId(bytes)
 }
 
-#[cfg(feature = "core-client")]
+#[cfg(feature = "client-engine")]
 fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
@@ -1135,7 +1127,7 @@ fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
 }
 
 impl JazzClient {
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
         let state = db
             .write_state(tx_id)
@@ -1146,7 +1138,7 @@ impl JazzClient {
         Ok(())
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     fn core_read_opts(durability_tier: Option<DurabilityTier>) -> CoreReadOpts {
         CoreReadOpts {
             tier: durability_tier
@@ -1158,7 +1150,7 @@ impl JazzClient {
         }
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     fn core_query(&self, query: &Query) -> Result<jazz::query::Query> {
         if query.disjuncts.len() != 1
             || !query.disjuncts[0].conditions.is_empty()
@@ -1172,7 +1164,7 @@ impl JazzClient {
             || query.result_element_index.is_some()
         {
             return Err(JazzError::Query(
-                "core JazzClient currently supports simple table queries only".to_string(),
+                "JazzClient currently supports simple table queries only".to_string(),
             ));
         }
         let mut core_query = jazz::query::Query::from(query.table.as_str());
@@ -1182,7 +1174,7 @@ impl JazzClient {
         Ok(core_query)
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     fn core_rows_to_public(
         &self,
         query: &Query,
@@ -1215,9 +1207,7 @@ impl JazzClient {
                                 ))
                             })?;
                         row.cell_at(position)
-                            .ok_or_else(|| {
-                                JazzError::Query(format!("core row missing column {column}"))
-                            })
+                            .ok_or_else(|| JazzError::Query(format!("row missing column {column}")))
                             .and_then(core_to_public_value)
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -1227,7 +1217,7 @@ impl JazzClient {
         Ok(rows)
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     fn core_cells(values: HashMap<String, Value>) -> Result<jazz::db::RowCells> {
         values
             .into_iter()
@@ -1235,7 +1225,7 @@ impl JazzClient {
             .collect()
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     fn core_ordered_values(
         &self,
         table: &str,
@@ -1260,7 +1250,7 @@ impl JazzClient {
             .collect()
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     fn apply_core_transaction_overlay(
         &self,
         query: &Query,
@@ -1329,7 +1319,7 @@ impl JazzClient {
         let default_session = default_session_from_context(&context);
         let has_server = !context.server_url.is_empty();
 
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             let schema_convert = convert_public_schema(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
@@ -1380,7 +1370,7 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             let _handle = SubscriptionHandle(
                 self.next_handle
@@ -1408,7 +1398,7 @@ impl JazzClient {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             let opts = Self::core_read_opts(durability_tier);
             let rows = self
@@ -1444,7 +1434,7 @@ impl JazzClient {
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             let row_values = self.core_ordered_values(table, &values)?;
             let cells = Self::core_cells(values)?;
@@ -1473,7 +1463,7 @@ impl JazzClient {
         object_id: Uuid,
         values: HashMap<String, Value>,
     ) -> Result<BatchId> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             let cells = Self::core_cells(values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
@@ -1489,7 +1479,7 @@ impl JazzClient {
 
     /// Update a row.
     pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             let cells = Self::core_cells(updates.into_iter().collect())?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
@@ -1504,7 +1494,7 @@ impl JazzClient {
 
     /// Delete a row.
     pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.engine.stage_delete(batch_id, object_id)?;
@@ -1522,7 +1512,7 @@ impl JazzClient {
     /// not visible to ordinary reads until the transaction is committed and
     /// accepted by the authority.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             let batch_id = self.engine.begin_transaction()?;
             let client = self.with_write_context(WriteContext::default().with_batch_id(batch_id));
@@ -1532,7 +1522,7 @@ impl JazzClient {
 
     /// Commit an open transaction by batch id.
     pub fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             self.engine.commit_transaction(batch_id)
         }
@@ -1542,14 +1532,14 @@ impl JazzClient {
     ///
     /// Returns whether a local batch record existed for the transaction.
     pub fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             self.engine.rollback_transaction(batch_id)
         }
     }
 
     pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             self.engine.wait_for_batch(batch_id, tier).await
         }
@@ -1564,7 +1554,7 @@ impl JazzClient {
 
     /// Get the current schema.
     pub fn schema(&self) -> Result<Schema> {
-        #[cfg(feature = "core-client")]
+        #[cfg(feature = "client-engine")]
         {
             Ok(self.public_schema.clone())
         }
@@ -1580,9 +1570,9 @@ impl JazzClient {
         JazzClient {
             default_session: self.default_session.clone(),
             write_context: Some(write_context),
-            #[cfg(feature = "core-client")]
+            #[cfg(feature = "client-engine")]
             engine: self.engine.clone(),
-            #[cfg(feature = "core-client")]
+            #[cfg(feature = "client-engine")]
             public_schema: self.public_schema.clone(),
             has_server: self.has_server,
             subscriptions: Arc::clone(&self.subscriptions),
@@ -1607,7 +1597,7 @@ impl JazzClient {
         None
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     pub fn local_driver_active(&self) -> bool {
         true
     }
@@ -1619,7 +1609,7 @@ impl JazzClient {
             .expect("connect local JazzClient")
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     pub async fn connect_with_local_driver(context: AppContext) -> Result<Self> {
         Self::connect_inner(context).await
     }
@@ -1706,7 +1696,7 @@ mod tests {
         format!("{header}.{payload}.sig")
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     #[test]
     fn core_integer_bridge_preserves_signed_i32_bits() {
         let core_value =
@@ -1755,7 +1745,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "core-client")]
+    #[cfg(feature = "client-engine")]
     #[tokio::test]
     async fn core_engine_transaction_stages_and_commits() {
         let public_schema = declared_todo_schema();
@@ -1768,7 +1758,7 @@ mod tests {
                 public_schema.clone(),
             ),
         )
-        .expect("open core storage");
+        .expect("open engine storage");
         let engine = ClientEngine::start(
             schema_convert.clone(),
             storage,
@@ -1781,7 +1771,7 @@ mod tests {
             None,
         )
         .await
-        .expect("open core engine");
+        .expect("open client engine");
 
         let batch_id = engine.begin_transaction().expect("begin transaction");
         let row_id = engine
@@ -1835,7 +1825,7 @@ mod tests {
 
         let client = JazzClient::connect(context.clone())
             .await
-            .expect("connect offline persistent core client");
+            .expect("connect offline persistent client");
         let (row_id, _values, batch_id) = client
             .insert(
                 "todos",
@@ -1850,7 +1840,7 @@ mod tests {
 
         let restarted = JazzClient::connect(context)
             .await
-            .expect("reconnect offline persistent core client");
+            .expect("reconnect offline persistent client");
         let rows = restarted
             .query(Query::new("todos"), Some(DurabilityTier::Local))
             .await
@@ -1879,7 +1869,7 @@ mod tests {
 
         let client = JazzClient::connect(context)
             .await
-            .expect("connect offline memory core client");
+            .expect("connect offline memory client");
         let (_row_id, _values, batch_id) = client
             .insert(
                 "todos",
@@ -1894,7 +1884,7 @@ mod tests {
 
         assert!(
             !data_dir.path().join("jazz-core.rocksdb").exists(),
-            "memory core storage should not create a RocksDB data directory"
+            "memory storage should not create a RocksDB data directory"
         );
     }
 }

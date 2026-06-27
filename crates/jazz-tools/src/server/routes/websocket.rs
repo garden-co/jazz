@@ -400,7 +400,7 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|addr| addr.is_loopback())
 }
 
-async fn read_core_auth_prelude(
+async fn read_ws_auth_prelude(
     socket: &mut WebSocket,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
@@ -424,7 +424,7 @@ async fn read_core_auth_prelude(
     .unwrap_or_default()
 }
 
-async fn read_core_wire_frame_batch(
+async fn read_ws_frame_batch(
     socket: &mut WebSocket,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
@@ -458,8 +458,7 @@ async fn handle_ws_connection(
         return;
     };
 
-    let Some(auth_bytes) = read_core_auth_prelude(&mut socket, &mut shutdown_rx, &state).await
-    else {
+    let Some(auth_bytes) = read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state).await else {
         return;
     };
     let prelude = match serde_json::from_slice::<WebSocketPrelude>(&auth_bytes)
@@ -467,7 +466,7 @@ async fn handle_ws_connection(
     {
         Ok(prelude) => prelude,
         Err(error) => {
-            send_core_wire_error(
+            send_ws_error(
                 &mut socket,
                 WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
             )
@@ -479,7 +478,7 @@ async fn handle_ws_connection(
     let admission = match ws_admission(prelude, &request_headers, &state).await {
         Ok(admission) => admission,
         Err(error) => {
-            send_core_wire_error(
+            send_ws_error(
                 &mut socket,
                 WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
             )
@@ -493,13 +492,12 @@ async fn handle_ws_connection(
         identity: admission.identity,
     });
 
-    let Some(first) = read_core_wire_frame_batch(&mut socket, &mut shutdown_rx, &state).await
-    else {
+    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
         return;
     };
 
-    let Some(WireFrame::Hello(remote_hello)) = decode_single_core_frame(&first).ok() else {
-        send_core_wire_error(
+    let Some(WireFrame::Hello(remote_hello)) = decode_single_ws_frame(&first).ok() else {
+        send_ws_error(
             &mut socket,
             WireError::new(
                 WireErrorCode::MalformedFrame,
@@ -520,7 +518,7 @@ async fn handle_ws_connection(
     ) {
         Ok(negotiated) if negotiated.features & WS_REQUIRED_FEATURES != 0 => negotiated,
         Ok(_) => {
-            send_core_wire_error(
+            send_ws_error(
                 &mut socket,
                 WireError::new(
                     WireErrorCode::UnsupportedFeature,
@@ -533,14 +531,14 @@ async fn handle_ws_connection(
             return;
         }
         Err(error) => {
-            send_core_wire_error(&mut socket, error).await;
+            send_ws_error(&mut socket, error).await;
             let _ = socket.close().await;
             return;
         }
     };
 
     let Some(local_engine) = state.local_engine() else {
-        send_core_wire_error(
+        send_ws_error(
             &mut socket,
             WireError::new(
                 WireErrorCode::Internal,
@@ -558,7 +556,7 @@ async fn handle_ws_connection(
     {
         Ok(session) => session,
         Err(error) => {
-            send_core_wire_error(
+            send_ws_error(
                 &mut socket,
                 WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
             )
@@ -572,7 +570,7 @@ async fn handle_ws_connection(
     let server_hello = match encode_frame(&server_hello) {
         Ok(frame) => frame,
         Err(error) => {
-            send_core_wire_error(
+            send_ws_error(
                 &mut socket,
                 WireError::new(
                     WireErrorCode::Internal,
@@ -585,7 +583,7 @@ async fn handle_ws_connection(
             return;
         }
     };
-    if send_core_encoded_frames(&mut socket, &[server_hello])
+    if send_ws_encoded_frames(&mut socket, &[server_hello])
         .await
         .is_err()
     {
@@ -599,7 +597,7 @@ async fn handle_ws_connection(
         "websocket negotiated"
     );
 
-    let mut core_activity_rx = local_engine.subscribe_activity();
+    let mut activity_rx = local_engine.subscribe_activity();
     if drain_ws_outbound(&mut socket, &local_engine, session)
         .await
         .is_err()
@@ -613,7 +611,7 @@ async fn handle_ws_connection(
         tokio::select! {
             eviction = admission_registration.evict_rx.recv() => {
                 if eviction.is_some() {
-                    send_core_wire_error(
+                    send_ws_error(
                         &mut socket,
                         WireError::new(
                             WireErrorCode::Backpressure,
@@ -634,10 +632,10 @@ async fn handle_ws_connection(
             }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
-                    let frames = match decode_core_encoded_frame_batch(&bytes) {
+                    let frames = match decode_ws_encoded_frame_batch(&bytes) {
                         Ok(frames) => frames,
                         Err(_) => {
-                            send_core_wire_error(
+                            send_ws_error(
                                 &mut socket,
                                 WireError::new(
                                     WireErrorCode::MalformedFrame,
@@ -652,7 +650,7 @@ async fn handle_ws_connection(
                     let outbound = match local_engine.receive_tick_take(session, frames).await {
                         Ok(frames) => frames,
                         Err(error) => {
-                            send_core_wire_error(
+                            send_ws_error(
                                 &mut socket,
                                 WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
                             )
@@ -660,7 +658,7 @@ async fn handle_ws_connection(
                             break;
                         }
                     };
-                    if !outbound.is_empty() && send_core_encoded_frames(&mut socket, &outbound).await.is_err() {
+                    if !outbound.is_empty() && send_ws_encoded_frames(&mut socket, &outbound).await.is_err() {
                         break;
                     }
                 }
@@ -672,7 +670,7 @@ async fn handle_ws_connection(
                 }
                 _ => {}
             },
-            changed = core_activity_rx.changed() => {
+            changed = activity_rx.changed() => {
                 if changed.is_err() {
                     break;
                 }
@@ -696,13 +694,13 @@ async fn drain_ws_outbound(
     if outbound.is_empty() {
         return Ok(());
     }
-    send_core_encoded_frames(socket, &outbound)
+    send_ws_encoded_frames(socket, &outbound)
         .await
         .map_err(|_| ())
 }
 
-fn decode_single_core_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
-    let mut frames = decode_core_frame_batch(bytes)?;
+fn decode_single_ws_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+    let mut frames = decode_ws_frame_batch(bytes)?;
     if frames.len() == 1 {
         Ok(frames.remove(0))
     } else {
@@ -710,19 +708,19 @@ fn decode_single_core_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> 
     }
 }
 
-fn decode_core_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
-    let encoded_frames = decode_core_encoded_frame_batch(bytes)?;
+fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
+    let encoded_frames = decode_ws_encoded_frame_batch(bytes)?;
     encoded_frames
         .iter()
         .map(|frame| jazz::wire::decode_frame(frame))
         .collect()
 }
 
-fn decode_core_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
     postcard::from_bytes::<Vec<Vec<u8>>>(bytes)
 }
 
-async fn send_core_encoded_frames(
+async fn send_ws_encoded_frames(
     socket: &mut WebSocket,
     frames: &[Vec<u8>],
 ) -> Result<(), axum::Error> {
@@ -730,14 +728,11 @@ async fn send_core_encoded_frames(
     socket.send(Message::Binary(batch)).await
 }
 
-async fn send_core_wire_error(socket: &mut WebSocket, error: WireError) {
-    let _ = send_core_wire_frames(socket, &[WireFrame::Error(error)]).await;
+async fn send_ws_error(socket: &mut WebSocket, error: WireError) {
+    let _ = send_ws_frames(socket, &[WireFrame::Error(error)]).await;
 }
 
-async fn send_core_wire_frames(
-    socket: &mut WebSocket,
-    frames: &[WireFrame],
-) -> Result<(), axum::Error> {
+async fn send_ws_frames(socket: &mut WebSocket, frames: &[WireFrame]) -> Result<(), axum::Error> {
     let encoded = frames
         .iter()
         .map(encode_frame)
@@ -798,7 +793,7 @@ mod tests {
     const WS_PUMP_DEADLINE: Duration = Duration::from_secs(5);
 
     #[test]
-    fn core_frame_batch_round_trips_wire_frames() {
+    fn ws_frame_batch_round_trips_wire_frames() {
         let frames = vec![WireFrame::Hello(WireHello::current(
             WirePeerRole::Client,
             WS_SUPPORTED_FEATURES,
@@ -810,7 +805,7 @@ mod tests {
             .unwrap();
         let batch = postcard::to_allocvec(&encoded).unwrap();
 
-        assert_eq!(decode_core_frame_batch(&batch).unwrap(), frames);
+        assert_eq!(decode_ws_frame_batch(&batch).unwrap(), frames);
     }
 
     #[test]
@@ -1062,7 +1057,7 @@ mod tests {
     // websocket client helper negotiates the real /apps/<APP_ID>/ws route
     // without reintroducing the legacy SyncPayload websocket handler.
     #[tokio::test]
-    async fn core_websocket_client_helper_negotiates_route_hello() {
+    async fn websocket_client_helper_negotiates_route_hello() {
         let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
 
@@ -1518,7 +1513,7 @@ mod tests {
     // through the public JazzClient API yet, so this observes the direct
     // admission registry as the user-visible socket closes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn same_core_peer_identity_connections_are_bounded_by_eviction() {
+    async fn same_peer_identity_connections_are_bounded_by_eviction() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorId::from_bytes([0x42; 16]);
@@ -1580,7 +1575,7 @@ mod tests {
     // observable through the public JazzClient API yet, so this tests the
     // protocol boundary and its admission registry.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn core_peer_identity_storm_is_bounded_without_rejecting_newest_connections() {
+    async fn peer_identity_storm_is_bounded_without_rejecting_newest_connections() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorId::from_bytes([0x24; 16]);
@@ -1615,7 +1610,7 @@ mod tests {
     // Internal route-boundary test: identity isolation is enforced before the
     // local engine has a higher-level public client surface to observe.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn core_peer_identity_eviction_does_not_affect_other_identities() {
+    async fn peer_identity_eviction_does_not_affect_other_identities() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let noisy_identity = AuthorId::from_bytes([0x31; 16]);
@@ -1666,7 +1661,7 @@ mod tests {
     // Internal route-boundary test: repeated reconnects should keep applying
     // the cap, not only the first overflow.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn repeated_core_peer_identity_evictions_keep_live_admissions_at_cap() {
+    async fn repeated_peer_identity_evictions_keep_live_admissions_at_cap() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorId::from_bytes([0x33; 16]);

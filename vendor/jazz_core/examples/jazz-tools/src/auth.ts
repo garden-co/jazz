@@ -5,6 +5,6 @@ export {
   encodeBase64Url,
   encodeBase64UrlUtf8,
   type LocalFirstJwtOptions,
-} from "./local-first-jwt-core.js";
+} from "./local-first-jwt-shared.js";
 export { createLocalFirstJwt, localFirstJwtPublicKeyPem } from "./local-first-jwt-node.js";
 export { createLocalFirstJwtAsync } from "./local-first-jwt-webcrypto.js";
