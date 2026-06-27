@@ -353,11 +353,15 @@ function writeGrooveValue(writer: PostcardWriter, value: DirectQueryLiteral): vo
     return;
   }
   if (value.type === "Integer") {
-    if (!Number.isSafeInteger(value.value) || value.value < 0 || value.value > 0x7fffffff) {
-      throw new Error("Integer value must be a non-negative signed 32-bit integer");
+    if (
+      !Number.isSafeInteger(value.value) ||
+      value.value < -0x80000000 ||
+      value.value > 0x7fffffff
+    ) {
+      throw new Error("Integer value must be a signed 32-bit integer");
     }
     writer.u64(2); // groove::records::Value::U32
-    writer.u64(value.value);
+    writer.u64((value.value ^ 0x80000000) >>> 0);
     return;
   }
   if (value.type === "Uuid") {

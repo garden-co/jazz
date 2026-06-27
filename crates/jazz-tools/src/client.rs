@@ -1078,12 +1078,7 @@ fn public_to_direct_core_value(value: Value) -> Result<CoreValue> {
     match value {
         Value::Boolean(value) => Ok(CoreValue::Bool(value)),
         Value::Text(value) => Ok(CoreValue::String(value)),
-        Value::Integer(value) => u32::try_from(value).map(CoreValue::U32).map_err(|_| {
-            JazzError::Write(
-                "direct core INTEGER values must be non-negative signed 32-bit integers"
-                    .to_string(),
-            )
-        }),
+        Value::Integer(value) => Ok(CoreValue::U32(encode_signed_i32_for_direct_core(value))),
         Value::BigInt(value) => u64::try_from(value).map(CoreValue::U64).map_err(|_| {
             JazzError::Write("negative BIGINT values are not supported by direct core".to_string())
         }),
@@ -1104,13 +1099,21 @@ fn public_to_direct_core_value(value: Value) -> Result<CoreValue> {
 }
 
 #[cfg(feature = "direct-core-client")]
+fn encode_signed_i32_for_direct_core(value: i32) -> u32 {
+    u32::from_ne_bytes(value.to_ne_bytes()) ^ 0x8000_0000
+}
+
+#[cfg(feature = "direct-core-client")]
+fn decode_signed_i32_from_direct_core(value: u32) -> i32 {
+    i32::from_ne_bytes((value ^ 0x8000_0000).to_ne_bytes())
+}
+
+#[cfg(feature = "direct-core-client")]
 fn direct_core_to_public_value(value: CoreValue) -> Result<Value> {
     match value {
         CoreValue::Bool(value) => Ok(Value::Boolean(value)),
         CoreValue::String(value) => Ok(Value::Text(value)),
-        CoreValue::U32(value) => i32::try_from(value).map(Value::Integer).map_err(|_| {
-            JazzError::Query("direct core INTEGER value exceeded signed 32-bit range".to_string())
-        }),
+        CoreValue::U32(value) => Ok(Value::Integer(decode_signed_i32_from_direct_core(value))),
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
         CoreValue::Uuid(value) => Ok(Value::Uuid(ObjectId::from_uuid(value))),
@@ -1717,6 +1720,23 @@ mod tests {
             .expect("serialize jwt payload"),
         );
         format!("{header}.{payload}.sig")
+    }
+
+    #[cfg(feature = "direct-core-client")]
+    #[test]
+    fn direct_core_integer_bridge_preserves_signed_i32_bits() {
+        let core_value = public_to_direct_core_value(Value::Integer(-1))
+            .expect("negative i32 should encode for direct core");
+
+        assert_eq!(core_value, CoreValue::U32(0x7fff_ffff));
+        assert_eq!(
+            direct_core_to_public_value(core_value).expect("decode signed i32"),
+            Value::Integer(-1)
+        );
+        assert_eq!(
+            public_to_direct_core_value(Value::Integer(0)).expect("encode zero"),
+            CoreValue::U32(0x8000_0000)
+        );
     }
 
     #[test]
