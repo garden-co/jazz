@@ -19,15 +19,13 @@ use crate::schema_api::Schema;
 #[cfg(test)]
 use crate::schema_api::SchemaHash;
 use crate::schema_manager::AppId;
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+use crate::server::CatalogueRocksDbStorage;
 use crate::server::routes;
 use crate::server::{
-    ConnectionEventHub, DirectCatalogueStore, DynCatalogueStorage, ServerState, ServerTopology,
+    CatalogueMemoryStorage, ConnectionEventHub, DirectCatalogueStore, DynCatalogueStorage,
+    ServerState, ServerTopology,
 };
-use crate::storage::MemoryStorage;
-#[cfg(feature = "rocksdb")]
-use crate::storage::RocksDBStorage;
-#[cfg(feature = "sqlite")]
-use crate::storage::SqliteStorage;
 #[cfg(test)]
 use crate::sync::DurabilityTier;
 
@@ -35,8 +33,6 @@ use crate::sync::DurabilityTier;
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(feature = "rocksdb")]
 const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
-#[cfg(feature = "sqlite")]
-const CATALOGUE_SQLITE_FILE: &str = "catalogue.sqlite";
 #[cfg(feature = "rocksdb")]
 const CORE_SERVER_ROCKSDB_DIR: &str = "core-server.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,9 +52,9 @@ enum ServerSchemaMode {
 
 /// Storage backend selection for [`ServerBuilder::with_storage`].
 ///
-/// `Persistent` picks the best available backend at compile time
-/// (RocksDB > SQLite > in-memory). `Sqlite` and `RocksDb` pin the backend
-/// regardless of which other storage features are enabled.
+/// `Persistent` requires the RocksDB feature for durable direct-core server
+/// storage. SQLite remains a client/native storage backend, but is not a
+/// supported direct-core server backend.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
     InMemory,
@@ -331,10 +327,10 @@ impl ServerBuilder {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
 
-                #[cfg(feature = "rocksdb")]
+                #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
                 {
                     let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
-                    let storage = RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
+                    let storage = CatalogueRocksDbStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
                         .map_err(|e| {
                             format!(
                                 "failed to open catalogue storage '{}': {e:?}",
@@ -343,42 +339,26 @@ impl ServerBuilder {
                         })?;
                     Ok(Box::new(storage))
                 }
-                #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
+                #[cfg(all(feature = "rocksdb", target_arch = "wasm32"))]
                 {
-                    let db_path = path.join(CATALOGUE_SQLITE_FILE);
-                    let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                        format!(
-                            "failed to open catalogue storage '{}': {e:?}",
-                            db_path.display()
-                        )
-                    })?;
-                    Ok(Box::new(storage))
+                    Err("catalogue storage does not support rocksdb on wasm".to_owned())
                 }
-                #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
+                #[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
                 {
-                    Ok(Box::new(MemoryStorage::new()))
+                    Err("persistent catalogue storage requires the rocksdb feature".to_owned())
                 }
             }
             #[cfg(feature = "sqlite")]
-            StorageBackend::Sqlite { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                let db_path = path.join(CATALOGUE_SQLITE_FILE);
-                let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                    format!(
-                        "failed to open catalogue storage '{}': {e:?}",
-                        db_path.display()
-                    )
-                })?;
-                Ok(Box::new(storage))
+            StorageBackend::Sqlite { .. } => {
+                Err("direct-core server catalogue storage does not support sqlite".to_owned())
             }
-            #[cfg(feature = "rocksdb")]
+            #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
             StorageBackend::RocksDb { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
                 let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
-                let storage =
-                    RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
+                let storage = CatalogueRocksDbStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
+                    .map_err(|e| {
                         format!(
                             "failed to open catalogue storage '{}': {e:?}",
                             db_path.display()
@@ -386,7 +366,13 @@ impl ServerBuilder {
                     })?;
                 Ok(Box::new(storage))
             }
-            StorageBackend::InMemory => Ok(Box::new(MemoryStorage::new())),
+            #[cfg(all(feature = "rocksdb", target_arch = "wasm32"))]
+            StorageBackend::RocksDb { path } => {
+                std::fs::create_dir_all(path)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
+                Err("catalogue storage does not support rocksdb on wasm".to_owned())
+            }
+            StorageBackend::InMemory => Ok(Box::new(CatalogueMemoryStorage::new())),
         }
     }
 

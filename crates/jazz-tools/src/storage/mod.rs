@@ -19,15 +19,18 @@ mod memory;
 ))]
 mod storage_core;
 mod storage_trait;
+#[allow(unused_imports)]
 pub use memory::MemoryStorage;
 pub use storage_trait::Storage;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 mod rocksdb;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+#[allow(unused_imports)]
 pub use rocksdb::RocksDBStorage;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 mod sqlite;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+#[allow(unused_imports)]
 pub use sqlite::SqliteStorage;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

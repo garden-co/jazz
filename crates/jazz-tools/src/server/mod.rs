@@ -30,9 +30,11 @@ mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub(crate) use catalogue::{DirectCatalogueStore, ServerCatalogue};
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+pub(crate) use catalogue_storage::CatalogueRocksDbStorage;
 #[cfg(test)]
 pub(crate) use catalogue_storage::CatalogueStorage;
-pub(crate) use catalogue_storage::DynCatalogueStorage;
+pub(crate) use catalogue_storage::{CatalogueMemoryStorage, DynCatalogueStorage};
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "test-utils")]
 pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
