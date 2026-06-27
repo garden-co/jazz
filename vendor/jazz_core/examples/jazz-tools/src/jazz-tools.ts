@@ -1037,8 +1037,9 @@ class DirectAbiDb implements Db {
       callback,
       relationQuery,
       (table, rowId) =>
-        this.#readRows(queryFromTable(table)).find((row) => sameBytes(encodeRowId(row.id), rowId)) ??
-        null,
+        this.#readRows(queryFromTable(table)).find((row) =>
+          sameBytes(encodeRowId(row.id), rowId),
+        ) ?? null,
     );
     this.#subscriptions.add(subscription as DirectAbiSubscription<unknown>);
     void subscription.start().catch((error: unknown) => {
@@ -2472,7 +2473,7 @@ function encodeBuiltQuery(built: string, schema?: SchemaDefinition): Uint8Array 
   const filters =
     query.filters ??
     (query.filter ? [query.filter] : filtersFromConditions(schema, table, query.conditions ?? []));
-  const includes = legacyByteIncludes(query, schema, table);
+  const includes = encodedForwardIncludes(query, schema, table);
   if (
     filters.length === 0 &&
     includes.length === 0 &&
@@ -2564,7 +2565,7 @@ export function assertSubscribeQuerySupportedForTest<Row>(
   assertSubscribeQuerySupported(tableOrQuery);
 }
 
-function legacyByteIncludes(
+function encodedForwardIncludes(
   query: BuiltQuery,
   schema: SchemaDefinition | undefined,
   table: string,
@@ -2572,11 +2573,11 @@ function legacyByteIncludes(
   if (query.includes == null || Object.keys(query.includes).length === 0) return [];
   if (!schema) throw new Error("query includes require a schema");
   validateAlphaIncludes(schema, table, query.includes);
-  if (!legacyByteIncludesCanRepresent(query.includes, schema, table)) return [];
-  return legacyByteIncludeEntries(query.includes, schema, table, "");
+  if (!encodedForwardIncludesCanRepresent(query.includes, schema, table)) return [];
+  return encodedForwardIncludeEntries(query.includes, schema, table, "");
 }
 
-function legacyByteIncludesCanRepresent(
+function encodedForwardIncludesCanRepresent(
   includes: QueryInclude,
   schema: SchemaDefinition,
   table: string,
@@ -2588,7 +2589,7 @@ function legacyByteIncludesCanRepresent(
     if (relation.direction !== "forward" || include.select != null) return false;
     if (
       include.include != null &&
-      !legacyByteIncludesCanRepresent(include.include, schema, relation.table)
+      !encodedForwardIncludesCanRepresent(include.include, schema, relation.table)
     ) {
       return false;
     }
@@ -2596,7 +2597,7 @@ function legacyByteIncludesCanRepresent(
   return true;
 }
 
-function legacyByteIncludeEntries(
+function encodedForwardIncludeEntries(
   includes: QueryInclude,
   schema: SchemaDefinition,
   table: string,
@@ -2609,7 +2610,7 @@ function legacyByteIncludeEntries(
     const path = prefix ? `${prefix}.${relation.column}` : relation.column;
     return [
       { path, required: normalized.required === true },
-      ...legacyByteIncludeEntries(normalized.include ?? {}, schema, relation.table, path),
+      ...encodedForwardIncludeEntries(normalized.include ?? {}, schema, relation.table, path),
     ];
   });
 }
@@ -3155,7 +3156,7 @@ function applyRelationSubscriptionIncludes(
             ? null
             : rowPayloadTargets.length === 1
               ? rowPayloadTargets[0]
-              : resolveIncludedRow?.(relation.table, encodeRowId(targetId)) ?? null
+              : (resolveIncludedRow?.(relation.table, encodeRowId(targetId)) ?? null)
           : (includedRowsByKey.get(rowKey(edge.targetTable, edge.targetRowId)) ??
             resolveIncludedRow?.(edge.targetTable, edge.targetRowId) ??
             null);
@@ -3953,16 +3954,7 @@ function fixedSize(valueType: ValueType): number | undefined {
 
 async function loadRuntime(): Promise<WasmDbConstructor> {
   const modulePath = "../../../jazz-wasm/pkg/jazz_core_wasm.js";
-  const legacyModulePath = "../../../jazz-wasm/pkg/jazz_wasm.js";
-  let mod: { WasmDb?: WasmDbConstructor };
-  try {
-    mod = (await import(/* @vite-ignore */ modulePath)) as { WasmDb?: WasmDbConstructor };
-  } catch (error) {
-    if (!(error instanceof Error) || !("code" in error) || error.code !== "ERR_MODULE_NOT_FOUND") {
-      throw error;
-    }
-    mod = (await import(/* @vite-ignore */ legacyModulePath)) as { WasmDb?: WasmDbConstructor };
-  }
+  const mod = (await import(/* @vite-ignore */ modulePath)) as { WasmDb?: WasmDbConstructor };
   if (!mod.WasmDb) throw new Error("jazz-wasm/pkg does not export WasmDb");
   return mod.WasmDb;
 }
