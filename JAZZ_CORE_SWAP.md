@@ -3,7 +3,7 @@
 This branch is a destructive engine-swap branch based on
 `feat/merge-batches-and-transaction`.
 
-The goal is to replace the alpha engine with the copied `jazz_core`
+The goal is to replace the alpha engine with the imported workspace engine
 implementation, not to keep both implementations behind flags or adapters.
 The alpha code that remains should be treated as integration target material:
 tests, examples, public TypeScript API shape, and thin binding/worker/server
@@ -11,7 +11,7 @@ entrypoints.
 
 ## Core Location
 
-The imported `jazz_core` Rust crates now live in first-class workspace
+The imported Rust engine crates now live in first-class workspace
 locations:
 
 ```text
@@ -73,7 +73,7 @@ first-class `dev`, `.github`, `docs`, `examples`, and `crates` trees.
 - `packages/jazz-tools/src/runtime/client.ts`, `runtime/db.ts`,
   `runtime/index.ts`, `runtime/context.ts`, `runtime/client-session.ts`
   - Keep the high-level `JazzClient`, `Db`, transaction/query/subscription API
-    shape; rebuild as thin bindings over `jazz_core`.
+    shape; rebuild as thin bindings over the workspace `jazz` engine.
 
 - `packages/jazz-tools/src/runtime/wasm-runtime-module.ts`,
   `runtime/db-runtime-module.ts`, `runtime/worker-bridge.ts`, `worker`
@@ -88,7 +88,7 @@ first-class `dev`, `.github`, `docs`, `examples`, and `crates` trees.
 
 - `crates/jazz-wasm/src`, `crates/jazz-napi/src`, `crates/jazz-rn`
   - Keep package/native binding roles, but regenerate/rebuild bindings around
-    `jazz_core` APIs.
+    the workspace engine APIs.
 
 - `crates/jazz-tools/src/server`, `middleware`, `commands`, `main.rs`,
   `transport_protocol.rs`, `transport_manager.rs`, `ws_stream`
@@ -136,7 +136,7 @@ Until deleted, treat them as replacement targets only.
   `packages/jazz-tools/src/runtime/native-row-format.ts`,
   `runtime/json-text.ts`, `runtime/ffi-value.ts`
   - Duplicate/old encoders and wire/storage formats. Replace with a single
-    `jazz_core` codec boundary.
+    engine codec boundary.
 
 - `packages/jazz-tools/src/runtime/subscription-manager.ts`,
   `runtime/sync-transport.ts`, `runtime/sync-telemetry.ts`
@@ -152,12 +152,12 @@ Until deleted, treat them as replacement targets only.
 
 - `crates/jazz-tools/src/schema_manager`
   - Some schema/lens/catalogue concepts may remain valuable, but encoding and
-    catalogue persistence likely belong in `jazz_core`.
+    catalogue persistence likely belong in the workspace engine.
 
 - `crates/jazz-tools/src/query_manager/query.rs`, `query_wire.rs`,
   `query_to_relation_ir.rs`, `relation_ir*`, `types`
-  - Could remain as public/intermediate query contracts if compatible; otherwise
-    replace with new core query IR.
+  - Keep only public query vocabulary and payload glue; old compiler and
+    materialization internals should stay deleted.
 
 - `crates/wasm-tracing`
   - Generic maintained tracing fork; keep only if still needed by new wasm
@@ -169,7 +169,7 @@ Until deleted, treat them as replacement targets only.
 
 - `packages/jazz-tools/src/runtime/file-storage.ts`
   - High-level file API likely should survive, but storage/chunking integration
-    should be redesigned against `jazz_core` binary large values.
+    should be redesigned against engine binary large values.
 
 ## Mechanical Verification So Far
 

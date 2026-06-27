@@ -70,7 +70,7 @@ pub struct ServerState {
     pub http_client: reqwest::Client,
     /// Configured verifier for external JWTs.
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
-    /// Sendable handle to the local-owner jazz_core peer loop for the websocket route.
+    /// Sendable handle to the local-owner engine peer loop for the websocket route.
     pub(crate) local_engine: StdRwLock<Option<local_engine::LocalEngineHandle>>,
     pub(crate) local_engine_storage_config: Option<StorageConfig>,
     pub shutdown: ShutdownController,

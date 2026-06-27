@@ -1,69 +1,20 @@
-//! Schema Manager - Content-addressed schema evolution with bidirectional lenses.
+//! Thin schema/catalogue API glue.
 //!
-//! This module provides schema versioning through content-addressed hashing,
-//! environment-based branch naming, and bidirectional migration lenses.
-//!
-//! # Overview
-//!
-//! - **SchemaHash**: Content-addressed schema identification (BLAKE3)
-//! - **ComposedBranchName**: `{env}-{hash8}-{userBranch}` format
-//! - **Lens**: Bidirectional row transformation between schema versions
-//! - **SchemaContext**: Tracks current schema and live versions
-//! - **SchemaManager**: Top-level coordination API
-//! - **AppId**: Application identifier for catalogue queries
-//!
-//! # Example
-//!
-//! ```ignore
-//! use crate::schema_manager::{AppId, SchemaManager};
-//! use crate::query_manager::types::{SchemaBuilder, TableSchema, ColumnType};
-//!
-//! let app_id = AppId::from_name("my-app");
-//! let schema = SchemaBuilder::new()
-//!     .table(TableSchema::builder("users")
-//!         .column("id", ColumnType::Uuid)
-//!         .column("name", ColumnType::Text))
-//!     .build();
-//!
-//! let mut manager = SchemaManager::new(schema, app_id, "dev", "main")?;
-//!
-//! // Add old schema version as live (auto-generates lens)
-//! manager.add_live_schema(old_schema)?;
-//!
-//! // Persist schema and lens to catalogue
-//! manager.persist_schema();
-//! manager.persist_lens(&lens);
-//!
-//! // Get all branches for querying
-//! let branches = manager.all_branches();
-//! ```
+//! The old schema-lens runtime, auto-lens generation, catalogue rehydrate, and
+//! schema-manager storage engine have been removed. What remains here is the
+//! small public surface still used by server routes and client setup.
 
-pub mod auto_lens;
-pub mod catalogue_export;
-pub mod catalogue_storage;
 pub mod context;
-pub mod diff;
 pub mod encoding;
 pub mod lens;
 pub mod manager;
-pub mod rehydrate;
-pub mod transformer;
 pub mod types;
 
-// Re-exports
-pub use auto_lens::generate_lens;
-pub use catalogue_storage::{CatalogueStorageError, SchemaManagerCatalogueStorage};
 pub use context::{QuerySchemaContext, SchemaContext, SchemaError};
-pub use diff::{Ambiguity, DiffResult, diff_schemas};
 pub use encoding::{
     CatalogueEncodingError, decode_lens_transform, decode_permissions, decode_schema,
     encode_lens_transform, encode_permissions, encode_schema,
 };
 pub use lens::{Direction, Lens, LensOp, LensTransform};
-pub use manager::SchemaManager;
-pub use rehydrate::rehydrate_schema_manager_from_catalogue;
-pub use transformer::{
-    LensTransformer, TransformError, TransformResult, origin_schema_hash_from_metadata,
-    resolve_current_table_name, translate_column_for_index, translate_table_name_to_schema,
-};
+pub use manager::{CurrentPermissionsSummary, PermissionsHeadSummary, SchemaManager};
 pub use types::AppId;

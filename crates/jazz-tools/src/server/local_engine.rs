@@ -11,7 +11,7 @@ use jazz_server::{
 };
 use tokio::sync::{oneshot, watch};
 
-/// Sendable handle for the thread that owns the local jazz_core engine shell.
+/// Sendable handle for the thread that owns the local engine shell.
 ///
 /// The underlying `InMemoryServerShell` is intentionally kept on one OS thread
 /// because it currently stores its DB, sessions, and transports behind

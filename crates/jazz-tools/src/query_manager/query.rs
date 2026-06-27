@@ -1475,38 +1475,6 @@ mod tests {
     }
 
     #[test]
-    fn condition_to_tuple_predicate_supports_scoped_implicit_row_id() {
-        let condition = Condition::Eq {
-            column: "__hop_0._id".into(),
-            value: Value::Uuid(crate::object::ObjectId::new()),
-        };
-        let tuple_descriptor = TupleDescriptor::from_tables(&[
-            (
-                "user_team_edges".to_string(),
-                RowDescriptor::new(vec![
-                    ColumnDescriptor::new("user_id", ColumnType::Text),
-                    ColumnDescriptor::new("team", ColumnType::Uuid),
-                ]),
-            ),
-            (
-                "__hop_0".to_string(),
-                RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
-            ),
-        ]);
-
-        let predicate = condition
-            .to_tuple_predicate(&tuple_descriptor)
-            .expect("scoped row id predicate");
-        assert!(matches!(
-            predicate,
-            Predicate::RowIdEq {
-                element_index: 1,
-                ..
-            }
-        ));
-    }
-
-    #[test]
     fn query_to_predicate_eq_null_becomes_is_null() {
         let descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),

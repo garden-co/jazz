@@ -109,7 +109,7 @@ function makeRuntimeStub(): Runtime {
   } as unknown as Runtime;
 }
 
-describe("runtime/Db direct path upstream wiring", () => {
+describe("runtime/Db core runtime path upstream wiring", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -350,7 +350,7 @@ describe("runtime/Db direct path upstream wiring", () => {
     );
   });
 
-  it("sends auth refreshes to memoized direct clients", () => {
+  it("sends auth refreshes to memoized runtime clients", () => {
     const db = new TestDb({
       appId: "app",
       serverUrl: "https://example.test",
