@@ -8,8 +8,9 @@ pub use vendored_core_wasm::*;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use jazz_tools::identity;
 use wasm_bindgen::prelude::*;
+
+mod identity;
 
 /// Initialize the WASM module.
 ///
