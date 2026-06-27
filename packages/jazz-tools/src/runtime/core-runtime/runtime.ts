@@ -1652,7 +1652,7 @@ function u32Le(value: number): Uint8Array {
 
 function encodeNullValue(valueType: ValueType): Uint8Array {
   const width = fixedValueSize(valueType);
-  return width == null ? Uint8Array.of(0) : new Uint8Array(width + 1);
+  return width == null ? Uint8Array.of(0) : new Uint8Array(width);
 }
 
 function fixedValueSize(valueType: ValueType): number | undefined {
