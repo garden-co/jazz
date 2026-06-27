@@ -591,7 +591,7 @@ export class JazzClient {
   /**
    * Create client from a pre-constructed runtime.
    *
-   * CoreSource implementations use this after selecting the platform runtime.
+   * RuntimeSource implementations use this after selecting the platform runtime.
    *
    * @param runtime A runtime implementing the Runtime interface
    * @param context Application context

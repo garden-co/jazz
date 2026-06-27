@@ -8,7 +8,7 @@ import { fetchSchemaHashes, fetchStoredWasmSchema, publishStoredSchema } from ".
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
-import { encodeSchema } from "./runtime.js";
+import { encodeSchema } from "./native-runtime-adapter.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
 const previousWebSocket = globalThis.WebSocket;
@@ -28,7 +28,7 @@ const binaryLargeValueSchema = {
   },
 } satisfies WasmSchema;
 
-describe("CoreRuntime server convergence", () => {
+describe("NativeRuntimeAdapter server convergence", () => {
   let server: LocalJazzServerHandle | null = null;
   const clients: JazzClient[] = [];
   const tempRoots: string[] = [];
@@ -90,7 +90,7 @@ describe("CoreRuntime server convergence", () => {
       );
       await waitForPromise(
         observedBySubscription,
-        "client B subscription did not observe the core runtime insert",
+        "client B subscription did not observe the native runtime insert",
       );
 
       const convergedRows = await waitFor(async () => {
@@ -226,7 +226,7 @@ describe("CoreRuntime server convergence", () => {
       });
       await waitForPromise(
         replayedToSubscription,
-        "reader subscription did not replay the persisted core runtime insert after restart",
+        "reader subscription did not replay the persisted native runtime insert after restart",
       );
 
       const persistedRow = await waitFor(async () => {
@@ -450,7 +450,7 @@ async function waitFor<T>(read: () => Promise<T | undefined>, timeoutMs = 5_000)
     await new Promise((resolve) => setTimeout(resolve, 25));
   } while (Date.now() < deadline);
 
-  throw new Error(`Timed out waiting for core runtime convergence; last value: ${lastValue}`);
+  throw new Error(`Timed out waiting for native runtime convergence; last value: ${lastValue}`);
 }
 
 async function waitForPromise<T>(

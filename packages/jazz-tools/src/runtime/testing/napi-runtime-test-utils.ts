@@ -2,10 +2,10 @@ import { createRequire } from "node:module";
 import { onTestFinished } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
 import type { Runtime } from "../client.js";
-import { CoreRuntime } from "../core-runtime/runtime.js";
+import { NativeRuntimeAdapter } from "../core-runtime/native-runtime-adapter.js";
 
 type NapiModule = typeof import("jazz-napi");
-export type TestNapiCoreRuntime = Runtime & { close?: () => void };
+export type TestNapiNativeRuntimeAdapter = Runtime & { close?: () => void };
 
 const require = createRequire(import.meta.url);
 
@@ -51,7 +51,7 @@ export async function loadNapiModule(): Promise<NapiModule> {
   return napiModulePromise;
 }
 
-export async function createNapiCoreRuntime(
+export async function createNapiNativeRuntimeAdapter(
   schema: WasmSchema,
   opts?: {
     appId?: string;
@@ -59,12 +59,12 @@ export async function createNapiCoreRuntime(
     userBranch?: string;
     tier?: string;
   },
-): Promise<TestNapiCoreRuntime> {
+): Promise<TestNapiNativeRuntimeAdapter> {
   const { NapiDb } = await loadNapiModule();
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const userBranch = opts?.userBranch ?? "main";
-  const runtime = new CoreRuntime(
+  const runtime = new NativeRuntimeAdapter(
     {
       openMemory: (schemaBytes, configBytes) =>
         NapiDb.openMemory(schemaBytes, configBytes) as never,
@@ -82,7 +82,7 @@ export async function createNapiCoreRuntime(
   return runtime;
 }
 
-export async function createPersistentNapiCoreRuntime(
+export async function createPersistentNapiNativeRuntimeAdapter(
   schema: WasmSchema,
   dataPath: string,
   opts?: {
@@ -91,12 +91,12 @@ export async function createPersistentNapiCoreRuntime(
     userBranch?: string;
     tier?: string;
   },
-): Promise<TestNapiCoreRuntime> {
+): Promise<TestNapiNativeRuntimeAdapter> {
   const { NapiDb } = await loadNapiModule();
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const userBranch = opts?.userBranch ?? "main";
-  const runtime = new CoreRuntime(
+  const runtime = new NativeRuntimeAdapter(
     {
       openMemory: (schemaBytes, configBytes) =>
         NapiDb.openMemory(schemaBytes, configBytes) as never,

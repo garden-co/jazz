@@ -3,7 +3,10 @@ import {
   createSyntheticRuntimeSchema,
   runSchemaMarshallingBench,
 } from "./testing/schema-marshalling-bench.js";
-import { createNapiCoreRuntime, hasJazzNapiBuild } from "./testing/napi-runtime-test-utils.js";
+import {
+  createNapiNativeRuntimeAdapter,
+  hasJazzNapiBuild,
+} from "./testing/napi-runtime-test-utils.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 
 const RUN_ABSTRACT_BENCH = process.env.JAZZ_ABSTRACT_BENCH === "1";
@@ -24,7 +27,7 @@ describe.skipIf(!RUN_ABSTRACT_BENCH)("schema marshalling abstract bench (node)",
 
     const schema = createSyntheticRuntimeSchema();
     const [napiRuntime, wasmRuntime] = await Promise.all([
-      createNapiCoreRuntime(schema, { appId: "schema-bench-node-napi" }),
+      createNapiNativeRuntimeAdapter(schema, { appId: "schema-bench-node-napi" }),
       createWasmRuntime(schema, { appId: "schema-bench-node-wasm" }),
     ]);
 

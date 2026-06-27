@@ -9,14 +9,14 @@ import {
   type Row,
 } from "./client.js";
 import type { Session } from "./context.js";
-import { CoreSource, type CoreClientContext } from "./core-source.js";
+import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 
-class TestCoreSource extends CoreSource<DbConfig> {
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(private readonly client: JazzClient) {
     super();
   }
 
-  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
     return this.client;
   }
 }
@@ -26,7 +26,7 @@ class TestDb extends Db {
     private readonly testClient: JazzClient,
     private readonly context: { session?: Session; attribution?: string } | null = null,
   ) {
-    super({ appId: "persisted-db-test" }, new TestCoreSource(testClient));
+    super({ appId: "persisted-db-test" }, new TestRuntimeSource(testClient));
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {

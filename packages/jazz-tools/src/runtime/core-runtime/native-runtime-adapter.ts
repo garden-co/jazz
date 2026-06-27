@@ -15,11 +15,11 @@ import {
   PostcardWriter,
   openConfig,
   queryWithPredicates,
-  readAbiRowBatch,
-  readAbiSubscriptionDelta,
+  readNativeRowBatch,
+  readNativeSubscriptionDelta,
   writeValueType,
-  type AbiRowBatch,
-  type AbiRemovedRow,
+  type NativeRowBatch,
+  type NativeRemovedRow,
   type QueryOrder,
   type QueryLiteral,
   type QueryPredicate,
@@ -29,17 +29,17 @@ import {
 } from "./core-codec.js";
 import { columnTypeToValueType, columnValueType, encodeSchema } from "./schema-codec.js";
 import { WebSocketCarrier, wireAuthFailureReason } from "./websocket.js";
-import { createRecord, decodeRecordValue } from "./row-codec.js";
+import { createRecord, decodeRecordValue } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
 
 export { encodeSchema } from "./schema-codec.js";
 
-type CoreDbConstructor = {
-  openMemory(schema: Uint8Array, config: Uint8Array): CoreDb;
-  openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): CoreDb;
+type NativeDbConstructor = {
+  openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
+  openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
 };
 
-type CoreDb = {
+type NativeDb = {
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
   propagateQuery?(query: PreparedQuery, opts: unknown): void;
@@ -163,19 +163,19 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 function openPersistentDb(
-  Runtime: CoreDbConstructor,
+  Runtime: NativeDbConstructor,
   dataPath: string,
   schema: Uint8Array,
   config: Uint8Array,
-): CoreDb {
+): NativeDb {
   if (!Runtime.openPersistent) {
-    throw new Error("Core runtime does not expose persistent storage");
+    throw new Error("Native runtime does not expose persistent storage");
   }
   return Runtime.openPersistent(dataPath, schema, config);
 }
 
-export class CoreRuntime implements Runtime {
-  private readonly db: CoreDb;
+export class NativeRuntimeAdapter implements Runtime {
+  private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
@@ -198,24 +198,24 @@ export class CoreRuntime implements Runtime {
   private nextSubscriptionId = 1;
 
   static fromDb(
-    db: CoreDb,
+    db: NativeDb,
     schema: WasmSchema,
     node: Uint8Array,
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
-  ): CoreRuntime {
-    return new CoreRuntime(null, schema, node, author, sourceId, historyComplete, { db });
+  ): NativeRuntimeAdapter {
+    return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, { db });
   }
 
   constructor(
-    Runtime: CoreDbConstructor | null,
+    Runtime: NativeDbConstructor | null,
     private readonly schema: WasmSchema,
     node: Uint8Array,
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
-    opts?: { persistentPath?: string; db?: CoreDb },
+    opts?: { persistentPath?: string; db?: NativeDb },
   ) {
     this.schemaBytes = encodeSchema(schema);
     this.configBytes = openConfig(node, author, sourceId, historyComplete);
@@ -225,17 +225,17 @@ export class CoreRuntime implements Runtime {
       this.db = opts.db;
     } else if (opts?.persistentPath) {
       if (!Runtime) {
-        throw new Error("Core runtime constructor required for persistent storage");
+        throw new Error("Native runtime constructor required for persistent storage");
       }
       this.db = openPersistentDb(Runtime, opts.persistentPath, this.schemaBytes, this.configBytes);
     } else {
       if (!Runtime) {
-        throw new Error("Core runtime constructor required for memory storage");
+        throw new Error("Native runtime constructor required for memory storage");
       }
       this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
     }
     if (typeof this.db.setTickScheduler !== "function") {
-      throw new Error("Core runtime requires db.setTickScheduler");
+      throw new Error("Native runtime requires db.setTickScheduler");
     }
     this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
       const urgency = typeof first === "string" ? first : second;
@@ -287,7 +287,7 @@ export class CoreRuntime implements Runtime {
       tx.writes.push({ table, rowId });
       return this.resultForRow(table, rowId, txIdFromContext(_writeContext) ?? "", writeIdentity);
     }
-    const write = directWriteOrThrow("Insert", () =>
+    const write = writeOrNormalizeRejection("Insert", () =>
       writeIdentity
         ? this.db.insertWithIdEncodedForIdentity(table, rowId, cells, writeIdentity)
         : this.db.insertWithIdEncoded(table, rowId, cells),
@@ -310,7 +310,7 @@ export class CoreRuntime implements Runtime {
       tx.writes.push({ table, rowId });
       return this.resultForRow(table, rowId, txIdFromContext(writeContext) ?? "", writeIdentity);
     }
-    const write = directWriteOrThrow("Insert", () =>
+    const write = writeOrNormalizeRejection("Insert", () =>
       writeIdentity
         ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity)
         : this.db.restoreEncoded(table, rowId, cells),
@@ -333,7 +333,7 @@ export class CoreRuntime implements Runtime {
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
-    const write = directWriteOrThrow("Update", () =>
+    const write = writeOrNormalizeRejection("Update", () =>
       writeIdentity
         ? this.db.updateEncodedForIdentity(table, rowId, patch, writeIdentity)
         : this.db.updateEncoded(table, rowId, patch),
@@ -356,7 +356,7 @@ export class CoreRuntime implements Runtime {
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
-    const write = directWriteOrThrow("Insert", () =>
+    const write = writeOrNormalizeRejection("Insert", () =>
       writeIdentity
         ? this.db.upsertEncodedForIdentity(table, rowId, cells, writeIdentity)
         : this.db.upsertEncoded(table, rowId, cells),
@@ -374,7 +374,7 @@ export class CoreRuntime implements Runtime {
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
-    const write = directWriteOrThrow("Delete", () =>
+    const write = writeOrNormalizeRejection("Delete", () =>
       writeIdentity
         ? this.db.deleteForIdentity(table, rowId, writeIdentity)
         : this.db.delete(table, rowId),
@@ -468,10 +468,10 @@ export class CoreRuntime implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     const session = readSession(sessionJson);
     if (!this.db.subscribe) {
-      throw new Error("Core runtime does not support subscriptions");
+      throw new Error("Native runtime does not support subscriptions");
     }
     if (session && !this.db.subscribeForIdentity) {
-      throw new Error("Core runtime does not support session-scoped subscriptions");
+      throw new Error("Native runtime does not support session-scoped subscriptions");
     }
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
@@ -676,8 +676,8 @@ export class CoreRuntime implements Runtime {
     if (pending.kind === "exclusive") {
       if (identity) {
         throw new Error(
-          "Core runtime cannot perform session-scoped exclusive transaction writes: " +
-            "the core runtime exclusive transaction API has no identity-aware staging methods.",
+          "Native runtime cannot perform session-scoped exclusive transaction writes: " +
+            "the native runtime exclusive transaction API has no identity-aware staging methods.",
         );
       }
       if (!pending.tx) {
@@ -686,10 +686,10 @@ export class CoreRuntime implements Runtime {
       return pending.tx;
     }
     if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
-      throw new Error("Core runtime mergeable transaction cannot mix write identities");
+      throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
     if (identity && pending.tx && !pending.identity) {
-      throw new Error("Core runtime mergeable transaction cannot mix write identities");
+      throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
     if (!pending.tx) {
       pending.identity = identity;
@@ -705,8 +705,8 @@ export class CoreRuntime implements Runtime {
   private exclusiveTx(): Tx {
     if (!this.db.exclusiveTx) {
       throw new Error(
-        "Core runtime cannot perform exclusive transaction writes: " +
-          "the core runtime exclusive transaction API is unavailable.",
+        "Native runtime cannot perform exclusive transaction writes: " +
+          "the native runtime exclusive transaction API is unavailable.",
       );
     }
     return this.db.exclusiveTx();
@@ -715,8 +715,8 @@ export class CoreRuntime implements Runtime {
   private mergeableTxForIdentity(identity: Uint8Array): Tx {
     if (!this.db.mergeableTxForIdentity) {
       throw new Error(
-        "Core runtime cannot perform session-scoped transaction writes: " +
-          "the core runtime mergeable transaction API has no identity-aware staging methods.",
+        "Native runtime cannot perform session-scoped transaction writes: " +
+          "the native runtime mergeable transaction API has no identity-aware staging methods.",
       );
     }
     return this.db.mergeableTxForIdentity(identity);
@@ -974,7 +974,7 @@ function readOptions(
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
   if (tier != null && !["local", "edge", "global"].includes(tier)) {
-    throw new Error(`Core runtime received unsupported read tier '${tier}'`);
+    throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
   if (optionsJson != null) readSupportedReadOptions(optionsJson);
 }
@@ -983,7 +983,7 @@ function readSession(sessionJson?: string | null): { user_id: string } | null {
   if (sessionJson == null) return null;
   const parsed = JSON.parse(sessionJson) as { user_id?: unknown };
   if (typeof parsed.user_id !== "string") {
-    throw new Error("Core runtime session is missing user_id");
+    throw new Error("Native runtime session is missing user_id");
   }
   return { user_id: parsed.user_id };
 }
@@ -1002,7 +1002,9 @@ function readSupportedReadOptions(optionsJson: string): void {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
   const propagation = parsed.propagation;
   if (propagation != null && propagation !== "full" && propagation !== "local-only") {
-    throw new Error(`Core runtime does not support read propagation '${String(propagation)}' yet`);
+    throw new Error(
+      `Native runtime does not support read propagation '${String(propagation)}' yet`,
+    );
   }
 }
 
@@ -1041,7 +1043,10 @@ function rejectedWaitError(
   };
 }
 
-function directWriteOrThrow<T>(operation: "Insert" | "Update" | "Delete", write: () => T): T {
+function writeOrNormalizeRejection<T>(
+  operation: "Insert" | "Update" | "Delete",
+  write: () => T,
+): T {
   try {
     return write();
   } catch (error) {
@@ -1082,7 +1087,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     select?: unknown;
   };
   if (typeof parsed.table !== "string") {
-    throw new Error("Core runtime only supports table queries in this slice");
+    throw new Error("Native runtime only supports table queries in this slice");
   }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
   return queryWithPredicates(
@@ -1101,9 +1106,9 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
 
 function unsupportedRelationQueryError(operator?: string): Error {
   const detail = operator
-    ? ` Relation IR operator "${operator}" requires a relation-tree lowerer or native relation query API; the TS core runtime can currently lower only TableScan plus Filter/OrderBy/Offset/Limit into flat native predicates.`
-    : " The TS core runtime can currently lower only TableScan plus Filter/OrderBy/Offset/Limit into flat native predicates.";
-  return new Error(`Core runtime cannot lower this relation IR.${detail}`);
+    ? ` Relation IR operator "${operator}" requires a relation-tree lowerer or native relation query API; the TS native runtime can currently lower only TableScan plus Filter/OrderBy/Offset/Limit into flat native predicates.`
+    : " The TS native runtime can currently lower only TableScan plus Filter/OrderBy/Offset/Limit into flat native predicates.";
+  return new Error(`Native runtime cannot lower this relation IR.${detail}`);
 }
 
 function encodeSimpleRelationQuery(
@@ -1536,7 +1541,7 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Array":
       return encodeArrayValue(type.element, value);
     case "Row":
-      throw new Error(`Core runtime does not encode ${type.type} values yet`);
+      throw new Error(`Native runtime does not encode ${type.type} values yet`);
   }
 }
 
@@ -1634,11 +1639,11 @@ function expectString(value: Value, type: string): string {
   throw new Error(`expected ${type} value`);
 }
 
-function readRowBatches(payload: Uint8Array): AbiRowBatch[] {
-  return new PostcardReader(payload).readVec(readAbiRowBatch);
+function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
+  return new PostcardReader(payload).readVec(readNativeRowBatch);
 }
 
-function rowsFromBatches(batches: AbiRowBatch[], schema: WasmSchema): RowState[] {
+function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowState[] {
   return batches.flatMap((batch) =>
     batch.rows.map((row) => {
       const decoded = batch.descriptor
@@ -1674,7 +1679,7 @@ function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): 
 
 function applySubscriptionDelta(
   currentRows: RowState[],
-  delta: { added: AbiRowBatch[]; updated: AbiRowBatch[]; removed: AbiRemovedRow[] },
+  delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
   schema: WasmSchema,
 ): RowState[] {
   const rowsByKey = new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
@@ -1776,10 +1781,10 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
 }
 
 function normalizeSubscriptionChunk(chunk: unknown):
-  | { type: "snapshot"; rows: AbiRowBatch[]; settled?: boolean }
+  | { type: "snapshot"; rows: NativeRowBatch[]; settled?: boolean }
   | {
       type: "delta";
-      delta: { added: AbiRowBatch[]; updated: AbiRowBatch[]; removed: AbiRemovedRow[] };
+      delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
       settled?: boolean;
     }
   | { type: "closed" } {
@@ -1798,7 +1803,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
   if (record.type === "delta" || record.type === "Delta") {
     return {
       type: "delta",
-      delta: readAbiSubscriptionDelta(
+      delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),
       settled: typeof record.settled === "boolean" ? record.settled : undefined,

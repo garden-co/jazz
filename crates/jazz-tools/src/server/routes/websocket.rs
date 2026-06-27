@@ -1512,7 +1512,7 @@ mod tests {
     }
 
     // Internal route-boundary test: websocket liveness is not exposed
-    // through the public JazzClient API yet, so this observes the direct
+    // through the public JazzClient API yet, so this observes the internal
     // admission registry as the user-visible socket closes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn same_peer_identity_connections_are_bounded_by_eviction() {

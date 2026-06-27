@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => {
   const resolveRequestSession = vi.fn();
   const openMemory = vi.fn();
   const openPersistent = vi.fn();
-  const directRuntimeCtor = vi.fn();
+  const nativeRuntimeCtor = vi.fn();
   const runtimeInstances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
   const clients: Array<{
     asBackend: ReturnType<typeof vi.fn>;
@@ -41,7 +41,7 @@ const mocks = vi.hoisted(() => {
     }),
   };
 
-  class MockCoreRuntime {
+  class MockNativeRuntimeAdapter {
     readonly close = vi.fn();
     constructor(
       Runtime: typeof MockNapiDb,
@@ -52,7 +52,7 @@ const mocks = vi.hoisted(() => {
       historyComplete: boolean,
       opts?: { persistentPath?: string },
     ) {
-      directRuntimeCtor(Runtime, schema, node, author, sourceId, historyComplete, opts);
+      nativeRuntimeCtor(Runtime, schema, node, author, sourceId, historyComplete, opts);
       if (opts?.persistentPath) {
         Runtime.openPersistent(
           opts.persistentPath,
@@ -72,12 +72,12 @@ const mocks = vi.hoisted(() => {
 
   return {
     MockNapiDb,
-    MockCoreRuntime,
+    MockNativeRuntimeAdapter,
     MockJazzClient,
     resolveRequestSession,
     openMemory,
     openPersistent,
-    directRuntimeCtor,
+    nativeRuntimeCtor,
     runtimeInstances,
     connectWithRuntime,
     clients,
@@ -85,7 +85,7 @@ const mocks = vi.hoisted(() => {
       resolveRequestSession.mockReset();
       openMemory.mockReset();
       openPersistent.mockReset();
-      directRuntimeCtor.mockReset();
+      nativeRuntimeCtor.mockReset();
       MockNapiDb.openMemory.mockClear();
       MockNapiDb.openPersistent.mockClear();
       fakeDb.close.mockClear();
@@ -100,8 +100,8 @@ vi.mock("jazz-napi", () => ({
   NapiDb: mocks.MockNapiDb,
 }));
 
-vi.mock("../runtime/core-runtime/runtime.js", () => ({
-  CoreRuntime: mocks.MockCoreRuntime,
+vi.mock("../runtime/core-runtime/native-runtime-adapter.js", () => ({
+  NativeRuntimeAdapter: mocks.MockNativeRuntimeAdapter,
 }));
 
 vi.mock("../runtime/client.js", async () => {
@@ -199,18 +199,18 @@ describe("backend/create-jazz-context", () => {
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
-    expect(mocks.directRuntimeCtor).not.toHaveBeenCalled();
+    expect(mocks.nativeRuntimeCtor).not.toHaveBeenCalled();
     expect(mocks.connectWithRuntime).not.toHaveBeenCalled();
 
     const dbA = context.db();
     const dbB = context.db();
 
     expect(dbA).not.toBe(dbB);
-    expect(mocks.directRuntimeCtor).toHaveBeenCalledTimes(1);
+    expect(mocks.nativeRuntimeCtor).toHaveBeenCalledTimes(1);
     expect(mocks.openPersistent).toHaveBeenCalledTimes(1);
     expect(mocks.openMemory).not.toHaveBeenCalled();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
-    expect(mocks.directRuntimeCtor).toHaveBeenCalledWith(
+    expect(mocks.nativeRuntimeCtor).toHaveBeenCalledWith(
       mocks.MockNapiDb,
       SCHEMA_A,
       expect.any(Uint8Array),
@@ -389,7 +389,7 @@ describe("backend/create-jazz-context", () => {
 
     context.db();
 
-    expect(mocks.directRuntimeCtor.mock.calls[0]![1]).toEqual({
+    expect(mocks.nativeRuntimeCtor.mock.calls[0]![1]).toEqual({
       todos: {
         columns: [],
         policies: TODO_PERMISSIONS.todos as any,
@@ -413,7 +413,7 @@ describe("backend/create-jazz-context", () => {
 
     context.db();
 
-    expect(mocks.directRuntimeCtor.mock.calls[0]![1]).toEqual({
+    expect(mocks.nativeRuntimeCtor.mock.calls[0]![1]).toEqual({
       resources: {
         columns: [],
         policies: {
@@ -523,7 +523,7 @@ describe("backend/create-jazz-context", () => {
 
     context.db();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(2);
-    expect(mocks.directRuntimeCtor).toHaveBeenCalledTimes(2);
+    expect(mocks.nativeRuntimeCtor).toHaveBeenCalledTimes(2);
   });
 
   it("BC-U08: uses in-memory runtime when driver.type is memory", () => {
@@ -539,7 +539,7 @@ describe("backend/create-jazz-context", () => {
 
     expect(mocks.openMemory).toHaveBeenCalledTimes(1);
     expect(mocks.openPersistent).not.toHaveBeenCalled();
-    expect(mocks.directRuntimeCtor).toHaveBeenCalledWith(
+    expect(mocks.nativeRuntimeCtor).toHaveBeenCalledWith(
       mocks.MockNapiDb,
       SCHEMA_A,
       expect.any(Uint8Array),
