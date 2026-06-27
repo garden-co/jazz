@@ -1,4 +1,4 @@
-use super::graph_nodes::sort::SortDirection;
+use super::query::SortDirection;
 use super::query::{
     ArraySubquerySpec, Condition, Conjunction, JoinSpec, RecursiveHopSpec, RecursiveSpec,
 };

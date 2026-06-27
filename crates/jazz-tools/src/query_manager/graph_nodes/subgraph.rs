@@ -139,10 +139,10 @@ impl SubgraphTemplate {
         // Apply order by
         for (col, dir) in &self.base_query.order_by {
             query_builder = match dir {
-                crate::query_manager::graph_nodes::sort::SortDirection::Ascending => {
+                crate::query_manager::query::SortDirection::Ascending => {
                     query_builder.order_by(col)
                 }
-                crate::query_manager::graph_nodes::sort::SortDirection::Descending => {
+                crate::query_manager::query::SortDirection::Descending => {
                     query_builder.order_by_desc(col)
                 }
             };

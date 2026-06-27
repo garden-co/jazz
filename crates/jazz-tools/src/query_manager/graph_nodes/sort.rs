@@ -1,5 +1,4 @@
 use ahash::AHashSet;
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
 use crate::object::ObjectId;
@@ -7,31 +6,7 @@ use crate::query_manager::encoding::compare_column;
 use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
 
 use super::RowNode;
-
-/// Sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SortDirection {
-    Ascending,
-    Descending,
-}
-
-/// Sort specification for a single column.
-#[derive(Debug, Clone)]
-pub struct SortKey {
-    pub target: SortTarget,
-    pub direction: SortDirection,
-}
-
-/// Field used by a sort key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortTarget {
-    Column(usize),
-    /// Virtual sort key for object identity (`id`/`_id`).
-    ///
-    /// This is needed because object ID is not part of row payload columns,
-    /// but query semantics allow `ORDER BY id|_id` (including desc and mixed keys).
-    RowId,
-}
+pub use crate::query_manager::query::{SortDirection, SortKey, SortTarget};
 
 /// Threshold: when adding more than this many tuples, use bulk append + sort
 /// instead of individual binary-search inserts.

@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::query_manager::encoding::encode_value_with_type;
-use crate::query_manager::graph_nodes::filter::Predicate;
-use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey, SortTarget};
 use crate::query_manager::magic_columns::is_magic_column_name;
 use crate::query_manager::types::{ColumnType, RowDescriptor, TableName, TupleDescriptor, Value};
 
@@ -36,6 +35,130 @@ impl fmt::Display for QueryBuildError {
 }
 
 impl std::error::Error for QueryBuildError {}
+
+/// A predicate condition used by the public query builder vocabulary.
+#[derive(Debug, Clone)]
+pub enum Predicate {
+    Eq {
+        col_index: usize,
+        value: Vec<u8>,
+    },
+    Ne {
+        col_index: usize,
+        value: Vec<u8>,
+    },
+    Lt {
+        col_index: usize,
+        value: Vec<u8>,
+    },
+    Le {
+        col_index: usize,
+        value: Vec<u8>,
+    },
+    Gt {
+        col_index: usize,
+        value: Vec<u8>,
+    },
+    Ge {
+        col_index: usize,
+        value: Vec<u8>,
+    },
+    Contains {
+        col_index: usize,
+        value: Value,
+    },
+    IsNull {
+        col_index: usize,
+    },
+    IsNotNull {
+        col_index: usize,
+    },
+    RowIdEq {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    RowIdNe {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    RowIdLt {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    RowIdLe {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    RowIdGt {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    RowIdGe {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    RowIdIsNull {
+        element_index: usize,
+    },
+    RowIdIsNotNull {
+        element_index: usize,
+    },
+    And(Vec<Predicate>),
+    Or(Vec<Predicate>),
+    Not(Box<Predicate>),
+    True,
+}
+
+impl Predicate {
+    pub fn required_columns(&self) -> HashSet<usize> {
+        match self {
+            Predicate::Eq { col_index, .. }
+            | Predicate::Ne { col_index, .. }
+            | Predicate::Lt { col_index, .. }
+            | Predicate::Le { col_index, .. }
+            | Predicate::Gt { col_index, .. }
+            | Predicate::Ge { col_index, .. }
+            | Predicate::Contains { col_index, .. }
+            | Predicate::IsNull { col_index }
+            | Predicate::IsNotNull { col_index } => [*col_index].into_iter().collect(),
+            Predicate::RowIdEq { .. }
+            | Predicate::RowIdNe { .. }
+            | Predicate::RowIdLt { .. }
+            | Predicate::RowIdLe { .. }
+            | Predicate::RowIdGt { .. }
+            | Predicate::RowIdGe { .. }
+            | Predicate::RowIdIsNull { .. }
+            | Predicate::RowIdIsNotNull { .. } => HashSet::new(),
+            Predicate::And(predicates) | Predicate::Or(predicates) => predicates
+                .iter()
+                .flat_map(|predicate| predicate.required_columns())
+                .collect(),
+            Predicate::Not(predicate) => predicate.required_columns(),
+            Predicate::True => HashSet::new(),
+        }
+    }
+}
+
+/// Sort direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+/// Sort specification for a single column.
+#[derive(Debug, Clone)]
+pub struct SortKey {
+    pub target: SortTarget,
+    pub direction: SortDirection,
+}
+
+/// Field used by a sort key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortTarget {
+    Column(usize),
+    RowId,
+}
 
 fn parse_condition_column(column: &str) -> Option<(Option<&str>, &str)> {
     let trimmed = column.trim();
