@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PostcardWriter } from "./core-codec.js";
+import { PostcardWriter } from "./native-codec.js";
 import {
   WebSocketCarrier,
   decodeWireError,

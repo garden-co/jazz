@@ -1,7 +1,7 @@
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
 import type { AuthFailureReason } from "../auth-state.js";
-import { PostcardReader, PostcardWriter } from "./core-codec.js";
+import { PostcardReader, PostcardWriter } from "./native-codec.js";
 
 export type WebSocketFrameHandler = (frame: Uint8Array) => void;
 export type WebSocketErrorHandler = (error: WireError) => void;

@@ -28,7 +28,7 @@ describe("runtime/createDb driver mode", () => {
     ).rejects.toThrow("driver.type='memory' requires serverUrl.");
   });
 
-  it("uses the in-process core runtime path in browser when driver is persistent", async () => {
+  it("uses the in-process native runtime path in browser when driver is persistent", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).Worker = class {};
 
@@ -44,7 +44,7 @@ describe("runtime/createDb driver mode", () => {
     expect(createSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("uses the in-memory core runtime path in browser when driver is memory", async () => {
+  it("uses the in-memory native runtime path in browser when driver is memory", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).Worker = class {};
 

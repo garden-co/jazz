@@ -1,5 +1,5 @@
 import { loadWasmModule, type Runtime } from "../client.js";
-import { openConfig } from "./core-codec.js";
+import { openConfig } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-runtime.js";

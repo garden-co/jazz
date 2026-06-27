@@ -26,7 +26,7 @@ import {
   type QueryPredicateOp,
   type DescriptorField,
   type ValueType,
-} from "./core-codec.js";
+} from "./native-codec.js";
 import { columnTypeToValueType, columnValueType, encodeSchema } from "./schema-codec.js";
 import { WebSocketCarrier, wireAuthFailureReason } from "./websocket.js";
 import { createRecord, decodeRecordValue } from "./native-row-codec.js";

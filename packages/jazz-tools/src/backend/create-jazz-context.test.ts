@@ -100,7 +100,7 @@ vi.mock("jazz-napi", () => ({
   NapiDb: mocks.MockNapiDb,
 }));
 
-vi.mock("../runtime/core-runtime/native-runtime-adapter.js", () => ({
+vi.mock("../runtime/native-runtime/native-runtime-adapter.js", () => ({
   NativeRuntimeAdapter: mocks.MockNativeRuntimeAdapter,
 }));
 

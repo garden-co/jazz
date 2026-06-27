@@ -7,7 +7,7 @@ import { JazzClient, type RequestLike, type Runtime } from "../runtime/client.js
 import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
-import { NativeRuntimeAdapter } from "../runtime/core-runtime/native-runtime-adapter.js";
+import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { SYSTEM_AUTHOR_ID } from "../runtime/system-identity.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";

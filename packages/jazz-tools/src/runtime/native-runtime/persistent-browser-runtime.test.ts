@@ -79,7 +79,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     });
     const insertMessage = worker.messages.find((message) => message.method === "insert");
     expect(insertMessage).toBeDefined();
-    worker.respond(insertMessage!.id, { transactionId: "core-runtime-transaction" });
+    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
 
     const waitPromise = runtime.waitForTransaction(insert.transactionId, "local");
 
@@ -87,7 +87,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
     const waitMessage = worker.messages.find((message) => message.method === "waitForTransaction");
-    expect(waitMessage?.args).toEqual(["core-runtime-transaction", "local"]);
+    expect(waitMessage?.args).toEqual(["native-runtime-transaction", "local"]);
     worker.respond(waitMessage!.id, undefined);
 
     await expect(waitPromise).resolves.toBeUndefined();
@@ -118,10 +118,10 @@ describe("PersistentBrowserOpfsRuntime", () => {
     });
     const updateMessage = worker.messages.find((message) => message.method === "update");
     expect(updateMessage).toBeDefined();
-    worker.reject(updateMessage!.id, "core runtime rejected write");
+    worker.reject(updateMessage!.id, "native runtime rejected write");
 
     await expect(runtime.waitForTransaction(update.transactionId, "local")).rejects.toThrow(
-      "core runtime rejected write",
+      "native runtime rejected write",
     );
     expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(false);
 

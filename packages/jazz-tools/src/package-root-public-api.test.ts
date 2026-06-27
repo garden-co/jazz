@@ -222,19 +222,11 @@ const removedBrowserRuntimeExportPathFragments = [
   "jazz-worker",
 ] as const;
 
-const intendedNativeRuntimeAdapterBuildArtifacts = [
-  "runtime/core-runtime/core-codec.js",
-  "runtime/core-runtime/core-codec.d.ts",
-  "runtime/core-runtime/native-row-codec.js",
-  "runtime/core-runtime/native-row-codec.d.ts",
-  "runtime/core-runtime/schema-codec.js",
-  "runtime/core-runtime/schema-codec.d.ts",
-  "runtime/core-runtime/websocket.js",
-  "runtime/core-runtime/websocket.d.ts",
-  "runtime/core-runtime/persistent-browser-runtime.js",
-  "runtime/core-runtime/persistent-browser-runtime.d.ts",
-  "runtime/core-runtime/persistent-browser-worker.js",
-  "runtime/core-runtime/persistent-browser-worker.d.ts",
+const removedRuntimeBuildPathFragments = ["runtime/core-runtime/", "core-codec"] as const;
+
+const internalRuntimeExportPathFragments = [
+  "/runtime/core-runtime",
+  "/runtime/native-runtime",
 ] as const;
 
 function listDistFiles(dir: string, prefix = ""): string[] {
@@ -325,30 +317,30 @@ describe("package root public API", () => {
     }
   });
 
-  it("does not publish subpath exports for deleted browser runtime paths", () => {
+  it("does not publish subpath exports for deleted or internal runtime paths", () => {
     const packageJson = JSON.parse(
       readFileSync(join(packageRootDir, "..", "package.json"), "utf8"),
     ) as { exports: Record<string, unknown> };
     const exportedPaths = JSON.stringify(packageJson.exports);
 
-    for (const removedPathFragment of removedBrowserRuntimeExportPathFragments) {
+    for (const removedPathFragment of [
+      ...removedBrowserRuntimeExportPathFragments,
+      ...internalRuntimeExportPathFragments,
+    ]) {
       expect(exportedPaths, removedPathFragment).not.toContain(removedPathFragment);
     }
   });
 
-  it("builds only the intended core browser runtime boundary glue", () => {
+  it("does not leave stale runtime build artifacts in the package surface", () => {
     const distDir = join(packageRootDir, "..", "dist");
     const distFiles = listDistFiles(distDir);
-    const unexpectedBrowserRuntimeFiles = distFiles.filter(
+    const unexpectedRuntimeFiles = distFiles.filter(
       (file) =>
-        removedBrowserRuntimeExportPathFragments.some((fragment) => file.includes(fragment)) &&
-        !file.includes(".test."),
+        [...removedBrowserRuntimeExportPathFragments, ...removedRuntimeBuildPathFragments].some(
+          (fragment) => file.includes(fragment),
+        ) && !file.includes(".test."),
     );
 
-    expect(unexpectedBrowserRuntimeFiles).toEqual([]);
-
-    for (const artifact of intendedNativeRuntimeAdapterBuildArtifacts) {
-      expect(existsSync(join(distDir, artifact)), artifact).toBe(true);
-    }
+    expect(unexpectedRuntimeFiles).toEqual([]);
   });
 });

@@ -23,7 +23,7 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
     super();
   }
 
-  protected override async loadCore(): Promise<void> {
+  protected override async loadRuntime(): Promise<void> {
     return;
   }
 

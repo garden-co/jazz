@@ -26,19 +26,19 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
  * Internal source for loading and wiring the native runtime.
  *
  * This keeps platform/source differences (WASM, NAPI, browser storage, React
- * Native support status) out of Db. The active database path is core-only:
+ * Native support status) out of Db. The active database path is native-runtime backed:
  * implementations preload the runtime, then create JazzClient instances for
  * concrete schemas.
  */
 export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
-  /** Set to false when the core must receive schemas exactly as declared. */
+  /** Set to false when the runtime must receive schemas exactly as declared. */
   readonly supportsPolicyBypass: boolean = true;
 
   async load(config: RuntimeConfig): Promise<void> {
-    await this.loadCore(config);
+    await this.loadRuntime(config);
   }
 
-  protected async loadCore(_config: RuntimeConfig): Promise<unknown> {
+  protected async loadRuntime(_config: RuntimeConfig): Promise<unknown> {
     return undefined;
   }
 
@@ -51,10 +51,10 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
   }
 
   mintLocalFirstToken(_options: RuntimeTokenOptions): string {
-    throw new Error("Db core source does not support local-first auth");
+    throw new Error("Db runtime source does not support local-first auth");
   }
 
   mintAnonymousToken(_options: RuntimeTokenOptions): string {
-    throw new Error("Db core source does not support anonymous auth");
+    throw new Error("Db runtime source does not support anonymous auth");
   }
 }

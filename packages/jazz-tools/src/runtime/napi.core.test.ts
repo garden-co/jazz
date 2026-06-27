@@ -5,10 +5,10 @@ import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
-import { webSocketUrl } from "./core-runtime/websocket.js";
-import { openConfig } from "./core-runtime/core-codec.js";
-import { NativeRuntimeAdapter } from "./core-runtime/native-runtime-adapter.js";
-import { encodeSchema } from "./core-runtime/native-runtime-adapter.js";
+import { webSocketUrl } from "./native-runtime/websocket.js";
+import { openConfig } from "./native-runtime/native-codec.js";
+import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
+import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 const TEST_SCHEMA: WasmSchema = {
@@ -87,8 +87,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const db = NapiDb.openMemory(
       encodeSchema(TEST_SCHEMA),
       openConfig(
-        deterministicBytes("jazz-napi-core-runtime:scheduler-node"),
-        deterministicBytes("jazz-napi-core-runtime:scheduler-author"),
+        deterministicBytes("jazz-napi-native-runtime:scheduler-node"),
+        deterministicBytes("jazz-napi-native-runtime:scheduler-author"),
         1,
         true,
       ),
@@ -115,8 +115,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
-      deterministicBytes("jazz-napi-core-runtime:node"),
-      deterministicBytes("jazz-napi-core-runtime:author"),
+      deterministicBytes("jazz-napi-native-runtime:node"),
+      deterministicBytes("jazz-napi-native-runtime:author"),
       1,
       true,
     );
@@ -162,8 +162,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
-      deterministicBytes("jazz-napi-core-runtime-subscription:node"),
-      deterministicBytes("jazz-napi-core-runtime-subscription:author"),
+      deterministicBytes("jazz-napi-native-runtime-subscription:node"),
+      deterministicBytes("jazz-napi-native-runtime-subscription:author"),
       21,
       true,
     );
@@ -226,8 +226,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
-      deterministicBytes("jazz-napi-core-runtime-policy:node"),
-      deterministicBytes("jazz-napi-core-runtime-policy:author"),
+      deterministicBytes("jazz-napi-native-runtime-policy:node"),
+      deterministicBytes("jazz-napi-native-runtime-policy:author"),
       11,
       true,
     );
@@ -328,8 +328,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
-      deterministicBytes("jazz-napi-core-runtime-policy-subscription:node"),
-      deterministicBytes("jazz-napi-core-runtime-policy-subscription:author"),
+      deterministicBytes("jazz-napi-native-runtime-policy-subscription:node"),
+      deterministicBytes("jazz-napi-native-runtime-policy-subscription:author"),
       14,
       true,
     );
@@ -404,8 +404,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
-      deterministicBytes("jazz-napi-core-runtime-delete-policy:node"),
-      deterministicBytes("jazz-napi-core-runtime-delete-policy:author"),
+      deterministicBytes("jazz-napi-native-runtime-delete-policy:node"),
+      deterministicBytes("jazz-napi-native-runtime-delete-policy:author"),
       12,
       true,
     );
@@ -474,8 +474,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
-      deterministicBytes("jazz-napi-core-runtime-edge-delete-policy:node"),
-      deterministicBytes("jazz-napi-core-runtime-edge-delete-policy:author"),
+      deterministicBytes("jazz-napi-native-runtime-edge-delete-policy:node"),
+      deterministicBytes("jazz-napi-native-runtime-edge-delete-policy:author"),
       13,
       true,
     );
@@ -568,8 +568,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
             NapiDb.openPersistent(path, schema, config) as never,
         },
         OWNED_TODOS_SCHEMA,
-        deterministicBytes("jazz-napi-core-runtime-persistent-edge-delete-policy:node"),
-        deterministicBytes("jazz-napi-core-runtime-persistent-edge-delete-policy:author"),
+        deterministicBytes("jazz-napi-native-runtime-persistent-edge-delete-policy:node"),
+        deterministicBytes("jazz-napi-native-runtime-persistent-edge-delete-policy:author"),
         14,
         true,
         { persistentPath: join(tempDir, "db") },
@@ -650,8 +650,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
-      deterministicBytes("jazz-napi-core-runtime-parity:node"),
-      deterministicBytes("jazz-napi-core-runtime-parity:author"),
+      deterministicBytes("jazz-napi-native-runtime-parity:node"),
+      deterministicBytes("jazz-napi-native-runtime-parity:author"),
       2,
       true,
     );

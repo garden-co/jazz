@@ -7,7 +7,7 @@ import type {
   Value,
   WasmSchema,
 } from "../../drivers/types.js";
-import { PostcardWriter, writeValueType, type ValueType } from "./core-codec.js";
+import { PostcardWriter, writeValueType, type ValueType } from "./native-codec.js";
 
 export function encodeSchema(schema: WasmSchema): Uint8Array {
   const tables = Object.entries(schema);
