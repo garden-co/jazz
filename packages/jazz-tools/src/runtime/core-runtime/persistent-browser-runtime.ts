@@ -18,7 +18,9 @@ type PendingCall = {
 type WorkerResponse =
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: { name?: string; message?: string } }
-  | { subscription: number; args: unknown[] };
+  | { subscription: number; args: unknown[] }
+  | { event: "mutationError"; payload: MutationErrorEvent }
+  | { event: "authFailure"; reason: string };
 
 export class PersistentBrowserRuntime implements Runtime {
   private readonly worker: Worker;
@@ -27,6 +29,8 @@ export class PersistentBrowserRuntime implements Runtime {
   private readonly subscriptions = new Map<number, Function>();
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
   private readonly subscriptionLocalHandles = new Map<number, number>();
+  private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
+  private authFailureCallback: ((reason: string) => void) | undefined;
   private nextCallId = 1;
   private nextSubscriptionId = 1;
   private closed = false;
@@ -119,7 +123,9 @@ export class PersistentBrowserRuntime implements Runtime {
     return { transactionId };
   }
 
-  onMutationError(_callback: (event: MutationErrorEvent) => void): void {}
+  onMutationError(callback: (event: MutationErrorEvent) => void): void {
+    this.mutationErrorCallback = callback;
+  }
 
   beginTransaction(_transactionKind: TransactionKind): string {
     throw new Error(
@@ -222,7 +228,9 @@ export class PersistentBrowserRuntime implements Runtime {
     this.fireAndForget("updateAuth", authJson);
   }
 
-  onAuthFailure(_callback: (reason: string) => void): void {}
+  onAuthFailure(callback: (reason: string) => void): void {
+    this.authFailureCallback = callback;
+  }
 
   private writeId(): string {
     return `worker-write-${this.nextCallId++}`;
@@ -257,6 +265,20 @@ export class PersistentBrowserRuntime implements Runtime {
   }
 
   private handleWorkerMessage(message: WorkerResponse): void {
+    if ("event" in message) {
+      try {
+        if (message.event === "mutationError") {
+          this.mutationErrorCallback?.(message.payload);
+        } else {
+          this.authFailureCallback?.(message.reason);
+        }
+      } catch (error) {
+        setTimeout(() => {
+          throw error;
+        }, 0);
+      }
+      return;
+    }
     if ("subscription" in message) {
       const callback = this.subscriptions.get(
         this.subscriptionLocalHandles.get(message.subscription) ?? message.subscription,
