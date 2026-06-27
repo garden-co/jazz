@@ -202,15 +202,17 @@ cannot query the restored row yet.
 - Public transaction compatibility now has a first bounded slice over real ABI
   transaction handles: `beginTransaction`, synchronous `transaction(cb)`,
   transactional insert/update/upsert/delete/restore, commit with local write
-  waiting, rollback, custom ids, and exclusive transaction `tx.all`/`tx.one`
-  reads over staged state. Same-row insert/update, update/delete, and
+  waiting, rollback, custom ids, exclusive transaction commit/rollback through
+  direct core WASM, and exclusive transaction `tx.all`/`tx.one` reads over
+  staged state. Same-row insert/update, update/delete, and
   restore/update sequences are coalesced before commit so the public facade can
   present alpha-shaped staged-row semantics while still replaying a minimal ABI
   operation set. Focused compat tests also pin rollback after coalesced staged
   changes, repeated same-row upsert sequences, sync and async `transaction(cb)`
   commit return/throw rollback behavior, and rollback after rejected async
-  callbacks. Mergeable transaction reads, transaction query-builder reads, and
-  exclusive restore remain future work.
+  callbacks. Mergeable transaction reads and transaction query-builder reads
+  remain future work; session-scoped exclusive writes fail closed until direct
+  core exposes identity-aware exclusive staging.
 - Auth now has the first pure TypeScript alpha-shaped foundation in
   `jazz-tools.ts`: `Session`/`AuthMode`, JWT payload parsing, deterministic
   local-first `secret` resolution, `cookieSession`, auth state, and same-principal

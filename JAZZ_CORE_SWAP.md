@@ -261,6 +261,11 @@ Until deleted, treat them as replacement targets only.
   `mergeableTxForIdentity`). A mergeable transaction chooses its identity on
   first write and rejects mixed identities rather than silently writing under
   the wrong author.
+- Direct-core exclusive transactions are now exposed through WASM
+  (`exclusiveTx`) and the TypeScript runtime routes `beginExclusiveTransaction`
+  through the same transaction lifecycle as mergeable transactions. Session-
+  scoped exclusive writes still fail closed because core does not expose
+  identity-aware exclusive staging.
 - The Rust `storage` module is crate-private even under `test-utils`. Existing
   files under `crates/jazz-tools/tests/*storage*_integration.rs` and
   `client_restart_integration.rs` still reference the old storage API, but they
@@ -287,5 +292,10 @@ Until deleted, treat them as replacement targets only.
 - Public shell APIs (`Db`, `JazzClient`, schema DSL, framework adapters, tests,
   examples) should remain; duplicate execution/query/sync/storage internals
   should be hollowed or deleted once direct-core gates cover the behavior.
+- Remaining TS runtime cleanup pressure is concentrated around relation query
+  and subscription recompute helpers in `core-runtime/runtime.ts` plus the
+  query adapter's relation IR compiler. Those are useful integration scaffolds
+  but should be replaced by direct core prepared query/subscription lowering,
+  not allowed to become a second query engine.
 - Resolve crate/package name collisions before adding copied core crates to the
   root Cargo or pnpm workspaces.
