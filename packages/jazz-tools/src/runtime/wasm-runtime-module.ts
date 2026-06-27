@@ -5,7 +5,7 @@ import {
   type WasmModule,
 } from "./client.js";
 import { LOCAL_FIRST_JWT_ISSUER } from "./client-session.js";
-import type { DbConfig } from "./db.js";
+import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
 import {
   DbRuntimeModule,
   type DbRuntimeClientContext,
@@ -13,6 +13,7 @@ import {
   type RuntimeTokenOptions,
 } from "./db-runtime-module.js";
 import { CoreRuntime } from "./core-runtime/runtime.js";
+import { PersistentBrowserRuntime } from "./core-runtime/persistent-browser-runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
@@ -66,18 +67,25 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       onAuthFailure,
     };
 
-    const mainThreadPeerRuntime = new CoreRuntime(
-      this.wasmModule.WasmDb,
-      schema,
-      deterministicBytes(
-        `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:node`,
-      ),
-      deterministicBytes(
-        `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:author`,
-      ),
-      1,
-      true,
+    const node = deterministicBytes(
+      `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:node`,
     );
+    const author = deterministicBytes(
+      `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:author`,
+    );
+    const persistentBrowserDbName =
+      isBrowserRuntime() && (config.driver?.type ?? "persistent") === "persistent"
+        ? resolveDefaultPersistentDbName(config)
+        : undefined;
+    const mainThreadPeerRuntime = persistentBrowserDbName
+      ? new PersistentBrowserRuntime(
+          config.runtimeSources,
+          schema,
+          persistentBrowserDbName,
+          node,
+          author,
+        )
+      : new CoreRuntime(this.wasmModule.WasmDb, schema, node, author, 1, true);
 
     return JazzClient.connectWithRuntime(
       mainThreadPeerRuntime,
@@ -131,4 +139,8 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       options.nowSeconds,
     );
   }
+}
+
+function isBrowserRuntime(): boolean {
+  return typeof window !== "undefined" && typeof Worker !== "undefined";
 }

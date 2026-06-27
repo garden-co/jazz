@@ -111,7 +111,7 @@ describe("alpha public package flow", () => {
     ).toBe(true);
   });
 
-  it.skip("TODO(alpha direct core): reopens public persistent OPFS data after local writes; blocked on direct-core worker runtime preserving sync write handles", async () => {
+  it("reopens public persistent OPFS data after local writes", async () => {
     const appId = uniqueDbName("alpha-public-local-reopen");
     const persistentDbName = uniqueDbName("alpha-public-local-reopen-opfs");
     const sharedSecret = generateAuthSecret();
