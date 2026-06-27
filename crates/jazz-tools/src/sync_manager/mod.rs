@@ -19,9 +19,6 @@ pub mod forwarding;
 pub mod inbox;
 pub mod permissions;
 pub mod sync_logic;
-pub(crate) mod sync_tracer {
-    pub(crate) use crate::sync::sync_tracer::*;
-}
 pub mod types;
 
 use clock::MonotonicClock;
