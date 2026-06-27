@@ -330,8 +330,7 @@ type DirectDb = {
   prepareQuery(query: Uint8Array): object;
   all(query: object, opts: unknown): Uint8Array;
   allForIdentity?(query: object, identity: Uint8Array, opts: unknown): Uint8Array;
-  setTickScheduler?(callback: (urgency: "immediate" | "deferred") => void): void;
-  tick(): void;
+  setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
 };
 
 function isUint8Array(value: unknown): value is Uint8Array {
@@ -356,8 +355,6 @@ class DirectWorkerHost {
   private readonly peers = new Map<string, { port: MessagePort; transport: DirectTransport }>();
   private pumpScheduled = false;
   private pumpAgain = false;
-  private pendingDurabilityTick = false;
-  private coreSchedulerInstalled = false;
 
   private constructor(
     private readonly db: DirectDb,
@@ -388,10 +385,7 @@ class DirectWorkerHost {
       init.directOpen.peerIdentity,
       init.clientId ?? crypto.randomUUID(),
     );
-    if (typeof db.setTickScheduler === "function") {
-      host.coreSchedulerInstalled = true;
-      db.setTickScheduler((urgency) => host.scheduleCoreWake(urgency));
-    }
+    db.setTickScheduler((urgency) => host.scheduleCoreWake(urgency));
     self.onmessage = (event: MessageEvent) => host.handle(event.data);
     post({ type: "init-ok", clientId: host.clientId });
     host.schedulePump();
@@ -405,7 +399,6 @@ class DirectWorkerHost {
       case "sync":
         for (const frame of normalizeFrames(message.frames)) {
           this.mainTransport.sendWireFrame(frame);
-          this.pendingDurabilityTick = true;
         }
         this.schedulePump();
         return;
@@ -430,14 +423,12 @@ class DirectWorkerHost {
         }
         return;
       case "settle":
-        this.pendingDurabilityTick = true;
         this.pump();
         post({ type: "settled", id: message.id });
         return;
       case "server-in":
         if (message.frame instanceof Uint8Array) {
           this.serverTransport?.sendWireFrame(message.frame);
-          this.pendingDurabilityTick = true;
           this.schedulePump();
         }
         return;
@@ -473,7 +464,6 @@ class DirectWorkerHost {
       if (msg.type === "sync") {
         for (const frame of normalizeFrames(msg.frames)) {
           transport.sendWireFrame(frame);
-          this.pendingDurabilityTick = true;
         }
         this.schedulePump();
       } else if (msg.type === "close") {
@@ -495,7 +485,6 @@ class DirectWorkerHost {
   }
 
   private shutdown(): void {
-    this.pendingDurabilityTick = true;
     this.pump();
     this.mainTransport.close();
     this.serverTransport?.close();
@@ -529,12 +518,7 @@ class DirectWorkerHost {
 
   private pump(): void {
     for (let round = 0; round < 32; round += 1) {
-      const hadPendingDurabilityTick = this.pendingDurabilityTick;
-      this.pendingDurabilityTick = false;
-      if (!this.coreSchedulerInstalled) {
-        this.db.tick();
-      }
-      let madeProgress = hadPendingDurabilityTick;
+      let madeProgress = false;
       madeProgress =
         this.pumpTransport(this.mainTransport, (frames) =>
           post({ type: "sync", frames }, frameTransfers(frames)),
@@ -550,9 +534,6 @@ class DirectWorkerHost {
           this.pumpTransport(transport, (frames) => {
             port.postMessage({ type: "sync", frames }, frameTransfers(frames));
           }) || madeProgress;
-      }
-      if (hadPendingDurabilityTick && !this.coreSchedulerInstalled) {
-        this.db.tick();
       }
       if (!madeProgress) {
         return;
