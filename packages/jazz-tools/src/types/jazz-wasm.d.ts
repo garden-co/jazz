@@ -101,5 +101,6 @@ declare module "jazz-wasm" {
     acceptSubscriber(identity: Uint8Array): WasmTransport;
     mergeableTx(): WasmTx;
     mergeableTxForIdentity(author: Uint8Array): WasmTx;
+    exclusiveTx(): WasmTx;
   }
 }

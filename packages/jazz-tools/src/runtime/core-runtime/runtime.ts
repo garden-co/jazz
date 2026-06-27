@@ -96,6 +96,7 @@ type CoreDb = {
   deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): DirectWrite;
   mergeableTx(): DirectTx;
   mergeableTxForIdentity?(author: Uint8Array): DirectTx;
+  exclusiveTx?(): DirectTx;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -417,9 +418,6 @@ export class CoreRuntime implements Runtime {
   onMutationError(_callback: (event: MutationErrorEvent) => void): void {}
 
   beginTransaction(kind: TransactionKind): string {
-    if (kind !== "mergeable") {
-      throw new Error("Direct core runtime does not support exclusive transactions yet");
-    }
     const id = `tx-${this.nextTransactionId++}`;
     this.pendingTxs.set(id, { kind, writes: [] });
     return id;
@@ -430,7 +428,7 @@ export class CoreRuntime implements Runtime {
     if (!pending) {
       throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
     }
-    const write = (pending.tx ?? this.db.mergeableTx()).commit();
+    const write = (pending.tx ?? this.txForKind(pending.kind)).commit();
     this.writes.set(transactionId, write);
     this.pendingTxs.delete(transactionId);
     this.completedTxs.set(transactionId, { kind: pending.kind, state: "committed" });
@@ -918,6 +916,18 @@ export class CoreRuntime implements Runtime {
   }
 
   private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): DirectTx {
+    if (pending.kind === "exclusive") {
+      if (identity) {
+        throw new Error(
+          "Direct core runtime cannot perform session-scoped exclusive transaction writes: " +
+            "the core runtime exclusive transaction API has no identity-aware staging methods.",
+        );
+      }
+      if (!pending.tx) {
+        pending.tx = this.exclusiveTx();
+      }
+      return pending.tx;
+    }
     if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
       throw new Error("Direct core runtime mergeable transaction cannot mix write identities");
     }
@@ -929,6 +939,20 @@ export class CoreRuntime implements Runtime {
       pending.tx = identity ? this.mergeableTxForIdentity(identity) : this.db.mergeableTx();
     }
     return pending.tx;
+  }
+
+  private txForKind(kind: TransactionKind): DirectTx {
+    return kind === "exclusive" ? this.exclusiveTx() : this.db.mergeableTx();
+  }
+
+  private exclusiveTx(): DirectTx {
+    if (!this.db.exclusiveTx) {
+      throw new Error(
+        "Direct core runtime cannot perform exclusive transaction writes: " +
+          "the core runtime exclusive transaction API is unavailable.",
+      );
+    }
+    return this.db.exclusiveTx();
   }
 
   private mergeableTxForIdentity(identity: Uint8Array): DirectTx {
