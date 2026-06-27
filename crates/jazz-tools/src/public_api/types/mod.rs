@@ -1,5 +1,5 @@
 // Re-export encoding module from parent for use by sub-modules
-pub(crate) use crate::row_format;
+pub(crate) use crate::admin_catalogue_row_format;
 
 // Sub-modules
 mod branch;
@@ -18,7 +18,7 @@ pub use schema::*;
 pub use value::*;
 
 // Import PolicyExpr for use by schema module
-pub(crate) use crate::query_api::policy::PolicyExpr;
+pub(crate) use crate::public_api::policy::PolicyExpr;
 
 // Tests module
 #[cfg(test)]

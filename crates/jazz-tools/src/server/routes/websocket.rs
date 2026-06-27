@@ -25,7 +25,7 @@ use jazz::wire::{
 };
 use tokio::sync::mpsc;
 
-use crate::schema_api::AuthMode;
+use crate::public_schema::AuthMode;
 use crate::server::ServerState;
 
 const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
@@ -147,7 +147,7 @@ fn ws_live_admissions_for(key: WebSocketAdmissionKey) -> usize {
 #[derive(serde::Deserialize)]
 struct WebSocketPrelude {
     peer_identity: String,
-    auth: crate::transport_auth::AuthConfig,
+    auth: crate::websocket_prelude_auth::AuthConfig,
 }
 
 async fn ws_admission(
@@ -235,7 +235,7 @@ async fn ws_admission(
 }
 
 fn session_claims(
-    session: crate::schema_api::Session,
+    session: crate::public_schema::Session,
 ) -> Result<BTreeMap<String, CoreValue>, String> {
     let mut json = match session.claims {
         serde_json::Value::Object(map) => map,
@@ -538,7 +538,7 @@ async fn handle_ws_connection(
         }
     };
 
-    let Some(server_shell) = state.server_shell() else {
+    let Some(core_server_shell) = state.core_server_shell() else {
         send_ws_error(
             &mut socket,
             WireError::new(
@@ -551,7 +551,7 @@ async fn handle_ws_connection(
         let _ = socket.close().await;
         return;
     };
-    let session = match server_shell
+    let session = match core_server_shell
         .open(admission.identity, admission.claims, admission.trust)
         .await
     {
@@ -598,12 +598,12 @@ async fn handle_ws_connection(
         "websocket negotiated"
     );
 
-    let mut activity_rx = server_shell.subscribe_activity();
-    if drain_ws_outbound(&mut socket, &server_shell, session)
+    let mut activity_rx = core_server_shell.subscribe_activity();
+    if drain_ws_outbound(&mut socket, &core_server_shell, session)
         .await
         .is_err()
     {
-        server_shell.close(session);
+        core_server_shell.close(session);
         let _ = socket.close().await;
         return;
     }
@@ -648,7 +648,7 @@ async fn handle_ws_connection(
                             break;
                         }
                     };
-                    let outbound = match server_shell.receive_tick_take(session, frames).await {
+                    let outbound = match core_server_shell.receive_tick_take(session, frames).await {
                         Ok(frames) => frames,
                         Err(error) => {
                             send_ws_error(
@@ -675,23 +675,23 @@ async fn handle_ws_connection(
                 if changed.is_err() {
                     break;
                 }
-                if drain_ws_outbound(&mut socket, &server_shell, session).await.is_err() {
+                if drain_ws_outbound(&mut socket, &core_server_shell, session).await.is_err() {
                     break;
                 }
             }
         }
     }
 
-    server_shell.close(session);
+    core_server_shell.close(session);
     let _ = socket.close().await;
 }
 
 async fn drain_ws_outbound(
     socket: &mut WebSocket,
-    server_shell: &crate::server::server_shell::ServerShellHandle,
+    core_server_shell: &crate::server::core_server_shell::ServerShellHandle,
     session: jazz_server::ServerSession,
 ) -> Result<(), ()> {
-    let outbound = server_shell.tick_take(session).await.map_err(|_| ())?;
+    let outbound = core_server_shell.tick_take(session).await.map_err(|_| ())?;
     if outbound.is_empty() {
         return Ok(());
     }
@@ -785,8 +785,8 @@ mod tests {
 
     use crate::AppId;
     use crate::middleware::AuthConfig;
-    use crate::schema_api::Schema;
-    use crate::server::websocket_client::WebSocketTransport;
+    use crate::public_schema::Schema;
+    use crate::server::core_websocket_transport::WebSocketTransport;
     use crate::server::{ServerBuilder, StorageBackend};
 
     const WS_STORM_SIZE: usize = 24;
@@ -938,12 +938,12 @@ mod tests {
         .with_write_policy(Policy::public())
     }
 
-    fn ws_schema_convert() -> JazzSchema {
+    fn ws_public_schema_convert() -> JazzSchema {
         JazzSchema::new([ws_todos_table_schema()])
     }
 
     async fn make_ws_convergence_test_state() -> Arc<ServerState> {
-        let schema = ws_schema_convert();
+        let schema = ws_public_schema_convert();
         ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
@@ -952,7 +952,7 @@ mod tests {
             })
             .with_storage(StorageBackend::InMemory)
             .with_schema(Schema::new())
-            .with_server_shell_schema(schema)
+            .with_core_server_shell_schema(schema)
             .build()
             .await
             .expect("build websocket convergence test state")
@@ -966,7 +966,7 @@ mod tests {
         let forged_peer = AuthorId::from_bytes([0x52; 16]);
         let prelude = WebSocketPrelude {
             peer_identity: hex::encode(forged_peer.as_bytes()),
-            auth: crate::transport_auth::AuthConfig {
+            auth: crate::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
                     "user_id": uuid::Uuid::from_bytes(*authenticated.as_bytes()).to_string(),
@@ -998,7 +998,7 @@ mod tests {
         let user_id = uuid::Uuid::from_bytes(*identity.as_bytes()).to_string();
         let prelude = WebSocketPrelude {
             peer_identity: hex::encode(identity.as_bytes()),
-            auth: crate::transport_auth::AuthConfig {
+            auth: crate::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
                     "user_id": user_id,
@@ -1058,7 +1058,7 @@ mod tests {
     // websocket client helper negotiates the real /apps/<APP_ID>/ws route
     // without reintroducing the legacy SyncPayload websocket handler.
     #[tokio::test]
-    async fn websocket_client_helper_negotiates_route_hello() {
+    async fn core_websocket_transport_helper_negotiates_route_hello() {
         let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
 
@@ -1066,7 +1066,7 @@ mod tests {
             format!("http://{addr}"),
             state.app_id,
             AuthorId::from_bytes([0x41; 16]),
-            crate::transport_auth::AuthConfig {
+            crate::websocket_prelude_auth::AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
                 ..Default::default()
             },
@@ -1074,7 +1074,7 @@ mod tests {
         .await
         .expect("websocket helper should negotiate server hello");
 
-        let schema = ws_schema_convert();
+        let schema = ws_public_schema_convert();
         let column_families = schema.column_families();
         let refs = column_families
             .iter()
@@ -1327,7 +1327,7 @@ mod tests {
         postcard::from_bytes(&bytes).unwrap_or_default()
     }
 
-    async fn pump_websocket_client_once(
+    async fn pump_core_websocket_transport_once(
         client: &TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -1358,7 +1358,7 @@ mod tests {
         (sent, received)
     }
 
-    async fn receive_websocket_client_push_once(
+    async fn receive_core_websocket_transport_push_once(
         client: &TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -1399,7 +1399,7 @@ mod tests {
     async fn ws_clients_exchange_server_mediated_wire_frames() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let schema = ws_schema_convert();
+        let schema = ws_public_schema_convert();
         let client_a = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
         let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
         let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
@@ -1413,10 +1413,10 @@ mod tests {
         let start = tokio::time::Instant::now();
         while !client_b.edge_query_is_covered(&client_b_todos) && start.elapsed() < WS_PUMP_DEADLINE
         {
-            let (sent, received) = pump_websocket_client_once(&client_a, &mut ws_a).await;
+            let (sent, received) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
-            let (sent, received) = pump_websocket_client_once(&client_b, &mut ws_b).await;
+            let (sent, received) = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1447,7 +1447,7 @@ mod tests {
     async fn ws_empty_covered_reader_receives_later_writer_row_without_repropagating() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let schema = ws_schema_convert();
+        let schema = ws_public_schema_convert();
         let client_b = TestClient::new(schema.clone(), 0xb2, 0xb200).await;
         let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
         let client_b_todos = client_b.propagate_todos_query();
@@ -1455,7 +1455,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         while !client_b.edge_query_is_covered(&client_b_todos) && start.elapsed() < WS_PUMP_DEADLINE
         {
-            let _ = pump_websocket_client_once(&client_b, &mut ws_b).await;
+            let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
@@ -1477,9 +1477,10 @@ mod tests {
         while client_b.edge_todo_titles(&client_b_todos).await.is_empty()
             && start.elapsed() < WS_PUMP_DEADLINE
         {
-            let (sent, _) = pump_websocket_client_once(&client_a, &mut ws_a).await;
+            let (sent, _) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
             writer_sent += sent;
-            reader_received_push += receive_websocket_client_push_once(&client_b, &mut ws_b).await;
+            reader_received_push +=
+                receive_core_websocket_transport_push_once(&client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 

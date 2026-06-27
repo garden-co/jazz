@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::AppContext;
 use crate::AppId;
 use crate::middleware::AuthConfig;
-use crate::schema_api::Schema;
+use crate::public_schema::Schema;
 
 use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use tokio::sync::oneshot;

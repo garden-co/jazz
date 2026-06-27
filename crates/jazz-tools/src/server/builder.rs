@@ -12,7 +12,7 @@ use crate::middleware::AuthConfig;
 use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
-use crate::schema_api::Schema;
+use crate::public_schema::Schema;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use crate::server::CatalogueRocksDbStorage;
 use crate::server::routes;
@@ -68,7 +68,7 @@ pub struct ServerBuilder {
     auth_config: AuthConfig,
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
-    server_shell_schema: Option<JazzSchema>,
+    core_server_shell_schema: Option<JazzSchema>,
     upstream_url: Option<String>,
     shutdown_timeout: Duration,
 }
@@ -85,7 +85,7 @@ impl ServerBuilder {
             storage_backend: StorageBackend::Persistent {
                 path: PathBuf::from("./data"),
             },
-            server_shell_schema: None,
+            core_server_shell_schema: None,
             upstream_url: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         }
@@ -122,8 +122,8 @@ impl ServerBuilder {
         self
     }
 
-    pub fn with_server_shell_schema(mut self, schema: JazzSchema) -> Self {
-        self.server_shell_schema = Some(schema);
+    pub fn with_core_server_shell_schema(mut self, schema: JazzSchema) -> Self {
+        self.core_server_shell_schema = Some(schema);
         self
     }
 
@@ -147,10 +147,12 @@ impl ServerBuilder {
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
-        let server_shell_storage_config = self.build_server_shell_storage_config();
-        let server_shell =
-            self.build_server_shell(latest_catalogue_schema, server_shell_storage_config.clone())?;
-        let server_shell_storage_config = server_shell_storage_config.ok();
+        let core_server_shell_storage_config = self.build_core_server_shell_storage_config();
+        let core_server_shell = self.build_core_server_shell(
+            latest_catalogue_schema,
+            core_server_shell_storage_config.clone(),
+        )?;
+        let core_server_shell_storage_config = core_server_shell_storage_config.ok();
 
         let state = Arc::new(ServerState {
             catalogue_store,
@@ -161,8 +163,8 @@ impl ServerBuilder {
             topology,
             jwt_verifier,
             http_client,
-            server_shell: std::sync::RwLock::new(server_shell),
-            server_shell_storage_config,
+            core_server_shell: std::sync::RwLock::new(core_server_shell),
+            core_server_shell_storage_config,
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 
@@ -201,15 +203,15 @@ impl ServerBuilder {
         Ok((store, latest_catalogue_schema))
     }
 
-    fn build_server_shell(
+    fn build_core_server_shell(
         &self,
         latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
-    ) -> Result<Option<crate::server::server_shell::ServerShellHandle>, String> {
-        if let Some(schema) = &self.server_shell_schema {
+    ) -> Result<Option<crate::server::core_server_shell::ServerShellHandle>, String> {
+        if let Some(schema) = &self.core_server_shell_schema {
             let storage_config = storage_config?;
             return Ok(Some(
-                crate::server::server_shell::ServerShellHandle::start_with_storage(
+                crate::server::core_server_shell::ServerShellHandle::start_with_storage(
                     schema.clone(),
                     storage_config,
                 )?,
@@ -224,17 +226,17 @@ impl ServerBuilder {
             return Ok(None);
         };
         let storage_config = storage_config?;
-        let schema = crate::server::schema_convert::convert_public_schema(&schema)
+        let schema = crate::server::public_schema_convert::convert_public_schema(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
-            crate::server::server_shell::ServerShellHandle::start_with_storage(
+            crate::server::core_server_shell::ServerShellHandle::start_with_storage(
                 schema,
                 storage_config,
             )?,
         ))
     }
 
-    fn build_server_shell_storage_config(&self) -> Result<StorageConfig, String> {
+    fn build_core_server_shell_storage_config(&self) -> Result<StorageConfig, String> {
         match &self.storage_backend {
             StorageBackend::InMemory => Ok(StorageConfig::InMemory),
             StorageBackend::Persistent { path } => {
@@ -591,14 +593,14 @@ mod tests {
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn dynamic_builder_starts_server_shell_from_rehydrated_catalogue_schema() {
+    async fn dynamic_builder_starts_core_server_shell_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("dynamic-server-shell-rehydrate");
-        let schema = crate::schema_api::SchemaBuilder::new()
+        let schema = crate::public_schema::SchemaBuilder::new()
             .table(
-                crate::schema_api::TableSchema::builder("todos")
-                    .column("id", crate::schema_api::ColumnType::Uuid)
-                    .column("title", crate::schema_api::ColumnType::Text),
+                crate::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::public_schema::ColumnType::Uuid)
+                    .column("title", crate::public_schema::ColumnType::Text),
             )
             .build();
 
@@ -611,7 +613,7 @@ mod tests {
                 .build()
                 .await
                 .expect("build fixed schema server");
-            assert!(built.state.server_shell().is_some());
+            assert!(built.state.core_server_shell().is_some());
             built
                 .state
                 .catalogue_store
@@ -632,19 +634,19 @@ mod tests {
             .await
             .expect("build dynamic server from rehydrated catalogue");
 
-        assert!(rebuilt.state.server_shell().is_some());
+        assert!(rebuilt.state.core_server_shell().is_some());
     }
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn rocksdb_builder_starts_server_shell_with_catalogue_storage_after_restart() {
+    async fn rocksdb_builder_starts_core_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-restart");
-        let schema = crate::schema_api::SchemaBuilder::new()
+        let schema = crate::public_schema::SchemaBuilder::new()
             .table(
-                crate::schema_api::TableSchema::builder("todos")
-                    .column("id", crate::schema_api::ColumnType::Uuid)
-                    .column("title", crate::schema_api::ColumnType::Text),
+                crate::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::public_schema::ColumnType::Uuid)
+                    .column("title", crate::public_schema::ColumnType::Text),
             )
             .build();
 
@@ -658,7 +660,7 @@ mod tests {
                 .await
                 .expect("build RocksDB server with server shell");
 
-            assert!(built.state.server_shell().is_some());
+            assert!(built.state.core_server_shell().is_some());
             assert!(data_dir.path().join(CATALOGUE_ROCKSDB_DIR).exists());
             assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
         }
@@ -672,7 +674,7 @@ mod tests {
             .await
             .expect("rebuild RocksDB server with server shell");
 
-        assert!(rebuilt.state.server_shell().is_some());
+        assert!(rebuilt.state.core_server_shell().is_some());
         assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
     }
 

@@ -5,14 +5,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::AppId;
-use crate::catalogue_payload_codec::{
+use crate::admin_catalogue_payload_codec::{
     decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
     decode_schema, encode_lens_transform, encode_permissions_bundle, encode_permissions_head,
     encode_schema,
 };
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::ObjectId;
-use crate::query_api::types::{Schema, SchemaHash, TableName, TablePolicies};
+use crate::public_api::types::{Schema, SchemaHash, TableName, TablePolicies};
 use crate::schema_lens::Lens;
 use crate::server::catalogue_entry::CatalogueEntry;
 use crate::server::catalogue_storage::{
@@ -197,7 +197,7 @@ impl StoredCatalogue {
     pub(crate) fn add_client(
         &self,
         client_id: ClientId,
-        _session: Option<crate::query_api::session::Session>,
+        _session: Option<crate::public_api::session::Session>,
     ) -> Result<(), CatalogueError> {
         let mut clients = self
             .test_clients
@@ -211,7 +211,7 @@ impl StoredCatalogue {
     pub(crate) fn ensure_client_with_session(
         &self,
         client_id: ClientId,
-        _session: crate::query_api::session::Session,
+        _session: crate::public_api::session::Session,
     ) -> Result<(), CatalogueError> {
         self.add_client(client_id, None)
     }

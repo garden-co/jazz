@@ -1,6 +1,7 @@
-pub mod app_id;
 #[cfg(any(feature = "server", test))]
-pub(crate) mod catalogue_payload_codec;
+pub(crate) mod admin_catalogue_payload_codec;
+pub(crate) mod admin_catalogue_row_format;
+pub mod app_id;
 pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
@@ -9,9 +10,8 @@ pub mod object;
 #[cfg(feature = "otel-core")]
 pub mod otel;
 #[allow(dead_code, unused_imports, clippy::wrong_self_convention)]
-pub(crate) mod query_api;
-pub mod row_format;
-pub mod schema_api;
+pub(crate) mod public_api;
+pub mod public_schema;
 pub mod schema_lens;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
@@ -20,8 +20,8 @@ pub mod sync;
 pub mod test_support;
 pub mod transaction;
 
-pub mod transport_auth;
 pub mod transport_error;
+pub mod websocket_prelude_auth;
 
 #[cfg(feature = "client")]
 #[allow(clippy::await_holding_refcell_ref)]
@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 pub use app_id::AppId;
-pub use schema_api::{
+pub use public_schema::{
     AuthMode, BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation,
     OrderedRowDelta, PolicyExpr, Query, QueryBuilder, Row, RowDelta, RowDescriptor, Schema,
     SchemaBuilder, SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext,
