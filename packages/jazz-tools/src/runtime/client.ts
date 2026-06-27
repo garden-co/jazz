@@ -1016,14 +1016,6 @@ export class JazzClient {
     return normalizeRuntimeSchema(this.context.schema);
   }
 
-  /**
-   * Get the underlying runtime for internal diagnostics and tests.
-   * @internal
-   */
-  getRuntime(): Runtime {
-    return this.runtime;
-  }
-
   async waitForTransaction(transactionId: TransactionId, tier: DurabilityTier): Promise<void> {
     try {
       await this.runtime.waitForTransaction(transactionId, tier);
