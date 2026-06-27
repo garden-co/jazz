@@ -15,7 +15,7 @@ import {
   readAbiSubscriptionDelta,
   writeDescriptor,
   writeValueType,
-} from "./direct-row-codec.js";
+} from "./row-codec.js";
 
 export {
   createRecord,
@@ -33,7 +33,7 @@ export {
   readValueType,
   writeDescriptor,
   writeValueType,
-} from "./direct-row-codec.js";
+} from "./row-codec.js";
 export type {
   AbiRelationSubscriptionDelta,
   AbiRelationSubscriptionEdge,
@@ -44,7 +44,7 @@ export type {
   AbiSubscriptionDelta,
   DescriptorField,
   ValueType,
-} from "./direct-row-codec.js";
+} from "./row-codec.js";
 
 export type SubscriptionSnapshotChunk = {
   type: "snapshot";

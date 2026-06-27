@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JazzClient } from "./client.js";
 import { Db, type DbConfig } from "./db.js";
-import {
-  DirectCoreSource,
-  type DirectCoreClientContext,
-  type DirectCoreTelemetryContext,
-} from "./direct-core-source.js";
+import { CoreSource, type CoreClientContext, type CoreTelemetryContext } from "./core-source.js";
 
 const TELEMETRY_ENV_KEYS = [
   "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
@@ -14,9 +10,9 @@ const TELEMETRY_ENV_KEYS = [
   "EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
 ] as const;
 
-class TestCoreSource extends DirectCoreSource<DbConfig> {
+class TestCoreSource extends CoreSource<DbConfig> {
   readonly installTelemetryMock = vi.fn(
-    (_context: DirectCoreTelemetryContext<DbConfig>) => this.disposeTelemetry,
+    (_context: CoreTelemetryContext<DbConfig>) => this.disposeTelemetry,
   );
 
   constructor(private readonly disposeTelemetry?: () => void) {
@@ -27,11 +23,11 @@ class TestCoreSource extends DirectCoreSource<DbConfig> {
     return;
   }
 
-  override createClient(_context: DirectCoreClientContext<DbConfig>): JazzClient {
+  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
     throw new Error("createClient should not be called by telemetry tests");
   }
 
-  override installTelemetry(context: DirectCoreTelemetryContext<DbConfig>): (() => void) | null {
+  override installTelemetry(context: CoreTelemetryContext<DbConfig>): (() => void) | null {
     return this.installTelemetryMock(context) ?? null;
   }
 }
@@ -48,7 +44,7 @@ afterEach(() => {
   }
 });
 
-describe("Db direct core telemetry", () => {
+describe("Db core telemetry", () => {
   it("does not start main-thread telemetry when telemetry is disabled", async () => {
     const coreSource = new TestCoreSource();
     const db = await createTestDb({ appId: "main-no-telemetry" }, coreSource);

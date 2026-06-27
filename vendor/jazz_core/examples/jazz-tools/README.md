@@ -2,8 +2,8 @@
 
 This package starts the actual alpha-style TypeScript package surface named
 `jazz-tools` over direct WASM objects. It runs in Node, keeps row writes encoded
-at the hot boundary, and uses `src/direct-codec.ts` plus
-`src/direct-row-codec.ts` for the small amount of postcard/record encoding that
+at the hot boundary, and uses `src/core-codec.ts` plus
+`src/row-codec.ts` for the small amount of postcard/record encoding that
 the binding layer needs to understand.
 
 ## Public API Shape
@@ -119,7 +119,7 @@ write coalescing, and sync or async transaction callbacks. Mergeable transaction
 reads and query-builder reads through transaction objects are still future work.
 
 `createJazzContext({ appId, app/schema, driver? })` is the smallest
-`jazz-tools/backend` compatibility slice for this direct-WasmDb package. It returns
+`jazz-tools/backend` compatibility slice for this WasmDb package. It returns
 `{ db(), asBackend(), shutdown() }`; both `db()` and `asBackend().db` point at
 the same `createDb` memory-backed direct WasmDb instance for now. `driver` may be
 omitted or set to `"memory"`/`"local"`. Persistent backend storage is not exposed

@@ -1,9 +1,4 @@
-import {
-  JazzClient,
-  type DirectInsertResult,
-  type DirectMutationResult,
-  type Runtime,
-} from "../client.js";
+import { JazzClient, type InsertResult, type MutationResult, type Runtime } from "../client.js";
 import type { AppContext } from "../context.js";
 
 export { JazzClient, type Runtime };
@@ -35,11 +30,11 @@ export async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
-export function mockRow(id = "todo-1"): DirectInsertResult {
+export function mockRow(id = "todo-1"): InsertResult {
   return { id, values: [], transactionId: `transaction-${id}` };
 }
 
-export function mockMutation(transactionId = "transaction-id"): DirectMutationResult {
+export function mockMutation(transactionId = "transaction-id"): MutationResult {
   return { transactionId };
 }
 

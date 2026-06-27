@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
-import { WriteResult, JazzClient, type DirectInsertResult, WriteHandle } from "./client.js";
+import { WriteResult, JazzClient, type InsertResult, WriteHandle } from "./client.js";
 import type { Session } from "./context.js";
 
 class TestDb extends Db {
@@ -27,7 +27,7 @@ function makeHandleClient(): JazzClient {
   } as unknown as JazzClient;
 }
 
-function makeWriteResult(row: DirectInsertResult): WriteResult<DirectInsertResult> {
+function makeWriteResult(row: InsertResult): WriteResult<InsertResult> {
   return new WriteResult(row, row.transactionId, makeHandleClient());
 }
 
@@ -53,7 +53,7 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
+    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<InsertResult>>(() =>
       makeWriteResult({
         id: "todo-1",
         values: [
@@ -219,7 +219,7 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
+    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<InsertResult>>(() =>
       makeWriteResult({
         id: "todo-1",
         values: [
@@ -274,7 +274,7 @@ describe("Db runtime schema order", () => {
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
     const insert = vi.fn<
-      (...args: [string, InsertValues, { id: string }]) => WriteResult<DirectInsertResult>
+      (...args: [string, InsertValues, { id: string }]) => WriteResult<InsertResult>
     >(() =>
       makeWriteResult({
         id: externalId,
@@ -374,7 +374,7 @@ describe("Db runtime schema order", () => {
     };
     const updatedAt = 1_764_000_000_000_000;
     const insert = vi.fn<
-      (...args: [string, InsertValues, { updatedAt: number }]) => WriteResult<DirectInsertResult>
+      (...args: [string, InsertValues, { updatedAt: number }]) => WriteResult<InsertResult>
     >(() =>
       makeWriteResult({
         id: "todo-1",

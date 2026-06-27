@@ -474,7 +474,7 @@ describe("useAllSuspense browser integration", () => {
     );
   });
 
-  it("accepts direct-core-supported QueryOptions for suspense subscriptions", async () => {
+  it("accepts core-supported QueryOptions for suspense subscriptions", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("options"),

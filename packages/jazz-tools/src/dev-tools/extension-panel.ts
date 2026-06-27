@@ -11,7 +11,7 @@ import {
   Value,
   WasmSchema,
 } from "../index.js";
-import { DirectInsertResult, DirectMutationResult } from "../runtime/client.js";
+import { InsertResult, MutationResult } from "../runtime/client.js";
 import { Db, DbConfig } from "../runtime/db.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
@@ -492,7 +492,7 @@ class DevToolsJazzClient {
     this.fallbackSchema = schema;
   }
 
-  create(table: string, values: InsertValues): DirectInsertResult {
+  create(table: string, values: InsertValues): InsertResult {
     throw new Error("DevTools client does not support non-durable create().");
   }
   async createDurable(
@@ -524,7 +524,7 @@ class DevToolsJazzClient {
     objectId: string,
     updates: Record<string, Value>,
     options?: { tier?: DurabilityTier },
-  ): DirectMutationResult {
+  ): MutationResult {
     throw new Error("DevTools client does not support non-durable update().");
   }
   async updateDurable(
@@ -541,11 +541,7 @@ class DevToolsJazzClient {
       tier: options?.tier,
     });
   }
-  delete(
-    table: string,
-    objectId: string,
-    options?: { tier?: DurabilityTier },
-  ): DirectMutationResult {
+  delete(table: string, objectId: string, options?: { tier?: DurabilityTier }): MutationResult {
     throw new Error("DevTools client does not support non-durable delete().");
   }
   async deleteDurable(

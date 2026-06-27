@@ -1,21 +1,14 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { schema as s } from "../index.js";
-import { JazzClient, WriteResult, type DirectInsertResult, type Runtime } from "./client.js";
+import { JazzClient, WriteResult, type InsertResult, type Runtime } from "./client.js";
 import { createDbWithCoreSource, Db, type DbConfig } from "./db.js";
-import {
-  DirectCoreSource,
-  type DirectCoreClientContext,
-  type RuntimeTokenOptions,
-} from "./direct-core-source.js";
+import { CoreSource, type CoreClientContext, type RuntimeTokenOptions } from "./core-source.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 class TestDb extends Db {
   static readonly runtime = { TestRuntime: class {} };
 
-  constructor(
-    config: DbConfig,
-    coreSource: DirectCoreSource<DbConfig> = new TestDirectCoreSource(),
-  ) {
+  constructor(config: DbConfig, coreSource: CoreSource<DbConfig> = new TestCoreSource()) {
     super(config, coreSource);
   }
   public exposeGetClient(schema: WasmSchema): JazzClient {
@@ -23,7 +16,7 @@ class TestDb extends Db {
   }
 }
 
-class TestDirectCoreSource extends DirectCoreSource<DbConfig> {
+class TestCoreSource extends CoreSource<DbConfig> {
   protected override async loadCore(): Promise<typeof TestDb.runtime> {
     return TestDb.runtime;
   }
@@ -32,7 +25,7 @@ class TestDirectCoreSource extends DirectCoreSource<DbConfig> {
     config,
     schema,
     onAuthFailure,
-  }: DirectCoreClientContext<DbConfig>): JazzClient {
+  }: CoreClientContext<DbConfig>): JazzClient {
     return JazzClient.connectWithRuntime(
       makeRuntimeStub(),
       {
@@ -214,7 +207,7 @@ describe("runtime/Db direct path upstream wiring", () => {
     const connectWithRuntimeSpy = vi
       .spyOn(JazzClient, "connectWithRuntime")
       .mockReturnValue(client);
-    class PolicyEvaluatingCoreSource extends TestDirectCoreSource {
+    class PolicyEvaluatingCoreSource extends TestCoreSource {
       override readonly supportsPolicyBypass = false;
     }
     const schema: WasmSchema = {
@@ -252,11 +245,11 @@ describe("runtime/Db direct path upstream wiring", () => {
     });
   });
 
-  it("DBRT-U04 routes Db direct-core wiring through an injected core source", async () => {
+  it("DBRT-U04 routes Db core wiring through an injected core source", async () => {
     const app = makeTodosApp();
     const schema = app.todos._schema;
     const loadedCore = { kind: "test-core" };
-    const runtimeRow: DirectInsertResult = {
+    const runtimeRow: InsertResult = {
       id: "todo-1",
       values: [{ type: "Text", value: "Buy milk" }],
       transactionId: "transaction-1",
@@ -272,11 +265,9 @@ describe("runtime/Db direct path upstream wiring", () => {
       shutdown: ReturnType<typeof vi.fn>;
       updateAuthToken: ReturnType<typeof vi.fn>;
     };
-    class TestCoreSource extends DirectCoreSource<DbConfig> {
+    class TestCoreSource extends CoreSource<DbConfig> {
       readonly loadCoreMock = vi.fn(async (_config: DbConfig) => loadedCore);
-      override readonly createClient = vi.fn(
-        (_context: DirectCoreClientContext<DbConfig>) => client,
-      );
+      override readonly createClient = vi.fn((_context: CoreClientContext<DbConfig>) => client);
       override readonly mintLocalFirstToken = vi.fn(
         (options: RuntimeTokenOptions) =>
           `jwt:${options.secret}:${options.audience}:${options.ttlSeconds}`,
@@ -333,16 +324,16 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect(client.shutdown).toHaveBeenCalledTimes(1);
   });
 
-  it("uses the direct core path", () => {
+  it("uses the core runtime path", () => {
     const client = makeClientStub();
-    class RecordingCoreSource extends DirectCoreSource<DbConfig> {
-      readonly createClientMock = vi.fn((_context: DirectCoreClientContext<DbConfig>) => client);
+    class RecordingCoreSource extends CoreSource<DbConfig> {
+      readonly createClientMock = vi.fn((_context: CoreClientContext<DbConfig>) => client);
 
       protected override async loadCore(): Promise<typeof TestDb.runtime> {
         return TestDb.runtime;
       }
 
-      override createClient(context: DirectCoreClientContext<DbConfig>): JazzClient {
+      override createClient(context: CoreClientContext<DbConfig>): JazzClient {
         return this.createClientMock(context);
       }
     }

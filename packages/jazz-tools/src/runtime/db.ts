@@ -37,7 +37,7 @@ import {
   resolveEffectiveQueryExecutionOptions,
   type DeleteOptions,
 } from "./client.js";
-import { type DirectCoreSource, type RuntimeTokenOptions } from "./direct-core-source.js";
+import { type CoreSource, type RuntimeTokenOptions } from "./core-source.js";
 import { SYSTEM_READ_SESSION } from "./system-identity.js";
 import { WasmCoreSource } from "./wasm-core-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
@@ -65,7 +65,7 @@ import { resolveSelectedColumns } from "./select-projection.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
-type AnyDirectCoreSource = DirectCoreSource<any>;
+type AnyCoreSource = CoreSource<any>;
 
 /**
  * Configuration for creating a Db instance.
@@ -193,7 +193,7 @@ type DbRuntimeOperationContext = {
 };
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
-  // The direct core path still lacks parity for several public query shapes when
+  // The core runtime path still lacks parity for several public query shapes when
   // reads run with immediate local updates. Keep the high-level Db default
   // deferred until those shapes can execute without changing public behavior.
   return { localUpdates: "deferred", ...options };
@@ -883,7 +883,7 @@ export class Db {
   private clients = new Map<string, JazzClient>();
   private clientSchemas = new Map<string, WasmSchema>();
   private config: DbConfig;
-  private readonly coreSource: AnyDirectCoreSource | null;
+  private readonly coreSource: AnyCoreSource | null;
   private readonly authStateStore;
   private disposeCoreTelemetry: (() => void) | null = null;
   private _localFirstSecret: string | null = null;
@@ -903,7 +903,7 @@ export class Db {
    */
   protected constructor(
     config: DbConfig,
-    coreSource: AnyDirectCoreSource | null,
+    coreSource: AnyCoreSource | null,
     authStateOptions?: AuthStateStoreOptions,
   ) {
     this.config = config;
@@ -1006,7 +1006,7 @@ export class Db {
    * Create a Db instance with a loaded core source.
    * @internal Use createDb() instead.
    */
-  static create(config: DbConfig, coreSource: AnyDirectCoreSource): Db {
+  static create(config: DbConfig, coreSource: AnyCoreSource): Db {
     return new Db(config, coreSource);
   }
 
@@ -1794,7 +1794,7 @@ function createRuntimeTokenOptions(
 
 export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
-  coreSource: DirectCoreSource<RuntimeConfig>,
+  coreSource: CoreSource<RuntimeConfig>,
 ): Promise<Db> {
   if (config.secret && (config.jwtToken || config.cookieSession)) {
     throw new Error("DbConfig error: secret, jwtToken, and cookieSession are mutually exclusive");
@@ -1833,7 +1833,7 @@ export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
     throw new Error("driver.type='memory' requires serverUrl.");
   }
 
-  const db = Db.create(resolvedConfig, coreSource as AnyDirectCoreSource);
+  const db = Db.create(resolvedConfig, coreSource as AnyCoreSource);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600);

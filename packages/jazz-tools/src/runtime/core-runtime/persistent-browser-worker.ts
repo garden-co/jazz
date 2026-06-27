@@ -1,6 +1,6 @@
 import { loadWasmModule, type Runtime } from "../client.js";
-import { openConfig } from "./direct-codec.js";
-import { encodeDirectSchema } from "./direct-schema-codec.js";
+import { openConfig } from "./core-codec.js";
+import { encodeSchema } from "./schema-codec.js";
 import { CoreRuntime } from "./runtime.js";
 import type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-runtime.js";
 
@@ -138,7 +138,7 @@ async function openRuntime(message: OpenMessage): Promise<void> {
   runtimeNamespace = dbName;
   const db = await wasmModule.WasmDb.openBrowser(
     dbName,
-    encodeDirectSchema(schema as never),
+    encodeSchema(schema as never),
     openConfig(node, author, 1, true),
   );
 

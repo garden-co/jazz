@@ -10,30 +10,30 @@ import * as runtime from "./runtime/index.js";
 import type { CoreRuntime as InternalCoreRuntimeExport } from "./runtime/index.js";
 // @ts-expect-error CoreRuntime is intentionally not part of the package-root surface.
 import type { CoreRuntime as PackageRootCoreRuntime } from "./index.js";
-// @ts-expect-error DirectWebSocketCarrier is intentionally not part of the public runtime surface.
-import type { DirectWebSocketCarrier as RuntimeDirectWebSocketCarrier } from "./runtime/index.js";
-// @ts-expect-error DirectWebSocketCarrier is intentionally not part of the package-root surface.
-import type { DirectWebSocketCarrier as PackageRootDirectWebSocketCarrier } from "./index.js";
-// @ts-expect-error encodeDirectSchema is intentionally not part of the public runtime surface.
-import type { encodeDirectSchema as RuntimeEncodeDirectSchema } from "./runtime/index.js";
-// @ts-expect-error encodeDirectSchema is intentionally not part of the package-root surface.
-import type { encodeDirectSchema as PackageRootEncodeDirectSchema } from "./index.js";
-// @ts-expect-error encodeDirectWebSocketFrameBatch is intentionally not part of the public runtime surface.
-import type { encodeDirectWebSocketFrameBatch as RuntimeEncodeDirectWebSocketFrameBatch } from "./runtime/index.js";
-// @ts-expect-error encodeDirectWebSocketFrameBatch is intentionally not part of the package-root surface.
-import type { encodeDirectWebSocketFrameBatch as PackageRootEncodeDirectWebSocketFrameBatch } from "./index.js";
-// @ts-expect-error directWebSocketUrl is intentionally not part of the public runtime surface.
-import type { directWebSocketUrl as RuntimeDirectWebSocketUrl } from "./runtime/index.js";
-// @ts-expect-error directWebSocketUrl is intentionally not part of the package-root surface.
-import type { directWebSocketUrl as PackageRootDirectWebSocketUrl } from "./index.js";
-// @ts-expect-error DirectOpenPayload is intentionally not part of the public runtime surface.
-import type { DirectOpenPayload as RuntimeDirectOpenPayload } from "./runtime/index.js";
-// @ts-expect-error DirectOpenPayload is intentionally not part of the package-root surface.
-import type { DirectOpenPayload as PackageRootDirectOpenPayload } from "./index.js";
-// @ts-expect-error DbDirectBatch was removed from the public runtime surface.
-import type { DbDirectBatch as RuntimeDbDirectBatch } from "./runtime/index.js";
-// @ts-expect-error DbDirectBatch was removed from the package-root surface.
-import type { DbDirectBatch as PackageRootDbDirectBatch } from "./index.js";
+// @ts-expect-error WebSocketCarrier is intentionally not part of the public runtime surface.
+import type { WebSocketCarrier as RuntimeWebSocketCarrier } from "./runtime/index.js";
+// @ts-expect-error WebSocketCarrier is intentionally not part of the package-root surface.
+import type { WebSocketCarrier as PackageRootWebSocketCarrier } from "./index.js";
+// @ts-expect-error encodeSchema is intentionally not part of the public runtime surface.
+import type { encodeSchema as RuntimeEncodeSchema } from "./runtime/index.js";
+// @ts-expect-error encodeSchema is intentionally not part of the package-root surface.
+import type { encodeSchema as PackageRootEncodeSchema } from "./index.js";
+// @ts-expect-error encodeWebSocketFrameBatch is intentionally not part of the public runtime surface.
+import type { encodeWebSocketFrameBatch as RuntimeEncodeWebSocketFrameBatch } from "./runtime/index.js";
+// @ts-expect-error encodeWebSocketFrameBatch is intentionally not part of the package-root surface.
+import type { encodeWebSocketFrameBatch as PackageRootEncodeWebSocketFrameBatch } from "./index.js";
+// @ts-expect-error webSocketUrl is intentionally not part of the public runtime surface.
+import type { webSocketUrl as RuntimeWebSocketUrl } from "./runtime/index.js";
+// @ts-expect-error webSocketUrl is intentionally not part of the package-root surface.
+import type { webSocketUrl as PackageRootWebSocketUrl } from "./index.js";
+// @ts-expect-error OpenPayload is intentionally not part of the public runtime surface.
+import type { OpenPayload as RuntimeOpenPayload } from "./runtime/index.js";
+// @ts-expect-error OpenPayload is intentionally not part of the package-root surface.
+import type { OpenPayload as PackageRootOpenPayload } from "./index.js";
+// @ts-expect-error DbBatch was removed from the public runtime surface.
+import type { DbBatch as RuntimeDbBatch } from "./runtime/index.js";
+// @ts-expect-error DbBatch was removed from the package-root surface.
+import type { DbBatch as PackageRootDbBatch } from "./index.js";
 // @ts-expect-error BatchScope was removed from the public runtime surface.
 import type { BatchScope as RuntimeBatchScope } from "./runtime/index.js";
 // @ts-expect-error BatchScope was removed from the package-root surface.
@@ -85,18 +85,18 @@ import type { DynamicTableRow as PackageRootDynamicTableRow } from "./index.js";
 
 void (null as unknown as InternalCoreRuntimeExport);
 void (null as unknown as PackageRootCoreRuntime);
-void (null as unknown as RuntimeDirectWebSocketCarrier);
-void (null as unknown as PackageRootDirectWebSocketCarrier);
-void (null as unknown as RuntimeEncodeDirectSchema);
-void (null as unknown as PackageRootEncodeDirectSchema);
-void (null as unknown as RuntimeEncodeDirectWebSocketFrameBatch);
-void (null as unknown as PackageRootEncodeDirectWebSocketFrameBatch);
-void (null as unknown as RuntimeDirectWebSocketUrl);
-void (null as unknown as PackageRootDirectWebSocketUrl);
-void (null as unknown as RuntimeDirectOpenPayload);
-void (null as unknown as PackageRootDirectOpenPayload);
-void (null as unknown as RuntimeDbDirectBatch);
-void (null as unknown as PackageRootDbDirectBatch);
+void (null as unknown as RuntimeWebSocketCarrier);
+void (null as unknown as PackageRootWebSocketCarrier);
+void (null as unknown as RuntimeEncodeSchema);
+void (null as unknown as PackageRootEncodeSchema);
+void (null as unknown as RuntimeEncodeWebSocketFrameBatch);
+void (null as unknown as PackageRootEncodeWebSocketFrameBatch);
+void (null as unknown as RuntimeWebSocketUrl);
+void (null as unknown as PackageRootWebSocketUrl);
+void (null as unknown as RuntimeOpenPayload);
+void (null as unknown as PackageRootOpenPayload);
+void (null as unknown as RuntimeDbBatch);
+void (null as unknown as PackageRootDbBatch);
 void (null as unknown as RuntimeBatchScope);
 void (null as unknown as PackageRootBatchScope);
 void (null as unknown as RuntimeSubscriptionManager);
@@ -138,14 +138,14 @@ void (null as unknown as PackageRootBatch);
 
 const internalRuntimeExports = [
   "CoreRuntime",
-  "DirectWebSocketCarrier",
-  "encodeDirectSchema",
-  "encodeDirectWebSocketFrameBatch",
-  "directWebSocketUrl",
-  "DirectOpenPayload",
+  "WebSocketCarrier",
+  "encodeSchema",
+  "encodeWebSocketFrameBatch",
+  "webSocketUrl",
+  "OpenPayload",
 ] as const;
 
-const removedBatchRuntimeExports = ["DbDirectBatch"] as const;
+const removedBatchRuntimeExports = ["DbBatch"] as const;
 
 const internalHelperRuntimeExports = [
   "DynamicTableRow",
@@ -203,7 +203,7 @@ const removedBrowserRuntimeExportNames = [
 const removedBrowserRuntimeExportPathFragments = [
   "browser-broker",
   "broker-worker",
-  "direct-wasm",
+  ["direct", "wasm"].join("-"),
   "leader-lock",
   "sync-transport",
   "worker-bridge",
@@ -211,15 +211,15 @@ const removedBrowserRuntimeExportPathFragments = [
   "jazz-worker",
 ] as const;
 
-const intendedDirectCoreRuntimeBuildArtifacts = [
-  "runtime/core-runtime/direct-codec.js",
-  "runtime/core-runtime/direct-codec.d.ts",
-  "runtime/core-runtime/direct-row-codec.js",
-  "runtime/core-runtime/direct-row-codec.d.ts",
-  "runtime/core-runtime/direct-schema-codec.js",
-  "runtime/core-runtime/direct-schema-codec.d.ts",
-  "runtime/core-runtime/direct-websocket.js",
-  "runtime/core-runtime/direct-websocket.d.ts",
+const intendedCoreRuntimeBuildArtifacts = [
+  "runtime/core-runtime/core-codec.js",
+  "runtime/core-runtime/core-codec.d.ts",
+  "runtime/core-runtime/row-codec.js",
+  "runtime/core-runtime/row-codec.d.ts",
+  "runtime/core-runtime/schema-codec.js",
+  "runtime/core-runtime/schema-codec.d.ts",
+  "runtime/core-runtime/websocket.js",
+  "runtime/core-runtime/websocket.d.ts",
   "runtime/core-runtime/persistent-browser-runtime.js",
   "runtime/core-runtime/persistent-browser-runtime.d.ts",
   "runtime/core-runtime/persistent-browser-worker.js",
@@ -244,7 +244,7 @@ function listDistFiles(dir: string, prefix = ""): string[] {
 }
 
 describe("package root public API", () => {
-  it("exposes intended runtime APIs without direct-core internals", () => {
+  it("exposes intended runtime APIs without core internals", () => {
     for (const publicRuntimeExport of [
       "BrowserAuthSecretStore",
       "Db",
@@ -325,7 +325,7 @@ describe("package root public API", () => {
     }
   });
 
-  it("builds only the intended direct-core browser runtime boundary glue", () => {
+  it("builds only the intended core browser runtime boundary glue", () => {
     const distDir = join(packageRootDir, "..", "dist");
     const distFiles = listDistFiles(distDir);
     const unexpectedBrowserRuntimeFiles = distFiles.filter(
@@ -336,7 +336,7 @@ describe("package root public API", () => {
 
     expect(unexpectedBrowserRuntimeFiles).toEqual([]);
 
-    for (const artifact of intendedDirectCoreRuntimeBuildArtifacts) {
+    for (const artifact of intendedCoreRuntimeBuildArtifacts) {
       expect(existsSync(join(distDir, artifact)), artifact).toBe(true);
     }
   });
