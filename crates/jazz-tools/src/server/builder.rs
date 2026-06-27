@@ -7,16 +7,12 @@ use jazz::schema::JazzSchema;
 use jazz_server::StorageConfig;
 use tracing::info;
 
+use crate::AppId;
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
-#[cfg(test)]
-use crate::query_manager::types::ComposedBranchName;
 use crate::schema_api::Schema;
-#[cfg(test)]
-use crate::schema_api::SchemaHash;
-use crate::schema_manager::AppId;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use crate::server::CatalogueRocksDbStorage;
 use crate::server::routes;
@@ -355,15 +351,7 @@ impl ServerBuilder {
 
 #[cfg(test)]
 fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
-    schema
-        .map(|schema| {
-            ComposedBranchName::new("prod", SchemaHash::compute(schema), "main")
-                .to_branch_name()
-                .as_str()
-                .to_string()
-        })
-        .into_iter()
-        .collect()
+    schema.map(|_| "main".to_string()).into_iter().collect()
 }
 
 async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
@@ -505,7 +493,7 @@ pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema_manager::AppId;
+    use crate::AppId;
     use crate::server::catalogue::CatalogueStore;
 
     #[tokio::test]

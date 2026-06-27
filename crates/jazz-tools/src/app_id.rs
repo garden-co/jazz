@@ -1,21 +1,8 @@
-//! Types for schema/lens catalogue management.
-
 use uuid::Uuid;
 
 use crate::object::ObjectId;
 
-/// Identifier for an application's schema family.
-///
-/// All schemas and lenses for an app share the same AppId. Used to:
-/// - Filter catalogue queries by app
-/// - Associate related schemas across clients
-///
-/// # Example
-///
-/// ```ignore
-/// let app_id = AppId::from_name("my-todo-app");
-/// let manager = SchemaManager::new(schema, app_id, "dev", "main")?;
-/// ```
+/// Identifier for an application's catalogue and sync namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AppId(pub ObjectId);
 
@@ -86,7 +73,6 @@ mod tests {
     fn app_id_display() {
         let id = AppId::from_name("test-app");
         let s = format!("{}", id);
-        // Should be a valid UUID string
         assert!(s.contains('-'));
         assert_eq!(s.len(), 36);
     }

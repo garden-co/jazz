@@ -3,8 +3,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use jazz_tools::AppId;
 use jazz_tools::middleware::AuthConfig;
-use jazz_tools::schema_manager::AppId;
 use jazz_tools::server::{ServerBuilder, ShutdownPhase, StorageBackend};
 use tracing::info;
 

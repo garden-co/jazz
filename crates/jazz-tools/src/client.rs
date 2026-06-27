@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[cfg(feature = "test-utils")]
-use crate::query_manager::types::RowPolicyMode;
+use crate::query_api::types::RowPolicyMode;
 #[cfg(feature = "client-engine")]
 use crate::schema_api::OrderedRowDelta;
 #[cfg(any(feature = "client-engine", feature = "test-utils"))]
@@ -435,7 +435,7 @@ impl ClientEngine {
         storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
-        app_id: crate::schema_manager::AppId,
+        app_id: crate::AppId,
         auth: Option<WsAuthConfig>,
     ) -> Result<Rc<Self>> {
         let scheduler = Rc::new(TickSchedulerImpl::default());
@@ -708,7 +708,7 @@ impl ClientEngineInner {
         storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
-        app_id: crate::schema_manager::AppId,
+        app_id: crate::AppId,
         auth: Option<WsAuthConfig>,
         scheduler: Rc<TickSchedulerImpl>,
     ) -> Result<Self> {
@@ -1637,8 +1637,8 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AppId;
     use crate::schema_api::Schema;
-    use crate::schema_manager::AppId;
     use crate::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;

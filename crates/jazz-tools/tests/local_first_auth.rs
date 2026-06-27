@@ -3,7 +3,7 @@
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use jazz_tools::identity;
 use jazz_tools::middleware::auth::{AuthConfig, extract_session};
-use jazz_tools::schema_manager::AppId;
+use jazz_tools::AppId;
 
 fn test_app_id() -> AppId {
     AppId::from_name("local-first-integration-test")

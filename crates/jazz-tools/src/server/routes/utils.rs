@@ -6,9 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
+use crate::AppId;
 use crate::object::ObjectId;
 use crate::schema_api::{SchemaHash, TableName, TablePolicies};
-use crate::schema_manager::AppId;
 
 use super::http::PermissionsHeadView;
 
@@ -51,7 +51,7 @@ pub(super) fn parse_app_id_param(app_id_text: &str) -> Result<AppId, String> {
 }
 
 pub(super) fn permissions_head_view(
-    head: crate::schema_manager::manager::PermissionsHeadSummary,
+    head: crate::server::PermissionsHeadSummary,
 ) -> PermissionsHeadView {
     PermissionsHeadView {
         schema_hash: head.schema_hash.to_string(),
