@@ -24,15 +24,13 @@ use crate::storage::RocksDBStorage;
 use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{Destination, DurabilityTier, SyncManager};
-use crate::transport_manager::TransportRetryConfig;
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(feature = "rocksdb")]
 const CORE_SERVER_ROCKSDB_DIR: &str = "core-server.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-const EDGE_UPSTREAM_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
-const EDGE_UPSTREAM_AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const EDGE_UPSTREAM_UNSUPPORTED_MESSAGE: &str = "edge upstream sync is temporarily unsupported while server-to-server sync is migrated to the core engine; refusing to start the legacy alpha transport";
 
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -76,6 +74,8 @@ pub struct ServerBuilder {
     sync_tracer: Option<crate::sync_manager::sync_tracer::SyncTracer>,
     upstream_url: Option<String>,
     shutdown_timeout: Duration,
+    #[cfg(test)]
+    allow_unsupported_upstream_for_catalogue_tests: bool,
 }
 
 impl ServerBuilder {
@@ -94,6 +94,8 @@ impl ServerBuilder {
             sync_tracer: None,
             upstream_url: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
+            #[cfg(test)]
+            allow_unsupported_upstream_for_catalogue_tests: false,
         }
     }
 
@@ -117,6 +119,12 @@ impl ServerBuilder {
 
     pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
         self.upstream_url = Some(upstream_url.into());
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allow_unsupported_upstream_for_catalogue_tests(mut self) -> Self {
+        self.allow_unsupported_upstream_for_catalogue_tests = true;
         self
     }
 
@@ -148,22 +156,21 @@ impl ServerBuilder {
         } else {
             ServerTopology::Core
         };
-        let upstream_ws_url = match self.upstream_url.as_deref() {
-            Some(upstream_url) => Some(upstream_ws_url(upstream_url, self.app_id)?),
-            None => None,
-        };
         let upstream_http_url = match self.upstream_url.as_deref() {
             Some(upstream_url) => Some(upstream_http_url(upstream_url, self.app_id)?),
             None => None,
         };
         validate_server_config(&auth_config, topology)?;
+        #[cfg(test)]
+        let allow_unsupported_upstream_for_catalogue_tests =
+            self.allow_unsupported_upstream_for_catalogue_tests;
+        #[cfg(not(test))]
+        let allow_unsupported_upstream_for_catalogue_tests = false;
+        validate_upstream_sync_supported(topology, allow_unsupported_upstream_for_catalogue_tests)?;
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
         let (runtime, connection_event_hub) = self.build_runtime()?;
-        if let Some(upstream_ws_url) = upstream_ws_url.clone() {
-            start_upstream_sync(&runtime, upstream_ws_url, &auth_config)?;
-        }
         let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
@@ -501,6 +508,17 @@ fn validate_server_config(
     Ok(())
 }
 
+fn validate_upstream_sync_supported(
+    topology: ServerTopology,
+    allow_unsupported_upstream_for_catalogue_tests: bool,
+) -> Result<(), String> {
+    if topology.is_edge() && !allow_unsupported_upstream_for_catalogue_tests {
+        return Err(EDGE_UPSTREAM_UNSUPPORTED_MESSAGE.to_owned());
+    }
+
+    Ok(())
+}
+
 fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
     info!(
         "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, topology={:?}",
@@ -512,47 +530,6 @@ fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
         auth_config.admin_secret.is_some(),
         topology
     );
-}
-
-pub fn upstream_ws_url(base_url: &str, app_id: AppId) -> Result<String, String> {
-    let mut url = reqwest::Url::parse(base_url)
-        .map_err(|err| format!("invalid upstream URL '{base_url}': {err}"))?;
-
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("upstream URL must not include query parameters or a fragment".to_string());
-    }
-
-    let scheme = match url.scheme() {
-        "http" => "ws",
-        "https" => "wss",
-        "ws" => "ws",
-        "wss" => "wss",
-        other => {
-            return Err(format!(
-                "unsupported upstream URL scheme '{other}'; expected http, https, ws, or wss"
-            ));
-        }
-    };
-    url.set_scheme(scheme)
-        .map_err(|_| format!("failed to set upstream URL scheme to {scheme}"))?;
-
-    let app_ws_path = format!("/apps/{app_id}/ws");
-    let normalized_path = url.path().trim_end_matches('/');
-    if normalized_path == app_ws_path.trim_end_matches('/') {
-        url.set_path(&app_ws_path);
-    } else {
-        let base_path = match normalized_path {
-            "" | "/" => String::new(),
-            path => path.to_string(),
-        };
-        url.set_path(&format!(
-            "{}/{}",
-            base_path.trim_end_matches('/'),
-            app_ws_path.trim_start_matches('/')
-        ));
-    }
-
-    Ok(url.to_string())
 }
 
 pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String> {
@@ -595,104 +572,31 @@ pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String
     Ok(url.to_string())
 }
 
-fn start_upstream_sync(
-    runtime: &TokioRuntime<DynStorage>,
-    upstream_ws_url: String,
-    auth_config: &AuthConfig,
-) -> Result<(), String> {
-    let admin_secret = auth_config
-        .admin_secret
-        .clone()
-        .ok_or_else(|| "edge mode requires --admin-secret / JAZZ_ADMIN_SECRET".to_string())?;
-
-    info!(
-        local_tier = "edge",
-        upstream_url = %upstream_ws_url,
-        upstream_connected = false,
-        "starting edge upstream sync"
-    );
-
-    let retry_config = TransportRetryConfig {
-        connect_attempt_timeout: Some(EDGE_UPSTREAM_CONNECT_ATTEMPT_TIMEOUT),
-        auth_handshake_timeout: Some(EDGE_UPSTREAM_AUTH_HANDSHAKE_TIMEOUT),
-    };
-
-    runtime.connect_with_retry_config(
-        upstream_ws_url.clone(),
-        crate::transport_manager::AuthConfig {
-            admin_secret: Some(admin_secret),
-            ..Default::default()
-        },
-        retry_config,
-    );
-
-    let wait_runtime = (*runtime).clone();
-    tokio::spawn(async move {
-        let connected = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            wait_runtime.transport_wait_until_connected(),
-        )
-        .await
-        .unwrap_or(false);
-        if connected {
-            tracing::info!(
-                local_tier = "edge",
-                upstream_url = %upstream_ws_url,
-                upstream_connected = true,
-                "edge upstream sync connected"
-            );
-        } else {
-            tracing::warn!(
-                local_tier = "edge",
-                upstream_url = %upstream_ws_url,
-                upstream_connected = false,
-                "edge upstream sync ended before first connection"
-            );
-        }
-    });
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema_manager::AppId;
 
-    #[test]
-    fn upstream_url_conversion_maps_base_urls_to_app_ws_route() {
+    #[tokio::test]
+    async fn edge_upstream_mode_is_explicitly_unsupported() {
         let app_id =
             AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
+        let auth_config = AuthConfig {
+            admin_secret: Some("test-admin-secret".to_owned()),
+            ..Default::default()
+        };
+
+        let result = ServerBuilder::new(app_id)
+            .with_auth_config(auth_config)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("http://127.0.0.1:12345")
+            .build()
+            .await;
 
         assert_eq!(
-            upstream_ws_url("https://core.example.com", app_id).expect("https conversion"),
-            "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws"
+            result.err().as_deref(),
+            Some(EDGE_UPSTREAM_UNSUPPORTED_MESSAGE)
         );
-        assert_eq!(
-            upstream_ws_url("http://core.example.com/base/", app_id).expect("http conversion"),
-            "ws://core.example.com/base/apps/00000000-0000-0000-0000-000000000001/ws"
-        );
-        assert_eq!(
-            upstream_ws_url("ws://core.example.com", app_id).expect("ws conversion"),
-            "ws://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws"
-        );
-        assert_eq!(
-            upstream_ws_url(
-                "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws",
-                app_id
-            )
-            .expect("already app-scoped ws URL"),
-            "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws"
-        );
-    }
-
-    #[test]
-    fn upstream_url_conversion_rejects_query_and_fragment_urls() {
-        let app_id =
-            AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
-
-        assert!(upstream_ws_url("https://core.example.com?token=abc", app_id).is_err());
-        assert!(upstream_ws_url("https://core.example.com#cluster-a", app_id).is_err());
     }
 
     #[test]
@@ -761,8 +665,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_allows_edge_mode_with_admin_secret_only() {
-        let built = ServerBuilder::new(AppId::from_name("edge-builder-admin-secret-only"))
+    async fn builder_rejects_edge_mode_with_admin_secret_until_direct_core_upstream_exists() {
+        let result = ServerBuilder::new(AppId::from_name("edge-builder-admin-secret-only"))
             .with_storage(StorageBackend::InMemory)
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_string()),
@@ -770,18 +674,11 @@ mod tests {
             })
             .with_upstream_url("ws://127.0.0.1:9")
             .build()
-            .await
-            .expect("build edge server with admin secret only");
-
-        let tiers = built
-            .state
-            .runtime
-            .with_sync_manager(|sync| sync.local_durability_tiers())
-            .expect("read sync manager");
+            .await;
 
         assert_eq!(
-            tiers,
-            std::collections::HashSet::from([DurabilityTier::EdgeServer])
+            result.err().as_deref(),
+            Some(EDGE_UPSTREAM_UNSUPPORTED_MESSAGE)
         );
     }
 
@@ -894,8 +791,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_uses_edge_tier_with_upstream() {
-        let built = ServerBuilder::new(AppId::from_name("edge-builder-tier"))
+    async fn builder_refuses_edge_tier_until_upstream_sync_uses_direct_core() {
+        let result = ServerBuilder::new(AppId::from_name("edge-builder-tier"))
             .with_storage(StorageBackend::InMemory)
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_string()),
@@ -903,18 +800,11 @@ mod tests {
             })
             .with_upstream_url("ws://127.0.0.1:9")
             .build()
-            .await
-            .expect("build edge server");
-
-        let tiers = built
-            .state
-            .runtime
-            .with_sync_manager(|sync| sync.local_durability_tiers())
-            .expect("read sync manager");
+            .await;
 
         assert_eq!(
-            tiers,
-            std::collections::HashSet::from([DurabilityTier::EdgeServer])
+            result.err().as_deref(),
+            Some(EDGE_UPSTREAM_UNSUPPORTED_MESSAGE)
         );
     }
 }

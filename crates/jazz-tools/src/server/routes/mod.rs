@@ -202,6 +202,7 @@ mod tests {
         ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(test_auth_config())
             .with_upstream_url(upstream_url)
+            .allow_unsupported_upstream_for_catalogue_tests()
             .with_storage(StorageBackend::InMemory)
             .with_schema(schema)
             .build()

@@ -20,21 +20,21 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 
 `jazz-tools@alpha server <APP_ID>` currently supports:
 
-| Option                              | Purpose                                                                                                                                                      | Environment variable          | Default                   |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------- | ------------------------- |
-| `<APP_ID>` (positional)             | App namespace identifier (required)                                                                                                                          | -                             | -                         |
-| `-p, --port <PORT>`                 | Listen port                                                                                                                                                  | -                             | `1625`                    |
-| `-d, --data-dir <DATA_DIR>`         | Persistent storage directory                                                                                                                                 | -                             | `./data`                  |
-| `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits                                                                                  | -                             | off                       |
-| `--jwks-url <JWKS_URL>`             | JWKS endpoint for external JWT validation                                                                                                                    | `JAZZ_JWKS_URL`               | unset                     |
-| `--jwt-public-key <JWT_PUBLIC_KEY>` | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                                       | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
-| `--allow-local-first-auth`          | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                                      | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
-| `--backend-secret <BACKEND_SECRET>` | Enable backend session impersonation                                                                                                                         | `JAZZ_BACKEND_SECRET`         | unset                     |
-| `--admin-secret <ADMIN_SECRET>`     | Required for `deploy`, `migrations push`, schema catalogue reads, and edge upstream sync. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
-| `--upstream-url <UPSTREAM_URL>`     | Run as an edge server connected to the upstream core server. Requires `--admin-secret`.                                                                      | `JAZZ_UPSTREAM_URL`           | unset                     |
+| Option                              | Purpose                                                                                                                                  | Environment variable          | Default                   |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
+| `<APP_ID>` (positional)             | App namespace identifier (required)                                                                                                      | -                             | -                         |
+| `-p, --port <PORT>`                 | Listen port                                                                                                                              | -                             | `1625`                    |
+| `-d, --data-dir <DATA_DIR>`         | Persistent storage directory                                                                                                             | -                             | `./data`                  |
+| `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits                                                              | -                             | off                       |
+| `--jwks-url <JWKS_URL>`             | JWKS endpoint for external JWT validation                                                                                                | `JAZZ_JWKS_URL`               | unset                     |
+| `--jwt-public-key <JWT_PUBLIC_KEY>` | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                   | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
+| `--allow-local-first-auth`          | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                  | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
+| `--backend-secret <BACKEND_SECRET>` | Enable backend session impersonation                                                                                                     | `JAZZ_BACKEND_SECRET`         | unset                     |
+| `--admin-secret <ADMIN_SECRET>`     | Required for `deploy`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
+| `--upstream-url <UPSTREAM_URL>`     | Edge upstream sync is temporarily unsupported while server-to-server sync is migrated to the core engine.                                | `JAZZ_UPSTREAM_URL`           | unset                     |
 
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
-Edge mode is enabled by `--upstream-url`; when set, provide `--admin-secret` or `JAZZ_ADMIN_SECRET`. The edge uses that admin secret for its upstream WebSocket connection.
+Servers currently refuse to start when `--upstream-url` or `JAZZ_UPSTREAM_URL` is set. This prevents edge deployments from silently using the legacy alpha WebSocket sync transport.
 
 There is no separate Jazz server CLI flag for cookie-based auth. The sync server validates bearer
 JWTs, local-first bearer JWTs, or backend impersonation headers. If your app uses an HttpOnly cookie,
