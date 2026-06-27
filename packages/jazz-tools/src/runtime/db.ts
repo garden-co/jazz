@@ -1418,8 +1418,6 @@ export class Db {
 
   /**
    * Delete browser OPFS storage for this Db's active namespace.
-   *
-   * Direct-core browser persistence reset is not implemented yet.
    */
   async deleteClientStorage(): Promise<void> {
     if (resolveStorageDriver(this.config.driver).type !== "persistent") {
@@ -1431,9 +1429,31 @@ export class Db {
       return;
     }
 
-    throw new Error(
-      "deleteClientStorage() direct-core browser persistence reset is not implemented yet.",
-    );
+    const clients = [...this.clients.values()];
+    if (clients.length === 0) {
+      const client = this.getClient({});
+      clients.push(client);
+    }
+
+    const [resetClient, ...otherClients] = clients;
+    let closeError: unknown = null;
+    for (const client of otherClients) {
+      try {
+        await client.shutdown();
+      } catch (error) {
+        closeError ??= error;
+      }
+    }
+
+    try {
+      if (closeError) {
+        throw closeError;
+      }
+      await resetClient!.clearClientStorage();
+    } finally {
+      this.clients.clear();
+      this.clientSchemas.clear();
+    }
   }
 
   /**

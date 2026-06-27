@@ -79,6 +79,7 @@ export interface Runtime {
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
   close?(): void | Promise<void>;
+  clearClientStorage?(): Promise<void>;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect(url: string, auth_json: string): void;
   /** Disconnect from the Jazz server and drop the transport handle. */
@@ -1069,6 +1070,14 @@ export class JazzClient {
     })();
 
     return await this.shutdownPromise;
+  }
+
+  async clearClientStorage(): Promise<void> {
+    if (!this.runtime.clearClientStorage) {
+      throw new Error("Runtime does not support client storage reset.");
+    }
+
+    await this.runtime.clearClientStorage();
   }
 }
 

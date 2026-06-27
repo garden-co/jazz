@@ -196,10 +196,14 @@ Until deleted, treat them as replacement targets only.
   alpha websocket frame injection method has been removed; tests must use direct
   websocket/public-client paths or push catalogue payloads into the catalogue
   store explicitly.
-- Remaining catalogue-store simplification gap: `DirectCatalogueStore` still
-  reuses `SchemaManager` catalogue algorithms internally to preserve admin route
-  semantics. The next cleanup is to flatten that into direct catalogue-entry
-  indexing over storage, without reintroducing runtime/query/sync serving.
+- Remaining catalogue-store simplification gap: `DirectCatalogueStore` now uses
+  a storage-backed `CatalogueIndex` for schema hashes, publish timestamps,
+  migration/lens connectivity, and permissions heads/bundles. The old
+  `SchemaManager` no longer serves admin catalogue reads/writes, but still
+  seeds the initial direct catalogue store and remains behind test-only
+  synthetic lifecycle helpers. The next cleanup is to construct catalogue
+  state directly from app/schema inputs and isolate any remaining test helper
+  needs.
 - Direct prepared reads now cover the browser gate's include, hop, UUID-array
   hop, gather, and array-membership `IN` shapes without a broad table fallback.
   Relation-shaped subscriptions reuse the same direct recompute path and now
@@ -238,12 +242,20 @@ Until deleted, treat them as replacement targets only.
   the worker accepts direct core mutation calls over encoded row/patch-shaped
   arguments. The worker implementation now names only the direct-core
   capabilities it needs internally, instead of importing the full legacy
-  `Runtime` interface.
+  `Runtime` interface. Persistent browser reset is implemented as a direct
+  runtime capability: `db.logout({ wipeData: true })` / `deleteClientStorage()`
+  asks the worker to settle pending local writes, close/free the direct WASM DB,
+  and destroy the scoped browser storage namespace.
 - The public TypeScript runtime/package root no longer exports internal helper
   plumbing such as query translators, row/value converters,
   `SubscriptionManager`, dynamic table helpers, or client-session resolvers.
   Public rows, query builders, `Db`, `JazzClient`, and subscription delta
   types remain the intended high-level shell.
+- The base TypeScript `Runtime` interface no longer requires transaction
+  methods. Transaction-capable runtimes opt into `TransactionalRuntime`; this
+  removes throw-only transaction methods from persistent browser direct-core
+  runtime while keeping real `CoreRuntime` mergeable transaction plumbing
+  explicit.
 - The Rust `storage` module is crate-private even under `test-utils`. Existing
   files under `crates/jazz-tools/tests/*storage*_integration.rs` and
   `client_restart_integration.rs` still reference the old storage API, but they

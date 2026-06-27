@@ -110,6 +110,7 @@ type WorkerRequest =
   | { id: number; method: "executeSubscription"; args: [handle: number] }
   | { id: number; method: "unsubscribe"; args: [handle: number] }
   | { id: number; method: "close"; args: [] }
+  | { id: number; method: "clearClientStorage"; args: [] }
   | { id: number; method: "connect"; args: [url: string, authJson: string] }
   | { id: number; method: "disconnect"; args: [] }
   | { id: number; method: "updateAuth"; args: [authJson: string] };
@@ -279,6 +280,17 @@ export class PersistentBrowserRuntime implements Runtime {
       this.closed = true;
       this.worker.terminate();
       this.rejectAll(new Error("Persistent browser core runtime closed"));
+    }
+  }
+
+  async clearClientStorage(): Promise<void> {
+    if (this.closed) return;
+    try {
+      await this.call("clearClientStorage");
+    } finally {
+      this.closed = true;
+      this.worker.terminate();
+      this.rejectAll(new Error("Persistent browser core runtime storage was cleared"));
     }
   }
 
