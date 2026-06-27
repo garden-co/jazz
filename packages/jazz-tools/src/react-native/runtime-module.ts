@@ -13,7 +13,7 @@ export interface ReactNativeRuntimeDbConfig extends RuntimeDbConfig {
 
 export const REACT_NATIVE_DIRECT_CORE_ALPHA_UNSUPPORTED_MESSAGE =
   "[jazz-tools] React Native is unsupported in the direct-core alpha runtime. " +
-  "Use a non-React-Native runtime for now; the legacy alpha RuntimeCore path is intentionally disabled.";
+  "Use a non-React-Native runtime until React Native is ported onto the direct-core runtime.";
 
 export function createReactNativeDirectCoreAlphaUnsupportedError(): Error {
   return new Error(REACT_NATIVE_DIRECT_CORE_ALPHA_UNSUPPORTED_MESSAGE);

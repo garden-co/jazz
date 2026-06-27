@@ -23,9 +23,6 @@ test = false
 default = []
 rocksdb = ["dep:rocksdb", "jazz-server/rocksdb"]
 sqlite = ["dep:rusqlite"]
-# Legacy alpha runtime kept only for crate-internal migration tests and binding
-# migration fallout. Do not add this to default, server, client, or test-utils.
-legacy-alpha-engine = ["dep:tokio"]
 client = ["direct-core-client"]
 direct-core-client = ["dep:thiserror", "server"]
 server = [

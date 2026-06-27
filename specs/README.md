@@ -44,7 +44,7 @@ ported or deleted.
 
 **[Query/Sync Integration](status-quo/query_sync_integration.md)** — How query subscriptions become sync scopes, how initial snapshots are replayed, and how live row changes flow back into subscription updates.
 
-**[Batched Tick Orchestration](status-quo/batched_tick_orchestration.md)** — Legacy alpha `RuntimeCore` scheduling notes. The remaining module is quarantined behind `legacy-alpha-engine`.
+**[Batched Tick Orchestration](status-quo/batched_tick_orchestration.md)** — Historical notes for the deleted legacy alpha runtime scheduler.
 
 ### 5. Transport and Adapters
 
@@ -70,7 +70,7 @@ Typed App + Db APIs
   -> jazz-tools facade/scaffolding still being removed
      -> public schema/query types
      -> admin catalogue routes
-     -> legacy RuntimeCore/QueryManager/SyncManager tests behind quarantine
+     -> old QueryManager/SyncManager/storage surfaces being hollowed or ported
 ```
 
 If you want one sentence to hold onto while reading the rest:

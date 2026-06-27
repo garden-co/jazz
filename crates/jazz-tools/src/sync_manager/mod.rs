@@ -101,7 +101,7 @@ pub struct SyncManager {
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
     /// Pending query rejections waiting for QueryManager to fail local subscriptions.
     pub(super) pending_query_rejections: Vec<PendingQueryRejection>,
-    /// Pending replayable batch fates for RuntimeCore to process.
+    /// Pending replayable batch fates for the surrounding runtime to process.
     pub(super) pending_batch_fates: Vec<BatchFate>,
 
     /// Batch fates to send to clients after a full inbox batch has been processed.
@@ -1059,7 +1059,7 @@ impl SyncManager {
         std::mem::take(&mut self.remote_query_scope_dirty)
     }
 
-    /// Take pending replayable batch fates for RuntimeCore to process.
+    /// Take pending replayable batch fates for the surrounding runtime to process.
     pub fn take_pending_batch_fates(&mut self) -> Vec<BatchFate> {
         std::mem::take(&mut self.pending_batch_fates)
     }

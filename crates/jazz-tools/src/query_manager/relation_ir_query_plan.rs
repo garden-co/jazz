@@ -26,7 +26,7 @@ struct LinearJoinInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeCorePlan {
+struct IncrementalCorePlan {
     table: TableName,
     base_scope: String,
     disjuncts: Vec<Conjunction>,
@@ -57,7 +57,7 @@ pub(crate) struct ExecutionQueryPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GatherJoinInfo {
-    plan: RuntimeCorePlan,
+    plan: IncrementalCorePlan,
     current_scope: String,
 }
 
@@ -514,7 +514,7 @@ fn bind_unscoped_project_filter_scope(predicate: &PredicateExpr, scope: &str) ->
 fn parse_projected_result_element_plan(
     input: &RelExpr,
     columns: &[ProjectColumn],
-) -> Option<(RuntimeCorePlan, String)> {
+) -> Option<(IncrementalCorePlan, String)> {
     let normalized_columns = normalize_project_columns(columns);
 
     if let Some(mut gather_info) = parse_gather_join_info(input) {
@@ -536,7 +536,7 @@ fn parse_projected_result_element_plan(
     let index = projected_result_element_index(&linear.scope_order, &normalized_columns)?;
     let selected_scope = linear.scope_order.get(index)?.clone();
     Some((
-        RuntimeCorePlan {
+        IncrementalCorePlan {
             table: linear.base_table,
             base_scope: linear.scope_order[0].clone(),
             disjuncts: linear.disjuncts,
@@ -550,7 +550,11 @@ fn parse_projected_result_element_plan(
     ))
 }
 
-fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option<RuntimeCorePlan> {
+fn parse_gather_core(
+    seed: &RelExpr,
+    step: &RelExpr,
+    max_depth: usize,
+) -> Option<IncrementalCorePlan> {
     let simple_seed = extract_linear_join_info(seed).filter(|info| info.joins.is_empty());
 
     let (step_core, step_projection) = match step {
@@ -590,7 +594,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
                 max_depth,
             };
 
-            return Some(RuntimeCorePlan {
+            return Some(IncrementalCorePlan {
                 table: seed_info.base_table,
                 base_scope: seed_info.scope_order[0].clone(),
                 disjuncts: seed_info.disjuncts.clone(),
@@ -710,7 +714,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
         )
     };
 
-    Some(RuntimeCorePlan {
+    Some(IncrementalCorePlan {
         table,
         base_scope,
         disjuncts,
@@ -792,7 +796,7 @@ fn parse_gather_join_info(expr: &RelExpr) -> Option<GatherJoinInfo> {
     }
 }
 
-fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
+fn parse_incremental_core_plan(core: &RelExpr) -> Option<IncrementalCorePlan> {
     match core {
         RelExpr::Gather {
             seed,
@@ -823,7 +827,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             }
 
             let linear = extract_linear_join_info(core)?;
-            Some(RuntimeCorePlan {
+            Some(IncrementalCorePlan {
                 table: linear.base_table,
                 base_scope: linear.scope_order[0].clone(),
                 disjuncts: linear.disjuncts,
@@ -845,7 +849,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             let linear = extract_linear_join_info(input)?;
             let result_element_index =
                 projected_result_element_index(&linear.scope_order, &normalized_columns);
-            Some(RuntimeCorePlan {
+            Some(IncrementalCorePlan {
                 table: linear.base_table,
                 base_scope: linear.scope_order[0].clone(),
                 disjuncts: linear.disjuncts,
@@ -862,7 +866,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             }
 
             let linear = extract_linear_join_info(core)?;
-            Some(RuntimeCorePlan {
+            Some(IncrementalCorePlan {
                 table: linear.base_table,
                 base_scope: linear.scope_order[0].clone(),
                 disjuncts: linear.disjuncts,
@@ -929,7 +933,7 @@ pub(crate) fn lower_relation_to_execution_plan(
     select_columns: Option<Vec<String>>,
 ) -> Option<ExecutionQueryPlan> {
     let envelope = unwrap_query_envelope(relation);
-    let core_plan = parse_runtime_core_plan(envelope.core)?;
+    let core_plan = parse_incremental_core_plan(envelope.core)?;
     if core_plan.disjuncts.is_empty() {
         return None;
     }

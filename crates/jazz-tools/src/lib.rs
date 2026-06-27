@@ -14,9 +14,6 @@ pub(crate) mod query_manager;
 pub mod row_format;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod row_histories;
-#[cfg(feature = "legacy-alpha-engine")]
-#[allow(dead_code, unused_imports)]
-pub(crate) mod runtime_core;
 pub mod schema_api;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
