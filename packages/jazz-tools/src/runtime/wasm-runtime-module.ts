@@ -15,6 +15,7 @@ import {
 import { CoreRuntime } from "./core-runtime/runtime.js";
 import { PersistentBrowserRuntime } from "./core-runtime/persistent-browser-runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
+import { parseJwtPayload } from "./client-session.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -47,6 +48,41 @@ function deterministicBytes(seed: string): Uint8Array {
   return bytes;
 }
 
+function randomBytes(): Uint8Array {
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+    return bytes;
+  }
+  return deterministicBytes(`${Date.now()}:${Math.random()}`);
+}
+
+function uuidBytes(value: string): Uint8Array | null {
+  const hex = value.replaceAll("-", "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
+    return null;
+  }
+  const bytes = new Uint8Array(16);
+  for (let index = 0; index < 16; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function subjectFromConfig(config: DbConfig): string | null {
+  if (config.cookieSession?.user_id) return config.cookieSession.user_id;
+  const payload = parseJwtPayload(config.jwtToken ?? "");
+  return typeof payload?.sub === "string" && payload.sub.trim() ? payload.sub.trim() : null;
+}
+
+function persistentIdentitySeed(config: DbConfig, subject: string | null): string {
+  return `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:${subject ?? "anonymous"}`;
+}
+
+function authorBytesForSubject(subject: string, fallbackSeed: string): Uint8Array {
+  return uuidBytes(subject) ?? deterministicBytes(`${fallbackSeed}:author`);
+}
+
 export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
   private get wasmModule(): WasmModule {
     return this.loadedRuntime as WasmModule;
@@ -67,16 +103,18 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       onAuthFailure,
     };
 
-    const node = deterministicBytes(
-      `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:node`,
-    );
-    const author = deterministicBytes(
-      `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:author`,
-    );
+    const subject = subjectFromConfig(config);
     const persistentBrowserDbName =
       isBrowserRuntime() && (config.driver?.type ?? "persistent") === "persistent"
         ? resolveDefaultPersistentDbName(config)
         : undefined;
+    const identitySeed = persistentIdentitySeed(config, subject);
+    const node = persistentBrowserDbName
+      ? deterministicBytes(`${identitySeed}:${persistentBrowserDbName}:node`)
+      : randomBytes();
+    const author = subject
+      ? authorBytesForSubject(subject, identitySeed)
+      : deterministicBytes(`${identitySeed}:author`);
     const mainThreadPeerRuntime = persistentBrowserDbName
       ? new PersistentBrowserRuntime(
           config.runtimeSources,
@@ -101,7 +139,6 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
         backendSecret: config.backendSecret,
         adminSecret: config.adminSecret,
         tier: "local",
-        defaultDurabilityTier: config.serverUrl ? "edge" : undefined,
       },
       runtimeOptions,
     );
