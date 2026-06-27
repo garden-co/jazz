@@ -408,9 +408,19 @@ API/testability gap, not as covered app persistence.
   or direct-core app gates.
   Schema-manager catalogue persistence and server catalogue storage now use
   catalogue-only traits/errors instead of `crate::storage::SchemaCatalogueStorage`
-  or `crate::storage::StorageError`. The old storage module is still present
-  only for remaining row-history/client-test fallout, not as a catalogue
-  abstraction to extend.
+  or `crate::storage::StorageError`. The old storage module has been deleted;
+  do not reintroduce it for remaining row-history/client-test fallout or as a
+  catalogue abstraction to extend.
+  The live server-side `SyncPayload` fanout hub
+  (`ConnectionEventHub`/`SequencedSyncUpdate`/registration dispatch) has also
+  been deleted. `SyncPayload` remains only as transitional tracer/test
+  vocabulary until that observability API is migrated to direct-core event
+  terms.
+  Persistent browser OPFS writes now expose their main-thread transaction ids
+  as pending worker writes and `.wait(...)` resolves through the worker-owned
+  direct-core transaction id only. Fully removing pending write semantics
+  requires changing the synchronous runtime mutation interface or returning a
+  write handle that resolves to the authoritative worker result.
 
 ## Next targets
 
@@ -423,7 +433,9 @@ API/testability gap, not as covered app persistence.
    has example-level reload coverage. The grafted `jazz-tools` package now
    bypasses the old worker broker and uses a direct-core dedicated worker
    runtime for OPFS; next it needs persistent transactions, websocket
-   convergence, file/blob reopen, and broader storage coverage. Expand coverage for true transactions,
+   convergence, file/blob reopen, and broader storage coverage. Resolve the
+   pending-worker-write API shape before treating browser persistent writes as
+   authoritative synchronous core writes. Expand coverage for true transactions,
    history/index/table partitions, cursor correctness after reload, ABI error
    mapping, format versioning, and quota/cleanup handling.
 3. **Make durable `jazz-server` real.** The server now has an alpha-shaped

@@ -1,5 +1,5 @@
 // Re-export encoding module from parent for use by sub-modules
-pub(crate) use super::encoding;
+pub(crate) use crate::row_format;
 
 // Sub-modules
 pub mod branch;

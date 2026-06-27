@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::magic_columns::is_magic_column_name;
 use crate::query_manager::types::{ColumnType, RowDescriptor, TableName, TupleDescriptor, Value};
+use crate::row_format::encode_value_with_type;
 
 use super::query_to_relation_ir::normalize_query_to_rel_expr;
 use super::relation_ir::ColumnRef;

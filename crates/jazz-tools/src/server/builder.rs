@@ -23,8 +23,7 @@ use crate::schema_manager::AppId;
 use crate::server::CatalogueRocksDbStorage;
 use crate::server::routes;
 use crate::server::{
-    CatalogueMemoryStorage, ConnectionEventHub, DirectCatalogueStore, DynCatalogueStorage,
-    ServerState, ServerTopology,
+    CatalogueMemoryStorage, DirectCatalogueStore, DynCatalogueStorage, ServerState, ServerTopology,
 };
 #[cfg(test)]
 use crate::sync::DurabilityTier;
@@ -173,7 +172,6 @@ impl ServerBuilder {
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
-        let connection_event_hub = Arc::new(ConnectionEventHub::default());
         let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store()?;
         let http_client = reqwest::Client::builder()
             .build()
@@ -190,7 +188,6 @@ impl ServerBuilder {
             app_id: self.app_id,
             connections: RwLock::new(HashMap::new()),
             next_connection_id: std::sync::atomic::AtomicU64::new(1),
-            connection_event_hub,
             auth_config,
             upstream_http_url,
             topology,
