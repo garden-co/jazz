@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import * as packageRoot from "./index.js";
 import * as runtime from "./runtime/index.js";
@@ -158,6 +161,29 @@ const internalHelperRuntimeExports = [
   "unwrapValue",
 ] as const;
 
+const packageRootDir = dirname(fileURLToPath(import.meta.url));
+const removedBrowserRuntimePrefix = ["browser", "broker"].join("-");
+const removedPostMessagePathName = ["worker", "bridge"].join("-");
+const removedLeaderLockName = ["leader", "lock"].join("-");
+const removedBrowserRuntimeBuildArtifacts = [
+  `runtime/${removedBrowserRuntimePrefix}-client.js`,
+  `runtime/${removedBrowserRuntimePrefix}-client.d.ts`,
+  `runtime/${removedBrowserRuntimePrefix}-errors.js`,
+  `runtime/${removedBrowserRuntimePrefix}-errors.d.ts`,
+  `runtime/${removedBrowserRuntimePrefix}-protocol.js`,
+  `runtime/${removedBrowserRuntimePrefix}-protocol.d.ts`,
+  `runtime/${removedLeaderLockName}.js`,
+  `runtime/${removedLeaderLockName}.d.ts`,
+  "runtime/sync-transport.js",
+  "runtime/sync-transport.d.ts",
+  `runtime/${removedPostMessagePathName}.js`,
+  `runtime/${removedPostMessagePathName}.d.ts`,
+  `worker/jazz-${removedBrowserRuntimePrefix.split("-")[1]}-worker.js`,
+  `worker/jazz-${removedBrowserRuntimePrefix.split("-")[1]}-worker.d.ts`,
+  "worker/jazz-worker.js",
+  "worker/jazz-worker.d.ts",
+] as const;
+
 describe("package root public API", () => {
   it("exposes intended runtime APIs without direct-core internals", () => {
     for (const publicRuntimeExport of [
@@ -210,6 +236,12 @@ describe("package root public API", () => {
         packageRoot,
         `package root helper export ${internalHelperRuntimeExport}`,
       ).not.toHaveProperty(internalHelperRuntimeExport);
+    }
+  });
+
+  it("does not leave deleted browser worker build artifacts in the package surface", () => {
+    for (const artifact of removedBrowserRuntimeBuildArtifacts) {
+      expect(existsSync(join(packageRootDir, "..", "dist", artifact)), artifact).toBe(false);
     }
   });
 });
