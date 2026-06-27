@@ -35,99 +35,66 @@ const NATIVE_EXAMPLE_SCENARIOS = [
 
 const NATIVE_CRITERION_SCENARIOS = [
   {
-    id: "r1_crud_sustained",
-    label: "Criterion R1 CRUD sustained",
+    id: "r1_crud",
+    label: "Criterion R1 CRUD",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/crud_sustained_rocksdb",
-      sqlite: "realistic_phase1/crud_sustained_sqlite",
+      rocksdb: "realistic_phase1_direct/r1_crud",
+      sqlite: "realistic_phase1_direct/r1_crud",
     },
   },
   {
-    id: "r1_crud_sustained_single_hop",
-    label: "Criterion R1 CRUD single-hop",
+    id: "r2_reads",
+    label: "Criterion R2 reads",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/crud_sustained_single_hop_rocksdb",
-      sqlite: "realistic_phase1/crud_sustained_single_hop_sqlite",
+      rocksdb: "realistic_phase1_direct/r2_reads",
+      sqlite: "realistic_phase1_direct/r2_reads",
     },
   },
   {
-    id: "r2_reads_sustained",
-    label: "Criterion R2 reads sustained",
+    id: "r3_rocksdb_cold_load",
+    label: "Criterion R3 RocksDB cold-load",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/reads_sustained_rocksdb",
-      sqlite: "realistic_phase1/reads_sustained_sqlite",
+      rocksdb: "realistic_phase1_direct/r3_rocksdb_cold_load",
     },
   },
   {
-    id: "r2_reads_sustained_single_hop",
-    label: "Criterion R2 reads single-hop",
+    id: "r4_hot_task_history",
+    label: "Criterion R4 hot task history",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/reads_sustained_single_hop_rocksdb",
-      sqlite: "realistic_phase1/reads_sustained_single_hop_sqlite",
+      rocksdb: "realistic_phase1_direct/r4_hot_task_history",
+      sqlite: "realistic_phase1_direct/r4_hot_task_history",
     },
   },
   {
-    id: "r2_reads_with_write_churn",
-    label: "Criterion R2 reads with churn",
+    id: "r9_subscribed_write",
+    label: "Criterion R9 subscribed write",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/reads_sustained_with_write_churn_rocksdb",
-      sqlite: "realistic_phase1/reads_sustained_with_write_churn_sqlite",
+      rocksdb: "realistic_phase1_direct/r9_subscribed_write",
+      sqlite: "realistic_phase1_direct/r9_subscribed_write",
     },
   },
   {
-    id: "r3_cold_load",
-    label: "Criterion R3 cold-load",
+    id: "r10_direct_sync_fanout",
+    label: "Criterion R10 direct sync fanout",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/cold_load_rocksdb",
-      sqlite: "realistic_phase1/cold_load_sqlite",
+      rocksdb: "realistic_phase1_direct/r10_direct_sync_fanout",
+      sqlite: "realistic_phase1_direct/r10_direct_sync_fanout",
     },
   },
   {
-    id: "r4_fanout_updates",
-    label: "Criterion R4 fanout updates",
+    id: "r11_byte_wire_resume",
+    label: "Criterion R11 byte-wire resume",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/fanout_updates_rocksdb",
-      sqlite: "realistic_phase1/fanout_updates_sqlite",
+      rocksdb: "realistic_phase1_direct/r11_byte_wire_resume",
+      sqlite: "realistic_phase1_direct/r11_byte_wire_resume",
     },
   },
   {
-    id: "r5_permission_recursive",
-    label: "Criterion R5 permission recursive",
+    id: "r12_recursive_permissions",
+    label: "Criterion R12 recursive permissions",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/permission_recursive_rocksdb",
-      sqlite: "realistic_phase1/permission_recursive_sqlite",
-    },
-  },
-  {
-    id: "r6_permission_write_heavy",
-    label: "Criterion R6 permission write-heavy",
-    criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/permission_write_heavy_rocksdb",
-      sqlite: "realistic_phase1/permission_write_heavy_sqlite",
-    },
-  },
-  {
-    id: "r7_hotspot_history",
-    label: "Criterion R7 hotspot history",
-    criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/hotspot_history_rocksdb",
-      sqlite: "realistic_phase1/hotspot_history_sqlite",
-    },
-  },
-  {
-    id: "r8_many_branches",
-    label: "Criterion R8 many branches",
-    criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/many_branches_rocksdb",
-      sqlite: "realistic_phase1/many_branches_sqlite",
-    },
-  },
-  {
-    id: "r9_subscribed_write_path",
-    label: "Criterion R9 subscribed write path",
-    criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/subscribed_write_path_rocksdb",
-      sqlite: "realistic_phase1/subscribed_write_path_sqlite",
+      rocksdb: "realistic_phase1_direct/r12_recursive_permissions",
+      sqlite: "realistic_phase1_direct/r12_recursive_permissions",
     },
   },
 ];
@@ -145,18 +112,24 @@ export const NATIVE_BENCHMARKS = NATIVE_STORAGE_ENGINES.flatMap((storage_engine)
     profile_path: scenario.profile_path,
     prepare_seed: scenario.prepare_seed,
   })),
-  ...NATIVE_CRITERION_SCENARIOS.map((scenario) => ({
-    id: `native-criterion:${storage_engine}:${scenario.id}`,
-    suite: "native",
-    storage_engine,
-    label: `${scenario.label} (${nativeStorageEngineLabel(storage_engine)})`,
-    kind: "criterion",
-    log_path: `logs/criterion_${scenario.id}.log`,
-    criterion_filter: scenario.criterion_filter_by_engine[storage_engine],
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
-    },
-  })),
+  ...NATIVE_CRITERION_SCENARIOS.flatMap((scenario) => {
+    const criterion_filter = scenario.criterion_filter_by_engine[storage_engine];
+    if (!criterion_filter) return [];
+    return [
+      {
+        id: `native-criterion:${storage_engine}:${scenario.id}`,
+        suite: "native",
+        storage_engine,
+        label: `${scenario.label} (${nativeStorageEngineLabel(storage_engine)})`,
+        kind: "criterion",
+        log_path: `logs/criterion_${scenario.id}.log`,
+        criterion_filter,
+        env: {
+          JAZZ_REALISTIC_VARIANT: "ci",
+        },
+      },
+    ];
+  }),
 ]);
 
 export const BROWSER_BENCHMARKS = [

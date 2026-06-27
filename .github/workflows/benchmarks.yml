@@ -123,8 +123,8 @@ jobs:
           set -euo pipefail
           cargo build --release -p jazz-tools --features client,rocksdb --example realistic_bench
           cargo build --release -p jazz-tools --features client,sqlite --example realistic_bench
-          cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 --no-run
-          cargo bench -p jazz-tools --features sqlite --bench realistic_phase1 --no-run
+          cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1_direct --no-run
+          cargo bench -p jazz-tools --features sqlite --bench realistic_phase1_direct --no-run
           cargo bench --manifest-path vendor/jazz_core/Cargo.toml -p jazz-sim --bench s2_canvas --no-run
 
       - name: Run native benchmark suite
@@ -142,6 +142,7 @@ jobs:
               --skip-set dev/benchmarks/realistic/ci_skip_set.json \
               --repeat-count "${BENCH_REPEAT_COUNT}" \
               --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
+            # Historical artifact names retained for update_history ingestion compatibility.
             node dev/benchmarks/realistic/export_criterion.mjs \
               --allow-empty \
               --out "${out_dir}/criterion_realistic_phase1.json" \
