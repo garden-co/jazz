@@ -13,7 +13,6 @@ crate-type = ["cdylib"]
 [dependencies]
 jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
   "test-utils",
-  "transport-websocket",
   "otel-core",
 ] }
 jazz = { path = "../../vendor/jazz_core/jazz", default-features = false }

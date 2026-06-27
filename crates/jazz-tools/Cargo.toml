@@ -25,6 +25,9 @@ rocksdb = ["dep:rocksdb", "jazz-server/rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
 transport = []
+legacy-alpha-transport = [
+  "transport-websocket",
+]
 transport-websocket = [
   "transport",
   "runtime-tokio",

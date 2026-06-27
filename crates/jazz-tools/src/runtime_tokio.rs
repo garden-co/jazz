@@ -824,12 +824,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
 /// `schedule_batched_tick()` whenever the transport layer needs to wake
 /// up `batched_tick` (on connect, on incoming sync frames, on disconnect).
 #[derive(Clone)]
-#[cfg(feature = "transport-websocket")]
+#[cfg(feature = "legacy-alpha-transport")]
 pub struct NativeTickNotifier<S: Storage + Send + 'static> {
     scheduler: TokioScheduler<S>,
 }
 
-#[cfg(feature = "transport-websocket")]
+#[cfg(feature = "legacy-alpha-transport")]
 impl<S: Storage + Send + 'static> crate::transport_manager::TickNotifier for NativeTickNotifier<S> {
     fn notify(&self) {
         self.scheduler.schedule_batched_tick();
@@ -840,7 +840,7 @@ impl<S: Storage + Send + 'static> crate::transport_manager::TickNotifier for Nat
 // TokioRuntime connect / disconnect (WebSocket transport)
 // ============================================================================
 
-#[cfg(feature = "transport-websocket")]
+#[cfg(feature = "legacy-alpha-transport")]
 impl<S: Storage + Send + 'static> TokioRuntime<S> {
     /// Connect to a Jazz server over WebSocket.
     ///
