@@ -1,4 +1,3 @@
-import type { RuntimeSourcesConfig } from "../context.js";
 import { loadWasmModule, type MutationErrorEvent, type Runtime } from "../client.js";
 import { openConfig } from "./direct-codec.js";
 import { encodeDirectSchema } from "./direct-schema-codec.js";
