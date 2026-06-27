@@ -156,7 +156,7 @@ type CompletedTx = {
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
-  filters: RowFilter[];
+  postFilters: RowFilter[];
   relationQuery?: {
     queryJson: string;
     identity?: Uint8Array;
@@ -502,7 +502,7 @@ export class CoreRuntime implements Runtime {
       : this.db.all(query, opts);
     return filterRows(
       rowsFromBatches(readRowBatches(rows), this.schema),
-      queryFiltersFromJson(queryJson, this.schema),
+      queryPostFiltersFromJson(queryJson, this.schema),
       this.schema,
     );
   }
@@ -708,7 +708,7 @@ export class CoreRuntime implements Runtime {
       : this.db.all(query, readOptions(tier, queryIncludesDeleted(queryJson), optionsJson));
     return filterRows(
       rowsFromBatches(readRowBatches(rows), this.schema),
-      queryFiltersFromJson(queryJson, this.schema),
+      queryPostFiltersFromJson(queryJson, this.schema),
       this.schema,
     );
   }
@@ -737,7 +737,7 @@ export class CoreRuntime implements Runtime {
       this.subscriptions.set(handle, {
         sources: [{ source: relationRefreshSource(), reading: false }],
         rows: [],
-        filters: [],
+        postFilters: [],
         relationQuery: { queryJson, identity, tier, optionsJson },
         cancelled: false,
       });
@@ -762,7 +762,7 @@ export class CoreRuntime implements Runtime {
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       rows: [],
-      filters: queryFiltersFromJson(queryJson, this.schema),
+      postFilters: queryPostFiltersFromJson(queryJson, this.schema),
       cancelled: false,
     });
     return handle;
@@ -1110,12 +1110,12 @@ export class CoreRuntime implements Runtime {
     if (chunk.type === "snapshot") {
       subscription.rows = filterRows(
         rowsFromBatches(chunk.rows, this.schema),
-        subscription.filters,
+        subscription.postFilters,
         this.schema,
       );
     } else {
       subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
-      subscription.rows = filterRows(subscription.rows, subscription.filters, this.schema);
+      subscription.rows = filterRows(subscription.rows, subscription.postFilters, this.schema);
     }
     subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
   }
@@ -2070,7 +2070,7 @@ function readOffset(value: unknown): number {
   return value;
 }
 
-function queryFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[] {
+function queryPostFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[] {
   const parsed = JSON.parse(queryJson) as {
     table?: unknown;
     relation_ir?: unknown;
@@ -2080,9 +2080,9 @@ function queryFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[
     orderBy?: unknown;
   };
   if (typeof parsed.table !== "string") return [];
-  return unwrapSimpleRelationOrThrow(parsed.table, parsed).predicates.map((filter) =>
-    coerceQueryPredicate(parsed.table as string, filter, schema),
-  );
+  return unwrapSimpleRelationOrThrow(parsed.table, parsed)
+    .predicates.filter((filter) => filter.column === "id")
+    .map((filter) => coerceQueryPredicate(parsed.table as string, filter, schema));
 }
 
 function filterRows(rows: RowState[], filters: RowFilter[], schema: WasmSchema): RowState[] {

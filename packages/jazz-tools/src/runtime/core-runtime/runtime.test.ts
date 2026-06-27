@@ -587,7 +587,7 @@ describe("CoreRuntime server transport", () => {
     });
   });
 
-  it("keeps simple equality relation queries supported", async () => {
+  it("trusts native prepared queries for simple equality relation filters", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
@@ -647,6 +647,111 @@ describe("CoreRuntime server transport", () => {
         id: "00000000-0000-0000-0000-000000000001",
         values: [{ type: "Text", value: "keep" }],
       },
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000002",
+        values: [{ type: "Text", value: "drop" }],
+      },
+    ]);
+    expect(readPreparedComparison(preparedBytes!)).toEqual({
+      table: "todos",
+      predicateTag: 3,
+      column: "title",
+      literalTag: 6,
+      value: "keep",
+      limit: undefined,
+    });
+  });
+
+  it("trusts native subscription snapshots for simple equality relation filters", async () => {
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            subscribe: () =>
+              new ReadableStream({
+                start(streamController) {
+                  controller = streamController;
+                },
+              }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const deltas: unknown[] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({
+        table: "todos",
+        relation_ir: {
+          Filter: {
+            input: { TableScan: { table: "todos" } },
+            predicate: {
+              Cmp: {
+                left: { column: "title" },
+                op: "Eq",
+                right: { Literal: { type: "Text", value: "keep" } },
+              },
+            },
+          },
+        },
+      }),
+    );
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      deltas.push(delta);
+    });
+
+    controller!.enqueue({
+      type: "snapshot",
+      rows: encodeRows([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "keep",
+        },
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          title: "drop",
+        },
+      ]),
+    });
+    await Promise.resolve();
+
+    expect(deltas).toEqual([
+      [
+        {
+          kind: 0,
+          id: "00000000-0000-0000-0000-000000000001",
+          index: 0,
+          row: {
+            id: "00000000-0000-0000-0000-000000000001",
+            values: [{ type: "Text", value: "keep" }],
+          },
+        },
+        {
+          kind: 0,
+          id: "00000000-0000-0000-0000-000000000002",
+          index: 1,
+          row: {
+            id: "00000000-0000-0000-0000-000000000002",
+            values: [{ type: "Text", value: "drop" }],
+          },
+        },
+      ],
     ]);
     expect(readPreparedComparison(preparedBytes!)).toEqual({
       table: "todos",

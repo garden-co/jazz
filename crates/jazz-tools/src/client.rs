@@ -1692,8 +1692,6 @@ mod tests {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
-            #[cfg(feature = "test-utils")]
-            sync_tracer: None,
         }
     }
 
