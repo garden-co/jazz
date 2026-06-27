@@ -24,19 +24,9 @@ default = []
 rocksdb = ["dep:rocksdb", "jazz-server/rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
+# Legacy alpha runtime kept only for crate-internal migration tests and binding
+# migration fallout. Do not add this to default, server, client, or test-utils.
 legacy-alpha-engine = ["runtime-tokio"]
-transport = []
-legacy-alpha-transport = [
-  "transport-websocket",
-]
-transport-websocket = [
-  "transport",
-  "runtime-tokio",
-  "dep:tokio-tungstenite",
-  "dep:rustls",
-  "dep:rustls-native-certs",
-  "dep:webpki-roots",
-]
 client = ["direct-core-client"]
 direct-core-client = ["dep:thiserror", "server"]
 server = [

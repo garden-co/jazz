@@ -121,13 +121,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     /// Push a sync message to the inbox (from network).
     pub fn push_sync_inbox(&mut self, entry: InboxEntry) {
-        if matches!(
-            entry.payload,
-            crate::sync_manager::SyncPayload::CatalogueEntryUpdated { .. }
-        ) {
-            #[cfg(feature = "legacy-alpha-transport")]
-            self.mark_transport_catalogue_state_hash_dirty();
-        }
         if entry.payload.writes_storage() {
             self.mark_storage_write_pending_flush();
         }

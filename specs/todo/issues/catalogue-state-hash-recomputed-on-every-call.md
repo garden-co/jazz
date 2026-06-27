@@ -2,7 +2,7 @@
 
 ## What
 
-`SchemaManager::catalogue_state_hash()` collects known schemas, sorts them, encodes each with `encode_schema`, and feeds the bytes into blake3 on every call. It's invoked per `install_transport`, per WS handshake (`routes.rs:1305`), and inside `AuthHandshake::build_handshake_frame`. Under a reconnect storm of N clients the server pays N full catalogue rehashes.
+`SchemaManager::catalogue_state_hash()` collects known schemas, sorts them, encodes each with `encode_schema`, and feeds the bytes into blake3 on every call. Under a reconnect storm of N clients the server pays N full catalogue rehashes.
 
 ## Priority
 
