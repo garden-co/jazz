@@ -371,6 +371,83 @@ describe("alpha public package flow", () => {
     expect(snapshots.some((rows) => rows.some((todo) => todo.id === created.id))).toBe(true);
   });
 
+  it("converges memory writer to persistent OPFS reader over direct websocket and reopens locally", async () => {
+    const requestedAppId = uniqueDbName("alpha-public-mixed-websocket-flow");
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
+
+    const sharedSecret = generateAuthSecret();
+    const readerDbName = uniqueDbName("alpha-public-mixed-reader-opfs");
+    const writer = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
+    let reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
+      uniqueLabel: false,
+    });
+    const richQuery = richApp.todos.where({ tags: { contains: "mixed-boundary" } });
+
+    const snapshots: RichTodo[][] = [];
+    const unsubscribe = ctx.trackSubscription(
+      reader.subscribeAll(richQuery, (delta) => {
+        snapshots.push([...delta.all]);
+      }),
+    );
+
+    const created = await withTimeout(
+      writer
+        .insert(richApp.todos, {
+          title: "Adopt mixed alpha boundary",
+          done: false,
+          list: "launch",
+          priority: 9,
+          tags: ["alpha", "mixed-boundary"],
+          payload: new Uint8Array([9, 8, 7, 6, 5]),
+          ownerId: null,
+        })
+        .wait({ tier: "edge" }),
+      10_000,
+      "mixed memory writer insert was not accepted at the server",
+    );
+
+    const [rowOnReader] = await waitForRichTodos(
+      reader,
+      richQuery,
+      (todos) => todos.length === 1 && todos[0]?.id === created.id,
+      "mixed persistent reader websocket convergence",
+    );
+    expect(rowOnReader).toMatchObject({
+      id: created.id,
+      title: "Adopt mixed alpha boundary",
+      priority: 9,
+      tags: ["alpha", "mixed-boundary"],
+      ownerId: null,
+    });
+    expect(Array.from(rowOnReader.payload ?? [])).toEqual([9, 8, 7, 6, 5]);
+    expect(snapshots.some((rows) => rows.some((todo) => todo.id === created.id))).toBe(true);
+
+    unsubscribe();
+    await reader.shutdown();
+    ctx.untrack(reader);
+
+    reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
+      uniqueLabel: false,
+    });
+    const [reopenedRow] = await waitForQuery(
+      reader,
+      richQuery,
+      (todos) => todos.length === 1 && todos[0]?.id === created.id,
+      "mixed persistent reader local reopen",
+      15_000,
+      "local",
+    );
+    expect(reopenedRow).toMatchObject({
+      id: created.id,
+      title: "Adopt mixed alpha boundary",
+      priority: 9,
+      tags: ["alpha", "mixed-boundary"],
+      ownerId: null,
+    });
+    expect(Array.from(reopenedRow.payload ?? [])).toEqual([9, 8, 7, 6, 5]);
+  });
+
   it("opens public createDb with persistent OPFS and direct websocket server config, then converges todo CRUD", async () => {
     const requestedAppId = uniqueDbName("alpha-public-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);

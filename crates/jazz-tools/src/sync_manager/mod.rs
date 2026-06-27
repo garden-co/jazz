@@ -14,14 +14,13 @@ use crate::storage::{PreparedRowTableContext, Storage};
 pub(crate) use crate::sync::{ClientId, DurabilityTier, ServerId};
 
 // Module declarations
-pub mod clock;
 pub mod forwarding;
 pub mod inbox;
 pub mod permissions;
 pub mod sync_logic;
 pub mod types;
 
-use clock::MonotonicClock;
+use crate::sync::clock::MonotonicClock;
 
 // Re-export all public types
 pub use types::*;

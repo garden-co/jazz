@@ -1,6 +1,6 @@
 use web_time::{SystemTime, UNIX_EPOCH};
 
-/// Monotonic microsecond clock for write ordering.
+/// Monotonic microsecond clock for write and catalogue ordering.
 #[derive(Debug, Clone, Default)]
 pub struct MonotonicClock {
     last_timestamp: u64,

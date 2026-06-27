@@ -21,8 +21,8 @@ use crate::query_manager::types::{
 };
 use crate::schema_manager::rehydrate::latest_catalogue_content;
 use crate::storage::Storage;
+use crate::sync::clock::MonotonicClock;
 use crate::sync::vocabulary::ConnectionSchemaDiagnostics;
-use crate::sync_manager::SyncManager;
 use uuid::Uuid;
 
 use super::auto_lens::generate_lens;
@@ -78,13 +78,7 @@ pub struct CurrentPermissionsSummary {
 ///
 /// ```ignore
 /// let app_id = AppId::from_name("my-app");
-/// let mut manager = SchemaManager::new(
-///     SyncManager::new(),
-///     schema,
-///     app_id,
-///     "dev",
-///     "main",
-/// )?;
+/// let mut manager = SchemaManager::new(schema, app_id, "dev", "main")?;
 ///
 /// // Add a previous schema version as "live"
 /// manager.add_live_schema(old_schema)?;
@@ -97,8 +91,9 @@ pub struct CurrentPermissionsSummary {
 /// ```
 pub struct SchemaManager {
     context: SchemaContext,
-    sync_manager: SyncManager,
     app_id: AppId,
+    catalogue_clock: MonotonicClock,
+    pending_catalogue_updates: Vec<CatalogueEntry>,
     catalogue_publish_timestamps: HashMap<ObjectId, u64>,
     current_permissions_head: Option<PermissionsHeadState>,
     known_permissions_bundles: HashMap<ObjectId, PermissionsBundleState>,
@@ -116,13 +111,11 @@ impl SchemaManager {
     ///
     /// # Arguments
     ///
-    /// * `sync_manager` - SyncManager for object persistence
     /// * `schema` - Current schema for this client
     /// * `app_id` - Application identifier for catalogue queries
     /// * `env` - Environment (e.g., "dev", "prod")
     /// * `user_branch` - User-facing branch name (e.g., "main")
     pub fn new(
-        sync_manager: SyncManager,
         schema: Schema,
         app_id: AppId,
         env: &str,
@@ -133,18 +126,10 @@ impl SchemaManager {
         } else {
             RowPolicyMode::PermissiveLocal
         };
-        Self::new_with_policy_mode(
-            sync_manager,
-            schema,
-            app_id,
-            env,
-            user_branch,
-            row_policy_mode,
-        )
+        Self::new_with_policy_mode(schema, app_id, env, user_branch, row_policy_mode)
     }
 
     pub fn new_with_policy_mode(
-        sync_manager: SyncManager,
         schema: Schema,
         app_id: AppId,
         env: &str,
@@ -163,8 +148,9 @@ impl SchemaManager {
 
         Ok(Self {
             context,
-            sync_manager,
             app_id,
+            catalogue_clock: MonotonicClock::new(),
+            pending_catalogue_updates: Vec::new(),
             catalogue_publish_timestamps: HashMap::new(),
             current_permissions_head: None,
             known_permissions_bundles: HashMap::new(),
@@ -177,12 +163,11 @@ impl SchemaManager {
 
     /// Create with default environment ("dev").
     pub fn with_defaults(
-        sync_manager: SyncManager,
         schema: Schema,
         app_id: AppId,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
-        Self::new(sync_manager, schema, app_id, "dev", user_branch)
+        Self::new(schema, app_id, "dev", user_branch)
     }
 
     /// Create a server-mode SchemaManager with no fixed current schema.
@@ -193,11 +178,12 @@ impl SchemaManager {
     ///
     /// Queries are executed with explicit `QuerySchemaContext` rather than
     /// using implicit current schema context.
-    pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
+    pub fn new_server(app_id: AppId, _env: &str) -> Self {
         Self {
             context: SchemaContext::empty(),
-            sync_manager,
             app_id,
+            catalogue_clock: MonotonicClock::new(),
+            pending_catalogue_updates: Vec::new(),
             catalogue_publish_timestamps: HashMap::new(),
             current_permissions_head: None,
             known_permissions_bundles: HashMap::new(),
@@ -644,7 +630,7 @@ impl SchemaManager {
             return false;
         }
 
-        let timestamp = self.sync_manager.reserve_timestamp();
+        let timestamp = self.reserve_catalogue_timestamp();
         let mut metadata = metadata;
         metadata.insert(
             crate::metadata::MetadataKey::PublishedAt.to_string(),
@@ -652,7 +638,7 @@ impl SchemaManager {
         );
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
-        self.sync_manager.upsert_catalogue_entry(
+        self.upsert_catalogue_entry(
             storage,
             CatalogueEntry {
                 object_id,
@@ -661,6 +647,28 @@ impl SchemaManager {
             },
         );
         true
+    }
+
+    fn reserve_catalogue_timestamp(&mut self) -> u64 {
+        self.catalogue_clock.reserve_timestamp()
+    }
+
+    fn upsert_catalogue_entry<H: Storage>(&mut self, storage: &mut H, entry: CatalogueEntry) {
+        let existing = storage.load_catalogue_entry(entry.object_id).ok().flatten();
+        if existing.as_ref() == Some(&entry) {
+            return;
+        }
+
+        if let Err(error) = storage.upsert_catalogue_entry(&entry) {
+            tracing::warn!(
+                object_id = %entry.object_id,
+                %error,
+                "failed to persist schema catalogue entry"
+            );
+            return;
+        }
+
+        self.pending_catalogue_updates.push(entry);
     }
 
     pub fn ensure_current_schema_persisted<H: Storage>(&mut self, storage: &mut H) -> bool {
@@ -697,11 +705,11 @@ impl SchemaManager {
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
 
-        let timestamp = self.sync_manager.reserve_timestamp();
+        let timestamp = self.reserve_catalogue_timestamp();
         let metadata = self.schema_metadata_with_published_at(&schema_hash, timestamp);
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
-        self.sync_manager.upsert_catalogue_entry(
+        self.upsert_catalogue_entry(
             storage,
             CatalogueEntry {
                 object_id,
@@ -726,11 +734,11 @@ impl SchemaManager {
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(&schema);
 
-        let timestamp = self.sync_manager.reserve_timestamp();
+        let timestamp = self.reserve_catalogue_timestamp();
         let metadata = self.schema_metadata_with_published_at(&schema_hash, timestamp);
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
-        self.sync_manager.upsert_catalogue_entry(
+        self.upsert_catalogue_entry(
             storage,
             CatalogueEntry {
                 object_id,
@@ -754,10 +762,10 @@ impl SchemaManager {
         let content = encode_lens_transform(&lens.forward);
 
         let metadata = self.lens_metadata(lens);
-        let timestamp = self.sync_manager.reserve_timestamp();
+        let timestamp = self.reserve_catalogue_timestamp();
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
-        self.sync_manager.upsert_catalogue_entry(
+        self.upsert_catalogue_entry(
             storage,
             CatalogueEntry {
                 object_id,
@@ -782,10 +790,10 @@ impl SchemaManager {
             bundle.parent_bundle_object_id,
             &bundle.permissions,
         );
-        let bundle_timestamp = self.sync_manager.reserve_timestamp();
+        let bundle_timestamp = self.reserve_catalogue_timestamp();
         self.catalogue_publish_timestamps
             .insert(head.bundle_object_id, bundle_timestamp);
-        self.sync_manager.upsert_catalogue_entry(
+        self.upsert_catalogue_entry(
             storage,
             CatalogueEntry {
                 object_id: head.bundle_object_id,
@@ -1321,12 +1329,12 @@ impl SchemaManager {
         let _ = self.context.try_activate_pending();
     }
 
-    /// Process pending catalogue operations from SyncManager.
+    /// Process pending catalogue operations published by this manager.
     pub fn process<H: Storage>(&mut self, storage: &mut H) {
+        let _ = storage;
         let _span = tracing::debug_span!("SM::process").entered();
-        self.sync_manager.process_inbox(storage);
 
-        let updates = self.sync_manager.take_pending_catalogue_updates();
+        let updates = std::mem::take(&mut self.pending_catalogue_updates);
         for update in updates {
             // Ignore errors from individual catalogue updates - they're non-critical
             let _ =
@@ -1468,8 +1476,7 @@ mod tests {
     #[test]
     fn schema_manager_new() {
         let schema = make_schema_v1();
-        let manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
 
         assert_eq!(manager.env(), "dev");
         assert_eq!(manager.user_branch(), "main");
@@ -1487,8 +1494,7 @@ mod tests {
             )
             .build();
 
-        let manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
 
         let descriptor = manager.current_schema().get(&"users".into()).unwrap();
         let column_names: Vec<_> = descriptor
@@ -1520,10 +1526,8 @@ mod tests {
             )
             .build();
 
-        let manager_a =
-            SchemaManager::new(SyncManager::new(), schema_a, test_app_id(), "dev", "main").unwrap();
-        let manager_b =
-            SchemaManager::new(SyncManager::new(), schema_b, test_app_id(), "dev", "main").unwrap();
+        let manager_a = SchemaManager::new(schema_a, test_app_id(), "dev", "main").unwrap();
+        let manager_b = SchemaManager::new(schema_b, test_app_id(), "dev", "main").unwrap();
 
         assert_ne!(manager_a.current_hash(), manager_b.current_hash());
     }
@@ -1531,9 +1535,7 @@ mod tests {
     #[test]
     fn schema_manager_branch_name() {
         let schema = make_schema_v1();
-        let manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "prod", "feature")
-                .unwrap();
+        let manager = SchemaManager::new(schema, test_app_id(), "prod", "feature").unwrap();
 
         let branch = manager.branch_name();
         let s = branch.as_str();
@@ -1547,8 +1549,7 @@ mod tests {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         let lens = manager.add_live_schema(v1).unwrap();
 
         assert!(!lens.is_draft());
@@ -1568,8 +1569,7 @@ mod tests {
             )
             .build();
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         let result = manager.add_live_schema(v1);
 
         assert!(matches!(result, Err(SchemaError::DraftLensInPath { .. })));
@@ -1597,8 +1597,7 @@ mod tests {
         );
         let lens = Lens::new(v1_hash, v2_hash, transform);
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema_with_lens(v1, lens).unwrap();
 
         assert_eq!(manager.all_branches().len(), 2);
@@ -1609,8 +1608,7 @@ mod tests {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         // Should pass - no draft lenses
@@ -1623,8 +1621,7 @@ mod tests {
         let v2 = make_schema_v2();
         let v1_hash = SchemaHash::compute(&v1);
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         let path = manager.lens_path(&v1_hash).unwrap();
@@ -1636,9 +1633,7 @@ mod tests {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
 
-        let manager =
-            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
-                .unwrap();
+        let manager = SchemaManager::new(v2.clone(), test_app_id(), "dev", "main").unwrap();
         let lens = manager.generate_lens(&v1, &v2);
 
         // Generated but not registered
@@ -1653,8 +1648,7 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         let map = manager.branch_schema_map();
@@ -1671,14 +1665,7 @@ mod tests {
         let schema = make_schema_v1();
         let schema_hash = SchemaHash::compute(&schema);
         let mut storage = crate::storage::MemoryStorage::new();
-        let mut manager = SchemaManager::new(
-            SyncManager::new(),
-            schema.clone(),
-            test_app_id(),
-            "dev",
-            "main",
-        )
-        .unwrap();
+        let mut manager = SchemaManager::new(schema.clone(), test_app_id(), "dev", "main").unwrap();
 
         assert_eq!(manager.schema_published_at(&schema_hash), None);
 
@@ -1704,15 +1691,14 @@ mod tests {
         let schema_hash = SchemaHash::compute(&schema);
         let mut storage = crate::storage::MemoryStorage::new();
         let app_id = test_app_id();
-        let mut publisher =
-            SchemaManager::new(SyncManager::new(), schema.clone(), app_id, "dev", "main").unwrap();
+        let mut publisher = SchemaManager::new(schema.clone(), app_id, "dev", "main").unwrap();
 
         publisher.persist_schema_object(&mut storage, &schema);
         let published_at = publisher
             .schema_published_at(&schema_hash)
             .expect("publisher should track publish timestamp");
 
-        let mut rehydrated = SchemaManager::new_server(SyncManager::new(), app_id, "prod");
+        let mut rehydrated = SchemaManager::new_server(app_id, "prod");
         crate::schema_manager::rehydrate::rehydrate_schema_manager_from_catalogue(
             &mut rehydrated,
             &storage,
@@ -1731,8 +1717,7 @@ mod tests {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         let branches = manager.all_branch_strings();
@@ -1752,8 +1737,7 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         // V1 has 2 columns (id, name)
@@ -1776,7 +1760,7 @@ mod tests {
         // af1349b9f5f9..., which later appears as an "unreachable schema hash"
         // in every connection diagnostics call.
         let mut storage = crate::storage::MemoryStorage::new();
-        let mut manager = SchemaManager::new_server(SyncManager::new(), test_app_id(), "prod");
+        let mut manager = SchemaManager::new_server(test_app_id(), "prod");
         let wrote = manager.ensure_current_schema_persisted(&mut storage);
         assert!(
             !wrote,
@@ -1799,8 +1783,7 @@ mod tests {
         // hash in every client's diagnostics. Ignore empty schemas.
         let schema = make_schema_v1();
         let real_hash = SchemaHash::compute(&schema);
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
 
         let empty_content = crate::schema_manager::encoding::encode_schema(&Schema::new());
         let mut metadata = HashMap::new();
@@ -1836,8 +1819,7 @@ mod tests {
     fn connection_schema_diagnostics_treat_unknown_client_schema_as_disconnected() {
         let schema = make_schema_v2();
         let current_hash = SchemaHash::compute(&schema);
-        let manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
 
         let diagnostics = manager.connection_schema_diagnostics(SchemaHash::from_bytes([7; 32]));
 
@@ -1868,8 +1850,7 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v3_hash = SchemaHash::compute(&v3);
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
         manager.add_known_schema(v3);
 
@@ -1896,8 +1877,7 @@ mod tests {
 
         assert!(draft_lens.is_draft());
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         manager.add_known_schema(v1);
         manager.context.register_lens(draft_lens);
 
@@ -1927,28 +1907,15 @@ mod tests {
 
         assert!(draft_lens.is_draft());
 
-        let mut disconnected = SchemaManager::new(
-            SyncManager::new(),
-            draft_target,
-            test_app_id(),
-            "dev",
-            "main",
-        )
-        .unwrap();
+        let mut disconnected =
+            SchemaManager::new(draft_target, test_app_id(), "dev", "main").unwrap();
         disconnected.add_known_schema(v1.clone());
         disconnected.context.register_lens(draft_lens);
         assert!(!disconnected.are_schema_hashes_connected(v1_hash, draft_target_hash));
 
         let live_target = make_schema_v2();
         let live_target_hash = SchemaHash::compute(&live_target);
-        let mut connected = SchemaManager::new(
-            SyncManager::new(),
-            live_target,
-            test_app_id(),
-            "dev",
-            "main",
-        )
-        .unwrap();
+        let mut connected = SchemaManager::new(live_target, test_app_id(), "dev", "main").unwrap();
         connected.add_live_schema(v1).unwrap();
         assert!(connected.are_schema_hashes_connected(v1_hash, live_target_hash));
     }
@@ -1957,8 +1924,7 @@ mod tests {
     fn permissions_head_waits_for_bundle_then_applies() {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
         let permissions = HashMap::from([(
             TableName::new("users"),
             TablePolicies::new().with_select(PolicyExpr::True),
@@ -2027,8 +1993,7 @@ mod tests {
         )]);
 
         let mut storage = crate::storage::MemoryStorage::new();
-        let mut previous_run =
-            SchemaManager::new(SyncManager::new(), schema.clone(), app_id, "dev", "main").unwrap();
+        let mut previous_run = SchemaManager::new(schema.clone(), app_id, "dev", "main").unwrap();
         previous_run.persist_schema(&mut storage);
         previous_run
             .publish_permissions_bundle(&mut storage, schema_hash, permissions, None)
@@ -2050,8 +2015,7 @@ mod tests {
             .expect("bundle entry should load")
             .expect("bundle entry should exist");
 
-        let mut restarted =
-            SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+        let mut restarted = SchemaManager::new(schema, app_id, "dev", "main").unwrap();
         crate::schema_manager::rehydrate_schema_manager_from_catalogue(
             &mut restarted,
             &storage,
@@ -2091,8 +2055,7 @@ mod tests {
     fn publish_permissions_bundle_rejects_stale_parent() {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
         let mut storage = crate::storage::MemoryStorage::new();
         let permissions = HashMap::from([(
             TableName::new("users"),
@@ -2118,8 +2081,7 @@ mod tests {
     fn republishing_identical_permissions_is_a_no_op() {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
         let mut storage = crate::storage::MemoryStorage::new();
         let permissions = HashMap::from([(
             TableName::new("users"),
@@ -2197,8 +2159,7 @@ mod tests {
     fn republishing_changed_permissions_bumps_version() {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
         let mut storage = crate::storage::MemoryStorage::new();
         let permissive = HashMap::from([(
             TableName::new("users"),
@@ -2248,8 +2209,7 @@ mod tests {
     fn dedup_preserves_parent_chain_for_subsequent_change() {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
         let mut storage = crate::storage::MemoryStorage::new();
         let permissive = HashMap::from([(
             TableName::new("users"),
@@ -2343,8 +2303,7 @@ mod tests {
         );
         let lens = Lens::new(v1_hash, v2_hash, transform);
 
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        let mut manager = SchemaManager::new(v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema_with_lens(v1, lens).unwrap();
 
         // Current schema uses "email_address"
