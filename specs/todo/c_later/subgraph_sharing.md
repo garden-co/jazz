@@ -2,7 +2,7 @@
 
 Optimization opportunities for array subqueries.
 
-> Status quo: [specs/status-quo/subgraph_sharing.md](../../status-quo/subgraph_sharing.md)
+> Legacy alpha status quo: [specs/legacy-alpha-status-quo/subgraph_sharing.md](../../legacy-alpha-status-quo/subgraph_sharing.md)
 
 ## Shared Hash Index (Recommended First Optimization)
 
@@ -20,7 +20,7 @@ inner_rows: HashMap<CorrelationValue, Vec<Row>>
 - Matches what JoinNode already does
 - Keep current approach as fallback for complex subqueries (filters, joins, nested arrays)
 
-> Current reevaluation logic lives in `crates/jazz-tools/src/query_manager/graph_nodes/array_subquery.rs`.
+> Legacy alpha reevaluation logic lived in `crates/jazz-tools/src/query_manager/graph_nodes/array_subquery.rs`.
 
 ## Memoized Subgraph Results
 

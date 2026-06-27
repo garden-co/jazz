@@ -3,8 +3,12 @@ packages:
   - packages/*
   - starters/*
   - examples/*
+  # React Native/Expo surfaces are paused; keep their source archived but out of active workspace installs.
+  - "!examples/todo-client-localfirst-expo"
   - examples/docs/*
+  - "!examples/docs/todo-client-localfirst-expo"
   - dev/stress-tests/*
+  - "!dev/stress-tests/stress-test-expo"
   - dev/local-telemetry/web
   - crates
   - crates/jazz-wasm

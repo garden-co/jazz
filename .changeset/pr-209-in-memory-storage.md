@@ -2,7 +2,6 @@
 "jazz-tools": patch
 "jazz-wasm": patch
 "jazz-napi": patch
-"jazz-rn": patch
 ---
 
 Add an in-memory storage driver across the Jazz JS, WASM, NAPI, and React Native runtimes.

@@ -2,7 +2,6 @@
 "jazz-tools": patch
 "jazz-wasm": patch
 "jazz-napi": patch
-"jazz-rn": patch
 ---
 
 Promote `authMode` to a first-class typed field, add anonymous auth, and overhaul the React provider.

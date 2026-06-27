@@ -1,4 +1,6 @@
-# Schema Files — Status Quo
+# Schema Files — Legacy Alpha Status Quo
+
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
 
 This is the developer-facing layer for schema management. While the [Schema Manager](schema_manager.md) handles runtime concerns like multi-version reads, lens transforms, and schema catalogue sync, this layer is focused on what files developers edit locally and what `jazz-tools` commands they use to validate schemas and generate/push migrations.
 

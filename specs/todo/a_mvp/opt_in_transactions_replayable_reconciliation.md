@@ -1,11 +1,11 @@
 # Opt-In Transactions, Replayable Reconciliation, and Strict Visibility — TODO (MVP)
 
-This spec is written for readers who know the status quo on `main`.
+This spec is written for readers who know the legacy alpha status quo on `main`.
 
 Update for this branch: the shared `BatchId` row identity model, replayable local batch records,
 explicit direct batches, explicit transactional batches, and row/batch digest terminology are now
-part of the current status quo. For the implementation as it exists today, start with
-[Batches — Status Quo](../../status-quo/batches.md).
+part of the current legacy alpha status quo. For the implementation as it exists today, start with
+[Batches — Legacy Alpha Status Quo](../../legacy-alpha-status-quo/batches.md).
 
 The remaining purpose of this TODO doc is to describe the stricter visibility/completeness work and
 the broader reconciliation design that still extends beyond the landed batch model.
@@ -32,15 +32,15 @@ This MVP assumes the batch-branch substrate from [Batch Branches and Prefix-Inde
 
 ## Related
 
-- [Sync Manager — Status Quo](../../status-quo/sync_manager.md)
-- [Query/Sync Integration — Status Quo](../../status-quo/query_sync_integration.md)
-- [Row Histories — Status Quo](../../status-quo/row_histories.md)
+- [Sync Manager — Legacy Alpha Status Quo](../../legacy-alpha-status-quo/sync_manager.md)
+- [Query/Sync Integration — Legacy Alpha Status Quo](../../legacy-alpha-status-quo/query_sync_integration.md)
+- [Row Histories — Legacy Alpha Status Quo](../../legacy-alpha-status-quo/row_histories.md)
 - [Batch Branches and Prefix-Indexed Storage](../b_launch/batch_branches_and_prefix_storage.md)
 - [Globally Consistent Transactions](../b_launch/globally_consistent_transactions.md)
 
 ## Why this exists
 
-The current status quo on `main` splits related truth across mechanisms that do not reconcile together:
+The current legacy alpha status quo on `main` splits related truth across mechanisms that do not reconcile together:
 
 - object history is branch/tip based
 - `PersistenceAck` answers write durability only if the live event arrives
@@ -255,7 +255,7 @@ The physical row still keeps explicit provenance fields such as `_jazz_updated_a
 
 ### 6. One batch-settlement model folds fate and durability together
 
-The status quo spreads write truth across separate concepts. The MVP should collapse that into one replayable settlement model, while still keeping transaction completeness separate.
+The legacy alpha status quo spreads write truth across separate concepts. The MVP should collapse that into one replayable settlement model, while still keeping transaction completeness separate.
 
 Every pending local batch, whether direct or transactional, should reconcile through one replayable settlement type:
 

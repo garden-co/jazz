@@ -1,6 +1,9 @@
-# Browser Adapters — Status Quo
+# Browser Adapters — Legacy Alpha Status Quo
 
-This doc describes how browser apps are wired to the Jazz runtime today.
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
+
+This doc describes how browser apps were wired to the legacy alpha Jazz
+runtime.
 
 The browser setup is intentionally split:
 

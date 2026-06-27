@@ -20,9 +20,6 @@ jobs:
   lint:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
-    env:
-      JAZZ_SKIP_RN_DEPS: "1"
-
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -42,9 +39,6 @@ jobs:
   test-rust:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
-    env:
-      JAZZ_SKIP_RN_DEPS: "1"
-
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -57,14 +51,13 @@ jobs:
       - name: Install Rust prerequisites
         run: pnpm run ensure:rust-toolchain
 
-      - run: cargo test --workspace --lib --bins --tests --exclude jazz-rn --features test
+      - run: cargo test --workspace --lib --bins --tests --features test
 
   test-ts:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
       JAZZ_NAPI_RELEASE: "0"
-      JAZZ_SKIP_RN_DEPS: "1"
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -91,5 +84,5 @@ jobs:
           key: playwright-browsers-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: /home/runner/.cache/ms-playwright
       - run: pnpm exec playwright install chromium
-      - run: pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!jazz-rn --concurrency=2
+      - run: pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --concurrency=2
       - run: pnpm --filter jazz-tools test:browser

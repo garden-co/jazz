@@ -30,7 +30,7 @@ type Patch<T> =
 
 ## Relationship to Existing Work
 
-- `status-quo/ts_client.md` documents the current React hooks (`JazzProvider`, `useDb`, `useAll`) shipping with `useSyncExternalStore` semantics — that's fine for MVP
+- `legacy-alpha-status-quo/ts_client.md` documents the legacy alpha React hooks (`JazzProvider`, `useDb`, `useAll`) and their `useSyncExternalStore` semantics as migration context.
 - This spec upgrades the plumbing so bindings can be smarter post-MVP
 - The Rust query graph's `Materialize` node already knows which rows changed — the patch info exists, it just isn't surfaced through the subscription API yet
 

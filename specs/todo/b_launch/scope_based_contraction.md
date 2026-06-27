@@ -4,7 +4,7 @@ When a query is removed and a row falls out of scope, the client keeps what it r
 
 Related runtime issue: [`specs/todo/issues/stale-client-cache-after-scope-removal.md`](../issues/stale-client-cache-after-scope-removal.md)
 
-Current scope-tracking lives in:
+Legacy alpha scope-tracking lived in:
 
 - `crates/jazz-tools/src/sync_manager/mod.rs`
 - `crates/jazz-tools/src/sync_manager/inbox.rs`
