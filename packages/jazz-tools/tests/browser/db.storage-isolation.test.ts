@@ -30,6 +30,9 @@ const todos: TableProxy<Todo, TodoInit> = {
   _initType: {} as TodoInit,
 };
 
+const ALICE_USER_ID = "00000000-0000-0000-0000-0000000000a1";
+const BOB_USER_ID = "00000000-0000-0000-0000-0000000000b2";
+
 const allTodos: QueryBuilder<Todo> = {
   _table: "todos",
   _schema: schema,
@@ -66,12 +69,12 @@ describe("Db browser storage isolation", () => {
   it("isolates default persistent storage by user_id while preserving same-user continuity", async () => {
     const appId = `browser-storage-isolation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const aliceJwt = makeFakeJwt({
-      sub: "alice",
+      sub: ALICE_USER_ID,
       claims: { role: "member" },
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
     const bobJwt = makeFakeJwt({
-      sub: "bob",
+      sub: BOB_USER_ID,
       claims: { role: "member" },
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
@@ -126,12 +129,12 @@ describe("Db browser storage isolation", () => {
   it("logout with wipeData only clears the current user's scoped storage", async () => {
     const appId = `browser-storage-logout-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const aliceJwt = makeFakeJwt({
-      sub: "alice",
+      sub: ALICE_USER_ID,
       claims: { role: "member" },
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
     const bobJwt = makeFakeJwt({
-      sub: "bob",
+      sub: BOB_USER_ID,
       claims: { role: "member" },
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
