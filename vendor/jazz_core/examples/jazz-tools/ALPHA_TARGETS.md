@@ -12,6 +12,13 @@ core/Groove correctness gaps, or missing storage/server/auth surfaces. Do not
 add a second row-batch/sync-manager compatibility implementation to make old
 tests pass.
 
+The old graft-era `batch_fate`, `row_histories`, and generic `storage` modules
+have been deleted outright. Transaction identity now lives in the neutral
+`transaction` module, schema catalogue persistence uses its own narrow storage
+trait, and remaining persistence work should target the direct-core browser,
+server, and native storage paths rather than reintroducing the deleted row
+history engine.
+
 ## Alpha targets surveyed
 
 - Upstream targets surveyed for this slice:

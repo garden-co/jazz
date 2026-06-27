@@ -1464,7 +1464,7 @@ mod tests {
     use crate::query_manager::types::{
         ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
     };
-    use crate::storage::Storage;
+    use crate::schema_manager::catalogue_storage::tests::CatalogueMemoryStorage;
 
     fn test_app_id() -> AppId {
         AppId::from_name("test-app")
@@ -1682,7 +1682,7 @@ mod tests {
     fn schema_manager_schema_published_at_uses_latest_catalogue_commit_timestamp() {
         let schema = make_schema_v1();
         let schema_hash = SchemaHash::compute(&schema);
-        let mut storage = crate::storage::MemoryStorage::new();
+        let mut storage = CatalogueMemoryStorage::new();
         let mut manager = SchemaManager::new(schema.clone(), test_app_id(), "dev", "main").unwrap();
 
         assert_eq!(manager.schema_published_at(&schema_hash), None);
@@ -1707,7 +1707,7 @@ mod tests {
     fn schema_manager_rehydrates_schema_published_at_from_catalogue_metadata() {
         let schema = make_schema_v1();
         let schema_hash = SchemaHash::compute(&schema);
-        let mut storage = crate::storage::MemoryStorage::new();
+        let mut storage = CatalogueMemoryStorage::new();
         let app_id = test_app_id();
         let mut publisher = SchemaManager::new(schema.clone(), app_id, "dev", "main").unwrap();
 
@@ -1777,7 +1777,7 @@ mod tests {
         // a bogus catalogue_schema row whose content hashes to BLAKE3("") =
         // af1349b9f5f9..., which later appears as an "unreachable schema hash"
         // in every connection diagnostics call.
-        let mut storage = crate::storage::MemoryStorage::new();
+        let mut storage = CatalogueMemoryStorage::new();
         let mut manager = SchemaManager::new_server(test_app_id(), "prod");
         let wrote = manager.ensure_current_schema_persisted(&mut storage);
         assert!(
@@ -2010,7 +2010,7 @@ mod tests {
             TablePolicies::new().with_select(PolicyExpr::True),
         )]);
 
-        let mut storage = crate::storage::MemoryStorage::new();
+        let mut storage = CatalogueMemoryStorage::new();
         let mut previous_run = SchemaManager::new(schema.clone(), app_id, "dev", "main").unwrap();
         previous_run.persist_schema(&mut storage);
         previous_run
@@ -2074,7 +2074,7 @@ mod tests {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
         let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
-        let mut storage = crate::storage::MemoryStorage::new();
+        let mut storage = CatalogueMemoryStorage::new();
         let permissions = HashMap::from([(
             TableName::new("users"),
             TablePolicies::new().with_select(PolicyExpr::True),
@@ -2100,7 +2100,7 @@ mod tests {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
         let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
-        let mut storage = crate::storage::MemoryStorage::new();
+        let mut storage = CatalogueMemoryStorage::new();
         let permissions = HashMap::from([(
             TableName::new("users"),
             TablePolicies::new().with_select(PolicyExpr::True),
@@ -2178,7 +2178,7 @@ mod tests {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
         let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
-        let mut storage = crate::storage::MemoryStorage::new();
+        let mut storage = CatalogueMemoryStorage::new();
         let permissive = HashMap::from([(
             TableName::new("users"),
             TablePolicies::new().with_select(PolicyExpr::True),
@@ -2228,7 +2228,7 @@ mod tests {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
         let mut manager = SchemaManager::new(schema, test_app_id(), "dev", "main").unwrap();
-        let mut storage = crate::storage::MemoryStorage::new();
+        let mut storage = CatalogueMemoryStorage::new();
         let permissive = HashMap::from([(
             TableName::new("users"),
             TablePolicies::new().with_select(PolicyExpr::True),
