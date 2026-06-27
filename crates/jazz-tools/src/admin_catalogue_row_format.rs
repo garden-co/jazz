@@ -681,16 +681,6 @@ fn decode_non_null_value(
     }
 }
 
-/// Decode a single column from binary data to Value.
-pub fn decode_column(
-    descriptor: &RowDescriptor,
-    data: &[u8],
-    col_index: usize,
-) -> Result<Value, EncodingError> {
-    let layout = compiled_row_layout(descriptor);
-    decode_column_with_layout(descriptor, layout.as_ref(), data, col_index)
-}
-
 fn decode_column_with_layout(
     descriptor: &RowDescriptor,
     layout: &CompiledRowLayout,
@@ -715,23 +705,6 @@ fn decode_column_with_layout(
 
     // Decode based on type
     decode_non_null_value(bytes, &col.column_type, DecodeValueContext::Column)
-}
-
-/// Get byte slice for a column (O(1) for fixed, O(1) for variable with offset table).
-/// Returns (bytes, is_null).
-fn column_bytes_internal<'a>(
-    descriptor: &RowDescriptor,
-    data: &'a [u8],
-    col_index: usize,
-) -> Result<(&'a [u8], bool), EncodingError> {
-    if col_index >= descriptor.columns.len() {
-        return Err(EncodingError::ColumnIndexOutOfBounds {
-            index: col_index,
-            max: descriptor.columns.len().saturating_sub(1),
-        });
-    }
-    let layout = compiled_row_layout(descriptor);
-    column_bytes_internal_with_layout(descriptor, layout.as_ref(), data, col_index)
 }
 
 fn column_bytes_internal_with_layout<'a>(
@@ -892,16 +865,6 @@ fn variable_column_bytes<'a>(
     } else {
         Ok((bytes, false))
     }
-}
-
-/// Check if column is null.
-pub fn column_is_null(
-    descriptor: &RowDescriptor,
-    data: &[u8],
-    col_index: usize,
-) -> Result<bool, EncodingError> {
-    let (_, is_null) = column_bytes_internal(descriptor, data, col_index)?;
-    Ok(is_null)
 }
 
 /// Encode a Value to binary bytes (for filter comparisons).
@@ -1321,25 +1284,6 @@ mod tests {
         let decoded = decode_row(&descriptor, &encoded).unwrap();
 
         assert_eq!(values, decoded);
-    }
-
-    #[test]
-    fn column_is_null_test() {
-        let descriptor = RowDescriptor::new(vec![
-            ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("name", ColumnType::Text).nullable(),
-        ]);
-
-        let with_value = vec![Value::Integer(1), Value::Text("Alice".into())];
-        let with_null = vec![Value::Integer(2), Value::Null];
-
-        let encoded_value = encode_row(&descriptor, &with_value).unwrap();
-        let encoded_null = encode_row(&descriptor, &with_null).unwrap();
-
-        assert!(!column_is_null(&descriptor, &encoded_value, 0).unwrap());
-        assert!(!column_is_null(&descriptor, &encoded_value, 1).unwrap());
-        assert!(!column_is_null(&descriptor, &encoded_null, 0).unwrap());
-        assert!(column_is_null(&descriptor, &encoded_null, 1).unwrap());
     }
 
     // ========================================================================
