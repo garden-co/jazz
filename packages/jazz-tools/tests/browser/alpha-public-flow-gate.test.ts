@@ -20,6 +20,11 @@ import {
   withTimeout,
 } from "./support.js";
 import { getJazzServerInfo } from "./testing-server.js";
+import {
+  closeRemoteBrowserDb,
+  createRemoteBrowserDb,
+  waitForRemoteBrowserDbTitle,
+} from "./remote-browser-db.js";
 
 const app = schema.defineApp({
   todos: schema.table({
@@ -348,6 +353,32 @@ describe("alpha public package flow", () => {
       "writer update was not accepted at the server",
     );
     await expectTodoSummaries(dbB, ["Adopt alpha websocket flow:done"], "local");
+
+    const remoteBrowserDbId = uniqueDbName("alpha-public-remote-browser-reader");
+    await createRemoteBrowserDb({
+      id: remoteBrowserDbId,
+      appId,
+      dbName: uniqueDbName("alpha-public-remote-browser-opfs"),
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      serverUrl,
+      adminSecret,
+      localFirstSecret: sharedSecret,
+    });
+    try {
+      const remoteRows = await waitForRemoteBrowserDbTitle({
+        id: remoteBrowserDbId,
+        title: "Adopt alpha websocket flow",
+        timeoutMs: 15_000,
+        tier: "local",
+      });
+      expect(remoteRows).toContainEqual({
+        ...created,
+        done: true,
+      });
+    } finally {
+      await closeRemoteBrowserDb(remoteBrowserDbId);
+    }
 
     unsubscribe();
     expect(
