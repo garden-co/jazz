@@ -299,9 +299,9 @@ shuts down and remounts the app.
   health, list, identity-bound policy list, create, read, update, delete, and
   live snapshots. `GET /todos/as/:userId` exercises real `dbReadForIdentity`
   The Rust server builder now keeps the old HTTP catalogue store explicitly
-  separate from the core server database: catalogue metadata lives under
+  separate from the local engine database: catalogue metadata lives under
   `catalogue.rocksdb`/`catalogue.sqlite`, while sync state lives under
-  `core-server.rocksdb`. The remaining cleanup is to replace or shrink that
+  `local-engine.rocksdb`. The remaining cleanup is to replace or shrink that
   legacy catalogue persistence path, not to let it grow back into a second
   engine.
   filtering for deterministic 16-byte identities, and
@@ -430,10 +430,10 @@ shuts down and remounts the app.
   core transaction id only. Fully removing pending write semantics
   requires changing the synchronous runtime mutation interface or returning a
   write handle that resolves to the authoritative worker result.
-- The Rust server's core authority is now named
-  `LocalCoreServerHandle`, with a private local owner around the non-`Send`
-  core server shell. This is not intended as a second engine; it is the current
-  required ownership boundary because the core server and underlying
+- The Rust server's embedded sync authority is now named
+  `LocalEngineHandle`, with a private local owner around the non-`Send`
+  engine shell. This is not intended as a second engine; it is the current
+  required ownership boundary because the engine and underlying
   `Db`/`Node` stack are local-owner `Rc`/`RefCell` structures while Axum shares
   server state across tasks.
 - Rust client/server schema conversion names now say public-schema/core
@@ -605,7 +605,7 @@ The landed smallest vertical slice is:
    API, but still skipped for the real React DOM todo flow until app code can
    wait for local durability before unmount.
 5. The persistent OPFS websocket gate is unskipped for React todo CRUD and
-   second-client convergence through one core server; shutdown/reopen of
+   second-client convergence through one local engine; shutdown/reopen of
    that DOM-driven todo flow remains the durability gap above.
 6. The includeDeleted websocket gate is unskipped for edge-confirmed deletes.
 7. The file/blob websocket gate is unskipped: binary-large-value `files.data`

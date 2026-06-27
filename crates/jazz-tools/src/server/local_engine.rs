@@ -11,19 +11,19 @@ use jazz_server::{
 };
 use tokio::sync::{oneshot, watch};
 
-/// Sendable handle for the thread that owns the direct jazz_core server shell.
+/// Sendable handle for the thread that owns the local jazz_core engine shell.
 ///
 /// The underlying `InMemoryServerShell` is intentionally kept on one OS thread
 /// because it currently stores its DB, sessions, and transports behind
 /// `Rc<RefCell<...>>`. Axum request/websocket tasks can clone this handle, but
 /// all direct shell work is serialized onto the local owner thread below.
 #[derive(Clone)]
-pub(crate) struct LocalCoreServerHandle {
-    commands: mpsc::Sender<LocalCoreServerCommand>,
+pub(crate) struct LocalEngineHandle {
+    commands: mpsc::Sender<LocalEngineCommand>,
     activity_tx: watch::Sender<u64>,
 }
 
-enum LocalCoreServerCommand {
+enum LocalEngineCommand {
     Open {
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
@@ -48,12 +48,12 @@ enum LocalCoreServerCommand {
     },
 }
 
-struct LocalCoreServerOwner {
+struct LocalEngineOwner {
     shell: InMemoryServerShell,
     activity_tx: watch::Sender<u64>,
 }
 
-impl LocalCoreServerHandle {
+impl LocalEngineHandle {
     pub(crate) fn start_with_storage(
         schema: JazzSchema,
         storage_config: StorageConfig,
@@ -61,10 +61,10 @@ impl LocalCoreServerHandle {
         let (commands, receiver) = mpsc::channel();
         let (started_tx, started_rx) = mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
-        let core_activity_tx = activity_tx.clone();
+        let engine_activity_tx = activity_tx.clone();
 
         thread::Builder::new()
-            .name("jazz-core-server".to_owned())
+            .name("jazz-local-engine".to_owned())
             .spawn(move || {
                 let config = InMemoryServerShellConfig::new(
                     schema,
@@ -85,20 +85,20 @@ impl LocalCoreServerHandle {
                     }
                 };
 
-                let mut owner = LocalCoreServerOwner {
+                let mut owner = LocalEngineOwner {
                     shell,
-                    activity_tx: core_activity_tx,
+                    activity_tx: engine_activity_tx,
                 };
 
                 while let Ok(command) = receiver.recv() {
                     owner.handle(command);
                 }
             })
-            .map_err(|error| format!("failed to spawn core server thread: {error}"))?;
+            .map_err(|error| format!("failed to spawn local engine thread: {error}"))?;
 
         started_rx
             .recv()
-            .map_err(|_| "core server thread exited before startup".to_owned())??;
+            .map_err(|_| "local engine thread exited before startup".to_owned())??;
         Ok(Self {
             commands,
             activity_tx,
@@ -117,16 +117,16 @@ impl LocalCoreServerHandle {
     ) -> Result<ServerSession, String> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(LocalCoreServerCommand::Open {
+            .send(LocalEngineCommand::Open {
                 identity,
                 claims,
                 trust,
                 reply,
             })
-            .map_err(|_| "core server thread is not running".to_owned())?;
+            .map_err(|_| "local engine thread is not running".to_owned())?;
         response
             .await
-            .map_err(|_| "core server thread dropped open response".to_owned())?
+            .map_err(|_| "local engine thread dropped open response".to_owned())?
     }
 
     pub(crate) async fn publish_schema(
@@ -135,14 +135,14 @@ impl LocalCoreServerHandle {
     ) -> Result<SchemaVersionId, String> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(LocalCoreServerCommand::PublishSchema {
+            .send(LocalEngineCommand::PublishSchema {
                 schema: Box::new(schema),
                 reply,
             })
-            .map_err(|_| "core server thread is not running".to_owned())?;
+            .map_err(|_| "local engine thread is not running".to_owned())?;
         response
             .await
-            .map_err(|_| "core server thread dropped schema publish response".to_owned())?
+            .map_err(|_| "local engine thread dropped schema publish response".to_owned())?
     }
 
     pub(crate) async fn receive_tick_take(
@@ -152,38 +152,36 @@ impl LocalCoreServerHandle {
     ) -> Result<Vec<AbiBytes>, String> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(LocalCoreServerCommand::ReceiveTickTake {
+            .send(LocalEngineCommand::ReceiveTickTake {
                 session,
                 frames,
                 reply,
             })
-            .map_err(|_| "core server thread is not running".to_owned())?;
+            .map_err(|_| "local engine thread is not running".to_owned())?;
         response
             .await
-            .map_err(|_| "core server thread dropped receive response".to_owned())?
+            .map_err(|_| "local engine thread dropped receive response".to_owned())?
     }
 
     pub(crate) async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(LocalCoreServerCommand::TickTake { session, reply })
-            .map_err(|_| "core server thread is not running".to_owned())?;
+            .send(LocalEngineCommand::TickTake { session, reply })
+            .map_err(|_| "local engine thread is not running".to_owned())?;
         response
             .await
-            .map_err(|_| "core server thread dropped tick response".to_owned())?
+            .map_err(|_| "local engine thread dropped tick response".to_owned())?
     }
 
     pub(crate) fn close(&self, session: ServerSession) {
-        let _ = self
-            .commands
-            .send(LocalCoreServerCommand::Close { session });
+        let _ = self.commands.send(LocalEngineCommand::Close { session });
     }
 }
 
-impl LocalCoreServerOwner {
-    fn handle(&mut self, command: LocalCoreServerCommand) {
+impl LocalEngineOwner {
+    fn handle(&mut self, command: LocalEngineCommand) {
         match command {
-            LocalCoreServerCommand::Open {
+            LocalEngineCommand::Open {
                 identity,
                 claims,
                 trust,
@@ -191,24 +189,24 @@ impl LocalCoreServerOwner {
             } => {
                 let _ = reply.send(self.open(identity, claims, trust));
             }
-            LocalCoreServerCommand::PublishSchema { schema, reply } => {
+            LocalEngineCommand::PublishSchema { schema, reply } => {
                 let _ = reply.send(self.publish_schema(*schema));
             }
-            LocalCoreServerCommand::ReceiveTickTake {
+            LocalEngineCommand::ReceiveTickTake {
                 session,
                 frames,
                 reply,
             } => {
                 let result = self.receive_tick_take(session, frames);
                 if result.is_ok() {
-                    notify_core_activity(&self.activity_tx);
+                    notify_engine_activity(&self.activity_tx);
                 }
                 let _ = reply.send(result);
             }
-            LocalCoreServerCommand::TickTake { session, reply } => {
+            LocalEngineCommand::TickTake { session, reply } => {
                 let _ = reply.send(self.tick_take(session));
             }
-            LocalCoreServerCommand::Close { session } => {
+            LocalEngineCommand::Close { session } => {
                 let _ = self.shell.close_session(session);
             }
         }
@@ -251,7 +249,7 @@ impl LocalCoreServerOwner {
     }
 }
 
-fn notify_core_activity(activity_tx: &watch::Sender<u64>) {
+fn notify_engine_activity(activity_tx: &watch::Sender<u64>) {
     activity_tx.send_modify(|version| {
         *version = version.wrapping_add(1);
     });

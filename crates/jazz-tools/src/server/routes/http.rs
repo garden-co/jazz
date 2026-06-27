@@ -586,14 +586,14 @@ pub(super) async fn publish_schema_handler(
     }
 
     let schema_convert =
-        match state.core_server().is_some() || state.core_server_storage_config.is_some() {
+        match state.local_engine().is_some() || state.local_engine_storage_config.is_some() {
             true => match crate::server::schema_convert::convert_public_schema(&request.schema) {
                 Ok(schema) => Some(schema),
                 Err(err) => {
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse::bad_request(format!(
-                            "schema is not supported by core server: {err}"
+                            "schema is not supported by the local engine: {err}"
                         ))),
                     )
                         .into_response();
@@ -604,26 +604,26 @@ pub(super) async fn publish_schema_handler(
 
     let schema_hash = SchemaHash::compute(&request.schema);
     if let Some(schema) = schema_convert.clone() {
-        let core_server = match state.core_server() {
-            Some(core_server) => core_server,
-            None => match state.start_core_server(schema.clone()) {
-                Ok(core_server) => core_server,
+        let local_engine = match state.local_engine() {
+            Some(local_engine) => local_engine,
+            None => match state.start_local_engine(schema.clone()) {
+                Ok(local_engine) => local_engine,
                 Err(err) => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse::internal(format!(
-                            "failed to start core server: {err}"
+                            "failed to start local engine: {err}"
                         ))),
                     )
                         .into_response();
                 }
             },
         };
-        if let Err(err) = core_server.publish_schema(schema).await {
+        if let Err(err) = local_engine.publish_schema(schema).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(format!(
-                    "failed to publish schema to core server: {err}"
+                    "failed to publish schema to local engine: {err}"
                 ))),
             )
                 .into_response();
@@ -872,8 +872,8 @@ pub(super) async fn publish_permissions_handler(
         table.policies = policies.clone();
     }
 
-    let schema_convert = match state.core_server().is_some()
-        || state.core_server_storage_config.is_some()
+    let schema_convert = match state.local_engine().is_some()
+        || state.local_engine_storage_config.is_some()
     {
         true => {
             match crate::server::schema_convert::convert_public_schema(&schema_with_permissions) {
@@ -882,7 +882,7 @@ pub(super) async fn publish_permissions_handler(
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse::bad_request(format!(
-                            "permissions schema is not supported by core server: {err}"
+                            "permissions schema is not supported by the local engine: {err}"
                         ))),
                     )
                         .into_response();
@@ -904,26 +904,26 @@ pub(super) async fn publish_permissions_handler(
         {
             Ok(head) => {
                 if let Some(schema) = schema_convert {
-                    let core_server = match state.core_server() {
-                        Some(core_server) => core_server,
-                        None => match state.start_core_server(schema.clone()) {
-                            Ok(core_server) => core_server,
+                    let local_engine = match state.local_engine() {
+                        Some(local_engine) => local_engine,
+                        None => match state.start_local_engine(schema.clone()) {
+                            Ok(local_engine) => local_engine,
                             Err(err) => {
                                 return (
                                     StatusCode::INTERNAL_SERVER_ERROR,
                                     Json(ErrorResponse::internal(format!(
-                                        "failed to start core server: {err}"
+                                        "failed to start local engine: {err}"
                                     ))),
                                 )
                                     .into_response();
                             }
                         },
                     };
-                    if let Err(err) = core_server.publish_schema(schema).await {
+                    if let Err(err) = local_engine.publish_schema(schema).await {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse::internal(format!(
-                                "failed to publish permissions schema to core server: {err}"
+                                "failed to publish permissions schema to local engine: {err}"
                             ))),
                         )
                             .into_response();

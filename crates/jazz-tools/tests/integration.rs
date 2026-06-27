@@ -76,7 +76,7 @@ async fn ws_handshake(
     ws
 }
 
-async fn expect_core_server_hello(
+async fn expect_local_engine_hello(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
@@ -363,7 +363,7 @@ async fn test_ws_connection_receives_server_hello() {
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
     let mut ws = ws_handshake(server.port, &token).await;
 
-    expect_core_server_hello(&mut ws).await;
+    expect_local_engine_hello(&mut ws).await;
 }
 
 #[tokio::test]
@@ -374,7 +374,7 @@ async fn test_ws_connection_stays_open_after_handshake() {
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
     let mut ws = ws_handshake(server.port, &token).await;
 
-    expect_core_server_hello(&mut ws).await;
+    expect_local_engine_hello(&mut ws).await;
 
     // Drain frames for 100ms, confirming the connection stays open the whole time.
     // The server may push WireFrame batches immediately after negotiation;

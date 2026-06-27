@@ -142,7 +142,7 @@ enum Commands {
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
 
-        /// Upstream core server URL. When set, this server runs as an edge.
+        /// Upstream server URL. When set, this server runs as an edge.
         #[arg(long, env = "JAZZ_UPSTREAM_URL")]
         upstream_url: Option<String>,
 

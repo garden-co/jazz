@@ -21,11 +21,11 @@ async fn sqlite_is_not_a_supported_server_storage_backend() {
         })
         .build()
         .await
-        .expect_err("sqlite must not be accepted as core server storage");
+        .expect_err("sqlite must not be accepted as local engine storage");
 
     assert!(
-        err.contains("core server catalogue storage does not support sqlite")
-            || err.contains("core server storage does not support sqlite"),
+        err.contains("local engine catalogue storage does not support sqlite")
+            || err.contains("local engine storage does not support sqlite"),
         "unexpected sqlite server storage error: {err}"
     );
 }
