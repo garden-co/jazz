@@ -196,6 +196,9 @@ Until deleted, treat them as replacement targets only.
 - The direct websocket route is the intended sync boundary. Old
   `transport_protocol.rs`, `transport_manager.rs`, and `sync_manager` code
   should not regain ownership of `/ws` semantics.
+- Runtime-facing HTTP/auth error DTOs now live in `transport_error.rs`; any
+  remaining `transport_protocol` dependency should be treated as legacy alpha
+  transport surface or test compatibility, not shared server API.
 - `ServerState::process_ws_client_frame` is gated to `test-utils`; it exists
   only for legacy in-process tests that still inject alpha `SyncPayload` frames,
   not for production server traffic.

@@ -72,7 +72,7 @@ async fn app_shutdown_gate(
     let Some(_guard) = state.shutdown.try_enter_app_request() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(crate::transport_protocol::ErrorResponse::internal(
+            axum::Json(crate::transport_error::ErrorResponse::internal(
                 "server is shutting down".to_string(),
             )),
         )

@@ -43,7 +43,7 @@ use crate::identity;
 use crate::query_manager::session::Session;
 use crate::schema_manager::AppId;
 use crate::server::ServerState;
-use crate::transport_protocol::UnauthenticatedResponse;
+use crate::transport_error::UnauthenticatedResponse;
 
 /// JWKS cache TTL — 5 minutes, matching the cloud server.
 pub const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -1118,7 +1118,7 @@ pub fn validate_admin_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport_protocol::UnauthenticatedCode;
+    use crate::transport_error::UnauthenticatedCode;
     use jsonwebtoken::{EncodingKey, Header, encode};
 
     const TEST_JWKS_KID: &str = "test-kid";
