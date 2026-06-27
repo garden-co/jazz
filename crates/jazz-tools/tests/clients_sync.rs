@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
-use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
@@ -72,68 +71,6 @@ where
             return rows;
         }
     }
-}
-
-#[tokio::test]
-async fn wait_for_batch_waits_until_expected_tier_confirmation_reaches_client() {
-    let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(schema, "alice-wait-for-batch"))
-            .await
-            .expect("connect alice");
-    let alice_client_id = alice.client_id().expect("alice transport client id");
-
-    wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
-
-    let blocked = server.block_messages_to(alice_client_id);
-    let (_, _, batch_id) = alice
-        .insert(
-            "todos",
-            row_input!("title" => "blocked confirmation", "completed" => false),
-        )
-        .expect("insert todo");
-
-    blocked
-        .wait_until_buffered(
-            |payload| {
-                matches!(
-                    payload,
-                    SyncPayload::BatchFate { fate }
-                        if fate.batch_id() == batch_id
-                            && fate
-                                .confirmed_tier()
-                                .is_some_and(|tier| tier >= DurabilityTier::EdgeServer)
-                )
-            },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("server should produce the edge confirmation while messages are blocked");
-    assert!(
-        blocked.buffered_count() > 0,
-        "blocked client should have buffered server messages"
-    );
-
-    {
-        let wait_for_batch = alice.wait_for_batch(batch_id, DurabilityTier::EdgeServer);
-        tokio::pin!(wait_for_batch);
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), &mut wait_for_batch)
-                .await
-                .is_err(),
-            "wait_for_batch should not resolve before the confirmation is delivered"
-        );
-
-        blocked.unblock();
-        wait_for_batch
-            .await
-            .expect("wait_for_batch should resolve after unblocking the confirmation");
-    }
-
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
 }
 
 /// Verifies that a fresh client resolves the latest state for a single object

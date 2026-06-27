@@ -12,8 +12,6 @@ Always prefer black-boxed integration tests that exercise public APIs over unit 
 - Assert user-visible effects through public client APIs: query rows,
   subscription deltas, accepted/rejected write settlement, or visible row state.
   - Use higher-level utils like `wait_for_query` to wait for results
-  - You can temporarily block communication between nodes using
-    `JazzServer::block_messages_to(client_id)`
 - Use `row_input!` for inserts.
 
 ## What Should Stay Internal

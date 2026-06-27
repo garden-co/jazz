@@ -351,7 +351,10 @@ API/testability gap, not as covered app persistence.
   Admin subscription introspection no longer records fabricated
   `SyncPayload::QuerySubscription` entries in the catalogue store; the endpoint
   currently returns an authenticated empty shell until it can be backed by
-  direct-core subscription telemetry.
+  direct-core subscription telemetry. Server test utilities no longer expose
+  `JazzServer::block_messages_to(...)` or buffered `SyncPayload::BatchFate`
+  assertions; tests should assert public query/subscription/write outcomes
+  instead of pinning old semantic sync frames.
 
 ## Next targets
 
