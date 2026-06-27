@@ -405,7 +405,7 @@ describe("CoreRuntime server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => encodeFileRows(),
+            all: () => encodeBinaryLargeValueRows(),
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -413,16 +413,16 @@ describe("CoreRuntime server transport", () => {
           throw new Error("not used");
         },
       } as never,
-      fileSchema,
+      binaryLargeValueSchema,
       new Uint8Array(16),
       new Uint8Array(16),
       1,
       true,
     );
 
-    await expect(runtime.query(JSON.stringify({ table: "files" }))).resolves.toEqual([
+    await expect(runtime.query(JSON.stringify({ table: "binary_large_values" }))).resolves.toEqual([
       {
-        table: "files",
+        table: "binary_large_values",
         id: "00000000-0000-0000-0000-000000000010",
         values: [
           {
@@ -1099,16 +1099,16 @@ function unsupportedProjectRelationIr(): unknown {
   };
 }
 
-const fileSchema = {
-  files: {
+const binaryLargeValueSchema = {
+  binary_large_values: {
     columns: [
       {
-        name: "partIds",
+        name: "chunk_refs",
         column_type: { type: "Array", element: { type: "Uuid" } },
         nullable: false,
       },
       {
-        name: "partSizes",
+        name: "chunk_sizes",
         column_type: { type: "Array", element: { type: "Double" } },
         nullable: false,
       },
@@ -1223,14 +1223,14 @@ function encodeSubscriptionDelta(delta: {
   return writer.finish();
 }
 
-function encodeFileRows(): Uint8Array {
+function encodeBinaryLargeValueRows(): Uint8Array {
   const descriptor = [
-    { name: "partIds", valueType: { tag: 11, inner: { tag: 8 } } },
-    { name: "partSizes", valueType: { tag: 11, inner: { tag: 4 } } },
+    { name: "chunk_refs", valueType: { tag: 11, inner: { tag: 8 } } },
+    { name: "chunk_sizes", valueType: { tag: 11, inner: { tag: 4 } } },
   ];
   const writer = new PostcardWriter();
   writer.vec((batch) => {
-    batch.string("files");
+    batch.string("binary_large_values");
     writeDescriptor(batch, descriptor);
     batch.vec((row) => {
       row.bytes(uuidBytes("00000000-0000-0000-0000-000000000010"));

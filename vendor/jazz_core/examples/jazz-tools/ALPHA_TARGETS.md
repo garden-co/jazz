@@ -120,10 +120,13 @@ The grafted package now also has a browser alpha public-flow gate in
 slice proves public `schema.defineApp`, `createDb({ driver: "persistent" })`,
 CRUD, `db.one`, `subscribeAll`, and read-your-writes in one browser session.
 The package persistent path now uses a direct-core dedicated worker for OPFS and
-the same file proves a local write can survive shutdown/reopen. The skipped TODO
-gates are now the broader persistent websocket/file flows: transactions, auth
-failure propagation, and cross-client convergence over the real Rust server
-boundary still need to be completed on the worker-owned runtime.
+the same file proves a local write can survive shutdown/reopen. The same gate
+also runs a persistent OPFS client through the real Rust websocket server
+boundary, reopens that client, and verifies a second persistent client converges
+over the websocket path. The skipped TODO gates are now narrower: delete/restore
+and includeDeleted websocket coverage, file/blob persistence plus websocket
+convergence, and the transaction semantics that require deeper direct-core
+support rather than worker-only forwarding.
 
 ## Current gaps versus alpha
 
@@ -131,10 +134,11 @@ boundary still need to be completed on the worker-owned runtime.
   direct-core dedicated worker for OPFS instead of the deleted broker/leader
   topology. The current positive browser gate covers public CRUD,
   read-your-writes, subscriptions in the direct path, and local OPFS
-  shutdown/reopen for a simple inserted row. Remaining persistence gaps are
-  transaction support in the worker runtime, auth failure propagation,
-  persistent websocket convergence, file/blob reopen, and broader history/index
-  correctness.
+  shutdown/reopen for a simple inserted row. It also covers persistent OPFS plus
+  direct websocket convergence over a real Rust server for a todo-shaped flow.
+  Remaining persistence gaps are transaction support in direct core plus the
+  worker runtime, file/blob reopen and websocket convergence, delete/restore and
+  includeDeleted websocket coverage, and broader history/index correctness.
   `examples/browser-wasm` still has older OPFS reload coverage for the vendored
   example path, but the package gate is the integration source of truth.
 - Public TypeScript API compatibility is intentionally thin. Since this repo is
@@ -396,11 +400,19 @@ The landed smallest vertical slice is:
    users should not need cross-origin isolation just to write local state.
 4. The local OPFS reopen gate is unskipped: insert, local wait, shutdown,
    reopen, and local query-by-id pass through public `createDb`.
+5. The persistent OPFS websocket gate is unskipped for todo CRUD: writer edge
+   waits, local subscription snapshots, shutdown/reopen, and second-client
+   convergence all pass through public `createDb`.
 
 Current blockers:
 
 - The worker-owned persistent DB and any main-thread mirror must converge
   deterministically under local writes, edge sync, subscriptions, and shutdown.
-- Transactions are not implemented on the worker runtime yet.
-- Auth failure callbacks are not propagated from the worker to the main thread.
-- Persistent websocket convergence and file/blob reopen remain skipped gates.
+- Transactions are not implemented on the persistent worker runtime yet. A
+  worker-only attempt exposed deeper missing direct-core semantics:
+  transaction-scoped reads, session-scoped staged writes, and exclusive
+  transaction support cannot be solved honestly in the wrapper alone.
+- Auth failure and mutation-error callbacks are now forwarded from the worker to
+  the main thread, but they still need focused browser failure tests.
+- Delete/restore, includeDeleted websocket coverage, and file/blob reopen plus
+  websocket convergence remain skipped gates.
