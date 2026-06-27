@@ -37,43 +37,33 @@ RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realis
   --server-url http://127.0.0.1:1625
 ```
 
-## Rust Criterion (Phase 1 local baseline)
+## Rust Criterion (active direct-core baseline)
 
 Run the local realistic benchmark suite:
 
 ```bash
-cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1
+cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1_direct
 ```
 
-It currently loads:
-
-- profile: `dev/benchmarks/realistic/profiles/s.json`
-- scenario `R1`: `dev/benchmarks/realistic/scenarios/r1_crud_sustained.json`
-- scenario `R2`: `dev/benchmarks/realistic/scenarios/r2_reads_sustained.json`
-- scenario `R2B`: `dev/benchmarks/realistic/scenarios/r2_reads_with_churn.json` (5% background write churn)
-- scenario `R3`: `dev/benchmarks/realistic/scenarios/r3_cold_load.json` (cold open + first query, RocksDB)
-- scenario `R4`: `dev/benchmarks/realistic/scenarios/r4_fanout_updates.json` (N={10,50,200} subscribers)
-- scenario `R5`: `dev/benchmarks/realistic/scenarios/r5_permission_recursive.json` (recursive policy read/update with allow+deny mix)
-- scenario `R6`: `dev/benchmarks/realistic/scenarios/r6_permission_write_heavy.json` (recursive policy write-heavy allow+deny mix)
-- scenario `R7A`: `dev/benchmarks/realistic/scenarios/r7_hotspot_history.json` (deep updates on a small hot set)
-- scenario `R8`: `dev/benchmarks/realistic/scenarios/r8_many_branches.json` (many linked branches on one object)
+It currently hard-codes the S profile inside
+`crates/jazz-tools/benches/realistic_phase1_direct.rs` and runs the active
+direct-core ports of selected realistic scenarios.
 
 Current topology coverage:
 
-- `T0_local`: `realistic_phase1/crud_sustained` and `realistic_phase1/reads_sustained`
-- mixed read/write churn: `realistic_phase1/reads_sustained_with_write_churn`
-- `T1_single_hop`: `realistic_phase1/crud_sustained_single_hop` and `realistic_phase1/reads_sustained_single_hop`
-- persisted cold-load (`M1_rocksdb`): `realistic_phase1/cold_load_rocksdb` (requires `--features rocksdb`)
-- fanout delivery: `realistic_phase1/fanout_updates`
-- recursive permission read/write: `realistic_phase1/permission_recursive`
-- recursive permission write-heavy: `realistic_phase1/permission_write_heavy`
-- hotspot deep-history updates: `realistic_phase1/hotspot_history`
-- branch-count scaling baseline: `realistic_phase1/many_branches_*`
+- direct CRUD: `realistic_phase1_direct/r1_crud`
+- direct reads: `realistic_phase1_direct/r2_reads`
+- persisted cold-load (`M1_rocksdb`): `realistic_phase1_direct/r3_rocksdb_cold_load` (requires `--features rocksdb`)
+- hot task history with multiple subscriptions: `realistic_phase1_direct/r4_hot_task_history`
+- subscribed write path: `realistic_phase1_direct/r9_subscribed_write`
+- direct writer/server/reader sync fanout: `realistic_phase1_direct/r10_direct_sync_fanout`
+- byte-wire reconnect/resume canary: `realistic_phase1_direct/r11_byte_wire_resume`
+- recursive permission read/subscription visibility: `realistic_phase1_direct/r12_recursive_permissions`
 
 Run only the cold-load benchmark:
 
 ```bash
-cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 cold_load_rocksdb
+cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1_direct -- realistic_phase1_direct/r3_rocksdb_cold_load
 ```
 
 Export consolidated Criterion artifacts (JSON + markdown summary) from `target/criterion`:
@@ -83,6 +73,12 @@ pnpm bench:realistic:export-criterion -- \
   --out bench-out/native/criterion_realistic_phase1.json \
   --summary-md bench-out/native/criterion_realistic_phase1.md
 ```
+
+The `criterion_realistic_phase1.*` artifact filenames are retained for history
+ingestion compatibility. New Criterion output is filtered from the active
+`realistic_phase1_direct/` prefix by default; old `realistic_phase1/` exports are
+archival only and correspond to the source captured under
+`crates/jazz-tools/benches/archive/realistic_phase1.rs.txt`.
 
 ## Browser Runner (OPFS Worker)
 
@@ -153,7 +149,7 @@ The workflow currently:
 - runs every benchmark with a 60-second CI budget and records `passed`, `timed_out`, `failed`, or `skipped_configured`
 - keeps a checked-in skip set at `dev/benchmarks/realistic/ci_skip_set.json`
 - only activates configured skips after 3 timed-out observations for the same benchmark id
-- records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`) when they complete within budget
+- records native example outputs (`W1`/`W4`) plus exported active direct Criterion results (`native-criterion`) when they complete within budget
 - records jazz-sim JSONL outputs and logs under `bench-out/native/jazz-sim`; `update_history.mjs` ingests passed JSONL outputs into history as suite `jazz-sim`, keyed by scenario plus phase/variant, and exposes numeric JSONL fields to the static site/report as per-phase metrics
 - records browser outputs per scenario when they complete within budget
 

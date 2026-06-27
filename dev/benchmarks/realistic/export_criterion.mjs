@@ -15,17 +15,19 @@ function printHelp() {
   node dev/benchmarks/realistic/export_criterion.mjs \
     [--criterion-root target/criterion] \
     [--scenarios-dir dev/benchmarks/realistic/scenarios] \
-    [--prefix realistic_phase1/] \
+    [--prefix realistic_phase1_direct/] \
     [--out bench-out/native/criterion_realistic_phase1.json] \
     [--summary-md bench-out/native/criterion_realistic_phase1.md]
 `);
 }
 
 function parseArgs(argv) {
+  // Keep the historical artifact filenames so update_history can ingest old and
+  // new native Criterion outputs through the same manifest paths.
   const out = {
     criterionRoot: "target/criterion",
     scenariosDir: "dev/benchmarks/realistic/scenarios",
-    prefix: "realistic_phase1/",
+    prefix: "realistic_phase1_direct/",
     out: "bench-out/native/criterion_realistic_phase1.json",
     summaryMd: "bench-out/native/criterion_realistic_phase1.md",
     allowEmpty: false,
