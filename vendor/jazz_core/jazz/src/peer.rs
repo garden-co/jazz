@@ -2096,7 +2096,7 @@ mod tests {
 
     use crate::ids::{NodeUuid, RowUuid};
     use crate::node::MergeableCommit;
-    use crate::protocol::SyncMessage;
+    use crate::protocol::{SyncMessage, VersionRecord};
     use crate::query::{OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not, param};
     use crate::schema::{JazzSchema, Policy, TableSchema};
     use crate::time::GlobalSeq;
@@ -2123,6 +2123,19 @@ mod tests {
 
     fn current_row_pair(row: crate::node::CurrentRow) -> (RowUuid, BTreeMap<String, Value>) {
         (row.row_uuid(), row.test_cells_by_descriptor())
+    }
+
+    fn wire_version_cells(record: &VersionRecord, table: &TableSchema) -> BTreeMap<String, Value> {
+        table
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, column)| {
+                record
+                    .cell_at(idx)
+                    .map(|value| (column.name.clone(), value))
+            })
+            .collect()
     }
 
     fn title_cells(title: impl Into<String>) -> BTreeMap<String, Value> {
@@ -2534,6 +2547,92 @@ mod tests {
             vec![("todos".to_owned().into(), row_from_u64(10), lower_tx)]
         );
         assert!(result_row_removes.is_empty());
+    }
+
+    #[test]
+    fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_content() {
+        let (_core_dir, mut core) = open_node_with_uuid(node(0x92));
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(0x93));
+        let row_uuid = row_from_u64(10);
+        let original_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
+            )
+            .unwrap();
+        accept_global(&mut core, original_tx, 1);
+        let delete_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_001)
+                    .parents(vec![original_tx])
+                    .deletion(DeletionEvent::Deleted),
+            )
+            .unwrap();
+        accept_global(&mut core, delete_tx, 2);
+        let restored_content_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_002)
+                    .parents(vec![delete_tx])
+                    .cells(title_cells("restored")),
+            )
+            .unwrap();
+        accept_global(&mut core, restored_content_tx, 3);
+        let restore_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_003)
+                    .parents(vec![restored_content_tx])
+                    .deletion(DeletionEvent::Restored),
+            )
+            .unwrap();
+        accept_global(&mut core, restore_tx, 4);
+        let (shape, binding) = title_shape_binding("restored");
+        let subscription = subscription_key(&shape, &binding);
+        let mut peer = PeerState::new();
+
+        let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        let SyncMessage::ViewUpdate {
+            result_row_adds,
+            version_bundles,
+            ..
+        } = &update
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(
+            result_row_adds,
+            &vec![("todos".to_owned().into(), row_uuid, restored_content_tx)]
+        );
+        assert!(
+            version_bundles.iter().any(|bundle| {
+                bundle.tx.tx_id == restored_content_tx
+                    && bundle.versions.iter().any(|version| {
+                        version.table() == "todos"
+                            && version.row_uuid() == row_uuid
+                            && version.deletion().is_none()
+                            && wire_version_cells(version, core.table("todos").unwrap())
+                                == title_cells("restored")
+                    })
+            }),
+            "rehydrate must ship the restored content version, not the pre-delete content"
+        );
+        reader.apply_sync_message(update).unwrap();
+        assert_eq!(
+            reader
+                .subscription_current_rows("todos", DurabilityTier::Local)
+                .unwrap()
+                .into_iter()
+                .map(current_row_pair)
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([(row_uuid, title_cells("restored"))])
+        );
+        assert_eq!(
+            row_result_set(&peer, subscription),
+            Some(BTreeSet::from([(
+                "todos".to_owned().into(),
+                row_uuid,
+                restored_content_tx
+            )]))
+        );
     }
 
     #[test]

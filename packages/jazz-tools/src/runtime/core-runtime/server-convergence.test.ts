@@ -305,6 +305,100 @@ describe("CoreRuntime server convergence", () => {
     );
     expect(Array.from(bytes)).toEqual([1, 2, 3, 4]);
   });
+
+  it.skip("TODO(alpha direct core): replays a restored row after insert-delete-restore to a fresh websocket subscriber", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const appId = "00000000-0000-0000-0000-00000000c004";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret: "core-runtime-restore-convergence-admin",
+      schema: encodeDirectSchema(schema),
+    });
+
+    const writer = await createClient({
+      appId,
+      serverUrl: server.url,
+      peer: "restore-writer",
+    });
+    clients.push(writer);
+    writer.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+    const inserted = writer.insert("todos", {
+      title: { type: "Text", value: "direct websocket before delete" },
+      done: { type: "Boolean", value: false },
+    });
+    await waitForPromise(
+      inserted.wait({ tier: "edge" }),
+      "writer insert did not settle at edge before delete",
+    );
+
+    const deleted = writer.delete("todos", inserted.value.id);
+    await waitForPromise(
+      deleted.wait({ tier: "edge" }),
+      "writer delete did not settle at edge before restore",
+    );
+
+    const restored = writer.restore("todos", inserted.value.id, {
+      title: { type: "Text", value: "direct websocket restored row" },
+      done: { type: "Boolean", value: true },
+    });
+    await waitForPromise(restored.wait({ tier: "edge" }), "writer restore did not settle at edge");
+
+    await writer.shutdown();
+    clients.splice(clients.indexOf(writer), 1);
+
+    const reader = await createClient({
+      appId,
+      serverUrl: server.url,
+      peer: "restore-reader",
+    });
+    clients.push(reader);
+    reader.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+    const replayedValues: string[] = [];
+    const replayedToSubscription = new Promise<string>((resolve) => {
+      reader.subscribe(
+        JSON.stringify({ table: "todos" }),
+        (delta) => {
+          if (!Array.isArray(delta)) return;
+          for (const change of delta) {
+            if ("row" in change && change.row?.id === inserted.value.id) {
+              const firstValue = change.row.values[0];
+              if (firstValue?.type === "Text") {
+                replayedValues.push(firstValue.value);
+                if (firstValue.value === "direct websocket restored row") {
+                  resolve(firstValue.value);
+                }
+              }
+            }
+          }
+        },
+        { tier: "local" },
+      );
+    });
+
+    await expect(
+      waitForPromise(
+        replayedToSubscription,
+        `fresh reader subscription did not replay restored row; saw ${JSON.stringify(replayedValues)}`,
+      ),
+    ).resolves.toBe("direct websocket restored row");
+
+    const restoredRow = await waitFor(async () => {
+      const rows = await reader.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+      return rows.find((row) => row.id === inserted.value.id);
+    });
+
+    expect(restoredRow).toMatchObject({
+      id: inserted.value.id,
+      values: [
+        { type: "Text", value: "direct websocket restored row" },
+        { type: "Boolean", value: true },
+      ],
+    });
+  }, 15_000);
 });
 
 async function publishSchema(

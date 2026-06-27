@@ -203,22 +203,48 @@ export class CoreRuntime implements Runtime {
   private nextTransactionId = 1;
   private nextSubscriptionId = 1;
 
+  static fromDb(
+    db: CoreDb,
+    schema: WasmSchema,
+    node: Uint8Array,
+    author: Uint8Array,
+    sourceId: number,
+    historyComplete: boolean,
+  ): CoreRuntime {
+    return new CoreRuntime(null, schema, node, author, sourceId, historyComplete, { db });
+  }
+
   constructor(
-    Runtime: CoreDbConstructor,
+    Runtime: CoreDbConstructor | null,
     private readonly schema: WasmSchema,
     node: Uint8Array,
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
-    opts?: { persistentPath?: string },
+    opts?: { persistentPath?: string; db?: CoreDb },
   ) {
     this.schemaBytes = encodeDirectSchema(schema);
     this.configBytes = openConfig(node, author, sourceId, historyComplete);
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
-    this.db = opts?.persistentPath
-      ? openPersistentDirectDb(Runtime, opts.persistentPath, this.schemaBytes, this.configBytes)
-      : Runtime.openMemory(this.schemaBytes, this.configBytes);
+    if (opts?.db) {
+      this.db = opts.db;
+    } else if (opts?.persistentPath) {
+      if (!Runtime) {
+        throw new Error("Direct core runtime constructor required for persistent storage");
+      }
+      this.db = openPersistentDirectDb(
+        Runtime,
+        opts.persistentPath,
+        this.schemaBytes,
+        this.configBytes,
+      );
+    } else {
+      if (!Runtime) {
+        throw new Error("Direct core runtime constructor required for memory storage");
+      }
+      this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
+    }
     if (typeof this.db.setTickScheduler !== "function") {
       throw new Error("Direct core runtime requires db.setTickScheduler");
     }

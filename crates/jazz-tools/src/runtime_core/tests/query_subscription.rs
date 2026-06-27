@@ -1169,6 +1169,132 @@ fn rc_query_settled_tier_empty_resolves() {
 }
 
 #[test]
+fn rc_query_edge_after_restore_replays_restored_row_to_fresh_client() {
+    let mut s = create_3tier_rc();
+    let user_id = ObjectId::new();
+
+    let ((row_id, _row_values), mut insert_receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(user_id, "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
+    pump_3tier(&mut s);
+    assert!(
+        Pin::new(&mut insert_receiver)
+            .poll(&mut std::task::Context::from_waker(&noop_waker()))
+            .is_ready(),
+        "insert should settle at edge"
+    );
+
+    let mut delete_receiver =
+        delete_and_wait_for_batch(&mut s.a, row_id, None, DurabilityTier::EdgeServer).unwrap();
+    pump_3tier(&mut s);
+    assert!(
+        Pin::new(&mut delete_receiver)
+            .poll(&mut std::task::Context::from_waker(&noop_waker()))
+            .is_ready(),
+        "delete should settle at edge"
+    );
+
+    let restore_batch_id =
+        s.a.restore(
+            "users",
+            row_id,
+            user_insert_values(user_id, "Alice Restored"),
+            None,
+        )
+        .unwrap()
+        .1;
+    let mut restore_receiver =
+        s.a.wait_for_batch(restore_batch_id, DurabilityTier::EdgeServer)
+            .unwrap();
+    pump_3tier(&mut s);
+    assert!(
+        Pin::new(&mut restore_receiver)
+            .poll(&mut std::task::Context::from_waker(&noop_waker()))
+            .is_ready(),
+        "restore should settle at edge"
+    );
+    assert_eq!(
+        execute_local_runtime_query(&mut s.b, Query::new("users"), None),
+        vec![(row_id, user_row_values(user_id, "Alice Restored"))],
+        "worker should see restored row before fresh reader query"
+    );
+    assert_eq!(
+        execute_local_runtime_query(&mut s.c, Query::new("users"), None),
+        vec![(row_id, user_row_values(user_id, "Alice Restored"))],
+        "edge should see restored row before fresh reader query"
+    );
+
+    let mut fresh_reader = create_runtime_with_schema(test_schema(), "fresh-restore-reader");
+    let fresh_client_of_c = ClientId::new();
+    let fresh_server_for_reader = ServerId::new();
+    s.c.add_client(fresh_client_of_c, None);
+    s.c.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(fresh_client_of_c, ClientRole::Peer);
+    fresh_reader.add_server(fresh_server_for_reader);
+    fresh_reader.immediate_tick();
+    fresh_reader.batched_tick();
+    fresh_reader.sync_sender().take();
+
+    let mut future = fresh_reader.query_with_propagation(
+        QueryBuilder::new("users")
+            .filter_eq("id", Value::Uuid(row_id))
+            .build(),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+
+    for _ in 0..10 {
+        fresh_reader.batched_tick();
+        for entry in fresh_reader.sync_sender().take() {
+            if entry.destination == Destination::Server(fresh_server_for_reader) {
+                s.c.park_sync_message(InboxEntry {
+                    source: Source::Client(fresh_client_of_c),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        s.c.batched_tick();
+        s.c.immediate_tick();
+        s.c.batched_tick();
+        for entry in s.c.sync_sender().take() {
+            if entry.destination == Destination::Client(fresh_client_of_c) {
+                fresh_reader.park_sync_message(InboxEntry {
+                    source: Source::Server(fresh_server_for_reader),
+                    payload: entry.payload,
+                });
+            }
+        }
+        fresh_reader.batched_tick();
+        fresh_reader.immediate_tick();
+
+        if let Poll::Ready(result) = Pin::new(&mut future).poll(&mut cx) {
+            let rows = result.expect("fresh reader query should succeed");
+            assert_eq!(rows.len(), 1, "fresh reader should receive restored row");
+            assert_eq!(rows[0].0, row_id);
+            assert_eq!(rows[0].1[1], Value::Text("Alice Restored".into()));
+            return;
+        }
+    }
+
+    panic!("fresh reader edge query did not resolve with restored row");
+}
+
+#[test]
 fn query_reads_pick_row_batches_by_required_durability_tier() {
     let mut core = create_runtime_with_schema_and_sync_manager(
         test_schema(),
