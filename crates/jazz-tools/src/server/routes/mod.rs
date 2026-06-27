@@ -134,7 +134,6 @@ mod tests {
         ColumnType, Schema, SchemaBuilder, TableSchema, Value as QueryValue,
     };
     use crate::server::catalogue::ConnectionSchemaDiagnostics;
-    use crate::sync::ClientId;
     use axum::body;
     use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};
@@ -2046,9 +2045,6 @@ mod tests {
         let current_hash = SchemaHash::compute(&schema);
         let declared_hash = SchemaHash::from_bytes([9; 32]);
         let state = make_state_with_schema(schema).await;
-
-        let client_id = ClientId::new();
-        let _ = state.catalogue_store.ensure_client_as_backend(client_id);
 
         let diagnostics = state
             .catalogue_store

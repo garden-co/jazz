@@ -55,9 +55,13 @@ function pushU32(target: number[], value: number): void {
 function nativeRowData(name: string, count: number): Uint8Array {
   const text = new TextEncoder().encode(name);
   const data = new Uint8Array(4 + text.byteLength);
-  new DataView(data.buffer).setInt32(0, count, true);
+  new DataView(data.buffer).setUint32(0, encodeSignedI32ForCore(count), true);
   data.set(text, 4);
   return data;
+}
+
+function encodeSignedI32ForCore(value: number): number {
+  return (value ^ 0x80000000) >>> 0;
 }
 
 function nativeAddedRecord(id: string, index: number, name: string, count: number): Uint8Array {
@@ -103,7 +107,7 @@ describe("SubscriptionManager", () => {
     const id = "00000000-0000-4000-8000-000000000001";
     const delta: NativeRowDelta = {
       __jazzNativeRowDelta: true,
-      added: nativeAddedRecord(id, 0, "native", 42),
+      added: nativeAddedRecord(id, 0, "native", -42),
       removed: new Uint8Array(),
       updated: new Uint8Array(),
       addedCount: 1,
@@ -113,13 +117,13 @@ describe("SubscriptionManager", () => {
 
     const result = manager.handleDelta(delta, transform, nativeColumns);
 
-    expect(result.all).toEqual([{ id, name: "native", count: 42 }]);
+    expect(result.all).toEqual([{ id, name: "native", count: -42 }]);
     expect(result.delta).toEqual([
       {
         kind: 0,
         id,
         index: 0,
-        item: { id, name: "native", count: 42 },
+        item: { id, name: "native", count: -42 },
       },
     ]);
   });
