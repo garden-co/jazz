@@ -90,7 +90,8 @@ pub struct ServerState {
     /// Client state TTL. Default: 5 minutes.
     /// Disconnected clients are reaped after this duration.
     pub client_ttl: RwLock<Duration>,
-    /// Optional sync message tracer for test observability.
+    /// Optional legacy sync message tracer for test observability.
+    #[cfg(any(test, feature = "test-utils"))]
     pub sync_tracer: Option<crate::sync::SyncTracer>,
     /// Server-side jazz_core peer loop for the direct websocket route.
     pub(crate) core_server: StdRwLock<Option<core_server::CoreServer>>,
@@ -369,6 +370,7 @@ mod tests {
             jwt_verifier: None,
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
+            #[cfg(any(test, feature = "test-utils"))]
             sync_tracer: None,
             core_server: StdRwLock::new(None),
             core_server_storage_config: None,

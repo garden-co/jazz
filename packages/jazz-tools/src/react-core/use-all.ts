@@ -1,5 +1,6 @@
 import { type Usable, use, useCallback, useRef, useSyncExternalStore } from "react";
 import type { QueryBuilder, QueryOptions, UseAllState } from "../shared/index.js";
+import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
 
 type UseAllOptions = {
@@ -18,13 +19,13 @@ function useAllBase<T extends { id: string }>(
   options?: UseAllOptions,
 ): T[] | undefined {
   const { suspense = false } = options ?? {};
-  const { manager } = useJazzClient();
+  const store = getSubscriptionStore(useJazzClient());
 
   // Pure, render-safe key: computeKey neither registers the query nor opens a
   // subscription, so the render phase stays side-effect free (concurrent/strict
   // and SSR safe). Registration + subscription happen in the commit-phase
   // `subscribe` callback below.
-  const key = query ? manager.computeKey(query, queryOptions) : null;
+  const key = query ? store.computeKey(query, queryOptions) : null;
 
   // Keep the latest query/options in refs so the keyed `subscribe`/`getSnapshot`
   // callbacks can read them without depending on object identity — an inline
@@ -41,8 +42,8 @@ function useAllBase<T extends { id: string }>(
       if (!q || key === null) {
         return () => {};
       }
-      manager.makeQueryKey(q, optionsRef.current);
-      const entry = manager.getCacheEntry<T>(key);
+      store.makeQueryKey(q, optionsRef.current);
+      const entry = store.getCacheEntry<T>(key);
       return entry.subscribe({
         onfulfilled: onStoreChange,
         onDelta: onStoreChange,
@@ -50,12 +51,12 @@ function useAllBase<T extends { id: string }>(
         onReset: onStoreChange,
       });
     },
-    [manager, key],
+    [store, key],
   );
 
   const getSnapshot = useCallback(
-    (): UseAllState<T> | null => (key === null ? null : manager.peekState<T>(key)),
-    [manager, key],
+    (): UseAllState<T> | null => (key === null ? null : store.peekState<T>(key)),
+    [store, key],
   );
 
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
@@ -78,8 +79,8 @@ function useAllBase<T extends { id: string }>(
     // `subscribe` effect can't run while the boundary is suspended — so create
     // the entry here and suspend on its real promise (which resolves on the
     // first result), rather than a sentinel that never resolves.
-    manager.makeQueryKey(query, queryOptions);
-    const entry = manager.getCacheEntry<T>(key);
+    store.makeQueryKey(query, queryOptions);
+    const entry = store.getCacheEntry<T>(key);
     if (entry.state.status === "rejected") {
       throw entry.state.error;
     }

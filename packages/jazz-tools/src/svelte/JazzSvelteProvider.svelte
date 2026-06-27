@@ -4,6 +4,7 @@ Pass a pre-created client or a promise that resolves to one.
 -->
 <script lang="ts">
 	import type { Db } from '../runtime/db.js';
+	import { getSubscriptionStore } from '../subscription-store-internal.js';
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
 
@@ -26,7 +27,7 @@ Pass a pre-created client or a promise that resolves to one.
 		error = null;
 		ctx.db = null;
 		ctx.session = null;
-		ctx.manager = null;
+		ctx.subscriptionStore = null;
 
 		Promise.resolve(client)
 			.then((resolved) => {
@@ -38,7 +39,7 @@ Pass a pre-created client or a promise that resolves to one.
 				resolvedClient = resolved;
 				ctx.db = resolved.db;
 				ctx.session = resolved.session ?? null;
-				ctx.manager = resolved.manager;
+				ctx.subscriptionStore = getSubscriptionStore(resolved);
 				stopSessionSync = resolved.db.onAuthChanged(({ session }) => {
 					if (cancelled) {
 						return;

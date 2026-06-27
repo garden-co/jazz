@@ -5,7 +5,7 @@
  * Handles query translation, execution, and result transformation.
  *
  * Key design:
- * - createDb() is async (pre-loads the runtime module)
+ * - createDb() is async (pre-loads the core source)
  * - insert/update/delete are sync (local-first immediate writes, no durability wait)
  * - all/one are async (need storage I/O for queries)
  */
@@ -37,9 +37,9 @@ import {
   resolveEffectiveQueryExecutionOptions,
   type DeleteOptions,
 } from "./client.js";
-import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
+import { type DirectCoreSource, type RuntimeTokenOptions } from "./direct-core-source.js";
 import { SYSTEM_READ_SESSION } from "./system-identity.js";
-import { WasmRuntimeModule } from "./wasm-runtime-module.js";
+import { WasmCoreSource } from "./wasm-core-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -65,7 +65,7 @@ import { resolveSelectedColumns } from "./select-projection.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
-type AnyDbRuntimeModule = DbRuntimeModule<any>;
+type AnyDirectCoreSource = DirectCoreSource<any>;
 
 /**
  * Configuration for creating a Db instance.
@@ -900,9 +900,9 @@ export class Db {
   private clients = new Map<string, JazzClient>();
   private clientSchemas = new Map<string, WasmSchema>();
   private config: DbConfig;
-  private readonly runtimeModule: AnyDbRuntimeModule | null;
+  private readonly coreSource: AnyDirectCoreSource | null;
   private readonly authStateStore;
-  private disposeWasmTelemetry: (() => void) | null = null;
+  private disposeCoreTelemetry: (() => void) | null = null;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -920,11 +920,11 @@ export class Db {
    */
   protected constructor(
     config: DbConfig,
-    runtimeModule: AnyDbRuntimeModule | null,
+    coreSource: AnyDirectCoreSource | null,
     authStateOptions?: AuthStateStoreOptions,
   ) {
     this.config = config;
-    this.runtimeModule = runtimeModule;
+    this.coreSource = coreSource;
     this.authStateStore = createAuthStateStore(config, authStateOptions);
   }
 
@@ -963,11 +963,11 @@ export class Db {
   }
 
   private mintLocalFirstToken(secret: string, audience: string, ttlSeconds: number): string {
-    if (!this.runtimeModule) {
-      throw new Error("Db runtime module is not initialized for this Db implementation");
+    if (!this.coreSource) {
+      throw new Error("Db core source is not initialized for this Db implementation");
     }
 
-    return this.runtimeModule.mintLocalFirstToken({
+    return this.coreSource.mintLocalFirstToken({
       secret,
       audience,
       ttlSeconds,
@@ -1020,25 +1020,25 @@ export class Db {
   }
 
   /**
-   * Create a Db instance with a loaded runtime module.
+   * Create a Db instance with a loaded core source.
    * @internal Use createDb() instead.
    */
-  static create(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Db {
-    return new Db(config, runtimeModule);
+  static create(config: DbConfig, coreSource: AnyDirectCoreSource): Db {
+    return new Db(config, coreSource);
   }
 
   /**
    * Get or create a JazzClient for the given schema.
-   * Synchronous because the runtime module is loaded before Db is created.
+   * Synchronous because the core source is loaded before Db is created.
    *
    */
   protected getClient(schema: WasmSchema): JazzClient {
-    if (!this.runtimeModule) {
-      throw new Error("Db runtime module is not initialized for this Db implementation");
+    if (!this.coreSource) {
+      throw new Error("Db core source is not initialized for this Db implementation");
     }
 
     const runtimeSchema =
-      this.runtimeModule.supportsPolicyBypass && shouldBypassLocalPolicies(this.config)
+      this.coreSource.supportsPolicyBypass && shouldBypassLocalPolicies(this.config)
         ? getPolicyStrippedSchema(schema)
         : schema;
 
@@ -1046,8 +1046,8 @@ export class Db {
     // schema identity so write-heavy paths don't stringify the same schema per row.
     const key = getRuntimeSchemaCacheKey(runtimeSchema);
     if (!this.clients.has(key)) {
-      this.installMainThreadWasmTelemetry();
-      const client = this.runtimeModule.createClient({
+      this.installMainThreadCoreTelemetry();
+      const client = this.coreSource.createClient({
         config: { ...this.config },
         schema: runtimeSchema,
         onAuthFailure: (reason) => {
@@ -1074,14 +1074,14 @@ export class Db {
     return null;
   }
 
-  private installMainThreadWasmTelemetry(): void {
+  private installMainThreadCoreTelemetry(): void {
     const collectorUrl = this.resolveTelemetryCollectorUrl();
-    if (!collectorUrl || !this.runtimeModule || this.disposeWasmTelemetry) {
+    if (!collectorUrl || !this.coreSource || this.disposeCoreTelemetry) {
       return;
     }
 
-    this.disposeWasmTelemetry =
-      this.runtimeModule.installTelemetry?.({
+    this.disposeCoreTelemetry =
+      this.coreSource.installTelemetry?.({
         config: this.config,
         collectorUrl,
         runtimeThread: "main",
@@ -1619,8 +1619,8 @@ export class Db {
     }
     this.clearActiveQuerySubscriptionTraces();
 
-    this.disposeWasmTelemetry?.();
-    this.disposeWasmTelemetry = null;
+    this.disposeCoreTelemetry?.();
+    this.disposeCoreTelemetry = null;
     for (const client of this.clients.values()) {
       await client.shutdown();
     }
@@ -1796,7 +1796,7 @@ function generateEphemeralSeedBase64Url(): string {
 /**
  * Create a new Db instance with the given configuration.
  *
- * This is an **async** factory function that pre-loads the runtime module.
+ * This is an **async** factory function that pre-loads the core source.
  * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
  * Use the `wait` method when you need a Promise that resolves at a durability tier.
  *
@@ -1826,9 +1826,9 @@ function createRuntimeTokenOptions(
   };
 }
 
-export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
+export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
-  runtimeModule: DbRuntimeModule<RuntimeConfig>,
+  coreSource: DirectCoreSource<RuntimeConfig>,
 ): Promise<Db> {
   if (config.secret && (config.jwtToken || config.cookieSession)) {
     throw new Error("DbConfig error: secret, jwtToken, and cookieSession are mutually exclusive");
@@ -1838,7 +1838,7 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   }
 
   let resolvedConfig = { ...config };
-  await runtimeModule.load(config);
+  await coreSource.load(config);
 
   // Local-first auth: resolve seed and mint a JWT
   let localFirstSecret: string | null = null;
@@ -1846,7 +1846,7 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     const secret = config.secret;
     localFirstSecret = secret;
 
-    const jwtToken = runtimeModule.mintLocalFirstToken(
+    const jwtToken = coreSource.mintLocalFirstToken(
       createRuntimeTokenOptions(secret, config.appId, 3600),
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };
@@ -1855,7 +1855,7 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.
     const ephemeralSeed = generateEphemeralSeedBase64Url();
-    const jwtToken = runtimeModule.mintAnonymousToken(
+    const jwtToken = coreSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };
@@ -1867,7 +1867,7 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     throw new Error("driver.type='memory' requires serverUrl.");
   }
 
-  const db = Db.create(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
+  const db = Db.create(resolvedConfig, coreSource as AnyDirectCoreSource);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600);
@@ -1877,7 +1877,7 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
 }
 
 export async function createDb(config: DbConfig): Promise<Db> {
-  return await createDbWithRuntimeModule(config, new WasmRuntimeModule());
+  return await createDbWithCoreSource(config, new WasmCoreSource());
 }
 
 export function createDbFromClient(

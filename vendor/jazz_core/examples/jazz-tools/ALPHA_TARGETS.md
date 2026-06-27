@@ -415,12 +415,22 @@ API/testability gap, not as covered app persistence.
   (`ConnectionEventHub`/`SequencedSyncUpdate`/registration dispatch) has also
   been deleted. `SyncPayload` remains only as transitional tracer/test
   vocabulary until that observability API is migrated to direct-core event
-  terms.
+  terms. `SyncTracer`, server tracer hooks, and the legacy `SyncPayload`
+  vocabulary are now gated behind tests/test-utils rather than exported as
+  product sync APIs.
   Persistent browser OPFS writes now expose their main-thread transaction ids
   as pending worker writes and `.wait(...)` resolves through the worker-owned
   direct-core transaction id only. Fully removing pending write semantics
   requires changing the synchronous runtime mutation interface or returning a
   write handle that resolves to the authoritative worker result.
+- The TypeScript `DbRuntimeModule` / `WasmRuntimeModule` naming has been
+  collapsed into `DirectCoreSource` / `WasmCoreSource`. The remaining seam is a
+  platform loader/source boundary for direct core, not a swappable engine
+  abstraction.
+- Public framework client objects no longer expose the subscription
+  orchestrator as `.manager`. Framework hooks read an internal symbol-backed
+  subscription store attached to the client, while the advanced shared package
+  exports only the small cache/result types needed by binding authors.
 
 ## Next targets
 

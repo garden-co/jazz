@@ -3,13 +3,13 @@ import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
+import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createDbFromInspectedPage } from "../dev-tools/index.js";
 import { registerWindowJazzStorageClient } from "../window-client-storage.js";
 
 export interface JazzClient {
   db: Db;
   session: Session | null;
-  manager: SubscriptionsOrchestrator;
   shutdown(): Promise<void>;
 }
 
@@ -24,19 +24,21 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   });
   const unregisterWindowJazzStorageClient = registerWindowJazzStorageClient(db);
 
-  return {
-    db,
-    get session() {
-      return session;
+  return attachSubscriptionStore(
+    {
+      db,
+      get session() {
+        return session;
+      },
+      async shutdown() {
+        stopSessionSync?.();
+        unregisterWindowJazzStorageClient();
+        await manager.shutdown();
+        await db.shutdown();
+      },
     },
     manager,
-    async shutdown() {
-      stopSessionSync?.();
-      unregisterWindowJazzStorageClient();
-      await manager.shutdown();
-      await db.shutdown();
-    },
-  };
+  );
 }
 
 export function createJazzClient(config: DbConfig): Promise<JazzClient> {
@@ -44,16 +46,20 @@ export function createJazzClient(config: DbConfig): Promise<JazzClient> {
   const holder = {};
   const shared = acquireClient(key, () => createJazzClientInternal(config), holder);
   return trackPromise(
-    shared.then((client) => ({
-      db: client.db,
-      get session() {
-        return client.session;
-      },
-      manager: client.manager,
-      shutdown() {
-        return releaseClient(key, holder);
-      },
-    })),
+    shared.then((client) =>
+      attachSubscriptionStore(
+        {
+          db: client.db,
+          get session() {
+            return client.session;
+          },
+          shutdown() {
+            return releaseClient(key, holder);
+          },
+        },
+        getSubscriptionStore(client),
+      ),
+    ),
   );
 }
 
@@ -71,18 +77,20 @@ async function createExtensionJazzClientInternal(): Promise<JazzClient> {
     manager.setSession(nextSession ?? null);
   });
 
-  return {
-    db,
-    get session() {
-      return session;
+  return attachSubscriptionStore(
+    {
+      db,
+      get session() {
+        return session;
+      },
+      async shutdown() {
+        stopSessionSync?.();
+        await manager.shutdown();
+        await db.shutdown();
+      },
     },
     manager,
-    async shutdown() {
-      stopSessionSync?.();
-      await manager.shutdown();
-      await db.shutdown();
-    },
-  };
+  );
 }
 
 export function createExtensionJazzClient(): Promise<JazzClient> {
