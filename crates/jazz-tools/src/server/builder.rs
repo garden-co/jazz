@@ -21,7 +21,7 @@ use crate::schema_api::SchemaHash;
 use crate::schema_manager::AppId;
 use crate::server::routes;
 use crate::server::{
-    ConnectionEventHub, DirectCatalogueStore, DynStorage, ServerState, ServerTopology,
+    ConnectionEventHub, DirectCatalogueStore, DynCatalogueStorage, ServerState, ServerTopology,
 };
 use crate::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
@@ -325,7 +325,7 @@ impl ServerBuilder {
         }
     }
 
-    fn build_catalogue_storage(&self) -> Result<DynStorage, String> {
+    fn build_catalogue_storage(&self) -> Result<DynCatalogueStorage, String> {
         match &self.storage_backend {
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
