@@ -1285,6 +1285,34 @@ where
         Ok(winner)
     }
 
+    fn local_layer_winner_tx_id(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<TxId>, Error> {
+        self.query_local_layer_winner(table, row_uuid, layer)?
+            .as_ref()
+            .map(|version| self.version_tx_id(version))
+            .transpose()
+    }
+
+    pub(crate) fn local_content_winner_tx_id(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        self.local_layer_winner_tx_id(table, row_uuid, VersionLayer::Content)
+    }
+
+    pub(crate) fn local_deletion_winner_tx_id(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        self.local_layer_winner_tx_id(table, row_uuid, VersionLayer::Deletion)
+    }
+
     fn ahead_current_table_is_empty(&self, table: &str) -> bool {
         !self
             .ahead_current_rows
