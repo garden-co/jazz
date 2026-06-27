@@ -93,7 +93,7 @@ enum ClientEngine {
         runtime: ClientRuntime,
     },
     DirectCore {
-        engine: Arc<DirectCoreEngine>,
+        engine: Rc<DirectCoreEngine>,
         alpha_schema: Schema,
     },
 }
@@ -108,7 +108,7 @@ impl Clone for ClientEngine {
                 engine,
                 alpha_schema,
             } => Self::DirectCore {
-                engine: Arc::clone(engine),
+                engine: Rc::clone(engine),
                 alpha_schema: alpha_schema.clone(),
             },
         }
@@ -116,8 +116,7 @@ impl Clone for ClientEngine {
 }
 
 struct DirectCoreEngine {
-    commands: mpsc::UnboundedSender<DirectCoreCommand>,
-    owner_thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    inner: Rc<std::cell::RefCell<DirectCoreInner>>,
 }
 
 struct DirectCoreInner {
@@ -127,53 +126,6 @@ struct DirectCoreInner {
     row_tables: HashMap<ObjectId, String>,
 }
 
-enum DirectCoreCommand {
-    WaitForTick {
-        reply: std::sync::mpsc::Sender<Result<()>>,
-    },
-    Query {
-        query: jazz::query::Query,
-        opts: CoreReadOpts,
-        table: String,
-        wait_for_coverage: bool,
-        reply: std::sync::mpsc::Sender<Result<Vec<jazz::node::CurrentRow>>>,
-    },
-    Subscribe {
-        query: jazz::query::Query,
-        opts: CoreReadOpts,
-        table: String,
-        tx: mpsc::UnboundedSender<OrderedRowDelta>,
-        reply: std::sync::mpsc::Sender<Result<()>>,
-    },
-    Insert {
-        table: String,
-        row_id: Option<Uuid>,
-        cells: jazz::db::RowCells,
-        reply: std::sync::mpsc::Sender<Result<(ObjectId, CoreTxId)>>,
-    },
-    Upsert {
-        table: String,
-        row_id: Uuid,
-        cells: jazz::db::RowCells,
-        reply: std::sync::mpsc::Sender<Result<CoreTxId>>,
-    },
-    Update {
-        row_id: ObjectId,
-        cells: jazz::db::RowCells,
-        reply: std::sync::mpsc::Sender<Result<CoreTxId>>,
-    },
-    Delete {
-        row_id: ObjectId,
-        reply: std::sync::mpsc::Sender<Result<CoreTxId>>,
-    },
-    WaitForBatch {
-        batch_id: BatchId,
-        tier: DurabilityTier,
-        reply: std::sync::mpsc::Sender<Result<()>>,
-    },
-    Shutdown,
-}
-
 impl DirectCoreEngine {
     async fn start(
         schema: jazz::schema::JazzSchema,
@@ -181,113 +133,37 @@ impl DirectCoreEngine {
         server_url: String,
         app_id: crate::schema_manager::AppId,
         auth: WsAuthConfig,
-    ) -> Result<Arc<Self>> {
-        let (commands, command_rx) = mpsc::unbounded_channel();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let owner_thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("create direct core owner runtime");
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&runtime, async move {
-                let result =
-                    DirectCoreInner::open(schema, identity, server_url, app_id, auth).await;
-                match result {
-                    Ok(inner) => {
-                        let inner = Rc::new(std::cell::RefCell::new(inner));
-                        DirectCoreInner::spawn_tick(Rc::clone(&inner));
-                        let _ = ready_tx.send(Ok(()));
-                        DirectCoreInner::run_commands(inner, command_rx).await;
-                    }
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(error));
-                    }
-                }
-            });
-        });
-        tokio::task::spawn_blocking(move || {
-            ready_rx
-                .recv()
-                .map_err(|_| JazzError::Connection("direct core owner thread exited".to_string()))?
-        })
-        .await
-        .map_err(|error| {
-            JazzError::Connection(format!("direct core start task failed: {error}"))
-        })??;
-        Ok(Arc::new(Self {
-            commands,
-            owner_thread: std::sync::Mutex::new(Some(owner_thread)),
+    ) -> Result<Rc<Self>> {
+        let inner = DirectCoreInner::open(schema, identity, server_url, app_id, auth).await?;
+        Ok(Rc::new(Self {
+            inner: Rc::new(std::cell::RefCell::new(inner)),
         }))
     }
 
-    fn request<R: Send + 'static>(
-        &self,
-        build: impl FnOnce(std::sync::mpsc::Sender<Result<R>>) -> DirectCoreCommand,
-    ) -> Result<R> {
-        let (reply, rx) = std::sync::mpsc::channel();
-        self.commands
-            .send(build(reply))
-            .map_err(|_| JazzError::Sync("direct core owner thread stopped".to_string()))?;
-        rx.recv()
-            .map_err(|_| JazzError::Sync("direct core owner thread stopped".to_string()))?
-    }
-
-    async fn request_async<R: Send + 'static>(
-        self: &Arc<Self>,
-        build: impl FnOnce(std::sync::mpsc::Sender<Result<R>>) -> DirectCoreCommand + Send + 'static,
-    ) -> Result<R> {
-        let engine = Arc::clone(self);
-        tokio::task::spawn_blocking(move || engine.request(build))
-            .await
-            .map_err(|error| JazzError::Sync(format!("direct core request task failed: {error}")))?
-    }
-
     async fn wait_for_tick(&self) -> Result<()> {
-        let (reply, rx) = std::sync::mpsc::channel();
-        self.commands
-            .send(DirectCoreCommand::WaitForTick { reply })
-            .map_err(|_| JazzError::Sync("direct core owner thread stopped".to_string()))?;
-        tokio::task::spawn_blocking(move || {
-            rx.recv()
-                .map_err(|_| JazzError::Sync("direct core owner thread stopped".to_string()))?
-        })
-        .await
-        .map_err(|error| JazzError::Sync(format!("direct core request task failed: {error}")))?
+        self.tick()?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        self.tick()
     }
 
     async fn query_rows(
-        self: &Arc<Self>,
+        &self,
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
         wait_for_coverage: bool,
     ) -> Result<Vec<jazz::node::CurrentRow>> {
-        self.request_async(move |reply| DirectCoreCommand::Query {
-            query,
-            opts,
-            table,
-            wait_for_coverage,
-            reply,
-        })
-        .await
+        DirectCoreInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
     }
 
     async fn subscribe(
-        self: &Arc<Self>,
+        &self,
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
         tx: mpsc::UnboundedSender<OrderedRowDelta>,
     ) -> Result<()> {
-        self.request_async(move |reply| DirectCoreCommand::Subscribe {
-            query,
-            opts,
-            table,
-            tx,
-            reply,
-        })
-        .await
+        DirectCoreInner::handle_subscribe(&self.inner, query, opts, table, tx).await
     }
 
     fn insert(
@@ -296,46 +172,85 @@ impl DirectCoreEngine {
         row_id: Option<Uuid>,
         cells: jazz::db::RowCells,
     ) -> Result<(ObjectId, CoreTxId)> {
-        self.request(|reply| DirectCoreCommand::Insert {
-            table,
-            row_id,
-            cells,
-            reply,
-        })
+        let mut inner = self.inner.borrow_mut();
+        let write = match row_id {
+            Some(uuid) => inner.db.insert_with_id(&table, CoreRowUuid(uuid), cells),
+            None => inner.db.insert(&table, cells),
+        }
+        .map_err(|error| JazzError::Write(error.to_string()))?;
+        JazzClient::check_direct_write_not_rejected(&inner.db, write.mergeable_tx_id())?;
+        let object_id = ObjectId::from_uuid(write.row_uuid().0);
+        inner.remember_write(object_id, &table, write.mergeable_tx_id());
+        drop(inner);
+        self.tick()?;
+        Ok((object_id, write.mergeable_tx_id()))
     }
 
     fn upsert(&self, table: String, row_id: Uuid, cells: jazz::db::RowCells) -> Result<CoreTxId> {
-        self.request(|reply| DirectCoreCommand::Upsert {
-            table,
-            row_id,
-            cells,
-            reply,
-        })
+        let mut inner = self.inner.borrow_mut();
+        let write = inner
+            .db
+            .upsert(&table, CoreRowUuid(row_id), cells)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        JazzClient::check_direct_write_not_rejected(&inner.db, write.mergeable_tx_id())?;
+        let object_id = ObjectId::from_uuid(row_id);
+        inner.remember_write(object_id, &table, write.mergeable_tx_id());
+        let tx_id = write.mergeable_tx_id();
+        drop(inner);
+        self.tick()?;
+        Ok(tx_id)
     }
 
     fn update(&self, row_id: ObjectId, cells: jazz::db::RowCells) -> Result<CoreTxId> {
-        self.request(|reply| DirectCoreCommand::Update {
-            row_id,
-            cells,
-            reply,
-        })
+        let mut inner = self.inner.borrow_mut();
+        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
+            JazzError::Write(
+                "direct core update requires a row created or observed by this client".to_string(),
+            )
+        })?;
+        let write = inner
+            .db
+            .update(&table, CoreRowUuid(*row_id.uuid()), cells)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        JazzClient::check_direct_write_not_rejected(&inner.db, write.mergeable_tx_id())?;
+        inner.remember_write(row_id, &table, write.mergeable_tx_id());
+        let tx_id = write.mergeable_tx_id();
+        drop(inner);
+        self.tick()?;
+        Ok(tx_id)
     }
 
     fn delete(&self, row_id: ObjectId) -> Result<CoreTxId> {
-        self.request(|reply| DirectCoreCommand::Delete { row_id, reply })
+        let mut inner = self.inner.borrow_mut();
+        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
+            JazzError::Write(
+                "direct core delete requires a row created or observed by this client".to_string(),
+            )
+        })?;
+        let write = inner
+            .db
+            .delete(&table, CoreRowUuid(*row_id.uuid()))
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        JazzClient::check_direct_write_not_rejected(&inner.db, write.mergeable_tx_id())?;
+        inner.remember_write(row_id, &table, write.mergeable_tx_id());
+        let tx_id = write.mergeable_tx_id();
+        drop(inner);
+        self.tick()?;
+        Ok(tx_id)
     }
 
-    async fn wait_for_batch(
-        self: &Arc<Self>,
-        batch_id: BatchId,
-        tier: DurabilityTier,
-    ) -> Result<()> {
-        self.request_async(move |reply| DirectCoreCommand::WaitForBatch {
-            batch_id,
-            tier,
-            reply,
-        })
-        .await
+    async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
+        DirectCoreInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
+    }
+
+    fn tick(&self) -> Result<()> {
+        self.inner
+            .borrow()
+            .connection
+            .borrow_mut()
+            .tick()
+            .map(|_| ())
+            .map_err(|error| JazzError::Sync(error.to_string()))
     }
 }
 
@@ -369,167 +284,6 @@ impl DirectCoreInner {
         })
     }
 
-    fn spawn_tick(inner: Rc<std::cell::RefCell<Self>>) {
-        tokio::task::spawn_local(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(10));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                if inner.borrow().connection.borrow_mut().tick().is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
-    async fn run_commands(
-        inner: Rc<std::cell::RefCell<Self>>,
-        mut commands: mpsc::UnboundedReceiver<DirectCoreCommand>,
-    ) {
-        while let Some(command) = commands.recv().await {
-            match command {
-                DirectCoreCommand::WaitForTick { reply } => {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    let _ = reply.send(Ok(()));
-                }
-                DirectCoreCommand::Query {
-                    query,
-                    opts,
-                    table,
-                    wait_for_coverage,
-                    reply,
-                } => {
-                    let result =
-                        Self::handle_query(&inner, query, opts, table, wait_for_coverage).await;
-                    let _ = reply.send(result);
-                }
-                DirectCoreCommand::Subscribe {
-                    query,
-                    opts,
-                    table,
-                    tx,
-                    reply,
-                } => {
-                    let result = Self::handle_subscribe(&inner, query, opts, table, tx).await;
-                    let _ = reply.send(result);
-                }
-                DirectCoreCommand::Insert {
-                    table,
-                    row_id,
-                    cells,
-                    reply,
-                } => {
-                    let result = {
-                        let mut inner = inner.borrow_mut();
-                        let write = match row_id {
-                            Some(uuid) => inner.db.insert_with_id(&table, CoreRowUuid(uuid), cells),
-                            None => inner.db.insert(&table, cells),
-                        }
-                        .map_err(|error| JazzError::Write(error.to_string()))
-                        .and_then(|write| {
-                            JazzClient::check_direct_write_not_rejected(
-                                &inner.db,
-                                write.mergeable_tx_id(),
-                            )?;
-                            Ok(write)
-                        });
-                        write.map(|write| {
-                            let object_id = ObjectId::from_uuid(write.row_uuid().0);
-                            inner.remember_write(object_id, &table, write.mergeable_tx_id());
-                            (object_id, write.mergeable_tx_id())
-                        })
-                    };
-                    let _ = reply.send(result);
-                }
-                DirectCoreCommand::Upsert {
-                    table,
-                    row_id,
-                    cells,
-                    reply,
-                } => {
-                    let result = {
-                        let mut inner = inner.borrow_mut();
-                        inner
-                            .db
-                            .upsert(&table, CoreRowUuid(row_id), cells)
-                            .map_err(|error| JazzError::Write(error.to_string()))
-                            .and_then(|write| {
-                                JazzClient::check_direct_write_not_rejected(
-                                    &inner.db,
-                                    write.mergeable_tx_id(),
-                                )?;
-                                let object_id = ObjectId::from_uuid(row_id);
-                                inner.remember_write(object_id, &table, write.mergeable_tx_id());
-                                Ok(write.mergeable_tx_id())
-                            })
-                    };
-                    let _ = reply.send(result);
-                }
-                DirectCoreCommand::Update {
-                    row_id,
-                    cells,
-                    reply,
-                } => {
-                    let result = {
-                        let mut inner = inner.borrow_mut();
-                        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-                            JazzError::Write(
-                                "direct core update requires a row created or observed by this client"
-                                    .to_string(),
-                            )
-                        });
-                        table.and_then(|table| {
-                            let write = inner
-                                .db
-                                .update(&table, CoreRowUuid(*row_id.uuid()), cells)
-                                .map_err(|error| JazzError::Write(error.to_string()))?;
-                            JazzClient::check_direct_write_not_rejected(
-                                &inner.db,
-                                write.mergeable_tx_id(),
-                            )?;
-                            inner.remember_write(row_id, &table, write.mergeable_tx_id());
-                            Ok(write.mergeable_tx_id())
-                        })
-                    };
-                    let _ = reply.send(result);
-                }
-                DirectCoreCommand::Delete { row_id, reply } => {
-                    let result = {
-                        let mut inner = inner.borrow_mut();
-                        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-                            JazzError::Write(
-                                "direct core delete requires a row created or observed by this client"
-                                    .to_string(),
-                            )
-                        });
-                        table.and_then(|table| {
-                            let write = inner
-                                .db
-                                .delete(&table, CoreRowUuid(*row_id.uuid()))
-                                .map_err(|error| JazzError::Write(error.to_string()))?;
-                            JazzClient::check_direct_write_not_rejected(
-                                &inner.db,
-                                write.mergeable_tx_id(),
-                            )?;
-                            inner.remember_write(row_id, &table, write.mergeable_tx_id());
-                            Ok(write.mergeable_tx_id())
-                        })
-                    };
-                    let _ = reply.send(result);
-                }
-                DirectCoreCommand::WaitForBatch {
-                    batch_id,
-                    tier,
-                    reply,
-                } => {
-                    let result = Self::handle_wait_for_batch(&inner, batch_id, tier).await;
-                    let _ = reply.send(result);
-                }
-                DirectCoreCommand::Shutdown => break,
-            }
-        }
-    }
-
     async fn handle_query(
         inner: &Rc<std::cell::RefCell<Self>>,
         query: jazz::query::Query,
@@ -550,6 +304,12 @@ impl DirectCoreInner {
             while !inner.borrow().db.query_is_covered(&prepared)
                 && tokio::time::Instant::now() < deadline
             {
+                inner
+                    .borrow()
+                    .connection
+                    .borrow_mut()
+                    .tick()
+                    .map_err(|error| JazzError::Sync(error.to_string()))?;
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             if !inner.borrow().db.query_is_covered(&prepared) {
@@ -559,6 +319,12 @@ impl DirectCoreInner {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        inner
+            .borrow()
+            .connection
+            .borrow_mut()
+            .tick()
+            .map_err(|error| JazzError::Sync(error.to_string()))?;
         let rows = {
             let inner = inner.borrow();
             inner
@@ -592,18 +358,29 @@ impl DirectCoreInner {
         };
         let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(10));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut stream = stream;
-            while let Some(event) = stream.next_event().await {
-                match event {
-                    CoreSubscriptionEvent::Opened { current, .. }
-                    | CoreSubscriptionEvent::Reset { current, .. } => {
-                        inner.borrow_mut().remember_rows(&table, &current);
-                        let _ = tx.send(OrderedRowDelta::default());
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if inner.borrow().connection.borrow_mut().tick().is_err() {
+                            break;
+                        }
                     }
-                    CoreSubscriptionEvent::Delta { .. } => {
-                        let _ = tx.send(OrderedRowDelta::default());
+                    event = stream.next_event() => {
+                        match event {
+                            Some(CoreSubscriptionEvent::Opened { current, .. })
+                            | Some(CoreSubscriptionEvent::Reset { current, .. }) => {
+                                inner.borrow_mut().remember_rows(&table, &current);
+                                let _ = tx.send(OrderedRowDelta::default());
+                            }
+                            Some(CoreSubscriptionEvent::Delta { .. }) => {
+                                let _ = tx.send(OrderedRowDelta::default());
+                            }
+                            Some(CoreSubscriptionEvent::Closed) | None => break,
+                        }
                     }
-                    CoreSubscriptionEvent::Closed => break,
                 }
             }
         });
@@ -624,6 +401,12 @@ impl DirectCoreInner {
         let desired = core_tier(tier);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         loop {
+            inner
+                .borrow()
+                .connection
+                .borrow_mut()
+                .tick()
+                .map_err(|error| JazzError::Sync(error.to_string()))?;
             tokio::time::sleep(Duration::from_millis(20)).await;
             let state = inner
                 .borrow()
@@ -655,17 +438,6 @@ impl DirectCoreInner {
         for row in rows {
             self.row_tables
                 .insert(ObjectId::from_uuid(row.row_uuid().0), table.to_string());
-        }
-    }
-}
-
-impl Drop for DirectCoreEngine {
-    fn drop(&mut self) {
-        let _ = self.commands.send(DirectCoreCommand::Shutdown);
-        if let Ok(mut owner_thread) = self.owner_thread.lock() {
-            if let Some(owner_thread) = owner_thread.take() {
-                let _ = owner_thread.join();
-            }
         }
     }
 }
