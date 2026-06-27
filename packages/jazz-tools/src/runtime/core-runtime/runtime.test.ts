@@ -1006,6 +1006,47 @@ describe("CoreRuntime server transport", () => {
     expect(calls).toEqual([]);
   });
 
+  it("passes supported read tiers and propagation through direct read options", async () => {
+    const readOptions: unknown[] = [];
+    const propagated: unknown[] = [];
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: (_query: unknown, opts: unknown) => {
+              readOptions.push(opts);
+              return new Uint8Array([0]);
+            },
+            propagateQuery: (_query: unknown, opts: unknown) => {
+              propagated.push(opts);
+            },
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "edge",
+        JSON.stringify({ propagation: "local-only" }),
+      ),
+    ).resolves.toEqual([]);
+
+    expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
+    expect(propagated).toEqual([]);
+  });
+
   it("passes supported read tiers through and fails fast for unsupported read options", async () => {
     const runtime = directRuntimeWithEmptyDb();
 
@@ -1066,6 +1107,47 @@ describe("CoreRuntime server transport", () => {
     expect(() =>
       runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "planetary"),
     ).toThrow("unsupported read tier");
+  });
+
+  it("passes local-only subscription propagation through direct read options", () => {
+    const readOptions: unknown[] = [];
+    const propagated: unknown[] = [];
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => ({}),
+            subscribe: (_query: unknown, opts: unknown) => {
+              readOptions.push(opts);
+              return new ReadableStream();
+            },
+            propagateQuery: (_query: unknown, opts: unknown) => {
+              propagated.push(opts);
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "edge",
+        JSON.stringify({ propagation: "local-only" }),
+      ),
+    ).not.toThrow();
+
+    expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
+    expect(propagated).toEqual([]);
   });
 
   it("accepts well-formed subscription sessions and rejects malformed sessions", () => {
