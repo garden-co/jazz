@@ -195,7 +195,6 @@ describe("react/create-jazz-client unit", () => {
       runtimeSources: {
         baseUrl: "/assets/jazz/",
         wasmUrl: "/assets/jazz/custom.wasm",
-        workerUrl: "/assets/jazz/custom-worker.js",
       },
     };
     const db = createMockDb();

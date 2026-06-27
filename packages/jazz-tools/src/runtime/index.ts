@@ -44,10 +44,6 @@ export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
-  INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE,
-  IncompatibleBrowserBrokerConfigurationError,
-} from "./browser-broker-errors.js";
-export {
   fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
