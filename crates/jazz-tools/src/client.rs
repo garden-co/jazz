@@ -160,6 +160,8 @@ struct DirectCoreTickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
     notify: tokio::sync::Notify,
+    completed_ticks: std::sync::atomic::AtomicU64,
+    completed_notify: tokio::sync::Notify,
 }
 
 #[cfg(feature = "direct-core-client")]
@@ -185,6 +187,32 @@ impl DirectCoreTickScheduler {
 
     fn wake_handle(&self) -> Arc<DirectCoreTickState> {
         Arc::clone(&self.state)
+    }
+
+    fn completed_ticks(&self) -> u64 {
+        self.state.completed_ticks.load(Ordering::Acquire)
+    }
+
+    async fn wait_for_completed_tick_after(&self, previous: u64) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if self.completed_ticks() > previous {
+                return Ok(());
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(JazzError::Connection(
+                    "timed out waiting for direct core initial tick".to_string(),
+                ));
+            }
+            tokio::time::timeout_at(deadline, self.state.completed_notify.notified())
+                .await
+                .map_err(|_| {
+                    JazzError::Connection(
+                        "timed out waiting for direct core initial tick".to_string(),
+                    )
+                })?;
+        }
     }
 }
 
@@ -215,13 +243,12 @@ impl DirectCoreEngine {
         )
         .await?;
         let inner = Rc::new(std::cell::RefCell::new(inner));
+        let completed_ticks = scheduler.completed_ticks();
         Self::spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
+        scheduler
+            .wait_for_completed_tick_after(completed_ticks)
+            .await?;
         Ok(Rc::new(Self { inner }))
-    }
-
-    async fn wait_for_tick(&self) -> Result<()> {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        Ok(())
     }
 
     async fn query_rows(
@@ -328,6 +355,8 @@ impl DirectCoreEngine {
                 if inner.borrow().connection.borrow_mut().tick().is_err() {
                     break;
                 }
+                state.completed_ticks.fetch_add(1, Ordering::AcqRel);
+                state.completed_notify.notify_waiters();
             }
         });
     }
@@ -402,7 +431,6 @@ impl DirectCoreInner {
                     "timed out waiting for direct core query coverage".to_string(),
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let (db, prepared) = {
             let inner = inner.borrow();
@@ -469,7 +497,6 @@ impl DirectCoreInner {
         let desired = core_tier(tier);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         loop {
-            tokio::time::sleep(Duration::from_millis(20)).await;
             let state = inner
                 .borrow()
                 .db
@@ -488,6 +515,7 @@ impl DirectCoreInner {
                     "timed out waiting for direct core batch to reach {tier:?}"
                 )));
             }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -985,9 +1013,6 @@ impl JazzClient {
                 subscriptions: Arc::new(RwLock::new(HashMap::new())),
                 next_handle: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             };
-            if let ClientEngine::DirectCore { engine, .. } = &client.engine {
-                engine.wait_for_tick().await?;
-            }
             return Ok(client);
         }
 
