@@ -3,7 +3,6 @@ import type {
   DirectMutationResult,
   MutationErrorEvent,
   Runtime,
-  TransactionKind,
 } from "../client.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
@@ -218,26 +217,10 @@ export class PersistentBrowserRuntime implements Runtime {
     this.mutationErrorCallback = callback;
   }
 
-  beginTransaction(_transactionKind: TransactionKind): string {
-    throw new Error(
-      "Persistent browser direct-core worker runtime does not support transactions yet",
-    );
-  }
-
-  commitTransaction(_transactionId: string): void {
-    throw new Error(
-      "Persistent browser direct-core worker runtime does not support transactions yet",
-    );
-  }
-
   async waitForTransaction(transactionId: string, tier: string): Promise<void> {
     await this.opened;
     await this.writes.get(transactionId);
     await this.call("waitForTransaction", transactionId, tier);
-  }
-
-  rollbackTransaction(_transactionId: string): boolean {
-    return false;
   }
 
   async query(
