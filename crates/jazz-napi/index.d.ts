@@ -51,6 +51,7 @@ export declare class JazzServer {
 export declare class NapiDirectDb {
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDirectDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDirectDb
+  setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   prepareQuery(query: Uint8Array): DirectPreparedQuery
   all(query: DirectPreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   allForIdentity(query: DirectPreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
