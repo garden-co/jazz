@@ -13,13 +13,13 @@ use tokio::time::Instant;
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
 use crate::schema_manager::AppId;
-use crate::storage::Storage;
 use crate::sync::ClientId;
 use crate::sync_manager::SyncPayload;
 use jazz_server::StorageConfig;
 
 mod builder;
 mod catalogue;
+mod catalogue_storage;
 mod core_server;
 pub mod direct_client;
 pub(crate) mod direct_schema;
@@ -30,11 +30,12 @@ mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub(crate) use catalogue::{DirectCatalogueStore, ServerCatalogue};
+#[cfg(test)]
+pub(crate) use catalogue_storage::CatalogueStorage;
+pub(crate) use catalogue_storage::DynCatalogueStorage;
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "test-utils")]
 pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
-
-pub type DynStorage = Box<dyn Storage + Send>;
 
 /// Cap on concurrent connections sharing a single `client_id`. When a new
 /// connection would exceed this cap, the oldest connection(s) for the same
@@ -634,7 +635,28 @@ mod tests {
         close_calls: Arc<AtomicUsize>,
     }
 
-    impl Storage for CloseObservingStorage {
+    impl CatalogueStorage for CloseObservingStorage {
+        fn scan_catalogue_entries(
+            &self,
+        ) -> Result<Vec<crate::catalogue::CatalogueEntry>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        fn upsert_catalogue_entry(
+            &mut self,
+            _entry: &crate::catalogue::CatalogueEntry,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        fn flush(&self) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        fn flush_wal(&self) -> Result<(), StorageError> {
+            Ok(())
+        }
+
         fn close(&self) -> Result<(), StorageError> {
             self.close_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -666,7 +688,10 @@ mod tests {
         built.state
     }
 
-    fn build_test_state_with_storage(storage: DynStorage, timeout: Duration) -> Arc<ServerState> {
+    fn build_test_state_with_storage(
+        storage: DynCatalogueStorage,
+        timeout: Duration,
+    ) -> Arc<ServerState> {
         let app_id = AppId::from_name("shutdown-storage-test");
         Arc::new(ServerState {
             catalogue_store: DirectCatalogueStore::with_test_observability(

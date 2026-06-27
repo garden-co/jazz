@@ -15,7 +15,7 @@ use crate::schema_manager::encoding::{
 };
 use crate::schema_manager::manager::{CurrentPermissionsSummary, PermissionsHeadSummary};
 use crate::schema_manager::{AppId, Lens};
-use crate::server::DynStorage;
+use crate::server::catalogue_storage::{CatalogueStorage, DynCatalogueStorage};
 use crate::storage::StorageError;
 #[cfg(test)]
 use crate::sync::{ClientId, DurabilityTier};
@@ -88,7 +88,7 @@ pub(crate) struct DirectCatalogueStore {
     test_clients: Mutex<HashSet<ClientId>>,
     #[cfg(test)]
     test_local_durability_tiers: Mutex<HashSet<DurabilityTier>>,
-    storage: Mutex<DynStorage>,
+    storage: Mutex<DynCatalogueStorage>,
     #[cfg(test)]
     test_query_subscriptions: Mutex<
         Vec<(
@@ -101,7 +101,11 @@ pub(crate) struct DirectCatalogueStore {
 }
 
 impl DirectCatalogueStore {
-    pub(crate) fn new(app_id: AppId, initial_schema: Option<Schema>, storage: DynStorage) -> Self {
+    pub(crate) fn new(
+        app_id: AppId,
+        initial_schema: Option<Schema>,
+        storage: DynCatalogueStorage,
+    ) -> Self {
         let mut index = CatalogueIndex::from_storage(storage.as_ref(), app_id).unwrap_or_default();
         if let Some(schema) = initial_schema {
             index.add_schema(schema);
@@ -125,7 +129,7 @@ impl DirectCatalogueStore {
     pub(crate) fn with_test_observability(
         app_id: AppId,
         initial_schema: Option<Schema>,
-        storage: DynStorage,
+        storage: DynCatalogueStorage,
         schema_branches: Vec<String>,
         local_durability_tiers: HashSet<DurabilityTier>,
     ) -> Self {
@@ -359,10 +363,7 @@ struct CatalogueIndex {
 }
 
 impl CatalogueIndex {
-    fn from_storage(
-        storage: &dyn crate::storage::Storage,
-        app_id: AppId,
-    ) -> Result<Self, CatalogueError> {
+    fn from_storage(storage: &dyn CatalogueStorage, app_id: AppId) -> Result<Self, CatalogueError> {
         let mut index = Self::default();
         for entry in storage.scan_catalogue_entries().map_err(storage_error)? {
             if entry.metadata.get(MetadataKey::AppId.as_str()) != Some(&app_id.uuid().to_string()) {
