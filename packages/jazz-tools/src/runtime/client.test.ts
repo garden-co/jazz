@@ -282,13 +282,10 @@ describe("JazzClient transaction query plumbing", () => {
     client.insertInternal("todos", {}, undefined, undefined, undefined, transactionId);
 
     await expect(
-      client.query(
-        { _build: () => JSON.stringify({ table: "todos" }) },
-        {
-          localUpdates: "deferred",
-          transactionId,
-        },
-      ),
+      client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+        localUpdates: "deferred",
+        transactionId,
+      }),
     ).resolves.toEqual([{ id: "todo-transaction-query", values: [] }]);
 
     expect(runtime.query).toHaveBeenCalledTimes(1);

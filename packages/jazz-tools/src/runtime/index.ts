@@ -9,7 +9,6 @@ export {
   loadWasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
-  type QueryInput,
   type QueryPropagation,
   type QueryVisibility,
   type RequestLike,

@@ -82,6 +82,10 @@ import type { WasmValue as PackageRootWasmValue } from "./index.js";
 import type { DynamicTableRow as RuntimeDynamicTableRow } from "./runtime/index.js";
 // @ts-expect-error DynamicTableRow is not part of the package-root surface.
 import type { DynamicTableRow as PackageRootDynamicTableRow } from "./index.js";
+// @ts-expect-error QueryInput was removed from the runtime JazzClient surface.
+import type { QueryInput as RuntimeQueryInput } from "./runtime/index.js";
+// @ts-expect-error QueryInput was removed from the package-root surface.
+import type { QueryInput as PackageRootQueryInput } from "./index.js";
 
 void (null as unknown as InternalNativeRuntimeAdapterExport);
 void (null as unknown as PackageRootNativeRuntimeAdapter);
@@ -121,6 +125,8 @@ void (null as unknown as RuntimeWasmValue);
 void (null as unknown as PackageRootWasmValue);
 void (null as unknown as RuntimeDynamicTableRow);
 void (null as unknown as PackageRootDynamicTableRow);
+void (null as unknown as RuntimeQueryInput);
+void (null as unknown as PackageRootQueryInput);
 
 // @ts-expect-error Db.beginBatch was removed from the public runtime surface.
 type RuntimeBeginBatch = InstanceType<typeof runtime.Db>["beginBatch"];

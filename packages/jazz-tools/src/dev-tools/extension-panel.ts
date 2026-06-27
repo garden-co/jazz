@@ -4,7 +4,6 @@ import {
   JazzClient,
   DurabilityTier,
   QueryExecutionOptions,
-  QueryInput,
   Row,
   Session,
   SubscriptionCallback,
@@ -514,7 +513,7 @@ class DevToolsJazzClient {
       tier: options?.tier,
     });
   }
-  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
+  async query(query: string, options?: QueryExecutionOptions): Promise<Row[]> {
     await ensureDevtoolsAnnounced();
     const payload = { query, options, tier: options?.tier };
     return (await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload)) as Row[];
@@ -564,7 +563,7 @@ class DevToolsJazzClient {
     });
   }
   subscribe(
-    query: string | QueryInput,
+    query: string,
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
   ): number {
@@ -590,7 +589,7 @@ class DevToolsJazzClient {
     return handle;
   }
   subscribeInternal(
-    query: string | QueryInput,
+    query: string,
     callback: SubscriptionCallback,
     session?: Session,
     options?: QueryExecutionOptions,
