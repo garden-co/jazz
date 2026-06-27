@@ -200,9 +200,10 @@ Until deleted, treat them as replacement targets only.
   a storage-backed `CatalogueIndex` for schema hashes, publish timestamps,
   migration/lens connectivity, and permissions heads/bundles. The old
   `SchemaManager` no longer serves admin catalogue reads/writes and production
-  server startup no longer constructs one to seed catalogue state. It remains
-  only behind test-only synthetic lifecycle helpers. The next cleanup is to
-  replace those test helpers or move them fully onto direct-core observability.
+  server startup no longer constructs one to seed catalogue state. The broad
+  test-only `with_schema_manager` / `with_sync_manager` shims are gone too;
+  remaining server tests use narrow catalogue observability helpers for client
+  registration, local durability tiers, branch names, and schema diagnostics.
 - Direct prepared reads now cover the browser gate's include, hop, UUID-array
   hop, gather, and array-membership `IN` shapes without a broad table fallback.
   Relation-shaped subscriptions reuse the same direct recompute path and now

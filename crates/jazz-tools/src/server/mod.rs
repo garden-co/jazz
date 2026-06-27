@@ -14,7 +14,8 @@ use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, SyncPayload};
+use crate::sync::ClientId;
+use crate::sync_manager::SyncPayload;
 use jazz_server::StorageConfig;
 
 mod builder;
@@ -626,10 +627,8 @@ mod tests {
     use crate::middleware::AuthConfig;
     use crate::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
     use crate::schema_manager::AppId;
-    use crate::schema_manager::SchemaManager;
     use crate::server::builder::{ServerBuilder, StorageBackend};
     use crate::storage::StorageError;
-    use crate::sync_manager::SyncManager;
 
     struct CloseObservingStorage {
         close_calls: Arc<AtomicUsize>,
@@ -669,21 +668,13 @@ mod tests {
 
     fn build_test_state_with_storage(storage: DynStorage, timeout: Duration) -> Arc<ServerState> {
         let app_id = AppId::from_name("shutdown-storage-test");
-        let schema_manager = SchemaManager::new(
-            SyncManager::new(),
-            shutdown_test_schema(),
-            app_id,
-            "dev",
-            "main",
-        )
-        .expect("build schema manager");
         Arc::new(ServerState {
-            catalogue_store: DirectCatalogueStore::with_test_schema_manager(
+            catalogue_store: DirectCatalogueStore::with_test_observability(
                 app_id,
                 Some(shutdown_test_schema()),
                 storage,
-                schema_manager,
-                SyncManager::new(),
+                Vec::new(),
+                std::collections::HashSet::new(),
             ),
             catalogue: ServerCatalogue,
             app_id,
@@ -865,7 +856,7 @@ mod tests {
         // disabled while catalogue_store remains catalogue-only.
         let has_client = state
             .catalogue_store
-            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .client_registered_for_test(alice)
             .expect("lock");
         assert!(has_client, "alice's ClientState should be preserved");
     }
@@ -917,7 +908,7 @@ mod tests {
 
         let has_client = state
             .catalogue_store
-            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .client_registered_for_test(alice)
             .expect("lock");
         assert!(has_client, "alice's ClientState should be preserved");
     }
@@ -960,7 +951,7 @@ mod tests {
 
         let has_client = state
             .catalogue_store
-            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .client_registered_for_test(alice)
             .expect("lock");
         assert!(has_client, "alice's state should be preserved");
     }
@@ -1029,7 +1020,7 @@ mod tests {
 
         let has_client = state
             .catalogue_store
-            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .client_registered_for_test(alice)
             .expect("lock");
         assert!(has_client, "alice's fresh ClientState should be preserved");
     }
@@ -1078,7 +1069,7 @@ mod tests {
 
         let has_bob = state
             .catalogue_store
-            .with_sync_manager(|sm| sm.get_client(bob).is_some())
+            .client_registered_for_test(bob)
             .expect("lock");
         assert!(has_bob, "bob should be unaffected");
     }
@@ -1155,7 +1146,7 @@ mod tests {
         // Verify the catalogue client state is preserved.
         let has_client = state
             .catalogue_store
-            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .client_registered_for_test(alice)
             .expect("lock");
         assert!(has_client, "alice should remain after marker expiry");
 
@@ -1168,7 +1159,7 @@ mod tests {
 
         let has_client = state
             .catalogue_store
-            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .client_registered_for_test(alice)
             .expect("lock");
         assert!(
             has_client,
@@ -1300,7 +1291,7 @@ mod tests {
 
         let has_alice = state
             .catalogue_store
-            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .client_registered_for_test(alice)
             .expect("lock");
         assert!(has_alice, "alice reconnected — should be preserved");
     }
