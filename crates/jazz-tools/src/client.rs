@@ -138,6 +138,7 @@ impl Clone for ClientEngine {
 #[cfg(feature = "direct-core-client")]
 struct DirectCoreEngine {
     inner: Rc<std::cell::RefCell<DirectCoreInner>>,
+    scheduler: Rc<DirectCoreTickScheduler>,
 }
 
 #[cfg(feature = "direct-core-client")]
@@ -195,23 +196,37 @@ impl DirectCoreTickScheduler {
 
     async fn wait_for_completed_tick_after(&self, previous: u64) -> Result<()> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        if self
+            .wait_for_completed_tick_after_until(previous, deadline)
+            .await
+        {
+            Ok(())
+        } else {
+            Err(JazzError::Connection(
+                "timed out waiting for direct core initial tick".to_string(),
+            ))
+        }
+    }
+
+    async fn wait_for_completed_tick_after_until(
+        &self,
+        previous: u64,
+        deadline: tokio::time::Instant,
+    ) -> bool {
         loop {
             if self.completed_ticks() > previous {
-                return Ok(());
+                return true;
             }
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                return Err(JazzError::Connection(
-                    "timed out waiting for direct core initial tick".to_string(),
-                ));
+                return false;
             }
-            tokio::time::timeout_at(deadline, self.state.completed_notify.notified())
+            if tokio::time::timeout_at(deadline, self.state.completed_notify.notified())
                 .await
-                .map_err(|_| {
-                    JazzError::Connection(
-                        "timed out waiting for direct core initial tick".to_string(),
-                    )
-                })?;
+                .is_err()
+            {
+                return false;
+            }
         }
     }
 }
@@ -248,7 +263,7 @@ impl DirectCoreEngine {
         scheduler
             .wait_for_completed_tick_after(completed_ticks)
             .await?;
-        Ok(Rc::new(Self { inner }))
+        Ok(Rc::new(Self { inner, scheduler }))
     }
 
     async fn query_rows(
@@ -258,7 +273,15 @@ impl DirectCoreEngine {
         table: String,
         wait_for_coverage: bool,
     ) -> Result<Vec<jazz::node::CurrentRow>> {
-        DirectCoreInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
+        DirectCoreInner::handle_query(
+            &self.inner,
+            &self.scheduler,
+            query,
+            opts,
+            table,
+            wait_for_coverage,
+        )
+        .await
     }
 
     async fn subscribe(
@@ -337,7 +360,7 @@ impl DirectCoreEngine {
     }
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
-        DirectCoreInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
+        DirectCoreInner::handle_wait_for_batch(&self.inner, &self.scheduler, batch_id, tier).await
     }
 
     fn spawn_local_tick_driver(
@@ -406,6 +429,7 @@ impl DirectCoreInner {
 
     async fn handle_query(
         inner: &Rc<std::cell::RefCell<Self>>,
+        scheduler: &DirectCoreTickScheduler,
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
@@ -424,7 +448,13 @@ impl DirectCoreInner {
             while !inner.borrow().db.query_is_covered(&prepared)
                 && tokio::time::Instant::now() < deadline
             {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                let completed_ticks = scheduler.completed_ticks();
+                if !scheduler
+                    .wait_for_completed_tick_after_until(completed_ticks, deadline)
+                    .await
+                {
+                    break;
+                }
             }
             if !inner.borrow().db.query_is_covered(&prepared) {
                 return Err(JazzError::Query(
@@ -485,6 +515,7 @@ impl DirectCoreInner {
 
     async fn handle_wait_for_batch(
         inner: &Rc<std::cell::RefCell<Self>>,
+        scheduler: &DirectCoreTickScheduler,
         batch_id: BatchId,
         tier: DurabilityTier,
     ) -> Result<()> {
@@ -515,7 +546,15 @@ impl DirectCoreInner {
                     "timed out waiting for direct core batch to reach {tier:?}"
                 )));
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            let completed_ticks = scheduler.completed_ticks();
+            if !scheduler
+                .wait_for_completed_tick_after_until(completed_ticks, deadline)
+                .await
+            {
+                return Err(JazzError::Sync(format!(
+                    "timed out waiting for direct core batch to reach {tier:?}"
+                )));
+            }
         }
     }
 
