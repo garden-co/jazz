@@ -684,8 +684,11 @@ fn alpha_to_core_value(value: Value) -> Result<CoreValue> {
     match value {
         Value::Boolean(value) => Ok(CoreValue::Bool(value)),
         Value::Text(value) => Ok(CoreValue::String(value)),
-        Value::Integer(value) => u64::try_from(value).map(CoreValue::U64).map_err(|_| {
-            JazzError::Write("negative INTEGER values are not supported by direct core".to_string())
+        Value::Integer(value) => u32::try_from(value).map(CoreValue::U32).map_err(|_| {
+            JazzError::Write(
+                "direct core INTEGER values must be non-negative signed 32-bit integers"
+                    .to_string(),
+            )
         }),
         Value::BigInt(value) => u64::try_from(value).map(CoreValue::U64).map_err(|_| {
             JazzError::Write("negative BIGINT values are not supported by direct core".to_string())
@@ -711,6 +714,9 @@ fn core_to_alpha_value(value: CoreValue) -> Result<Value> {
     match value {
         CoreValue::Bool(value) => Ok(Value::Boolean(value)),
         CoreValue::String(value) => Ok(Value::Text(value)),
+        CoreValue::U32(value) => i32::try_from(value).map(Value::Integer).map_err(|_| {
+            JazzError::Query("direct core INTEGER value exceeded signed 32-bit range".to_string())
+        }),
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
         CoreValue::Uuid(value) => Ok(Value::Uuid(ObjectId::from_uuid(value))),

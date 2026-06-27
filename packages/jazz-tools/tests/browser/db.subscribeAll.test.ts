@@ -673,6 +673,65 @@ describe("db.subscribeAll browser integration", () => {
     unsubscribe();
   });
 
+  it("reacts when only a reverse include target row changes", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("include-target-update") },
+      }),
+    );
+
+    const {
+      value: { id: userId },
+    } = db.insert(users, { name: "Owner", team_id: undefined });
+    const {
+      value: { id: todoId },
+    } = db.insert(todos, {
+      title: "before",
+      done: false,
+      priority: 1,
+      owner_id: userId,
+      tags: ["x"],
+    });
+
+    const deltas: Array<SubscriptionDelta<User & { todosViaOwner?: Todo[] }>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<User & { todosViaOwner?: Todo[] }>("users", {
+          conditions: [{ column: "id", op: "eq", value: userId }],
+          includes: { todosViaOwner: true },
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return latestAll[0]?.todosViaOwner?.some((todo) => todo.id === todoId) === true;
+      },
+      4000,
+      "expected initial reverse include result",
+    );
+
+    await db.update(todos, todoId, { title: "after" });
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return (
+          latestAll[0]?.todosViaOwner?.some(
+            (todo) => todo.id === todoId && todo.title === "after",
+          ) === true
+        );
+      },
+      4000,
+      "expected reverse include target update to wake subscribeAll",
+    );
+
+    unsubscribe();
+  });
+
   it("supports hop queries", async () => {
     const db = track(
       await createDb({

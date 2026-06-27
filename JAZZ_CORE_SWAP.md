@@ -195,8 +195,10 @@ Until deleted, treat them as replacement targets only.
   `TokioRuntime` as `ServerState::catalogue_runtime` for admin catalogue
   storage/rehydration, plus the direct `CoreServer` path for websocket sync.
   The runtime is no longer a general server sync runtime: shutdown does not
-  disconnect alpha transports, disconnected-client sweeping only expires
-  markers, and test-only alpha websocket frame injection fails closed.
+  disconnect alpha transports and disconnected-client sweeping only expires
+  markers. The test-only alpha websocket frame injection method has been
+  removed; tests must use direct websocket/public-client paths or push into the
+  catalogue runtime explicitly.
 - Exact catalogue-runtime replacement gap: admin catalogue HTTP still depends
   on the alpha `TokioRuntime`/`SchemaManager`/`storage` stack to persist and
   rehydrate schema, permissions, and lens catalogue entries. That runtime is
@@ -206,14 +208,15 @@ Until deleted, treat them as replacement targets only.
   without reintroducing alpha row/query/sync serving.
 - Direct prepared reads now cover the browser gate's include, hop, UUID-array
   hop, gather, and array-membership `IN` shapes without a broad table fallback.
-  Relation-shaped subscriptions reuse the same direct recompute path, but their
-  current wake source is the seed/root subscription. Writes that only affect a
-  downstream joined/include target row are a known remaining wake-coverage gap.
-- Richer public-builder local gates cover arrays, binary large values, nullable
-  refs, integer predicates, and filtered subscriptions. The equivalent
-  websocket gate is still skipped because publishing public `schema.int()`
-  currently fails against the core server's unsigned fixed-schema integer
-  support.
+  Relation-shaped subscriptions reuse the same direct recompute path and now
+  maintain multiple native trigger subscriptions for supported hop, gather, and
+  reverse-include target rows. Unsupported relation shapes still fail closed;
+  forward include target-row wakes are intentionally not implemented when they
+  would require a whole target-table trigger.
+- Richer public-builder gates cover arrays, binary large values, nullable refs,
+  integer predicates, filtered subscriptions, and websocket convergence. Public
+  `schema.int()` is represented in direct core as `U32`, with writes and query
+  literals restricted to the non-negative signed 32-bit subset (`0..=i32::MAX`).
 - The direct websocket route is the intended sync boundary. Old
   `transport_protocol.rs`, `transport_manager.rs`, and `sync_manager` code
   should not regain ownership of `/ws` semantics.
@@ -225,9 +228,10 @@ Until deleted, treat them as replacement targets only.
   `transport`/`transport-websocket`. Direct-core browser/server flows should
   depend only on the direct websocket route/client helper, not the alpha
   transport manager machinery.
-- `ServerState::process_ws_client_frame` is gated to `test-utils`; it exists
-  only as a fail-closed compatibility stub for legacy in-process tests that
-  still inject alpha `SyncPayload` frames, not for production server traffic.
+- `ServerState::process_ws_client_frame` has been removed. Remaining public
+  `transport_protocol` symbols exist only because the gated legacy
+  `TransportManager` still uses them internally; they should not become a server
+  ingress path again.
 - Edge upstream sync currently fails closed when `--upstream-url` is set. This
   intentionally removes the old alpha `TransportManager` path that was pointed
   at the direct core websocket route; server-to-server sync should be rebuilt on

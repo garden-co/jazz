@@ -338,6 +338,9 @@ function writeGrooveValue(writer: PostcardWriter, value: DirectQueryLiteral): vo
     return;
   }
   if (value.type === "Integer") {
+    if (!Number.isSafeInteger(value.value) || value.value < 0 || value.value > 0x7fffffff) {
+      throw new Error("Integer value must be a non-negative signed 32-bit integer");
+    }
     writer.u64(2); // groove::records::Value::U32
     writer.u64(value.value);
     return;
