@@ -59,7 +59,10 @@ use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
 #[cfg(feature = "direct-core-client")]
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
 #[cfg(feature = "direct-core-client")]
-use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId as CoreTxId};
+use jazz::tx::{
+    DeletionEvent as CoreDeletionEvent, DurabilityTier as CoreDurabilityTier, Fate as CoreFate,
+    TxId as CoreTxId,
+};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 #[cfg(feature = "direct-core-client")]
@@ -131,6 +134,20 @@ struct DirectCoreInner {
     db: Rc<DirectCoreDb>,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
+    transactions: HashMap<BatchId, DirectTransactionState>,
+}
+
+#[cfg(feature = "direct-core-client")]
+struct DirectTransactionState {
+    writes: Vec<DirectTransactionWrite>,
+}
+
+#[cfg(feature = "direct-core-client")]
+struct DirectTransactionWrite {
+    table: String,
+    row_id: ObjectId,
+    cells: jazz::db::RowCells,
+    deletion: Option<CoreDeletionEvent>,
 }
 
 #[derive(Default)]
@@ -242,6 +259,29 @@ impl DirectCoreEngine {
         Ok((object_id, write.mergeable_tx_id()))
     }
 
+    fn stage_insert(
+        &self,
+        batch_id: BatchId,
+        table: String,
+        row_id: Option<Uuid>,
+        cells: jazz::db::RowCells,
+    ) -> Result<ObjectId> {
+        let mut inner = self.inner.borrow_mut();
+        let row_id = ObjectId::from_uuid(row_id.unwrap_or_else(Uuid::now_v7));
+        let tx = inner
+            .transactions
+            .get_mut(&batch_id)
+            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
+        tx.writes.push(DirectTransactionWrite {
+            table: table.clone(),
+            row_id,
+            cells,
+            deletion: None,
+        });
+        inner.row_tables.insert(row_id, table);
+        Ok(row_id)
+    }
+
     fn upsert(&self, table: String, row_id: Uuid, cells: jazz::db::RowCells) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = inner
@@ -253,6 +293,29 @@ impl DirectCoreEngine {
         inner.remember_write(object_id, &table, write.mergeable_tx_id());
         let tx_id = write.mergeable_tx_id();
         Ok(tx_id)
+    }
+
+    fn stage_upsert(
+        &self,
+        batch_id: BatchId,
+        table: String,
+        row_id: Uuid,
+        cells: jazz::db::RowCells,
+    ) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        let object_id = ObjectId::from_uuid(row_id);
+        let tx = inner
+            .transactions
+            .get_mut(&batch_id)
+            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
+        tx.writes.push(DirectTransactionWrite {
+            table: table.clone(),
+            row_id: object_id,
+            cells,
+            deletion: None,
+        });
+        inner.row_tables.insert(object_id, table);
+        Ok(())
     }
 
     fn update(&self, row_id: ObjectId, cells: jazz::db::RowCells) -> Result<CoreTxId> {
@@ -272,6 +335,31 @@ impl DirectCoreEngine {
         Ok(tx_id)
     }
 
+    fn stage_update(
+        &self,
+        batch_id: BatchId,
+        row_id: ObjectId,
+        cells: jazz::db::RowCells,
+    ) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
+            JazzError::Write(
+                "direct core update requires a row created or observed by this client".to_string(),
+            )
+        })?;
+        let tx = inner
+            .transactions
+            .get_mut(&batch_id)
+            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
+        tx.writes.push(DirectTransactionWrite {
+            table,
+            row_id,
+            cells,
+            deletion: None,
+        });
+        Ok(())
+    }
+
     fn delete(&self, row_id: ObjectId) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
@@ -287,6 +375,83 @@ impl DirectCoreEngine {
         inner.remember_write(row_id, &table, write.mergeable_tx_id());
         let tx_id = write.mergeable_tx_id();
         Ok(tx_id)
+    }
+
+    fn stage_delete(&self, batch_id: BatchId, row_id: ObjectId) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
+            JazzError::Write(
+                "direct core delete requires a row created or observed by this client".to_string(),
+            )
+        })?;
+        let tx = inner
+            .transactions
+            .get_mut(&batch_id)
+            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
+        tx.writes.push(DirectTransactionWrite {
+            table,
+            row_id,
+            cells: jazz::db::RowCells::new(),
+            deletion: Some(CoreDeletionEvent::Deleted),
+        });
+        Ok(())
+    }
+
+    fn begin_transaction(&self) -> Result<BatchId> {
+        let mut inner = self.inner.borrow_mut();
+        let mut batch_id = BatchId::new();
+        while inner.transactions.contains_key(&batch_id) || inner.write_map.contains_key(&batch_id)
+        {
+            batch_id = BatchId::new();
+        }
+        inner
+            .transactions
+            .insert(batch_id, DirectTransactionState { writes: Vec::new() });
+        Ok(batch_id)
+    }
+
+    fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        let state = inner
+            .transactions
+            .remove(&batch_id)
+            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
+        if state.writes.is_empty() {
+            return Err(JazzError::Write(
+                "direct core transaction cannot commit without writes".to_string(),
+            ));
+        }
+        let mut tx = inner.db.mergeable_tx();
+        let mut touched_rows = Vec::new();
+        for write in state.writes {
+            match write.deletion {
+                Some(CoreDeletionEvent::Deleted) => tx
+                    .delete(&write.table, CoreRowUuid(*write.row_id.uuid()))
+                    .map_err(|error| JazzError::Write(error.to_string()))?,
+                Some(CoreDeletionEvent::Restored) => tx
+                    .restore(&write.table, CoreRowUuid(*write.row_id.uuid()), write.cells)
+                    .map_err(|error| JazzError::Write(error.to_string()))?,
+                None => tx
+                    .update(&write.table, CoreRowUuid(*write.row_id.uuid()), write.cells)
+                    .map_err(|error| JazzError::Write(error.to_string()))?,
+            }
+            touched_rows.push((write.row_id, write.table));
+        }
+        let tx_id = tx
+            .commit()
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        JazzClient::check_direct_write_not_rejected(&inner.db, tx_id)?;
+        inner.write_map.insert(batch_id, tx_id);
+        inner.write_map.insert(direct_batch_id(tx_id), tx_id);
+        for (row_id, table) in touched_rows {
+            inner.row_tables.insert(row_id, table);
+        }
+        Ok(())
+    }
+
+    fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
+        let mut inner = self.inner.borrow_mut();
+        Ok(inner.transactions.remove(&batch_id).is_some())
     }
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
@@ -352,6 +517,7 @@ impl DirectCoreInner {
             db,
             write_map: HashMap::new(),
             row_tables: HashMap::new(),
+            transactions: HashMap::new(),
         })
     }
 
@@ -473,15 +639,28 @@ impl DirectCoreInner {
         batch_id: BatchId,
         tier: DurabilityTier,
     ) -> Result<()> {
-        let tx_id = inner
-            .borrow()
-            .write_map
-            .get(&batch_id)
-            .copied()
-            .ok_or_else(|| JazzError::Sync(format!("unknown direct core batch {batch_id}")))?;
         let desired = core_tier(tier);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         loop {
+            let tx_id = {
+                let borrowed = inner.borrow();
+                if let Some(tx_id) = borrowed.write_map.get(&batch_id).copied() {
+                    tx_id
+                } else if borrowed.transactions.contains_key(&batch_id) {
+                    drop(borrowed);
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(JazzError::Sync(format!(
+                            "timed out waiting for direct core batch {batch_id}"
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                } else {
+                    return Err(JazzError::Sync(format!(
+                        "unknown direct core batch {batch_id}"
+                    )));
+                }
+            };
             let state = inner
                 .borrow()
                 .db
@@ -909,6 +1088,60 @@ impl JazzClient {
             .collect()
     }
 
+    #[cfg(feature = "direct-core-client")]
+    fn apply_direct_transaction_overlay(
+        &self,
+        query: &Query,
+        batch_id: BatchId,
+        rows: &mut Vec<(ObjectId, Vec<Value>)>,
+    ) -> Result<()> {
+        let table = query.table.as_str();
+        let schema = self.schema()?;
+        let table_schema = schema
+            .get(&TableName::new(table))
+            .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
+        let columns = query.select_columns.clone().unwrap_or_else(|| {
+            table_schema
+                .columns
+                .columns
+                .iter()
+                .map(|column| column.name.as_str().to_string())
+                .collect()
+        });
+
+        let inner = self.engine.inner.borrow();
+        let tx = inner
+            .transactions
+            .get(&batch_id)
+            .ok_or_else(|| JazzError::Query(format!("transaction {batch_id} is not open")))?;
+
+        for write in tx.writes.iter().filter(|write| write.table == table) {
+            if write.deletion == Some(CoreDeletionEvent::Deleted) {
+                rows.retain(|(row_id, _)| *row_id != write.row_id);
+                continue;
+            }
+
+            let existing_position = rows.iter().position(|(row_id, _)| *row_id == write.row_id);
+            let mut values = existing_position
+                .map(|position| rows[position].1.clone())
+                .unwrap_or_else(|| vec![Value::Null; columns.len()]);
+
+            for (column, value) in &write.cells {
+                if let Some(position) = columns.iter().position(|candidate| candidate == column) {
+                    values[position] = core_to_alpha_value(value.clone())?;
+                }
+            }
+
+            if let Some(position) = existing_position {
+                rows[position].1 = values;
+            } else {
+                rows.push((write.row_id, values));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Connect to Jazz with the given configuration.
     ///
     /// This will:
@@ -1046,7 +1279,11 @@ impl JazzClient {
                     durability_tier.is_some(),
                 )
                 .await?;
-            return self.direct_rows_to_alpha(&query, rows);
+            let mut rows = self.direct_rows_to_alpha(&query, rows)?;
+            if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
+                self.apply_direct_transaction_overlay(&query, batch_id, &mut rows)?;
+            }
+            return Ok(rows);
         }
 
         #[cfg(not(feature = "direct-core-client"))]
@@ -1076,11 +1313,21 @@ impl JazzClient {
         {
             let row_values = self.direct_ordered_values(table, &values)?;
             let cells = Self::direct_cells(values)?;
-            let (row_id, tx_id) = self
-                .engine
-                .insert(table.to_string(), object_id.into(), cells)?;
-            let batch_id = direct_batch_id(tx_id);
-            return Ok((row_id, row_values, batch_id));
+            if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
+                let row_id = self.engine.stage_insert(
+                    batch_id,
+                    table.to_string(),
+                    object_id.into(),
+                    cells,
+                )?;
+                return Ok((row_id, row_values, batch_id));
+            } else {
+                let (row_id, tx_id) =
+                    self.engine
+                        .insert(table.to_string(), object_id.into(), cells)?;
+                let batch_id = direct_batch_id(tx_id);
+                return Ok((row_id, row_values, batch_id));
+            }
         }
 
         #[cfg(not(feature = "direct-core-client"))]
@@ -1100,8 +1347,14 @@ impl JazzClient {
         #[cfg(feature = "direct-core-client")]
         {
             let cells = Self::direct_cells(values)?;
-            let tx_id = self.engine.upsert(table.to_string(), object_id, cells)?;
-            return Ok(direct_batch_id(tx_id));
+            if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
+                self.engine
+                    .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
+                return Ok(batch_id);
+            } else {
+                let tx_id = self.engine.upsert(table.to_string(), object_id, cells)?;
+                return Ok(direct_batch_id(tx_id));
+            }
         }
         #[cfg(not(feature = "direct-core-client"))]
         {
@@ -1115,8 +1368,13 @@ impl JazzClient {
         #[cfg(feature = "direct-core-client")]
         {
             let cells = Self::direct_cells(updates.into_iter().collect())?;
-            let tx_id = self.engine.update(object_id, cells)?;
-            return Ok(direct_batch_id(tx_id));
+            if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
+                self.engine.stage_update(batch_id, object_id, cells)?;
+                return Ok(batch_id);
+            } else {
+                let tx_id = self.engine.update(object_id, cells)?;
+                return Ok(direct_batch_id(tx_id));
+            }
         }
         #[cfg(not(feature = "direct-core-client"))]
         {
@@ -1129,8 +1387,13 @@ impl JazzClient {
     pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
         #[cfg(feature = "direct-core-client")]
         {
-            let tx_id = self.engine.delete(object_id)?;
-            return Ok(direct_batch_id(tx_id));
+            if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
+                self.engine.stage_delete(batch_id, object_id)?;
+                return Ok(batch_id);
+            } else {
+                let tx_id = self.engine.delete(object_id)?;
+                return Ok(direct_batch_id(tx_id));
+            }
         }
         #[cfg(not(feature = "direct-core-client"))]
         {
@@ -1145,27 +1408,45 @@ impl JazzClient {
     /// not visible to ordinary reads until the transaction is committed and
     /// accepted by the authority.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        Err(JazzError::Write(
-            "direct core JazzClient transactions are not implemented yet".to_string(),
-        ))
+        #[cfg(feature = "direct-core-client")]
+        {
+            let batch_id = self.engine.begin_transaction()?;
+            let client = self.with_write_context(WriteContext::default().with_batch_id(batch_id));
+            Ok(JazzTransaction { batch_id, client })
+        }
+
+        #[cfg(not(feature = "direct-core-client"))]
+        Err(Self::legacy_client_error())
     }
 
     /// Commit an open transaction by batch id.
     pub fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
-        let _ = batch_id;
-        Err(JazzError::Write(
-            "direct core JazzClient transactions are not implemented yet".to_string(),
-        ))
+        #[cfg(feature = "direct-core-client")]
+        {
+            self.engine.commit_transaction(batch_id)
+        }
+
+        #[cfg(not(feature = "direct-core-client"))]
+        {
+            let _ = batch_id;
+            Err(Self::legacy_client_error())
+        }
     }
 
     /// Roll back an open transaction by batch id.
     ///
     /// Returns whether a local batch record existed for the transaction.
     pub fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
-        let _ = batch_id;
-        Err(JazzError::Write(
-            "direct core JazzClient transactions are not implemented yet".to_string(),
-        ))
+        #[cfg(feature = "direct-core-client")]
+        {
+            self.engine.rollback_transaction(batch_id)
+        }
+
+        #[cfg(not(feature = "direct-core-client"))]
+        {
+            let _ = batch_id;
+            Err(Self::legacy_client_error())
+        }
     }
 
     pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
@@ -1516,6 +1797,70 @@ mod tests {
             default_session_from_context(&context).is_none(),
             "backend/admin clients should keep using explicit session scopes"
         );
+    }
+
+    #[cfg(feature = "direct-core-client")]
+    #[tokio::test]
+    async fn direct_core_engine_transaction_stages_and_commits() {
+        let alpha_schema = declared_todo_schema();
+        let core_schema = convert_alpha_schema(&alpha_schema).expect("convert schema");
+        let db = Rc::new(
+            DirectCoreDb::open(CoreDbConfig::new(
+                core_schema.clone(),
+                direct_core_storage(&core_schema),
+                CoreDbIdentity {
+                    node: CoreNodeUuid::from_bytes([0x11; 16]),
+                    author: CoreAuthorId::from_bytes([0xa1; 16]),
+                },
+            ))
+            .await
+            .expect("open direct core db"),
+        );
+        let engine = DirectCoreEngine {
+            inner: Rc::new(std::cell::RefCell::new(DirectCoreInner {
+                db,
+                write_map: HashMap::new(),
+                row_tables: HashMap::new(),
+                transactions: HashMap::new(),
+            })),
+        };
+
+        let batch_id = engine.begin_transaction().expect("begin transaction");
+        let row_id = engine
+            .stage_insert(
+                batch_id,
+                "todos".to_string(),
+                None,
+                jazz::row! {
+                    title: "staged",
+                    completed: false,
+                },
+            )
+            .expect("stage insert");
+        assert!(
+            engine.inner.borrow().write_map.get(&batch_id).is_none(),
+            "staged transaction should not be committed yet",
+        );
+
+        engine
+            .commit_transaction(batch_id)
+            .expect("commit transaction");
+        engine
+            .wait_for_batch(batch_id, DurabilityTier::Local)
+            .await
+            .expect("wait for committed transaction");
+
+        let rows = engine
+            .query_rows(
+                jazz::query::Query::from("todos"),
+                CoreReadOpts::default(),
+                "todos".to_string(),
+                false,
+            )
+            .await
+            .expect("query committed rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(ObjectId::from_uuid(rows[0].row_uuid().0), row_id);
     }
 
     #[cfg(feature = "transport-websocket")]
