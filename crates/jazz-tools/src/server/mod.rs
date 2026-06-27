@@ -12,7 +12,6 @@ use tokio::time::Instant;
 
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
-use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, SyncPayload};
@@ -29,7 +28,7 @@ mod shutdown;
 mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
-pub(crate) use catalogue::ServerCatalogue;
+pub(crate) use catalogue::{DirectCatalogueStore, ServerCatalogue};
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "test-utils")]
 pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
@@ -408,9 +407,10 @@ impl ServerTopology {
 
 /// Server state shared across request handlers.
 pub struct ServerState {
-    /// Legacy Tokio runtime retained only as the admin catalogue store while
-    /// production websocket sync runs through `CoreServer`.
-    pub(crate) catalogue_runtime: TokioRuntime<DynStorage>,
+    /// Direct, storage-backed admin catalogue store. Production websocket sync,
+    /// row storage, query execution, and client lifecycle are owned by
+    /// `CoreServer`.
+    pub(crate) catalogue_store: DirectCatalogueStore,
     pub(crate) catalogue: ServerCatalogue,
     #[allow(dead_code)]
     pub app_id: AppId,
@@ -503,38 +503,15 @@ impl ServerState {
         }
 
         self.shutdown.set_phase(ShutdownPhase::FlushingRuntime);
-        if let Err(error) = self.catalogue_runtime.flush().await {
-            tracing::error!(%error, "shutdown catalogue runtime flush failed");
+        if let Err(error) = self.catalogue.flush(&self.catalogue_store) {
+            tracing::error!(%error, "shutdown catalogue store flush failed");
             failed = true;
         }
 
         self.shutdown.set_phase(ShutdownPhase::ClosingStorage);
-        let storage_result = self.catalogue_runtime.with_storage(|storage| {
-            let flush_result = storage.flush();
-            let flush_wal_result = storage.flush_wal();
-            let close_result = storage.close();
-            (flush_result, flush_wal_result, close_result)
-        });
-
-        match storage_result {
-            Ok((flush_result, flush_wal_result, close_result)) => {
-                if let Err(error) = flush_result {
-                    tracing::error!(%error, "shutdown storage flush failed");
-                    failed = true;
-                }
-                if let Err(error) = flush_wal_result {
-                    tracing::error!(%error, "shutdown storage WAL flush failed");
-                    failed = true;
-                }
-                if let Err(error) = close_result {
-                    tracing::error!(%error, "shutdown storage close failed");
-                    failed = true;
-                }
-            }
-            Err(error) => {
-                tracing::error!(%error, "shutdown storage lock failed");
-                failed = true;
-            }
+        if let Err(error) = self.catalogue.close(&self.catalogue_store) {
+            tracing::error!(%error, "shutdown catalogue storage close failed");
+            failed = true;
         }
 
         if failed {
@@ -701,7 +678,7 @@ mod tests {
         )
         .expect("build schema manager");
         Arc::new(ServerState {
-            catalogue_runtime: TokioRuntime::new(schema_manager, storage, |_| {}),
+            catalogue_store: DirectCatalogueStore::new(schema_manager, storage),
             catalogue: ServerCatalogue,
             app_id,
             connections: RwLock::new(HashMap::new()),
@@ -867,7 +844,7 @@ mod tests {
 
         // Register alice in the catalogue runtime. The direct-core server path
         // no longer uses sweeps to mutate this alpha client state.
-        let _ = state.catalogue_runtime.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(alice, None);
 
         let conn = add_connection(&state, alice).await;
         remove_connection(&state, conn).await;
@@ -879,9 +856,9 @@ mod tests {
         assert_eq!(reaped, vec![alice]);
 
         // Only the disconnect marker expires; alpha runtime client reaping is
-        // disabled while catalogue_runtime remains catalogue-only.
+        // disabled while catalogue_store remains catalogue-only.
         let has_client = state
-            .catalogue_runtime
+            .catalogue_store
             .with_sync_manager(|sm| sm.get_client(alice).is_some())
             .expect("lock");
         assert!(has_client, "alice's ClientState should be preserved");
@@ -892,7 +869,7 @@ mod tests {
         let state = build_test_state().await;
         let alice = ClientId::new();
 
-        let _ = state.catalogue_runtime.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(alice, None);
 
         let conn = add_connection(&state, alice).await;
         remove_connection(&state, conn).await;
@@ -915,7 +892,7 @@ mod tests {
         let state = build_test_state().await;
         let alice = ClientId::new();
 
-        let _ = state.catalogue_runtime.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(alice, None);
 
         let conn = add_connection(&state, alice).await;
         remove_connection(&state, conn).await;
@@ -933,7 +910,7 @@ mod tests {
         );
 
         let has_client = state
-            .catalogue_runtime
+            .catalogue_store
             .with_sync_manager(|sm| sm.get_client(alice).is_some())
             .expect("lock");
         assert!(has_client, "alice's ClientState should be preserved");
@@ -951,7 +928,7 @@ mod tests {
         // connection check.
         let state = build_test_state().await;
         let alice = ClientId::new();
-        let _ = state.catalogue_runtime.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(alice, None);
 
         // Insert an already-expired candidate directly
         {
@@ -976,7 +953,7 @@ mod tests {
         );
 
         let has_client = state
-            .catalogue_runtime
+            .catalogue_store
             .with_sync_manager(|sm| sm.get_client(alice).is_some())
             .expect("lock");
         assert!(has_client, "alice's state should be preserved");
@@ -1000,7 +977,7 @@ mod tests {
         //
         let state = build_test_state().await;
         let alice = ClientId::new();
-        let _ = state.catalogue_runtime.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(alice, None);
 
         // alice disconnects and expires
         let conn = add_connection(&state, alice).await;
@@ -1017,7 +994,7 @@ mod tests {
         assert_eq!(expired, vec![alice]);
 
         // alice reconnects AFTER drain — fresh state created, new connection added
-        let _ = state.catalogue_runtime.ensure_client_with_session(
+        let _ = state.catalogue_store.ensure_client_with_session(
             alice,
             crate::query_manager::session::Session::new("alice"),
         );
@@ -1045,7 +1022,7 @@ mod tests {
         );
 
         let has_client = state
-            .catalogue_runtime
+            .catalogue_store
             .with_sync_manager(|sm| sm.get_client(alice).is_some())
             .expect("lock");
         assert!(has_client, "alice's fresh ClientState should be preserved");
@@ -1057,8 +1034,8 @@ mod tests {
         let alice = ClientId::new();
         let bob = ClientId::new();
 
-        let _ = state.catalogue_runtime.add_client(alice, None);
-        let _ = state.catalogue_runtime.add_client(bob, None);
+        let _ = state.catalogue_store.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(bob, None);
 
         let conn_a = add_connection(&state, alice).await;
         let conn_b = add_connection(&state, bob).await;
@@ -1080,8 +1057,8 @@ mod tests {
         let alice = ClientId::new();
         let bob = ClientId::new();
 
-        let _ = state.catalogue_runtime.add_client(alice, None);
-        let _ = state.catalogue_runtime.add_client(bob, None);
+        let _ = state.catalogue_store.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(bob, None);
 
         // Only alice disconnects
         let conn_a = add_connection(&state, alice).await;
@@ -1094,7 +1071,7 @@ mod tests {
         assert_eq!(reaped, vec![alice]);
 
         let has_bob = state
-            .catalogue_runtime
+            .catalogue_store
             .with_sync_manager(|sm| sm.get_client(bob).is_some())
             .expect("lock");
         assert!(has_bob, "bob should be unaffected");
@@ -1105,7 +1082,7 @@ mod tests {
         let state = build_test_state().await;
         let alice = ClientId::new();
 
-        let _ = state.catalogue_runtime.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(alice, None);
 
         let conn = add_connection(&state, alice).await;
         remove_connection(&state, conn).await;
@@ -1124,7 +1101,7 @@ mod tests {
         let state = build_test_state().await;
         let alice = ClientId::new();
 
-        let _ = state.catalogue_runtime.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(alice, None);
 
         let conn = add_connection(&state, alice).await;
         remove_connection(&state, conn).await;
@@ -1156,9 +1133,9 @@ mod tests {
         let session = Session::new("alice");
 
         // Connect, register with session
-        let _ = state.catalogue_runtime.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(alice, None);
         let _ = state
-            .catalogue_runtime
+            .catalogue_store
             .ensure_client_with_session(alice, session.clone());
 
         let conn = add_connection(&state, alice).await;
@@ -1171,20 +1148,20 @@ mod tests {
 
         // Verify the catalogue client state is preserved.
         let has_client = state
-            .catalogue_runtime
+            .catalogue_store
             .with_sync_manager(|sm| sm.get_client(alice).is_some())
             .expect("lock");
         assert!(has_client, "alice should remain after marker expiry");
 
         // Reconnect against the preserved catalogue state.
         let _ = state
-            .catalogue_runtime
+            .catalogue_store
             .ensure_client_with_session(alice, session);
         let _conn2 = add_connection(&state, alice).await;
         state.on_client_connected(alice).await;
 
         let has_client = state
-            .catalogue_runtime
+            .catalogue_store
             .with_sync_manager(|sm| sm.get_client(alice).is_some())
             .expect("lock");
         assert!(
@@ -1257,8 +1234,8 @@ mod tests {
         let alice = ClientId::new();
         let bob = ClientId::new();
 
-        let _ = state.catalogue_runtime.add_client(alice, None);
-        let _ = state.catalogue_runtime.add_client(bob, None);
+        let _ = state.catalogue_store.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(bob, None);
 
         // alice disconnects and expires
         let conn_a = add_connection(&state, alice).await;
@@ -1296,8 +1273,8 @@ mod tests {
         let alice = ClientId::new();
         let bob = ClientId::new();
 
-        let _ = state.catalogue_runtime.add_client(alice, None);
-        let _ = state.catalogue_runtime.add_client(bob, None);
+        let _ = state.catalogue_store.add_client(alice, None);
+        let _ = state.catalogue_store.add_client(bob, None);
 
         let conn_a = add_connection(&state, alice).await;
         let conn_b = add_connection(&state, bob).await;
@@ -1316,7 +1293,7 @@ mod tests {
         assert_eq!(reaped, vec![bob]);
 
         let has_alice = state
-            .catalogue_runtime
+            .catalogue_store
             .with_sync_manager(|sm| sm.get_client(alice).is_some())
             .expect("lock");
         assert!(has_alice, "alice reconnected — should be preserved");

@@ -189,23 +189,17 @@ Until deleted, treat them as replacement targets only.
 
 ## Immediate Integration Gaps
 
-- Delete or gut old alpha engine internals listed under "Replace Or Delete",
-  starting at the active dual-runtime server wiring:
-  `crates/jazz-tools/src/server/builder.rs` still builds a legacy
-  `TokioRuntime` as `ServerState::catalogue_runtime` for admin catalogue
-  storage/rehydration, plus the direct `CoreServer` path for websocket sync.
-  The runtime is no longer a general server sync runtime: shutdown does not
-  disconnect alpha transports and disconnected-client sweeping only expires
-  markers. The test-only alpha websocket frame injection method has been
-  removed; tests must use direct websocket/public-client paths or push into the
-  catalogue runtime explicitly.
-- Exact catalogue-runtime replacement gap: admin catalogue HTTP still depends
-  on the alpha `TokioRuntime`/`SchemaManager`/`storage` stack to persist and
-  rehydrate schema, permissions, and lens catalogue entries. That runtime is
-  now documented and named as admin-catalogue-only, and `storage` is no longer
-  a normal public Rust module outside `test-utils`, but the remaining migration
-  is to move catalogue persistence/rehydration behind direct core storage
-  without reintroducing alpha row/query/sync serving.
+- Delete or gut old alpha engine internals listed under "Replace Or Delete".
+  The server no longer has `ServerState::catalogue_runtime`; admin
+  schema/permissions/lens HTTP now uses a storage-backed `DirectCatalogueStore`,
+  while websocket sync stays on the direct `CoreServer` path. The test-only
+  alpha websocket frame injection method has been removed; tests must use direct
+  websocket/public-client paths or push catalogue payloads into the catalogue
+  store explicitly.
+- Remaining catalogue-store simplification gap: `DirectCatalogueStore` still
+  reuses `SchemaManager` catalogue algorithms internally to preserve admin route
+  semantics. The next cleanup is to flatten that into direct catalogue-entry
+  indexing over storage, without reintroducing runtime/query/sync serving.
 - Direct prepared reads now cover the browser gate's include, hop, UUID-array
   hop, gather, and array-membership `IN` shapes without a broad table fallback.
   Relation-shaped subscriptions reuse the same direct recompute path and now

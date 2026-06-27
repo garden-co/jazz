@@ -324,7 +324,7 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
     .expect("encode jwt")
 }
 
-fn build_catalogue_runtime(
+fn build_catalogue_push_runtime(
     schema_manager: SchemaManager,
     storage: MemoryStorage,
     state: Arc<ServerState>,
@@ -347,12 +347,12 @@ fn build_catalogue_runtime(
                     source: Source::Client(client_id),
                     payload,
                 };
-                if let Err(error) = state.catalogue_runtime.push_sync_inbox(entry) {
+                if let Err(error) = state.catalogue_store.push_sync_inbox(entry) {
                     if let Ok(mut errors) = push_errors.lock() {
                         errors.push(format!("push catalogue sync payload: {error}"));
                     }
                 }
-                if let Err(error) = state.catalogue_runtime.flush().await {
+                if let Err(error) = state.catalogue_store.flush() {
                     if let Ok(mut errors) = push_errors.lock() {
                         errors.push(format!("flush catalogue sync payload: {error}"));
                     }
@@ -379,8 +379,8 @@ pub async fn push_catalogue_in_memory(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client_id = ClientId::new();
     state
-        .runtime
-        .ensure_client_as_admin(client_id)
+        .catalogue_store
+        .ensure_client_as_backend(client_id)
         .map_err(|e| format!("register admin client: {e:?}"))?;
 
     let in_flight_pushes = Arc::new(AtomicUsize::new(0));
@@ -395,7 +395,7 @@ pub async fn push_catalogue_in_memory(
                 .map_err(|error| {
                     format!("Failed to initialize schema manager for schema push: {error:?}")
                 })?;
-        let runtime = build_catalogue_runtime(
+        let runtime = build_catalogue_push_runtime(
             schema_manager,
             MemoryStorage::default(),
             state.clone(),
@@ -427,7 +427,7 @@ pub async fn push_catalogue_in_memory(
         )
         .map_err(|error| format!("Failed to initialize schema manager for lens push: {error:?}"))?;
         schema_manager.persist_lens(&mut storage, lens);
-        let runtime = build_catalogue_runtime(
+        let runtime = build_catalogue_push_runtime(
             schema_manager,
             storage,
             state.clone(),

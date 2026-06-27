@@ -334,12 +334,12 @@ pub(super) async fn schema_handler(
 
     match state
         .catalogue
-        .known_schema(&state.catalogue_runtime, &schema_hash)
+        .known_schema(&state.catalogue_store, &schema_hash)
     {
         Ok(Some(schema)) => {
             let published_at = match state
                 .catalogue
-                .schema_published_at(&state.catalogue_runtime, &schema_hash)
+                .schema_published_at(&state.catalogue_store, &schema_hash)
             {
                 Ok(timestamp) => timestamp,
                 Err(err) => {
@@ -413,16 +413,13 @@ pub(super) async fn schema_hashes_handler(
         };
     }
 
-    match state
-        .catalogue
-        .known_schema_hashes(&state.catalogue_runtime)
-    {
+    match state.catalogue.known_schema_hashes(&state.catalogue_store) {
         Ok(hashes) => {
             let mut schemas = Vec::with_capacity(hashes.len());
             for hash in &hashes {
                 let published_at = match state
                     .catalogue
-                    .schema_published_at(&state.catalogue_runtime, hash)
+                    .schema_published_at(&state.catalogue_store, hash)
                 {
                     Ok(timestamp) => timestamp,
                     Err(err) => {
@@ -515,7 +512,7 @@ pub(super) async fn schema_connectivity_handler(
 
     match state
         .catalogue
-        .are_schema_hashes_connected(&state.catalogue_runtime, from_hash, to_hash)
+        .are_schema_hashes_connected(&state.catalogue_store, from_hash, to_hash)
     {
         Ok(connected) => (
             StatusCode::OK,
@@ -634,7 +631,7 @@ pub(super) async fn publish_schema_handler(
     }
     let object_id = match state
         .catalogue
-        .publish_schema(&state.catalogue_runtime, request.schema)
+        .publish_schema(&state.catalogue_store, request.schema)
     {
         Ok(object_id) => object_id,
         Err(err) => {
@@ -690,7 +687,7 @@ pub(super) async fn permissions_head_handler(
 
     match state
         .catalogue
-        .current_permissions_head(&state.catalogue_runtime)
+        .current_permissions_head(&state.catalogue_store)
     {
         Ok(head) => {
             let head = head.map(permissions_head_view);
@@ -736,10 +733,7 @@ pub(super) async fn permissions_handler(
         };
     }
 
-    match state
-        .catalogue
-        .current_permissions(&state.catalogue_runtime)
-    {
+    match state.catalogue.current_permissions(&state.catalogue_store) {
         Ok(current) => (
             StatusCode::OK,
             Json(match current {
@@ -834,7 +828,7 @@ pub(super) async fn publish_permissions_handler(
 
     let mut schema_with_permissions = match state
         .catalogue
-        .known_schema(&state.catalogue_runtime, &schema_hash)
+        .known_schema(&state.catalogue_store, &schema_hash)
     {
         Ok(Some(schema)) => schema,
         Ok(None) => {
@@ -898,14 +892,14 @@ pub(super) async fn publish_permissions_handler(
         };
 
     match state.catalogue.publish_permissions_bundle(
-        &state.catalogue_runtime,
+        &state.catalogue_store,
         schema_hash,
         permissions,
         expected_parent_bundle_object_id,
     ) {
         Ok(_) => match state
             .catalogue
-            .current_permissions_head(&state.catalogue_runtime)
+            .current_permissions_head(&state.catalogue_store)
         {
             Ok(head) => {
                 if let Some(schema) = direct_schema {
@@ -1035,7 +1029,7 @@ pub(super) async fn publish_migration_handler(
 
     let source_schema = match state
         .catalogue
-        .known_schema(&state.catalogue_runtime, &source_hash)
+        .known_schema(&state.catalogue_store, &source_hash)
     {
         Ok(Some(schema)) => schema,
         Ok(None) => {
@@ -1061,7 +1055,7 @@ pub(super) async fn publish_migration_handler(
 
     let target_schema = match state
         .catalogue
-        .known_schema(&state.catalogue_runtime, &target_hash)
+        .known_schema(&state.catalogue_store, &target_hash)
     {
         Ok(Some(schema)) => schema,
         Ok(None) => {
@@ -1206,10 +1200,7 @@ pub(super) async fn publish_migration_handler(
     }
 
     let lens = Lens::new(source_hash, target_hash, forward);
-    let object_id = match state
-        .catalogue
-        .publish_lens(&state.catalogue_runtime, &lens)
-    {
+    let object_id = match state.catalogue.publish_lens(&state.catalogue_store, &lens) {
         Ok(object_id) => object_id,
         Err(err) => {
             return (
@@ -1222,7 +1213,7 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    if let Err(err) = state.catalogue_runtime.flush().await {
+    if let Err(err) = state.catalogue.flush(&state.catalogue_store) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
@@ -1291,21 +1282,13 @@ pub(super) async fn admin_subscription_introspection_handler(
             .into_response();
     }
 
-    match state.catalogue_runtime.server_subscription_telemetry() {
-        Ok(queries) => Json(AdminSubscriptionIntrospectionResponse {
-            app_id: state.app_id.to_string(),
-            generated_at: unix_timestamp_millis(),
-            queries,
-        })
-        .into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to read subscription telemetry: {err}"
-            ))),
-        )
-            .into_response(),
-    }
+    let queries = state.catalogue_store.server_subscription_telemetry();
+    Json(AdminSubscriptionIntrospectionResponse {
+        app_id: state.app_id.to_string(),
+        generated_at: unix_timestamp_millis(),
+        queries,
+    })
+    .into_response()
 }
 
 pub(super) async fn internal_shutdown_handler(

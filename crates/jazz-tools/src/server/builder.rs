@@ -14,16 +14,17 @@ use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
 use crate::query_manager::types::{Schema, SchemaHash};
-use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
 use crate::server::routes;
-use crate::server::{ConnectionEventHub, DynStorage, ServerState, ServerTopology};
+use crate::server::{
+    ConnectionEventHub, DirectCatalogueStore, DynStorage, ServerState, ServerTopology,
+};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
 use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
-use crate::sync_manager::{Destination, DurabilityTier, SyncManager};
+use crate::sync_manager::{DurabilityTier, SyncManager};
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
@@ -170,18 +171,19 @@ impl ServerBuilder {
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
-        let (catalogue_runtime, connection_event_hub) = self.build_admin_catalogue_runtime()?;
+        let connection_event_hub = Arc::new(ConnectionEventHub::default());
+        let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store()?;
         let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
         let core_server_storage_config = self.build_core_server_storage_config();
         let core_server =
-            self.build_core_server(&catalogue_runtime, core_server_storage_config.clone())?;
+            self.build_core_server(latest_catalogue_schema, core_server_storage_config.clone())?;
         let core_server_storage_config = core_server_storage_config.ok();
 
         let state = Arc::new(ServerState {
-            catalogue_runtime,
+            catalogue_store,
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             connections: RwLock::new(HashMap::new()),
@@ -223,32 +225,18 @@ impl ServerBuilder {
         Ok(BuiltServer { state, app })
     }
 
-    #[allow(clippy::type_complexity)]
-    /// Build the temporary alpha runtime used only by admin catalogue HTTP
-    /// handlers and schema rehydration.
+    /// Build the direct admin catalogue store used by HTTP catalogue routes.
     ///
-    /// Websocket sync is owned by `CoreServer`; this runtime must not become a
-    /// parallel server sync engine again while catalogue persistence is being
-    /// migrated.
-    fn build_admin_catalogue_runtime(
-        &self,
-    ) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
-        let connection_event_hub = Arc::new(ConnectionEventHub::default());
-        let dispatch_hub = Arc::clone(&connection_event_hub);
-
+    /// This intentionally reuses `SchemaManager` catalogue algorithms without
+    /// creating a runtime, sync engine, or websocket path.
+    fn build_catalogue_store(&self) -> Result<(DirectCatalogueStore, Option<Schema>), String> {
         let storage = self.build_main_storage()?;
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
-        let catalogue_runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
-            if let Destination::Client(client_id) = entry.destination {
-                dispatch_hub.dispatch_payload(client_id, entry.payload);
-            }
-        });
-
-        if let Some(ref tracer) = self.sync_tracer {
-            catalogue_runtime.set_sync_tracer(tracer.clone(), "server".to_string());
-        }
-
-        Ok((catalogue_runtime, connection_event_hub))
+        let latest_catalogue_schema = self.latest_published_schema(&schema_manager);
+        Ok((
+            DirectCatalogueStore::new(schema_manager, storage),
+            latest_catalogue_schema,
+        ))
     }
 
     fn build_schema_manager(&self, storage: &dyn Storage) -> Result<SchemaManager, String> {
@@ -276,7 +264,7 @@ impl ServerBuilder {
 
     fn build_core_server(
         &self,
-        runtime: &TokioRuntime<DynStorage>,
+        latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
     ) -> Result<Option<crate::server::core_server::CoreServer>, String> {
         if let Some(schema) = &self.core_server_schema {
@@ -291,7 +279,7 @@ impl ServerBuilder {
 
         let schema = match &self.schema_mode {
             ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
-            ServerSchemaMode::Dynamic => self.latest_published_schema(runtime)?,
+            ServerSchemaMode::Dynamic => latest_catalogue_schema,
         };
         let Some(schema) = schema else {
             return Ok(None);
@@ -337,19 +325,10 @@ impl ServerBuilder {
         }
     }
 
-    fn latest_published_schema(
-        &self,
-        runtime: &TokioRuntime<DynStorage>,
-    ) -> Result<Option<Schema>, String> {
+    fn latest_published_schema(&self, schema_manager: &SchemaManager) -> Option<Schema> {
         let mut candidates = Vec::<(u64, SchemaHash)>::new();
-        for hash in runtime
-            .known_schema_hashes()
-            .map_err(|error| format!("failed to inspect known schemas: {error:?}"))?
-        {
-            if let Some(published_at) = runtime
-                .schema_published_at(&hash)
-                .map_err(|error| format!("failed to inspect schema publish timestamp: {error:?}"))?
-            {
+        for hash in schema_manager.known_schema_hashes() {
+            if let Some(published_at) = schema_manager.schema_published_at(&hash) {
                 candidates.push((published_at, hash));
             }
         }
@@ -358,12 +337,8 @@ impl ServerBuilder {
                 .cmp(right_time)
                 .then_with(|| left_hash.as_bytes().cmp(right_hash.as_bytes()))
         });
-        let Some((_, hash)) = candidates.pop() else {
-            return Ok(None);
-        };
-        runtime
-            .known_schema(&hash)
-            .map_err(|error| format!("failed to load core server schema: {error:?}"))
+        let (_, hash) = candidates.pop()?;
+        schema_manager.get_known_schema(&hash).cloned()
     }
 
     fn build_main_storage(&self) -> Result<DynStorage, String> {
@@ -701,7 +676,7 @@ mod tests {
 
         let tiers = built
             .state
-            .catalogue_runtime
+            .catalogue_store
             .with_sync_manager(|sync| sync.local_durability_tiers())
             .expect("read sync manager");
 
@@ -736,14 +711,13 @@ mod tests {
             assert!(built.state.core_server().is_some());
             built
                 .state
-                .catalogue_runtime
+                .catalogue_store
                 .persist_schema()
                 .expect("publish fixed schema catalogue");
             built
                 .state
-                .catalogue_runtime
+                .catalogue_store
                 .flush()
-                .await
                 .expect("flush fixed schema catalogue");
         }
 
