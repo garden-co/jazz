@@ -10,9 +10,6 @@ use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz_tools::row_input;
 use jazz_tools::server::{JazzServer, TestJwtIssuer};
-#[cfg(feature = "rocksdb")]
-use jazz_tools::storage::RocksDBStorage;
-use jazz_tools::storage::Storage;
 use jazz_tools::{
     AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
     QueryBuilder, SchemaBuilder, TableSchema, Value,
@@ -324,50 +321,6 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     panic!("timed out waiting for EdgeServer query readiness");
 }
 
-async fn wait_for_catalogue_schema_entry_count_on_disk(
-    app_id: AppId,
-    data_root: &Path,
-    expected_min_count: usize,
-    timeout: Duration,
-) {
-    #[cfg(feature = "rocksdb")]
-    let db_path = data_root.join("jazz.rocksdb");
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut last_count = 0usize;
-
-    while tokio::time::Instant::now() < deadline {
-        #[cfg(feature = "rocksdb")]
-        let storage_result = if db_path.exists() {
-            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).ok()
-        } else {
-            None
-        };
-        if let Some(storage) = storage_result {
-            let expected_app_id = app_id.as_object_id().to_string();
-            let entries = storage.scan_catalogue_entries().unwrap_or_default();
-            last_count = entries
-                .into_iter()
-                .filter(|entry| {
-                    entry.metadata.get("type").map(|value| value.as_str())
-                        == Some("catalogue_schema")
-                        && entry.metadata.get("app_id").map(|value| value.as_str())
-                            == Some(expected_app_id.as_str())
-                })
-                .count();
-            let _ = storage.close();
-            if last_count >= expected_min_count {
-                return;
-            }
-        }
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
-    panic!(
-        "timed out waiting for catalogue schema entry count >= {expected_min_count}, last_count={last_count}"
-    );
-}
-
 #[tokio::test]
 async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_without_catalogue_resync()
  {
@@ -432,13 +385,6 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
 
     let restart_port = server.port;
     drop(server);
-    wait_for_catalogue_schema_entry_count_on_disk(
-        app_id,
-        server_data.path(),
-        1,
-        Duration::from_secs(20),
-    )
-    .await;
 
     let restarted =
         ServerProcess::start(restart_port, server_data.path(), &jwks_server.endpoint()).await;

@@ -399,6 +399,11 @@ API/testability gap, not as covered app persistence.
   so row-history/batch-fate storage is no longer pinned as an integration
   contract; future persistence checks should be narrow catalogue-storage gates
   or direct-core app gates.
+  Schema-manager catalogue persistence and server catalogue storage now use
+  catalogue-only traits/errors instead of `crate::storage::SchemaCatalogueStorage`
+  or `crate::storage::StorageError`. The old storage module is still present
+  only for remaining row-history/client-test fallout, not as a catalogue
+  abstraction to extend.
 
 ## Next targets
 

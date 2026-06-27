@@ -15,8 +15,9 @@ use crate::schema_manager::encoding::{
 };
 use crate::schema_manager::manager::{CurrentPermissionsSummary, PermissionsHeadSummary};
 use crate::schema_manager::{AppId, Lens};
-use crate::server::catalogue_storage::{CatalogueStorage, DynCatalogueStorage};
-use crate::storage::StorageError;
+use crate::server::catalogue_storage::{
+    CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,
+};
 #[cfg(test)]
 use crate::sync::vocabulary::ConnectionSchemaDiagnostics;
 #[cfg(test)]
@@ -220,7 +221,7 @@ impl DirectCatalogueStore {
         target_hash: SchemaHash,
     ) -> Result<Option<Lens>, CatalogueError> {
         let storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        let entries = storage.scan_catalogue_entries().map_err(storage_error)?;
+        let entries = storage.scan_catalogue_entries()?;
         Ok(entries.into_iter().find_map(|entry| {
             if entry.object_type() != Some(ObjectType::CatalogueLens.as_str()) {
                 return None;
@@ -256,8 +257,10 @@ impl DirectCatalogueStore {
     }
 }
 
-fn storage_error(error: StorageError) -> CatalogueError {
-    CatalogueError::WriteError(error.to_string())
+impl From<CatalogueStorageError> for CatalogueError {
+    fn from(error: CatalogueStorageError) -> Self {
+        CatalogueError::WriteError(error.to_string())
+    }
 }
 
 fn unix_timestamp_millis() -> u64 {
@@ -280,7 +283,7 @@ struct CatalogueIndex {
 impl CatalogueIndex {
     fn from_storage(storage: &dyn CatalogueStorage, app_id: AppId) -> Result<Self, CatalogueError> {
         let mut index = Self::default();
-        for entry in storage.scan_catalogue_entries().map_err(storage_error)? {
+        for entry in storage.scan_catalogue_entries()? {
             if entry.metadata.get(MetadataKey::AppId.as_str()) != Some(&app_id.uuid().to_string()) {
                 continue;
             }
@@ -615,9 +618,7 @@ impl CatalogueStore for DirectCatalogueStore {
         let published_at = unix_timestamp_millis();
         let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at);
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        storage
-            .upsert_catalogue_entry(&entry)
-            .map_err(storage_error)?;
+        storage.upsert_catalogue_entry(&entry)?;
         let object_id = entry.object_id;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&entry);
@@ -700,12 +701,8 @@ impl CatalogueStore for DirectCatalogueStore {
         };
 
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        storage
-            .upsert_catalogue_entry(&bundle_entry)
-            .map_err(storage_error)?;
-        storage
-            .upsert_catalogue_entry(&head_entry)
-            .map_err(storage_error)?;
+        storage.upsert_catalogue_entry(&bundle_entry)?;
+        storage.upsert_catalogue_entry(&head_entry)?;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&bundle_entry);
         index.permissions_head = Some(head);
@@ -720,9 +717,7 @@ impl CatalogueStore for DirectCatalogueStore {
         }
         let entry = lens_entry(self.app_id, lens);
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        storage
-            .upsert_catalogue_entry(&entry)
-            .map_err(storage_error)?;
+        storage.upsert_catalogue_entry(&entry)?;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&entry);
         Ok(entry.object_id)
@@ -730,15 +725,17 @@ impl CatalogueStore for DirectCatalogueStore {
 
     fn flush(&self) -> Result<(), CatalogueError> {
         let storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        storage.flush().map_err(storage_error)?;
-        storage.flush_wal().map_err(storage_error)
+        storage.flush()?;
+        storage.flush_wal()?;
+        Ok(())
     }
 
     fn close(&self) -> Result<(), CatalogueError> {
         let storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        storage.flush().map_err(storage_error)?;
-        storage.flush_wal().map_err(storage_error)?;
-        storage.close().map_err(storage_error)
+        storage.flush()?;
+        storage.flush_wal()?;
+        storage.close()?;
+        Ok(())
     }
 }
 

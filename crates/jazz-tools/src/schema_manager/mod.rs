@@ -40,6 +40,7 @@
 
 pub mod auto_lens;
 pub mod catalogue_export;
+pub mod catalogue_storage;
 pub mod context;
 pub mod diff;
 pub mod encoding;
@@ -51,6 +52,7 @@ pub mod types;
 
 // Re-exports
 pub use auto_lens::generate_lens;
+pub use catalogue_storage::{CatalogueStorageError, SchemaManagerCatalogueStorage};
 pub use context::{QuerySchemaContext, SchemaContext, SchemaError};
 pub use diff::{Ambiguity, DiffResult, diff_schemas};
 pub use encoding::{

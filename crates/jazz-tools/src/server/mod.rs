@@ -466,7 +466,7 @@ mod tests {
     use crate::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
     use crate::schema_manager::AppId;
     use crate::server::builder::{ServerBuilder, StorageBackend};
-    use crate::storage::StorageError;
+    use crate::server::catalogue_storage::CatalogueStorageResult;
 
     struct CloseObservingStorage {
         close_calls: Arc<AtomicUsize>,
@@ -475,26 +475,26 @@ mod tests {
     impl CatalogueStorage for CloseObservingStorage {
         fn scan_catalogue_entries(
             &self,
-        ) -> Result<Vec<crate::catalogue::CatalogueEntry>, StorageError> {
+        ) -> CatalogueStorageResult<Vec<crate::catalogue::CatalogueEntry>> {
             Ok(Vec::new())
         }
 
         fn upsert_catalogue_entry(
             &mut self,
             _entry: &crate::catalogue::CatalogueEntry,
-        ) -> Result<(), StorageError> {
+        ) -> CatalogueStorageResult<()> {
             Ok(())
         }
 
-        fn flush(&self) -> Result<(), StorageError> {
+        fn flush(&self) -> CatalogueStorageResult<()> {
             Ok(())
         }
 
-        fn flush_wal(&self) -> Result<(), StorageError> {
+        fn flush_wal(&self) -> CatalogueStorageResult<()> {
             Ok(())
         }
 
-        fn close(&self) -> Result<(), StorageError> {
+        fn close(&self) -> CatalogueStorageResult<()> {
             self.close_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
