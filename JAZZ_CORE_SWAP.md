@@ -196,6 +196,9 @@ Until deleted, treat them as replacement targets only.
 - The direct websocket route is the intended sync boundary. Old
   `transport_protocol.rs`, `transport_manager.rs`, and `sync_manager` code
   should not regain ownership of `/ws` semantics.
+- `ServerState::process_ws_client_frame` is gated to `test-utils`; it exists
+  only for legacy in-process tests that still inject alpha `SyncPayload` frames,
+  not for production server traffic.
 - Persistent browser runtime should stay a worker-owned direct core DB, with the
   main thread acting as the public API/proxy surface. `CoreRuntime::fromDb`
   exists so the worker no longer pretends an already-open OPFS DB is
