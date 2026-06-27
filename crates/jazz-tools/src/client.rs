@@ -1755,6 +1755,7 @@ mod tests {
 
         let client = JazzClient::connect(context).await.expect("connect client");
 
+        #[allow(irrefutable_let_patterns)]
         let ClientEngine::Legacy { runtime } = &client.engine else {
             panic!(
                 "offline persistent client should use legacy runtime until direct storage lands"
@@ -1797,6 +1798,7 @@ mod tests {
 
         let client = JazzClient::connect(context).await.expect("connect client");
 
+        #[allow(irrefutable_let_patterns)]
         let ClientEngine::Legacy { runtime } = &client.engine else {
             panic!(
                 "offline persistent client should use legacy runtime until direct storage lands"
