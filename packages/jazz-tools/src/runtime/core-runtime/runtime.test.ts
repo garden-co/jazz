@@ -895,8 +895,41 @@ describe("CoreRuntime server transport", () => {
     ]);
   });
 
-  it("fails fast instead of dropping unsupported id comparisons", async () => {
-    const runtime = directRuntimeWithEmptyDb();
+  it("applies range id comparisons as post-filters", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () =>
+              encodeRows([
+                {
+                  table: "todos",
+                  rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                  title: "drop",
+                },
+                {
+                  table: "todos",
+                  rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+                  title: "keep",
+                },
+              ]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
 
     await expect(
       runtime.query(
@@ -918,7 +951,14 @@ describe("CoreRuntime server transport", () => {
           },
         }),
       ),
-    ).rejects.toThrow("does not support 'Gt' comparisons on id yet");
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000002",
+        values: [{ type: "Text", value: "keep" }],
+      },
+    ]);
+    expect(readPreparedPredicateCount(preparedBytes!)).toBe(0);
   });
 
   it("does not push limits below post-filtered id predicates", async () => {
@@ -1131,6 +1171,12 @@ function readPreparedLimit(query: Uint8Array): number | undefined {
   reader.readVec(() => undefined);
   reader.option(() => undefined);
   return reader.option((optionReader) => optionReader.u64());
+}
+
+function readPreparedPredicateCount(query: Uint8Array): number {
+  const reader = new PostcardReader(query);
+  reader.string();
+  return reader.u64();
 }
 
 function readPreparedQueryShape(query: Uint8Array): {
