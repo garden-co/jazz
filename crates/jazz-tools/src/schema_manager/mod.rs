@@ -49,9 +49,6 @@ pub mod rehydrate;
 pub mod transformer;
 pub mod types;
 
-#[cfg(test)]
-mod integration_tests;
-
 // Re-exports
 pub use auto_lens::generate_lens;
 pub use context::{QuerySchemaContext, SchemaContext, SchemaError};

@@ -319,11 +319,18 @@ auth/admission integration gap, not a row encoding or React subscription gap.
 - Legacy alpha websocket transport, `runtime_tokio`, and the old Rust
   `runtime_core` module have been deleted from the active graft. React Native is
   temporarily unsupported rather than kept alive through the deleted runtime.
+  The legacy `onMutationError` callback/event path has also been removed from
+  the TypeScript runtime surface; direct-core writes report policy/durability
+  rejection through retained write handles and `.wait(...)`. Old
+  QueryManager/SyncManager/SchemaManager integration test modules are unwired
+  from active Rust test compilation so they no longer act as the semantic oracle
+  for the replacement engine.
   Remaining old `query_manager`/`sync_manager`/storage/schema-manager code
   should be treated as public schema/query facade or catalogue scaffolding until
   it is ported to core-native types, not as a second engine to extend. The next
-  cleanup target is to hollow those modules to the smallest catalogue/admin
-  surface needed by the direct-core server and package APIs.
+  cleanup target is to replace the server admin catalogue's dependency on the
+  fat old `Storage` trait with a catalogue-only store: scan/upsert catalogue
+  entries, flush, and close.
 
 ## Next targets
 
