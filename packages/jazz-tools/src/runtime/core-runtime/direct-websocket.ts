@@ -36,16 +36,8 @@ export type DirectBrowserWebSocket = {
   addEventListener(type: "close", listener: () => void): void;
 };
 
-export function directWebSocketUrl(
-  serverUrl: string,
-  appId: string,
-  _peerIdentity: Uint8Array,
-): string {
+export function directWebSocketUrl(serverUrl: string, appId: string): string {
   return httpUrlToWs(serverUrl, appId);
-}
-
-export function directWebSocketEndpointUrl(endpointUrl: string, _peerIdentity: Uint8Array): string {
-  return endpointUrl;
 }
 
 export function encodeDirectWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
@@ -107,11 +99,10 @@ export class DirectWebSocketCarrier {
   constructor(options: DirectWebSocketCarrierOptions) {
     const WebSocketCtor = options.WebSocket ?? browserWebSocketConstructor();
     this.url = options.endpointUrl
-      ? directWebSocketEndpointUrl(options.endpointUrl, options.peerIdentity)
+      ? options.endpointUrl
       : directWebSocketUrl(
           required(options.serverUrl, "serverUrl"),
           required(options.appId, "appId"),
-          options.peerIdentity,
         );
     this.onFrame = options.onFrame;
     this.onError = options.onError;
