@@ -210,6 +210,12 @@ Until deleted, treat them as replacement targets only.
   main thread acting as the public API/proxy surface. `CoreRuntime::fromDb`
   exists so the worker no longer pretends an already-open OPFS DB is
   `openMemory`.
+- Rust `JazzClient` no longer has a `ClientEngine::{Legacy, DirectCore}` split:
+  server-backed direct-core memory clients are the only live construction path,
+  and offline/persistent client construction fails closed until direct-core
+  storage is wired in.
+- Rust `JazzClient` transactions currently fail closed on the direct-core path
+  instead of falling back to the old alpha batch runtime.
 - The current sharp correctness gap is restore replay through the direct
   websocket server. The copied core now has unit coverage for cold maintained
   view rehydrate after restore, but

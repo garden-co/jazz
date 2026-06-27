@@ -136,12 +136,6 @@ export type DirectTransport = {
   tick(): number;
 };
 
-export type DirectOpenPayload = {
-  schema: Uint8Array;
-  config: Uint8Array;
-  peerIdentity: Uint8Array;
-};
-
 type PendingTx = {
   kind: TransactionKind;
   tx: DirectTx;
@@ -196,7 +190,6 @@ export class CoreRuntime implements Runtime {
   private serverCarrierPromise: Promise<DirectWebSocketCarrier> | null = null;
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
-  private readonly syncNeededCallbacks = new Set<() => void>();
   private serverPumpScheduled = false;
   private serverPumpAgain = false;
   private closed = false;
@@ -256,7 +249,11 @@ export class CoreRuntime implements Runtime {
     }) as (error: Error | null, urgency: string) => void);
   }
 
-  getDirectOpenPayload(): DirectOpenPayload {
+  getDirectOpenPayload(): {
+    schema: Uint8Array;
+    config: Uint8Array;
+    peerIdentity: Uint8Array;
+  } {
     return { schema: this.schemaBytes, config: this.configBytes, peerIdentity: this.peerIdentity };
   }
 
@@ -276,31 +273,11 @@ export class CoreRuntime implements Runtime {
     this.pendingTxs.clear();
     this.writes.clear();
     this.queuedServerFrames.length = 0;
-    this.syncNeededCallbacks.clear();
     this.serverTransport?.close();
     this.serverTransport = null;
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.db.close?.();
-  }
-
-  encodeDirectQuery(queryJson: string): Uint8Array {
-    return encodeQueryJson(queryJson, this.schema);
-  }
-
-  decodeDirectRows(payload: Uint8Array, queryJson: string): RowState[] {
-    return filterRows(
-      rowsFromBatches(readRowBatches(payload), this.schema),
-      queryFiltersFromJson(queryJson, this.schema),
-      this.schema,
-    );
-  }
-
-  onDirectSyncNeeded(callback: () => void): () => void {
-    this.syncNeededCallbacks.add(callback);
-    return () => {
-      this.syncNeededCallbacks.delete(callback);
-    };
   }
 
   insert(
@@ -418,10 +395,7 @@ export class CoreRuntime implements Runtime {
     return this.finishMutation(write);
   }
 
-  onMutationError(_callback: (event: MutationErrorEvent) => void): void {
-    // Direct core wait() surfaces rejected writes synchronously today. Worker
-    // replay of async rejection events is handled above this runtime layer.
-  }
+  onMutationError(_callback: (event: MutationErrorEvent) => void): void {}
 
   beginTransaction(kind: TransactionKind): string {
     if (kind !== "mergeable") {
@@ -439,7 +413,6 @@ export class CoreRuntime implements Runtime {
     this.writes.set(transactionId, write);
     this.pendingTxs.delete(transactionId);
     this.pumpSubscriptions();
-    this.notifySyncNeeded();
   }
 
   async waitForTransaction(transactionId: string, tier: string): Promise<void> {
@@ -494,7 +467,11 @@ export class CoreRuntime implements Runtime {
     const rows = session
       ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
       : this.db.all(query, opts);
-    return this.decodeDirectRows(rows, queryJson);
+    return filterRows(
+      rowsFromBatches(readRowBatches(rows), this.schema),
+      queryFiltersFromJson(queryJson, this.schema),
+      this.schema,
+    );
   }
 
   createSubscription(
@@ -527,7 +504,6 @@ export class CoreRuntime implements Runtime {
       cancelled: false,
       reading: false,
     });
-    this.notifySyncNeeded();
     return handle;
   }
 
@@ -536,7 +512,6 @@ export class CoreRuntime implements Runtime {
     if (!subscription) return;
     subscription.callback = onUpdate;
     this.startSubscriptionReader(handle, subscription);
-    this.notifySyncNeeded();
   }
 
   unsubscribe(handle: number): void {
@@ -617,14 +592,12 @@ export class CoreRuntime implements Runtime {
   ): DirectInsertResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
-    this.notifySyncNeeded();
     return this.resultForRow(table, rowId, transactionId, identity);
   }
 
   private finishMutation(write: DirectWrite): DirectMutationResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
-    this.notifySyncNeeded();
     return { transactionId };
   }
 
@@ -649,7 +622,7 @@ export class CoreRuntime implements Runtime {
   }
 
   private prepareQuery(queryJson: string): DirectPreparedQuery {
-    const queryBytes = this.encodeDirectQuery(queryJson);
+    const queryBytes = encodeQueryJson(queryJson, this.schema);
     const key = bytesKey(queryBytes);
     let query = this.preparedQueries.get(key);
     if (!query) {
@@ -709,18 +682,8 @@ export class CoreRuntime implements Runtime {
     }
   }
 
-  private notifySyncNeeded(): void {
-    if (this.closed) return;
-    for (const callback of this.syncNeededCallbacks) {
-      callback();
-    }
-  }
-
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
     if (this.closed) return;
-    for (const callback of this.syncNeededCallbacks) {
-      callback();
-    }
     if (urgency === "immediate") {
       this.scheduleServerPump();
       return;
