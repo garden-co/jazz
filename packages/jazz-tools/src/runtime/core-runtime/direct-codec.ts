@@ -207,6 +207,13 @@ export type DirectQueryOrder = {
   direction: "Asc" | "Desc";
 };
 
+export type DirectQueryOptions = {
+  limit?: number;
+  offset?: number;
+  orderBy?: DirectQueryOrder[];
+  select?: string[];
+};
+
 export function queryWithEqFilters(
   table: string,
   filters: Array<{ column: string; value: DirectQueryLiteral }>,
@@ -222,10 +229,10 @@ export function queryWithEqFilters(
 export function queryWithPredicates(
   table: string,
   predicates: DirectQueryPredicate[],
-  options: number | { limit?: number; offset?: number; orderBy?: DirectQueryOrder[] } = {},
+  options: number | DirectQueryOptions = {},
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
-  const { limit, offset = 0, orderBy = [] } = queryOptions;
+  const { limit, offset = 0, orderBy = [], select } = queryOptions;
   if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
     throw new Error("query limit must be a non-negative safe integer");
   }
@@ -241,7 +248,15 @@ export function queryWithPredicates(
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
-  writer.none();
+  if (select == null) {
+    writer.none();
+  } else {
+    writer.some((selectWriter) => {
+      selectWriter.vec((columnWriter, index) => {
+        columnWriter.string(select[index]!);
+      }, select.length);
+    });
+  }
   writer.vec((order, index) => {
     const term = orderBy[index]!;
     order.string(term.column);
