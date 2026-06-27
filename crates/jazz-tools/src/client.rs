@@ -48,13 +48,14 @@ use crate::transport_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;
 #[cfg(feature = "direct-core-client")]
 use jazz::db::{
-    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
+    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
     LocalUpdates as CoreLocalUpdates, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
-    SubscriptionEvent as CoreSubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
+    SubscriptionEvent as CoreSubscriptionEvent, TickScheduler, TickUrgency,
+    Transport as CoreTransport, WireTransportAdapter,
 };
 #[cfg(feature = "direct-core-client")]
 use jazz::groove::records::Value as CoreValue;
-#[cfg(all(feature = "direct-core-client", not(feature = "rocksdb")))]
+#[cfg(feature = "direct-core-client")]
 use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
 #[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
 use jazz::groove::storage::RocksDbStorage as CoreRocksDbStorage;
@@ -78,19 +79,16 @@ use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, Subscri
 type DynStorage = Box<dyn Storage + Send>;
 #[cfg(all(test, feature = "transport-websocket"))]
 type ClientRuntime = crate::runtime_tokio::TokioRuntime<DynStorage>;
-#[cfg(all(feature = "direct-core-client", not(feature = "rocksdb")))]
-type DirectCoreDb = CoreDb<CoreMemoryStorage>;
-#[cfg(all(feature = "direct-core-client", not(feature = "rocksdb")))]
-type DirectCoreStorage = CoreMemoryStorage;
-#[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
-type DirectCoreDb = CoreDb<CoreRocksDbStorage>;
-#[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
-type DirectCoreStorage = CoreRocksDbStorage;
 #[cfg(feature = "direct-core-client")]
-struct DirectCoreStorageBundle {
-    storage: DirectCoreStorage,
+type DirectCoreMemoryDb = CoreDb<CoreMemoryStorage>;
+#[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
+type DirectCoreRocksDb = CoreDb<CoreRocksDbStorage>;
+
+#[cfg(feature = "direct-core-client")]
+enum DirectCoreStorageBundle {
+    Memory(CoreMemoryStorage),
     #[cfg(feature = "rocksdb")]
-    _temporary_dir: Option<tempfile::TempDir>,
+    RocksDb(CoreRocksDbStorage),
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,12 +143,247 @@ struct DirectCoreEngine {
 
 #[cfg(feature = "direct-core-client")]
 struct DirectCoreInner {
-    db: Rc<DirectCoreDb>,
-    #[cfg(feature = "rocksdb")]
-    _temporary_storage_dir: Option<tempfile::TempDir>,
+    db: DirectCoreBackend,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<BatchId, DirectTransactionState>,
+}
+
+#[cfg(feature = "direct-core-client")]
+enum DirectCoreBackend {
+    Memory(Rc<DirectCoreMemoryDb>),
+    #[cfg(feature = "rocksdb")]
+    RocksDb(Rc<DirectCoreRocksDb>),
+}
+
+#[cfg(feature = "direct-core-client")]
+impl Clone for DirectCoreBackend {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Memory(db) => Self::Memory(Rc::clone(db)),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => Self::RocksDb(Rc::clone(db)),
+        }
+    }
+}
+
+#[cfg(feature = "direct-core-client")]
+impl DirectCoreBackend {
+    async fn open(
+        schema: jazz::schema::JazzSchema,
+        storage: DirectCoreStorageBundle,
+        identity: CoreDbIdentity,
+    ) -> Result<Self> {
+        match storage {
+            DirectCoreStorageBundle::Memory(storage) => Ok(Self::Memory(Rc::new(
+                CoreDb::open(CoreDbConfig::new(schema, storage, identity))
+                    .await
+                    .map_err(|error| JazzError::Connection(error.to_string()))?,
+            ))),
+            #[cfg(feature = "rocksdb")]
+            DirectCoreStorageBundle::RocksDb(storage) => Ok(Self::RocksDb(Rc::new(
+                CoreDb::open(CoreDbConfig::new(schema, storage, identity))
+                    .await
+                    .map_err(|error| JazzError::Connection(error.to_string()))?,
+            ))),
+        }
+    }
+
+    fn set_tick_scheduler(&self, scheduler: Rc<DirectCoreTickScheduler>) {
+        match self {
+            Self::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.set_tick_scheduler(Some(scheduler)),
+        }
+    }
+
+    fn connect_upstream(&self, transport: Box<dyn CoreTransport>) {
+        match self {
+            Self::Memory(db) => {
+                db.connect_upstream(transport);
+            }
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => {
+                db.connect_upstream(transport);
+            }
+        }
+    }
+
+    fn tick(&self) -> std::result::Result<(), CoreDbError> {
+        match self {
+            Self::Memory(db) => db.tick(),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.tick(),
+        }
+    }
+
+    fn insert(
+        &self,
+        table: &str,
+        cells: jazz::db::RowCells,
+    ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
+        match self {
+            Self::Memory(db) => {
+                let write = db.insert(table, cells)?;
+                Ok((write.row_uuid(), write.mergeable_tx_id()))
+            }
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => {
+                let write = db.insert(table, cells)?;
+                Ok((write.row_uuid(), write.mergeable_tx_id()))
+            }
+        }
+    }
+
+    fn insert_with_id(
+        &self,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: jazz::db::RowCells,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        match self {
+            Self::Memory(db) => Ok(db.insert_with_id(table, row_id, cells)?.mergeable_tx_id()),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => Ok(db.insert_with_id(table, row_id, cells)?.mergeable_tx_id()),
+        }
+    }
+
+    fn upsert(
+        &self,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: jazz::db::RowCells,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        match self {
+            Self::Memory(db) => Ok(db.upsert(table, row_id, cells)?.mergeable_tx_id()),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => Ok(db.upsert(table, row_id, cells)?.mergeable_tx_id()),
+        }
+    }
+
+    fn update(
+        &self,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: jazz::db::RowCells,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        match self {
+            Self::Memory(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
+        }
+    }
+
+    fn delete(
+        &self,
+        table: &str,
+        row_id: CoreRowUuid,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        match self {
+            Self::Memory(db) => Ok(db.delete(table, row_id)?.mergeable_tx_id()),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => Ok(db.delete(table, row_id)?.mergeable_tx_id()),
+        }
+    }
+
+    fn commit_writes(
+        &self,
+        writes: Vec<DirectTransactionWrite>,
+    ) -> std::result::Result<(CoreTxId, Vec<(ObjectId, String)>), CoreDbError> {
+        match self {
+            Self::Memory(db) => commit_direct_writes(db, writes),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => commit_direct_writes(db, writes),
+        }
+    }
+
+    fn prepare_query(
+        &self,
+        query: &jazz::query::Query,
+    ) -> std::result::Result<jazz::db::PreparedQuery, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.prepare_query(query),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.prepare_query(query),
+        }
+    }
+
+    fn query_is_covered(&self, prepared: &jazz::db::PreparedQuery) -> bool {
+        match self {
+            Self::Memory(db) => db.query_is_covered(prepared),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.query_is_covered(prepared),
+        }
+    }
+
+    async fn all(
+        &self,
+        prepared: &jazz::db::PreparedQuery,
+        opts: CoreReadOpts,
+    ) -> std::result::Result<Vec<jazz::node::CurrentRow>, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.all(prepared, opts).await,
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.all(prepared, opts).await,
+        }
+    }
+
+    async fn subscribe(
+        &self,
+        prepared: &jazz::db::PreparedQuery,
+        opts: CoreReadOpts,
+    ) -> std::result::Result<jazz::db::SubscriptionStream, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.subscribe(prepared, opts).await,
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.subscribe(prepared, opts).await,
+        }
+    }
+
+    fn write_state(
+        &self,
+        tx_id: CoreTxId,
+    ) -> std::result::Result<jazz::db::WriteState, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.write_state(tx_id),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.write_state(tx_id),
+        }
+    }
+
+    async fn next_write_state_change(&self, tx_id: CoreTxId) {
+        match self {
+            Self::Memory(db) => db.next_write_state_change(tx_id).await,
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.next_write_state_change(tx_id).await,
+        }
+    }
+}
+
+#[cfg(feature = "direct-core-client")]
+fn commit_direct_writes<S>(
+    db: &CoreDb<S>,
+    writes: Vec<DirectTransactionWrite>,
+) -> std::result::Result<(CoreTxId, Vec<(ObjectId, String)>), CoreDbError>
+where
+    S: jazz::groove::storage::OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    let mut tx = db.mergeable_tx();
+    let mut touched_rows = Vec::new();
+    for write in writes {
+        match write.deletion {
+            Some(CoreDeletionEvent::Deleted) => {
+                tx.delete(&write.table, CoreRowUuid(*write.row_id.uuid()))?
+            }
+            Some(CoreDeletionEvent::Restored) => {
+                tx.restore(&write.table, CoreRowUuid(*write.row_id.uuid()), write.cells)?
+            }
+            None => tx.update(&write.table, CoreRowUuid(*write.row_id.uuid()), write.cells)?,
+        }
+        touched_rows.push((write.row_id, write.table));
+    }
+    let tx_id = tx.commit()?;
+    Ok((tx_id, touched_rows))
 }
 
 #[cfg(feature = "direct-core-client")]
@@ -269,15 +502,24 @@ impl DirectCoreEngine {
         cells: jazz::db::RowCells,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
-        let write = match row_id {
-            Some(uuid) => inner.db.insert_with_id(&table, CoreRowUuid(uuid), cells),
-            None => inner.db.insert(&table, cells),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_direct_write_not_rejected(&inner.db, write.mergeable_tx_id())?;
-        let object_id = ObjectId::from_uuid(write.row_uuid().0);
-        inner.remember_write(object_id, &table, write.mergeable_tx_id());
-        Ok((object_id, write.mergeable_tx_id()))
+        let (row_uuid, tx_id) = match row_id {
+            Some(uuid) => {
+                let row_uuid = CoreRowUuid(uuid);
+                let tx_id = inner
+                    .db
+                    .insert_with_id(&table, row_uuid, cells)
+                    .map_err(|error| JazzError::Write(error.to_string()))?;
+                (row_uuid, tx_id)
+            }
+            None => inner
+                .db
+                .insert(&table, cells)
+                .map_err(|error| JazzError::Write(error.to_string()))?,
+        };
+        JazzClient::check_direct_write_not_rejected(&inner.db, tx_id)?;
+        let object_id = ObjectId::from_uuid(row_uuid.0);
+        inner.remember_write(object_id, &table, tx_id);
+        Ok((object_id, tx_id))
     }
 
     fn stage_insert(
@@ -309,10 +551,10 @@ impl DirectCoreEngine {
             .db
             .upsert(&table, CoreRowUuid(row_id), cells)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_direct_write_not_rejected(&inner.db, write.mergeable_tx_id())?;
+        JazzClient::check_direct_write_not_rejected(&inner.db, write)?;
         let object_id = ObjectId::from_uuid(row_id);
-        inner.remember_write(object_id, &table, write.mergeable_tx_id());
-        let tx_id = write.mergeable_tx_id();
+        inner.remember_write(object_id, &table, write);
+        let tx_id = write;
         Ok(tx_id)
     }
 
@@ -350,9 +592,9 @@ impl DirectCoreEngine {
             .db
             .update(&table, CoreRowUuid(*row_id.uuid()), cells)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_direct_write_not_rejected(&inner.db, write.mergeable_tx_id())?;
-        inner.remember_write(row_id, &table, write.mergeable_tx_id());
-        let tx_id = write.mergeable_tx_id();
+        JazzClient::check_direct_write_not_rejected(&inner.db, write)?;
+        inner.remember_write(row_id, &table, write);
+        let tx_id = write;
         Ok(tx_id)
     }
 
@@ -392,9 +634,9 @@ impl DirectCoreEngine {
             .db
             .delete(&table, CoreRowUuid(*row_id.uuid()))
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_direct_write_not_rejected(&inner.db, write.mergeable_tx_id())?;
-        inner.remember_write(row_id, &table, write.mergeable_tx_id());
-        let tx_id = write.mergeable_tx_id();
+        JazzClient::check_direct_write_not_rejected(&inner.db, write)?;
+        inner.remember_write(row_id, &table, write);
+        let tx_id = write;
         Ok(tx_id)
     }
 
@@ -442,24 +684,9 @@ impl DirectCoreEngine {
                 "direct core transaction cannot commit without writes".to_string(),
             ));
         }
-        let mut tx = inner.db.mergeable_tx();
-        let mut touched_rows = Vec::new();
-        for write in state.writes {
-            match write.deletion {
-                Some(CoreDeletionEvent::Deleted) => tx
-                    .delete(&write.table, CoreRowUuid(*write.row_id.uuid()))
-                    .map_err(|error| JazzError::Write(error.to_string()))?,
-                Some(CoreDeletionEvent::Restored) => tx
-                    .restore(&write.table, CoreRowUuid(*write.row_id.uuid()), write.cells)
-                    .map_err(|error| JazzError::Write(error.to_string()))?,
-                None => tx
-                    .update(&write.table, CoreRowUuid(*write.row_id.uuid()), write.cells)
-                    .map_err(|error| JazzError::Write(error.to_string()))?,
-            }
-            touched_rows.push((write.row_id, write.table));
-        }
-        let tx_id = tx
-            .commit()
+        let (tx_id, touched_rows) = inner
+            .db
+            .commit_writes(state.writes)
             .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_direct_write_not_rejected(&inner.db, tx_id)?;
         inner.write_map.insert(batch_id, tx_id);
@@ -511,12 +738,8 @@ impl DirectCoreInner {
         auth: Option<WsAuthConfig>,
         scheduler: Rc<DirectCoreTickScheduler>,
     ) -> Result<Self> {
-        let db = Rc::new(
-            CoreDb::open(CoreDbConfig::new(schema.clone(), storage.storage, identity))
-                .await
-                .map_err(|error| JazzError::Connection(error.to_string()))?,
-        );
-        db.set_tick_scheduler(Some(scheduler.clone()));
+        let db = DirectCoreBackend::open(schema, storage, identity).await?;
+        db.set_tick_scheduler(scheduler.clone());
         if let Some(server_url) = server_url {
             let auth = auth.ok_or_else(|| {
                 JazzError::Connection(
@@ -540,8 +763,6 @@ impl DirectCoreInner {
         }
         Ok(Self {
             db,
-            #[cfg(feature = "rocksdb")]
-            _temporary_storage_dir: storage._temporary_dir,
             write_map: HashMap::new(),
             row_tables: HashMap::new(),
             transactions: HashMap::new(),
@@ -567,7 +788,7 @@ impl DirectCoreInner {
         }
         let (db, prepared) = {
             let inner = inner.borrow();
-            (Rc::clone(&inner.db), prepared)
+            (inner.db.clone(), prepared)
         };
         let rows = db
             .all(&prepared, opts)
@@ -635,7 +856,7 @@ impl DirectCoreInner {
                 .db
                 .prepare_query(&query)
                 .map_err(|error| JazzError::Query(error.to_string()))?;
-            (Rc::clone(&inner.db), prepared)
+            (inner.db.clone(), prepared)
         };
         let stream = db
             .subscribe(&prepared, opts)
@@ -706,9 +927,9 @@ impl DirectCoreInner {
                     "timed out waiting for direct core batch to reach {tier:?}"
                 )));
             }
-            let db = Rc::clone(&inner.borrow().db);
-            let wait = db.next_write_state_change(tx_id);
-            let state = db
+            let state = inner
+                .borrow()
+                .db
                 .write_state(tx_id)
                 .map_err(|error| JazzError::Sync(error.to_string()))?;
             if matches!(state.fate, CoreFate::Rejected(_)) {
@@ -719,7 +940,11 @@ impl DirectCoreInner {
             if state.durability >= desired {
                 return Ok(());
             }
-            if tokio::time::timeout_at(deadline, wait).await.is_err() {
+            let db = inner.borrow().db.clone();
+            if tokio::time::timeout_at(deadline, db.next_write_state_change(tx_id))
+                .await
+                .is_err()
+            {
                 return Err(JazzError::Sync(format!(
                     "timed out waiting for direct core batch to reach {tier:?}"
                 )));
@@ -888,35 +1113,24 @@ fn direct_core_storage(
     #[cfg(feature = "rocksdb")]
     {
         match context.storage {
-            ClientStorage::Memory => {
-                let data_dir = tempfile::TempDir::new()
-                    .map_err(|error| JazzError::Connection(error.to_string()))?;
-                let db_path = data_dir.path().join("jazz-core.rocksdb");
-                let storage = CoreRocksDbStorage::open(&db_path, &refs)
-                    .map_err(|error| JazzError::Connection(error.to_string()))?;
-                Ok(DirectCoreStorageBundle {
-                    storage,
-                    _temporary_dir: Some(data_dir),
-                })
-            }
+            ClientStorage::Memory => Ok(DirectCoreStorageBundle::Memory(CoreMemoryStorage::new(
+                &refs,
+            ))),
             ClientStorage::Persistent => {
                 std::fs::create_dir_all(&context.data_dir)?;
                 let db_path = context.data_dir.join("jazz-core.rocksdb");
                 let storage = CoreRocksDbStorage::open(&db_path, &refs)
                     .map_err(|error| JazzError::Connection(error.to_string()))?;
-                Ok(DirectCoreStorageBundle {
-                    storage,
-                    _temporary_dir: None,
-                })
+                Ok(DirectCoreStorageBundle::RocksDb(storage))
             }
         }
     }
     #[cfg(not(feature = "rocksdb"))]
     {
         let _ = context;
-        Ok(DirectCoreStorageBundle {
-            storage: CoreMemoryStorage::new(&refs),
-        })
+        Ok(DirectCoreStorageBundle::Memory(CoreMemoryStorage::new(
+            &refs,
+        )))
     }
 }
 
@@ -1025,7 +1239,7 @@ impl JazzClient {
     }
 
     #[cfg(feature = "direct-core-client")]
-    fn check_direct_write_not_rejected(db: &DirectCoreDb, tx_id: CoreTxId) -> Result<()> {
+    fn check_direct_write_not_rejected(db: &DirectCoreBackend, tx_id: CoreTxId) -> Result<()> {
         let state = db
             .write_state(tx_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
@@ -1673,6 +1887,18 @@ mod tests {
         }
     }
 
+    fn make_offline_context_with_storage(
+        app_id: AppId,
+        data_dir: std::path::PathBuf,
+        schema: Schema,
+        storage: ClientStorage,
+    ) -> AppContext {
+        AppContext {
+            storage,
+            ..make_offline_context(app_id, data_dir, schema)
+        }
+    }
+
     fn make_test_jwt(sub: &str, claims: serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"none","typ":"JWT"}"#);
@@ -1861,28 +2087,19 @@ mod tests {
             ),
         )
         .expect("open direct core storage");
-        let db = Rc::new(
-            DirectCoreDb::open(CoreDbConfig::new(
-                core_schema.clone(),
-                storage.storage,
-                CoreDbIdentity {
-                    node: CoreNodeUuid::from_bytes([0x11; 16]),
-                    author: CoreAuthorId::from_bytes([0xa1; 16]),
-                },
-            ))
-            .await
-            .expect("open direct core db"),
-        );
-        let engine = DirectCoreEngine {
-            inner: Rc::new(std::cell::RefCell::new(DirectCoreInner {
-                db,
-                #[cfg(feature = "rocksdb")]
-                _temporary_storage_dir: storage._temporary_dir,
-                write_map: HashMap::new(),
-                row_tables: HashMap::new(),
-                transactions: HashMap::new(),
-            })),
-        };
+        let engine = DirectCoreEngine::start(
+            core_schema.clone(),
+            storage,
+            CoreDbIdentity {
+                node: CoreNodeUuid::from_bytes([0x11; 16]),
+                author: CoreAuthorId::from_bytes([0xa1; 16]),
+            },
+            None,
+            AppId::from_name("direct-core-transaction-test"),
+            None,
+        )
+        .await
+        .expect("open direct core engine");
 
         let batch_id = engine.begin_transaction().expect("begin transaction");
         let row_id = engine
@@ -1952,10 +2169,11 @@ mod tests {
     async fn offline_persistent_client_rehydrates_rows_from_direct_core_storage() {
         let data_dir = TempDir::new().expect("temp client dir");
         let app_id = AppId::from_name("client-direct-core-row-rehydrate");
-        let context = make_offline_context(
+        let context = make_offline_context_with_storage(
             app_id,
             data_dir.path().to_path_buf(),
             declared_todo_schema(),
+            ClientStorage::Persistent,
         );
 
         let client = JazzClient::connect(context.clone())
@@ -1987,6 +2205,39 @@ mod tests {
                 row_id,
                 vec![Value::Text("rehydrated".to_string()), Value::Boolean(false)]
             )]
+        );
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn offline_memory_client_does_not_create_direct_core_rocksdb_dir() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-direct-core-memory");
+        let context = make_offline_context_with_storage(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+            ClientStorage::Memory,
+        );
+
+        let client = JazzClient::connect(context)
+            .await
+            .expect("connect offline memory direct core client");
+        let (_row_id, _values, batch_id) = client
+            .insert(
+                "todos",
+                crate::row_input!("title" => "memory", "completed" => false),
+            )
+            .expect("insert offline memory row");
+        client
+            .wait_for_batch(batch_id, DurabilityTier::Local)
+            .await
+            .expect("wait for local durability");
+        drop(client);
+
+        assert!(
+            !data_dir.path().join("jazz-core.rocksdb").exists(),
+            "memory direct core storage should not create a RocksDB data directory"
         );
     }
 

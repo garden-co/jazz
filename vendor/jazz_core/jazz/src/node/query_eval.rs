@@ -644,6 +644,7 @@ where
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
     ) -> Result<Option<LocalMaintainedViewSubscriptionUpdate>, Error> {
+        self.database.flush().map_err(Error::Groove)?;
         let mut states = BTreeMap::<ResultRowEntry, (bool, bool)>::new();
         loop {
             match local.subscription.try_recv() {
