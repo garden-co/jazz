@@ -694,10 +694,9 @@ describe("alpha public package flow", () => {
     ).toBeNull();
 
     unsubscribe();
-    expect(snapshots.some((rows) => rows.length === 0)).toBe(true);
     expect(
-      snapshots.some((rows) =>
-        rows.some((todo) => todo.title === "Adopt alpha public flow" && todo.done),
+      snapshots.some(
+        (rows) => rows.length === 1 && rows[0]?.title === "Adopt alpha public flow" && rows[0].done,
       ),
     ).toBe(true);
 
