@@ -29,7 +29,6 @@ const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
 #[cfg(feature = "rocksdb")]
 const LOCAL_ENGINE_ROCKSDB_DIR: &str = "local-engine.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-const EDGE_UPSTREAM_UNSUPPORTED_MESSAGE: &str = "edge upstream sync is temporarily unsupported while server-to-server sync is migrated to the core engine; refusing to start the retired alpha transport";
 
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -72,8 +71,6 @@ pub struct ServerBuilder {
     local_engine_schema: Option<JazzSchema>,
     upstream_url: Option<String>,
     shutdown_timeout: Duration,
-    #[cfg(test)]
-    allow_unsupported_upstream_for_catalogue_tests: bool,
 }
 
 impl ServerBuilder {
@@ -91,8 +88,6 @@ impl ServerBuilder {
             local_engine_schema: None,
             upstream_url: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
-            #[cfg(test)]
-            allow_unsupported_upstream_for_catalogue_tests: false,
         }
     }
 
@@ -108,12 +103,6 @@ impl ServerBuilder {
 
     pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
         self.upstream_url = Some(upstream_url.into());
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn allow_unsupported_upstream_for_catalogue_tests(mut self) -> Self {
-        self.allow_unsupported_upstream_for_catalogue_tests = true;
         self
     }
 
@@ -150,12 +139,6 @@ impl ServerBuilder {
             None => None,
         };
         validate_server_config(&auth_config, topology)?;
-        #[cfg(test)]
-        let allow_unsupported_upstream_for_catalogue_tests =
-            self.allow_unsupported_upstream_for_catalogue_tests;
-        #[cfg(not(test))]
-        let allow_unsupported_upstream_for_catalogue_tests = false;
-        validate_upstream_sync_supported(topology, allow_unsupported_upstream_for_catalogue_tests)?;
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
@@ -426,17 +409,6 @@ fn validate_server_config(
     Ok(())
 }
 
-fn validate_upstream_sync_supported(
-    topology: ServerTopology,
-    allow_unsupported_upstream_for_catalogue_tests: bool,
-) -> Result<(), String> {
-    if topology.is_edge() && !allow_unsupported_upstream_for_catalogue_tests {
-        return Err(EDGE_UPSTREAM_UNSUPPORTED_MESSAGE.to_owned());
-    }
-
-    Ok(())
-}
-
 fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
     info!(
         "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, topology={:?}",
@@ -497,7 +469,7 @@ mod tests {
     use crate::server::catalogue::CatalogueStore;
 
     #[tokio::test]
-    async fn edge_upstream_mode_is_explicitly_unsupported() {
+    async fn edge_upstream_mode_builds_with_admin_secret() {
         let app_id =
             AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
         let auth_config = AuthConfig {
@@ -512,10 +484,7 @@ mod tests {
             .build()
             .await;
 
-        assert_eq!(
-            result.err().as_deref(),
-            Some(EDGE_UPSTREAM_UNSUPPORTED_MESSAGE)
-        );
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -584,8 +553,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_rejects_edge_mode_with_admin_secret_until_core_upstream_exists() {
-        let result = ServerBuilder::new(AppId::from_name("edge-builder-admin-secret-only"))
+    async fn builder_accepts_edge_mode_with_admin_secret() {
+        let built = ServerBuilder::new(AppId::from_name("edge-builder-admin-secret-only"))
             .with_storage(StorageBackend::InMemory)
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_string()),
@@ -593,12 +562,11 @@ mod tests {
             })
             .with_upstream_url("ws://127.0.0.1:9")
             .build()
-            .await;
+            .await
+            .expect("build edge server with admin secret");
 
-        assert_eq!(
-            result.err().as_deref(),
-            Some(EDGE_UPSTREAM_UNSUPPORTED_MESSAGE)
-        );
+        assert!(built.state.topology.is_edge());
+        assert!(built.state.upstream_http_url.is_some());
     }
 
     #[tokio::test]
@@ -709,8 +677,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_refuses_edge_tier_until_upstream_sync_uses_core() {
-        let result = ServerBuilder::new(AppId::from_name("edge-builder-tier"))
+    async fn builder_uses_edge_tier_with_upstream() {
+        let built = ServerBuilder::new(AppId::from_name("edge-builder-tier"))
             .with_storage(StorageBackend::InMemory)
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_string()),
@@ -718,11 +686,18 @@ mod tests {
             })
             .with_upstream_url("ws://127.0.0.1:9")
             .build()
-            .await;
+            .await
+            .expect("build edge server");
+
+        let tiers = built
+            .state
+            .catalogue_store
+            .local_durability_tiers_for_test()
+            .expect("read catalogue durability tiers");
 
         assert_eq!(
-            result.err().as_deref(),
-            Some(EDGE_UPSTREAM_UNSUPPORTED_MESSAGE)
+            tiers,
+            std::collections::HashSet::from([DurabilityTier::EdgeServer])
         );
     }
 }

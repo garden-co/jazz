@@ -127,7 +127,7 @@ mod tests {
 
     use crate::AppId;
     use crate::query_api::types::{SchemaHash, TableName};
-    use crate::schema_manager::LensOp;
+    use crate::schema_lens::LensOp;
     use std::time::Duration;
 
     use crate::query_api::types::{
@@ -198,7 +198,6 @@ mod tests {
         ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(test_auth_config())
             .with_upstream_url(upstream_url)
-            .allow_unsupported_upstream_for_catalogue_tests()
             .with_storage(StorageBackend::InMemory)
             .with_schema(schema)
             .build()

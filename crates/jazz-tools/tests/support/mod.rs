@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz_tools::schema_api::SchemaHash;
-use jazz_tools::schema_manager::Lens;
+use jazz_tools::schema_lens::Lens;
 use jazz_tools::AppId;
 use jazz_tools::server::{JazzServer, ServerState};
 use jazz_tools::sync::ClientId;
