@@ -1,6 +1,8 @@
-# Batched Tick Orchestration — Status Quo
+# Batched Tick Orchestration - Legacy Alpha Runtime
 
-`RuntimeCore` is where Jazz's local-first promise becomes concrete.
+`RuntimeCore` is the old alpha runtime. In the grafted direct-core branch it is
+quarantined behind `legacy-alpha-engine` for migration tests and binding fallout,
+not the production path to extend.
 
 Application code wants two things at the same time:
 
@@ -12,9 +14,9 @@ The runtime gets both by splitting work into two cooperating loops:
 - `immediate_tick()` for local settling
 - `batched_tick()` for queued sync I/O
 
-## What RuntimeCore Owns
+## What RuntimeCore Owned
 
-Today, `RuntimeCore` owns:
+The old runtime owns:
 
 - `SchemaManager`
 - `SyncManager`
@@ -23,7 +25,9 @@ Today, `RuntimeCore` owns:
 - a `Scheduler`
 - a `SyncSender`
 
-`QueryManager` lives inside `SchemaManager`, so the whole relational stack still settles inside one runtime entry point.
+`QueryManager` lives inside `SchemaManager`, so the old relational stack settles
+inside one runtime entry point. New execution work should move to direct core /
+Groove rather than adding behavior here.
 
 ## Why There Are Two Ticks
 
@@ -103,11 +107,9 @@ without changing the relational logic itself.
 
 ## Key Files
 
-| File                                           | Purpose                                  |
-| ---------------------------------------------- | ---------------------------------------- |
-| `crates/jazz-tools/src/runtime_core.rs`        | RuntimeCore definition and top-level API |
-| `crates/jazz-tools/src/runtime_core/ticks.rs`  | Tick orchestration                       |
-| `crates/jazz-tools/src/runtime_core/writes.rs` | Local write helpers                      |
-| `crates/jazz-tools/src/monotonic_clock.rs`     | Monotonic timestamp allocation           |
-| `crates/jazz-wasm/src/runtime.rs`              | Browser scheduler/runtime bridge         |
-| `crates/jazz-napi/src/lib.rs`                  | Native embedded runtime bridge           |
+| File                                           | Purpose                        |
+| ---------------------------------------------- | ------------------------------ |
+| `crates/jazz-tools/src/runtime_core/`          | Quarantined legacy RuntimeCore |
+| `crates/jazz-tools/src/runtime_core/ticks.rs`  | Tick orchestration             |
+| `crates/jazz-tools/src/runtime_core/writes.rs` | Local write helpers            |
+| `crates/jazz-tools/src/runtime_tokio.rs`       | Quarantined Tokio wrapper      |

@@ -308,13 +308,13 @@ auth/admission integration gap, not a row encoding or React subscription gap.
 - Node HTTP, todo WebSocket, shared-todo WebSocket, and chat WebSocket smokes
   now run directly on `createDb`/`WasmDb.connectUpstream()`. WebSocket frames are
   opaque byte batches; row decoding stays at the app/test edge.
-- Legacy alpha websocket transport is quarantined behind the explicit
-  `legacy-alpha-transport` Cargo feature, and the old `runtime_core`/
-  `runtime_tokio` runtime modules are quarantined behind `legacy-alpha-engine`.
-  Production-facing direct-core client/server checks compile without these
-  features. Remaining old `query_manager`/`sync_manager`/storage code should be
-  treated as public schema/query façade or catalogue scaffolding until it is
-  ported to core-native types, not as a second engine to extend.
+- Legacy alpha websocket transport has been deleted from the graft. The old
+  `runtime_core`/`runtime_tokio` runtime modules remain quarantined behind
+  `legacy-alpha-engine` for migration tests and binding fallout. Production-facing
+  direct-core client/server checks compile without that feature. Remaining old
+  `query_manager`/`sync_manager`/storage code should be treated as public
+  schema/query facade or catalogue scaffolding until it is ported to core-native
+  types, not as a second engine to extend.
 
 ## Next targets
 
