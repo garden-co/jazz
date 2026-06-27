@@ -697,7 +697,7 @@ describe("CoreRuntime server transport", () => {
     expect(calls).toEqual([]);
   });
 
-  it("rejects unsupported subscription relation shapes before subscribing", () => {
+  it("rejects unsupported subscription relation shapes while preparing the original query", () => {
     const calls: string[] = [];
     const runtime = new CoreRuntime(
       {
@@ -814,7 +814,88 @@ describe("CoreRuntime server transport", () => {
     expect(readPreparedSelect(preparedBytes!)).toEqual(["title"]);
   });
 
-  it("rejects Gather subscriptions before preparing trigger fanout queries", () => {
+  it("uses native subscription chunks for array subquery subscriptions", async () => {
+    const calls: string[] = [];
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              calls.push("all");
+              return new Uint8Array([0]);
+            },
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            subscribe: () => {
+              calls.push("subscribe");
+              return new ReadableStream({
+                start(streamController) {
+                  controller = streamController;
+                },
+              });
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const deltas: unknown[] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          {
+            column_name: "children",
+            table: "todos",
+            inner_column: "parent_id",
+            outer_column: "id",
+          },
+        ],
+      }),
+    );
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      deltas.push(delta);
+    });
+
+    controller!.enqueue({
+      type: "snapshot",
+      rows: encodeRows([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "native",
+        },
+      ]),
+    });
+    await Promise.resolve();
+
+    expect(calls).toEqual(["prepareQuery", "subscribe"]);
+    expect(deltas).toEqual([
+      [
+        {
+          kind: 0,
+          id: "00000000-0000-0000-0000-000000000001",
+          index: 0,
+          row: {
+            id: "00000000-0000-0000-0000-000000000001",
+            values: [{ type: "Text", value: "native" }],
+          },
+        },
+      ],
+    ]);
+  });
+
+  it("rejects Gather subscriptions while preparing the original query", () => {
     const calls: string[] = [];
     const runtime = new CoreRuntime(
       {
