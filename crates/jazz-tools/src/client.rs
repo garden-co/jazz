@@ -1264,13 +1264,18 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "rocksdb")]
     use crate::query_manager::policy::PolicyExpr;
-    use crate::query_manager::types::{Schema, SchemaHash, TableName, TablePolicies};
+    use crate::query_manager::types::Schema;
+    #[cfg(feature = "rocksdb")]
+    use crate::query_manager::types::{SchemaHash, TableName, TablePolicies};
+    #[cfg(feature = "rocksdb")]
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
+    use crate::runtime_tokio::TokioRuntime;
     use crate::schema_manager::AppId;
     #[cfg(feature = "rocksdb")]
     use crate::storage::RocksDBStorage;
-    use crate::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
 

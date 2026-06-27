@@ -170,17 +170,18 @@ impl ServerBuilder {
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
-        let (runtime, connection_event_hub) = self.build_runtime()?;
+        let (catalogue_runtime, connection_event_hub) = self.build_catalogue_runtime()?;
         let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
         let core_server_storage_config = self.build_core_server_storage_config();
-        let core_server = self.build_core_server(&runtime, core_server_storage_config.clone())?;
+        let core_server =
+            self.build_core_server(&catalogue_runtime, core_server_storage_config.clone())?;
         let core_server_storage_config = core_server_storage_config.ok();
 
         let state = Arc::new(ServerState {
-            runtime,
+            catalogue_runtime,
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             connections: RwLock::new(HashMap::new()),
@@ -223,23 +224,25 @@ impl ServerBuilder {
     }
 
     #[allow(clippy::type_complexity)]
-    fn build_runtime(&self) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
+    fn build_catalogue_runtime(
+        &self,
+    ) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
         let connection_event_hub = Arc::new(ConnectionEventHub::default());
         let dispatch_hub = Arc::clone(&connection_event_hub);
 
         let storage = self.build_main_storage()?;
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
-        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
+        let catalogue_runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
                 dispatch_hub.dispatch_payload(client_id, entry.payload);
             }
         });
 
         if let Some(ref tracer) = self.sync_tracer {
-            runtime.set_sync_tracer(tracer.clone(), "server".to_string());
+            catalogue_runtime.set_sync_tracer(tracer.clone(), "server".to_string());
         }
 
-        Ok((runtime, connection_event_hub))
+        Ok((catalogue_runtime, connection_event_hub))
     }
 
     fn build_schema_manager(&self, storage: &dyn Storage) -> Result<SchemaManager, String> {
@@ -692,7 +695,7 @@ mod tests {
 
         let tiers = built
             .state
-            .runtime
+            .catalogue_runtime
             .with_sync_manager(|sync| sync.local_durability_tiers())
             .expect("read sync manager");
 
@@ -727,12 +730,12 @@ mod tests {
             assert!(built.state.core_server().is_some());
             built
                 .state
-                .runtime
+                .catalogue_runtime
                 .persist_schema()
                 .expect("publish fixed schema catalogue");
             built
                 .state
-                .runtime
+                .catalogue_runtime
                 .flush()
                 .await
                 .expect("flush fixed schema catalogue");

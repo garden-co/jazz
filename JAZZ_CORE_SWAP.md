@@ -191,8 +191,12 @@ Until deleted, treat them as replacement targets only.
 
 - Delete or gut old alpha engine internals listed under "Replace Or Delete",
   starting at the active dual-runtime server wiring:
-  `crates/jazz-tools/src/server/builder.rs` still builds both the old
-  `TokioRuntime` path and the direct `CoreServer` path.
+  `crates/jazz-tools/src/server/builder.rs` still builds a legacy
+  `TokioRuntime` as `ServerState::catalogue_runtime` for admin catalogue
+  storage/rehydration, plus the direct `CoreServer` path for websocket sync.
+  The runtime is no longer a general server sync runtime: shutdown does not
+  disconnect alpha transports, disconnected-client sweeping only expires
+  markers, and test-only alpha websocket frame injection fails closed.
 - The direct websocket route is the intended sync boundary. Old
   `transport_protocol.rs`, `transport_manager.rs`, and `sync_manager` code
   should not regain ownership of `/ws` semantics.
@@ -200,8 +204,8 @@ Until deleted, treat them as replacement targets only.
   remaining `transport_protocol` dependency should be treated as legacy alpha
   transport surface or test compatibility, not shared server API.
 - `ServerState::process_ws_client_frame` is gated to `test-utils`; it exists
-  only for legacy in-process tests that still inject alpha `SyncPayload` frames,
-  not for production server traffic.
+  only as a fail-closed compatibility stub for legacy in-process tests that
+  still inject alpha `SyncPayload` frames, not for production server traffic.
 - Edge upstream sync currently fails closed when `--upstream-url` is set. This
   intentionally removes the old alpha `TransportManager` path that was pointed
   at the direct core websocket route; server-to-server sync should be rebuilt on
