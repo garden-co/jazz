@@ -18,7 +18,7 @@ use crate::server::catalogue_storage::{
     CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,
 };
 #[cfg(test)]
-use crate::sync::{ClientId, DurabilityTier};
+use crate::sync::DurabilityTier;
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -112,8 +112,6 @@ pub(crate) struct StoredCatalogue {
     #[cfg(test)]
     test_schema_branches: Mutex<Vec<String>>,
     #[cfg(test)]
-    test_clients: Mutex<HashSet<ClientId>>,
-    #[cfg(test)]
     test_local_durability_tiers: Mutex<HashSet<DurabilityTier>>,
     storage: Mutex<DynCatalogueStorage>,
 }
@@ -133,8 +131,6 @@ impl StoredCatalogue {
             index: Mutex::new(index),
             #[cfg(test)]
             test_schema_branches: Mutex::new(Vec::new()),
-            #[cfg(test)]
-            test_clients: Mutex::new(HashSet::new()),
             #[cfg(test)]
             test_local_durability_tiers: Mutex::new(HashSet::new()),
             storage: Mutex::new(storage),
@@ -170,18 +166,6 @@ impl StoredCatalogue {
     }
 
     #[cfg(test)]
-    pub(crate) fn client_registered_for_test(
-        &self,
-        client_id: ClientId,
-    ) -> Result<bool, CatalogueError> {
-        let clients = self
-            .test_clients
-            .lock()
-            .map_err(|_| CatalogueError::LockError)?;
-        Ok(clients.contains(&client_id))
-    }
-
-    #[cfg(test)]
     pub(crate) fn local_durability_tiers_for_test(
         &self,
     ) -> Result<HashSet<DurabilityTier>, CatalogueError> {
@@ -190,37 +174,6 @@ impl StoredCatalogue {
             .lock()
             .map_err(|_| CatalogueError::LockError)?;
         Ok(tiers.clone())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn add_client(
-        &self,
-        client_id: ClientId,
-        _session: Option<crate::public_api::session::Session>,
-    ) -> Result<(), CatalogueError> {
-        let mut clients = self
-            .test_clients
-            .lock()
-            .map_err(|_| CatalogueError::LockError)?;
-        clients.insert(client_id);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ensure_client_with_session(
-        &self,
-        client_id: ClientId,
-        _session: crate::public_api::session::Session,
-    ) -> Result<(), CatalogueError> {
-        self.add_client(client_id, None)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ensure_client_as_backend(
-        &self,
-        client_id: ClientId,
-    ) -> Result<(), CatalogueError> {
-        self.add_client(client_id, None)
     }
 
     #[cfg(test)]

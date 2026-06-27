@@ -1,3 +1,8 @@
+import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
+import { isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
+
+const textDecoder = new TextDecoder();
+
 export type ValueType = { tag: number; inner?: ValueType; members?: ValueType[] };
 export type DescriptorField = { name?: string; valueType: ValueType };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
@@ -208,6 +213,51 @@ export function decodeRecordBytes(
   return value;
 }
 
+export function decodeNativeRowValues(
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): Value[] {
+  const descriptor = descriptorFromColumns(columns);
+  return columns.map((column, index) => {
+    const bytes = decodeRecordValue(descriptor, raw, index);
+    if (bytes == null) return { type: "Null" };
+    return decodeBytes(column.column_type, bytes);
+  });
+}
+
+export function decodeNativeRow(
+  id: string,
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): WasmRow {
+  return {
+    id,
+    values: decodeNativeRowValues(columns, raw),
+  };
+}
+
+export function decodeNativeRowObject(
+  id: string | undefined,
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): Record<string, unknown> {
+  const descriptor = descriptorFromColumns(columns);
+  const obj: Record<string, unknown> = {};
+  if (id !== undefined) {
+    obj.id = id;
+  }
+
+  for (let i = 0; i < columns.length; i++) {
+    const column = columns[i];
+    if (!column) continue;
+    const bytes = decodeRecordValue(descriptor, raw, i);
+    obj[column.name] =
+      bytes == null ? null : decodePlainValue(column.column_type, bytes, column.name);
+  }
+
+  return obj;
+}
+
 export function decodeRecordValue(
   descriptor: DescriptorField[],
   raw: Uint8Array,
@@ -249,6 +299,166 @@ function unwrapNullable(value: Uint8Array): Uint8Array | null {
   if (value[0] === 0) return null;
   if (value[0] !== 1) return value;
   return value.subarray(1);
+}
+
+function descriptorFromColumns(columns: readonly ColumnDescriptor[]): DescriptorField[] {
+  return columns.map((column) => ({
+    name: column.name,
+    valueType: columnValueType(column),
+  }));
+}
+
+function columnValueType(column: ColumnDescriptor): ValueType {
+  const valueType = columnTypeToValueType(column.column_type);
+  return column.nullable ? { tag: 12, inner: valueType } : valueType;
+}
+
+function columnTypeToValueType(type: ColumnType): ValueType {
+  switch (type.type) {
+    case "Boolean":
+      return { tag: 5 };
+    case "Integer":
+      return { tag: 2 };
+    case "BigInt":
+    case "Timestamp":
+      return { tag: 3 };
+    case "Double":
+      return { tag: 4 };
+    case "Text":
+    case "Json":
+    case "Enum":
+      return { tag: 6 };
+    case "Bytea":
+      return { tag: 7 };
+    case "Uuid":
+      return { tag: 8 };
+    case "Array":
+      return { tag: 11, inner: columnTypeToValueType(type.element) };
+    case "Row":
+      throw new Error("Core runtime does not encode nested row columns yet");
+  }
+}
+
+function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  switch (type.type) {
+    case "Boolean":
+      return { type: "Boolean", value: bytes[0] !== 0 };
+    case "Integer":
+      return { type: "Integer", value: decodeSignedI32FromCore(view.getUint32(0, true)) };
+    case "BigInt":
+      return { type: "BigInt", value: Number(view.getBigUint64(0, true)) };
+    case "Double":
+      return { type: "Double", value: view.getFloat64(0, true) };
+    case "Timestamp":
+      return { type: "Timestamp", value: Number(view.getBigUint64(0, true)) };
+    case "Text":
+    case "Json":
+    case "Enum":
+      return { type: "Text", value: textDecoder.decode(bytes) };
+    case "Uuid":
+      return { type: "Uuid", value: formatUuid(bytes) };
+    case "Bytea":
+      return { type: "Bytea", value: bytes.slice() };
+    case "Array":
+      return { type: "Array", value: decodeArray(type.element, bytes) };
+    case "Row":
+      return { type: "Bytea", value: bytes.slice() };
+  }
+}
+
+function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: string): unknown {
+  const value = decodeBytes(type, bytes);
+  switch (type.type) {
+    case "Timestamp":
+      return value.type === "Timestamp" ? timestampToDate(value.value, columnName) : null;
+    case "Json":
+      return value.type === "Text" ? JSON.parse(value.value) : null;
+    case "Array":
+      return decodePlainArray(type.element, bytes);
+    case "Text":
+    case "Enum":
+    case "Bytea":
+    case "Uuid":
+    case "Boolean":
+    case "Integer":
+    case "BigInt":
+    case "Double":
+      return "value" in value ? value.value : null;
+    case "Row":
+      return "value" in value ? value.value : null;
+  }
+}
+
+function decodePlainArray(elementType: ColumnType, bytes: Uint8Array): unknown[] {
+  return decodeArrayElements(elementType, bytes, (element) =>
+    decodePlainValue(elementType, element),
+  );
+}
+
+function decodeArray(elementType: ColumnType, bytes: Uint8Array): Value[] {
+  return decodeArrayElements(elementType, bytes, (element) => decodeBytes(elementType, element));
+}
+
+function decodeArrayElements<T>(
+  elementType: ColumnType,
+  bytes: Uint8Array,
+  decodeElement: (bytes: Uint8Array) => T,
+): T[] {
+  const elementWidth = fixedSize(columnTypeToValueType(elementType));
+  if (elementWidth != null) {
+    if (elementWidth === 0) return [];
+    if (bytes.length % elementWidth !== 0) {
+      throw new Error(`invalid fixed-width array byte length ${bytes.length}`);
+    }
+    const values: T[] = [];
+    for (let offset = 0; offset < bytes.length; offset += elementWidth) {
+      values.push(decodeElement(bytes.subarray(offset, offset + elementWidth)));
+    }
+    return values;
+  }
+
+  if (bytes.length < 4) {
+    throw new Error("invalid variable-width array byte length");
+  }
+
+  const length = readU32Le(bytes, 0);
+  const offsetTableEnd = 4 + Math.max(0, length - 1) * 4;
+  if (offsetTableEnd > bytes.length) {
+    throw new Error("invalid variable-width array offset table");
+  }
+
+  const values: T[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const start = index === 0 ? offsetTableEnd : readU32Le(bytes, 4 + (index - 1) * 4);
+    const end = index === length - 1 ? bytes.length : readU32Le(bytes, 4 + index * 4);
+    if (start > end || end > bytes.length) {
+      throw new Error("invalid variable-width array element offset");
+    }
+    values.push(decodeElement(bytes.subarray(start, end)));
+  }
+  return values;
+}
+
+function timestampToDate(value: number, columnName?: string): Date {
+  if (columnName && isProvenanceMagicTimestampColumn(columnName)) {
+    return new Date(Math.trunc(value / 1_000));
+  }
+  return new Date(value);
+}
+
+function decodeSignedI32FromCore(value: number): number {
+  return (value ^ 0x80000000) | 0;
+}
+
+function formatUuid(bytes: Uint8Array): string {
+  const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
+    16,
+    20,
+  )}-${hex.slice(20)}`;
 }
 
 function fixedSize(valueType: ValueType): number | undefined {
