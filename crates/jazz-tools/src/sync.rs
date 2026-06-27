@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub(crate) mod clock;
-#[cfg(any(test, feature = "test-utils"))]
-pub mod sync_tracer;
 pub(crate) mod types;
 pub mod vocabulary;
 
@@ -64,8 +62,6 @@ impl std::fmt::Display for ClientId {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub use sync_tracer::SyncTracer;
 pub use types::{
     ConnectionSchemaDiagnostics, Destination, QueryId, QueryPropagation, SchemaWarning, Source,
     SyncError,
