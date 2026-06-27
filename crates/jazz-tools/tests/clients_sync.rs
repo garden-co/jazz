@@ -10,9 +10,10 @@ use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
 use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, SchemaBuilder,
-    SubscriptionStream, TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
+#[cfg(feature = "direct-core-client")]
+use jazz_tools::{ObjectId, SubscriptionStream};
 use support::{publish_allow_all_permissions, wait_for_query};
 use uuid::Uuid;
 
@@ -39,6 +40,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     .await;
 }
 
+#[cfg(feature = "direct-core-client")]
 async fn wait_for_subscription_driven_query<F>(
     client: &JazzClient,
     stream: &mut SubscriptionStream,
@@ -234,6 +236,7 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
     server.shutdown().await;
 }
 
+#[cfg(feature = "direct-core-client")]
 #[tokio::test(flavor = "current_thread")]
 async fn jazz_tools_cli_two_clients_sync_values() {
     tokio::task::LocalSet::new()
@@ -493,6 +496,7 @@ async fn delete_through_one_client_removes_row_from_peer_query_results() {
     server.shutdown().await;
 }
 
+#[cfg(feature = "direct-core-client")]
 #[tokio::test(flavor = "current_thread")]
 async fn caller_supplied_uuid_is_used_for_created_row() {
     tokio::task::LocalSet::new()
@@ -558,6 +562,7 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
         .await;
 }
 
+#[cfg(feature = "direct-core-client")]
 #[tokio::test(flavor = "current_thread")]
 async fn wait_for_batch_reaches_edge_tier_with_direct_core_local_driver() {
     tokio::task::LocalSet::new()
