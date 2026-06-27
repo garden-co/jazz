@@ -115,16 +115,26 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
 | `crates/jazz-tools/src/runtime_core/tests/basic.rs` | WasmDb-shaped insert/query, update/delete, callback subscription rows, restart-by-snapshot, owner-policy reads, and Rust WebSocket server durable restart are represented in the `WasmDb` binding checks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | A local `jazz-tools` runtime_core surface, default materialization API parity, durable restart through the exact runtime_core harness, and the exact Rust runtime_core test harness are still absent.                                                        |
 | `packages/jazz-tools/tests/browser/db.all.test.ts`  | `jazz-tools.ts` covers `createDb`, `defineApp`/schema tokens, table/query objects, `insert`, `update`, `delete`, `restore`, row-like write results with `.value`/`.handle`/`.wait(...)`, `all`, `one`, `allForIdentity`, `subscribe(query, callback)`, boolean/text/integer equality, scalar boolean/text/integer `in`, array-element `in`, integer/text `gt`/`gte`/`lt`/`lte`, nullable UUID `isNull`/`isNotNull`, nullable literal equality/inequality and mixed nullable `in`, text inequality, chained positional and object-style filters, one-shot text and array `contains`/`limit`, selected projections, result ordering, offset pagination, text-array insert/update/readback, whole-array `eq`/`in`, Bytea `eq`/`in`, binary-large-value file helpers, one-shot facade include/hop/gather reads over schema references, required object-style includes, one-shot nested include selection for scalar/reference paths, and simple/nested forward include subscription callbacks rebuilt from subscription rows. The browser example now proves reload persistence through `WasmDb.openBrowser(namespace, schema, config)` OPFS storage and keeps a subscription useful after reload/update. | Full browser `jazz-tools` test runner, reverse include subscriptions, hop/gather subscriptions, selected include projection subscriptions, broader relation query lowering/subscriptions, and durable/upload/streaming object-storage semantics are missing. |
 
+The grafted package now also has a browser alpha public-flow gate in
+`packages/jazz-tools/tests/browser/alpha-public-flow-gate.test.ts`. The running
+slice proves public `schema.defineApp`, `createDb({ driver: "persistent" })`,
+direct in-process core construction, CRUD, `db.one`, `subscribeAll`, and
+read-your-writes in one browser session. The same file keeps skipped TODO gates
+for the remaining honest blockers: browser edge waits need the WASM
+`nextWriteStateChange` write-state bridge, and direct in-process browser
+persistence needs a durable flush/reopen gate before OPFS reload parity can be
+claimed.
+
 ## Current gaps versus alpha
 
-- Browser reload persistence is covered by real browser storage in
-  `examples/browser-wasm`: the write page opens
-  `WasmDb.openBrowser(namespace, schema, config)`, writes a Jazz todo row, and closes the
-  DB/storage after the write flushes through OPFS; the verify page starts a
-  fresh worker, reopens the same namespace, reads the row back from
-  browser-owned durable bytes, keeps a subscription open, updates the restored row, and
-  observes the subscription move from open to done. The old temporary reload path and
-  TypeScript OPFS adapter are gone.
+- Browser persistent creation in the grafted `jazz-tools` package now opens the
+  direct core in-process instead of routing through the old broker/worker
+  topology. The current positive browser gate covers public CRUD,
+  read-your-writes, and subscriptions in that direct path. Reload persistence is
+  not yet covered for the grafted package: local writes need an explicit durable
+  flush/reopen API or wait gate before OPFS reload parity can be claimed.
+  `examples/browser-wasm` still has older OPFS reload coverage for the vendored
+  example path, but the package gate is the integration source of truth.
 - Public TypeScript API compatibility is intentionally thin. Since this repo is
   separate from the alpha repo, the replacement package is named `jazz-tools`
   and currently routes simple public-flow/todo-shaped examples through
@@ -275,11 +285,12 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
    separate compatibility-package abstraction just to host those tests.
 2. **Broaden browser storage coverage.** `WasmDb.openBrowser(namespace, schema, config)`
    uses the repo's OPFS-backed browser storage path and the browser smoke
-   proves reload persistence plus a post-reload subscription/update, worker-safe
-   same-namespace handoff, and a multi-write reopen/subscription durability gate. Expand
-   coverage for true transactions, history/index/table partitions, cursor
-   correctness after reload, ABI error mapping, format versioning, and
-   quota/cleanup handling.
+   has example-level reload coverage. The grafted `jazz-tools` package now
+   bypasses the old worker broker and opens direct in-process browser core; next
+   it needs a durable flush/reopen gate so public `createDb` can prove OPFS
+   reload persistence directly. Expand coverage for true transactions,
+   history/index/table partitions, cursor correctness after reload, ABI error
+   mapping, format versioning, and quota/cleanup handling.
 3. **Make durable `jazz-server` real.** The server now has an alpha-shaped
    `server <APP_ID>` command, `/apps/<APP_ID>/ws` route, auth/config aliases,
    durable WebSocket restart gates, and admin schema publish/list/fetch that
@@ -315,6 +326,8 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
 8. **Polish WebSocket protocol details later.** Current batched raw
    `WireFrame` bytes are good enough unless they block another target; full
    handshake/resume/control envelope design can wait.
+   The immediate browser blocker is not frame shape but the missing WASM
+   `nextWriteStateChange` bridge used by `WriteResult.wait({ tier: "edge" })`.
 9. **Defer React Native; keep NAPI as a parity gate.** NAPI now has direct-core
    CRUD/subscription/policy/persistence/edge-sync coverage and should stay in
    the green path. React Native remains deferred until the browser/server/API
