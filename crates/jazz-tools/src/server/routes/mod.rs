@@ -1718,13 +1718,18 @@ mod tests {
 
         let lens = state
             .catalogue_store
-            .with_schema_manager(|schema_manager| {
-                schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
-            })
-            .expect("read schema manager lens");
+            .stored_lens_for_test(v1_hash, v2_hash)
+            .expect("read stored catalogue lens");
         assert!(
             lens.is_some(),
-            "published lens should be registered in schema manager"
+            "published lens should be stored in the catalogue"
+        );
+        assert!(
+            state
+                .catalogue
+                .are_schema_hashes_connected(&state.catalogue_store, v1_hash, v2_hash)
+                .expect("read schema connectivity"),
+            "published lens should connect the source and target schema hashes"
         );
     }
 
@@ -1785,11 +1790,9 @@ mod tests {
 
         let lens = state
             .catalogue_store
-            .with_schema_manager(|schema_manager| {
-                schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
-            })
-            .expect("read schema manager lens")
-            .expect("published lens should be registered in schema manager");
+            .stored_lens_for_test(v1_hash, v2_hash)
+            .expect("read stored catalogue lens")
+            .expect("published lens should be stored in the catalogue");
 
         assert_eq!(
             lens.forward.ops,
@@ -1879,11 +1882,9 @@ mod tests {
 
         let lens = state
             .catalogue_store
-            .with_schema_manager(|schema_manager| {
-                schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
-            })
-            .expect("read schema manager lens")
-            .expect("published lens should be registered in schema manager");
+            .stored_lens_for_test(v1_hash, v2_hash)
+            .expect("read stored catalogue lens")
+            .expect("published lens should be stored in the catalogue");
 
         assert_eq!(lens.forward.ops.len(), 2);
 
