@@ -211,24 +211,24 @@ The result is that cold-start cost is much closer to "index size" than "total st
 
 ## Browser architecture
 
-### Direct-core browser runtime
+### Core browser runtime
 
 In the browser, Jazz uses the direct Rust/WASM core for reads, writes, subscriptions, and sync. With
 `driver: { type: "memory" }`, the database runs in the main thread and syncs to the configured
-server over the direct websocket protocol.
+server over the core WebSocket protocol.
 
 With `driver: { type: "persistent" }`, OPFS requires worker ownership, so Jazz starts one dedicated
-module worker for that database namespace. The worker opens the real direct-core database with
-`WasmDb.openBrowser(...)`, owns OPFS, and forwards direct-core row/query/write/subscription calls
+module worker for that database namespace. The worker opens the real core database with
+`WasmDb.openBrowser(...)`, owns OPFS, and forwards core row/query/write/subscription calls
 over `postMessage`. This worker is an OPFS owner, not a second JavaScript engine or compatibility
 broker.
 
 ```text
 Main thread Jazz API
   ↕ postMessage
-Dedicated worker (direct-core OPFS database)
+Dedicated worker (core OPFS database)
   ↕ WebSocket byte frames
-Direct-core Jazz server
+Core Jazz server
 ```
 
 With `driver: { type: "memory" }`, the worker and OPFS are skipped entirely, and the main-thread

@@ -254,7 +254,7 @@ async function readStreamValue(reader: ReadableStreamDefaultReader<unknown>): Pr
 
 function callMethod(target: unknown, method: string, ...args: unknown[]): unknown {
   const fn = (target as Record<string, unknown>)[method];
-  if (typeof fn !== "function") throw new Error(`direct object method ${method} is unavailable`);
+  if (typeof fn !== "function") throw new Error(`core object method ${method} is unavailable`);
   return (fn as UnknownFunction).apply(target, args);
 }
 

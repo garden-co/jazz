@@ -289,7 +289,7 @@ fn convert_scalar_kind(kind: &str, path: &str) -> Result<ColumnType, AdminSchema
         "Uuid" | "UUID" | "uuid" => Ok(ColumnType::Uuid),
         "Bytea" | "Bytes" | "bytea" => Ok(ColumnType::Bytes),
         "Double" | "Float64" | "F64" | "double" => Ok(ColumnType::F64),
-        // Direct core has unsigned integer cells only. Alpha public INTEGER is
+        // Jazz core has unsigned integer cells only. Alpha public INTEGER is
         // accepted as the non-negative i32 subset and represented as U32.
         "Integer" | "Int" | "I32" | "Number" => Ok(ColumnType::U32),
         "I64" => Err(err(

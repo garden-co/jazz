@@ -1,8 +1,8 @@
 # Query Manager - Legacy Alpha Facade
 
 The Query Manager is the old alpha relational execution layer. In the grafted
-direct-core branch, its public schema/query vocabulary remains useful, but new
-execution semantics should be implemented in direct core / Groove and then
+core branch, its public schema/query vocabulary remains useful, but new
+execution semantics should be implemented in core / Groove and then
 surfaced through the `jazz-tools` facade.
 
 If the storage layer answers:

@@ -1,4 +1,4 @@
-//! Small active direct-core realistic benchmark slice.
+//! Small active core realistic benchmark slice.
 //!
 //! This intentionally exercises `jazz::db::Db<MemoryStorage>` directly, without
 //! the legacy `RuntimeCore`, `SchemaManager`, or `SyncManager` stack.
@@ -235,7 +235,7 @@ fn open_db_with_schema(
         history_complete,
         schema,
         |refs| MemoryStorage::new(refs),
-        "open direct realistic benchmark db",
+        "open core realistic benchmark db",
     )
 }
 
@@ -252,7 +252,7 @@ fn open_rocks_db_with_author(
         history_complete,
         schema(),
         |refs| RocksDbStorage::open(path, refs).expect("open realistic RocksDB storage"),
-        "open direct realistic RocksDB benchmark db",
+        "open core realistic RocksDB benchmark db",
     )
 }
 
@@ -953,7 +953,7 @@ fn drain_delta(event: Option<SubscriptionEvent>, name: &str) -> usize {
 }
 
 fn r1_crud(c: &mut Criterion) {
-    let mut group = c.benchmark_group("realistic_phase1_direct/r1_crud");
+    let mut group = c.benchmark_group("realistic_phase1_core/r1_crud");
 
     for profile in [CI_S_PROFILE] {
         group.throughput(Throughput::Elements(1));
@@ -1001,7 +1001,7 @@ fn r1_crud(c: &mut Criterion) {
 }
 
 fn r2_reads(c: &mut Criterion) {
-    let mut group = c.benchmark_group("realistic_phase1_direct/r2_reads");
+    let mut group = c.benchmark_group("realistic_phase1_core/r2_reads");
 
     for profile in [CI_S_PROFILE] {
         group.throughput(Throughput::Elements(profile.tasks as u64));
@@ -1035,7 +1035,7 @@ fn r2_reads(c: &mut Criterion) {
 
 #[cfg(feature = "rocksdb")]
 fn r3_rocksdb_cold_load(c: &mut Criterion) {
-    let mut group = c.benchmark_group("realistic_phase1_direct/r3_rocksdb_cold_load");
+    let mut group = c.benchmark_group("realistic_phase1_core/r3_rocksdb_cold_load");
 
     for profile in [CI_S_PROFILE] {
         group.throughput(Throughput::Elements(profile.tasks as u64));
@@ -1044,7 +1044,7 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
             &profile,
             |b, &profile| {
                 let tempdir = TempDir::new().expect("create tempdir for RocksDB cold-load bench");
-                let db_path = tempdir.path().join("realistic_phase1_direct.rocksdb");
+                let db_path = tempdir.path().join("realistic_phase1_core.rocksdb");
                 let project = {
                     let db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
                     let fixture = seed_fixture(&db, profile);
@@ -1069,7 +1069,7 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
 fn r3_rocksdb_cold_load(_c: &mut Criterion) {}
 
 fn r4_hot_task_history(c: &mut Criterion) {
-    let mut group = c.benchmark_group("realistic_phase1_direct/r4_hot_task_history");
+    let mut group = c.benchmark_group("realistic_phase1_core/r4_hot_task_history");
 
     for profile in [CI_S_PROFILE] {
         group.throughput(Throughput::Elements(3));
@@ -1165,7 +1165,7 @@ fn r4_hot_task_history(c: &mut Criterion) {
 }
 
 fn r9_subscribed_write(c: &mut Criterion) {
-    let mut group = c.benchmark_group("realistic_phase1_direct/r9_subscribed_write");
+    let mut group = c.benchmark_group("realistic_phase1_core/r9_subscribed_write");
 
     for profile in [CI_S_PROFILE] {
         group.throughput(Throughput::Elements(1));
@@ -1212,8 +1212,8 @@ fn r9_subscribed_write(c: &mut Criterion) {
     group.finish();
 }
 
-fn r10_direct_sync_fanout(c: &mut Criterion) {
-    let mut group = c.benchmark_group("realistic_phase1_direct/r10_direct_sync_fanout");
+fn r10_core_sync_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1_core/r10_core_sync_fanout");
 
     for profile in [CI_S_PROFILE] {
         group.throughput(Throughput::Elements(1));
@@ -1298,7 +1298,7 @@ fn r10_direct_sync_fanout(c: &mut Criterion) {
 }
 
 fn r11_byte_wire_resume(c: &mut Criterion) {
-    let mut group = c.benchmark_group("realistic_phase1_direct/r11_byte_wire_resume");
+    let mut group = c.benchmark_group("realistic_phase1_core/r11_byte_wire_resume");
 
     for profile in [CI_S_PROFILE] {
         group.throughput(Throughput::Elements(1));
@@ -1433,7 +1433,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
 }
 
 fn r12_recursive_permissions(c: &mut Criterion) {
-    let mut group = c.benchmark_group("realistic_phase1_direct/r12_recursive_permissions");
+    let mut group = c.benchmark_group("realistic_phase1_core/r12_recursive_permissions");
     group.throughput(Throughput::Elements(2));
 
     group.bench_function("docs_recursive_read_s", |b| {
@@ -1465,7 +1465,7 @@ fn r12_recursive_permissions(c: &mut Criterion) {
 }
 
 fn r13_permission_filtered_resume(c: &mut Criterion) {
-    let mut group = c.benchmark_group("realistic_phase1_direct/r13_permission_filtered_resume");
+    let mut group = c.benchmark_group("realistic_phase1_core/r13_permission_filtered_resume");
     group.throughput(Throughput::Elements(1));
 
     group.bench_function("docs_recursive_resume_s", |b| {
@@ -1621,6 +1621,6 @@ fn r13_permission_filtered_resume(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout, r11_byte_wire_resume, r12_recursive_permissions, r13_permission_filtered_resume
+    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_core_sync_fanout, r11_byte_wire_resume, r12_recursive_permissions, r13_permission_filtered_resume
 }
 criterion_main!(benches);

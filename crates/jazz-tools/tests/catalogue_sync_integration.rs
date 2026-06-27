@@ -569,7 +569,7 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
         .expect("decode edge schema publish response");
     assert_eq!(published_schema.hash, schema_hash);
 
-    let core_schema_response = client
+    let schema_convert_response = client
         .get(format!(
             "{}/apps/{app_id}/schema/{schema_hash}",
             core.base_url()
@@ -578,13 +578,13 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
         .send()
         .await
         .expect("fetch schema from core");
-    assert_eq!(core_schema_response.status(), StatusCode::OK);
-    let core_schema: StoredSchemaHttpResponse = core_schema_response
+    assert_eq!(schema_convert_response.status(), StatusCode::OK);
+    let schema_convert: StoredSchemaHttpResponse = schema_convert_response
         .json()
         .await
         .expect("decode core schema response");
     assert_eq!(
-        SchemaHash::compute(&core_schema.schema).to_string(),
+        SchemaHash::compute(&schema_convert.schema).to_string(),
         schema_hash
     );
 

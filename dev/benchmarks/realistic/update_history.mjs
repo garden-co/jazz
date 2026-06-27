@@ -231,18 +231,18 @@ function nativeBenchmarkIdForFile(file, storageEngine) {
 function criterionBenchmarkId(benchmark, storageEngine) {
   const groupId = benchmark?.group_id;
   const exactMap = new Map([
-    ["realistic_phase1_direct/r1_crud", "native-criterion:r1_crud"],
-    ["realistic_phase1_direct/r2_reads", "native-criterion:r2_reads"],
+    ["realistic_phase1_core/r1_crud", "native-criterion:r1_crud"],
+    ["realistic_phase1_core/r2_reads", "native-criterion:r2_reads"],
     [
-      "realistic_phase1_direct/r3_rocksdb_cold_load",
+      "realistic_phase1_core/r3_rocksdb_cold_load",
       "native-criterion:rocksdb:r3_rocksdb_cold_load",
     ],
-    ["realistic_phase1_direct/r4_hot_task_history", "native-criterion:r4_hot_task_history"],
-    ["realistic_phase1_direct/r9_subscribed_write", "native-criterion:r9_subscribed_write"],
-    ["realistic_phase1_direct/r10_direct_sync_fanout", "native-criterion:r10_direct_sync_fanout"],
-    ["realistic_phase1_direct/r11_byte_wire_resume", "native-criterion:r11_byte_wire_resume"],
+    ["realistic_phase1_core/r4_hot_task_history", "native-criterion:r4_hot_task_history"],
+    ["realistic_phase1_core/r9_subscribed_write", "native-criterion:r9_subscribed_write"],
+    ["realistic_phase1_core/r10_core_sync_fanout", "native-criterion:r10_core_sync_fanout"],
+    ["realistic_phase1_core/r11_byte_wire_resume", "native-criterion:r11_byte_wire_resume"],
     [
-      "realistic_phase1_direct/r12_recursive_permissions",
+      "realistic_phase1_core/r12_recursive_permissions",
       "native-criterion:r12_recursive_permissions",
     ],
   ]);

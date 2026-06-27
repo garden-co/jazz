@@ -68,8 +68,8 @@ try {
       .join("\n");
     return (
       rendered.includes("initial: none") &&
-      rendered.includes("insert: Ship direct WasmDb:open") &&
-      rendered.includes("update: Ship direct WasmDb:done") &&
+      rendered.includes("insert: Ship core WasmDb:open") &&
+      rendered.includes("update: Ship core WasmDb:done") &&
       rendered.includes("delete: none")
     );
   });

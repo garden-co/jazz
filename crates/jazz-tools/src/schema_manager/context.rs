@@ -739,7 +739,7 @@ mod tests {
 
         let path = ctx.lens_path(&v1_hash).unwrap();
 
-        // BFS should find the direct path (1 hop) before the 2-hop path
+        // BFS should find the core path (1 hop) before the 2-hop path
         assert_eq!(path.len(), 1);
         assert_eq!(path[0].0.source_hash, v1_hash);
         assert_eq!(path[0].0.target_hash, ctx.current_hash);

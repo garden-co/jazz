@@ -1,4 +1,4 @@
-//! Direct jazz_core subscription latency benchmarks.
+//! core subscription latency benchmarks.
 //!
 //! These benchmarks intentionally exercise `jazz::db::Db` directly, bypassing
 //! the legacy RuntimeCore/SchemaManager/SyncManager stack while that path is
@@ -24,7 +24,7 @@ use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
-type DirectCoreDb = Db<MemoryStorage>;
+type CoreDb = Db<MemoryStorage>;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
@@ -46,7 +46,7 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
-fn open_db(seed: u64) -> DirectCoreDb {
+fn open_db(seed: u64) -> CoreDb {
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
@@ -64,7 +64,7 @@ fn open_db(seed: u64) -> DirectCoreDb {
         )
         .with_id_source(SeededRowIdSource::new(seed)),
     ))
-    .expect("open direct subscription benchmark db")
+    .expect("open core subscription benchmark db")
 }
 
 fn row_uuid(index: usize) -> RowUuid {
@@ -96,35 +96,35 @@ fn filtered_cells(index: usize) -> BTreeMap<String, Value> {
     cells
 }
 
-fn seed_documents(db: &DirectCoreDb, count: usize) {
+fn seed_documents(db: &CoreDb, count: usize) {
     for index in 0..count {
         let write = db
             .insert("documents", cells(index))
-            .expect("seed direct benchmark row");
+            .expect("seed core benchmark row");
         block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
     }
 }
 
-fn seed_filtered_documents(db: &DirectCoreDb, count: usize) {
+fn seed_filtered_documents(db: &CoreDb, count: usize) {
     for index in 0..count {
         let write = db
             .insert("documents", filtered_cells(index))
-            .expect("seed direct benchmark row");
+            .expect("seed core benchmark row");
         block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
     }
 }
 
-fn all_documents_query(db: &DirectCoreDb) -> jazz::db::PreparedQuery {
+fn all_documents_query(db: &CoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents"))
         .expect("prepare documents query")
 }
 
-fn author_filter_query(db: &DirectCoreDb) -> jazz::db::PreparedQuery {
+fn author_filter_query(db: &CoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents").filter(eq(col("author"), lit(AUTHOR.0))))
         .expect("prepare author-filtered documents query")
 }
 
-fn narrow_filter_query(db: &DirectCoreDb) -> jazz::db::PreparedQuery {
+fn narrow_filter_query(db: &CoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents").filter(all_of([
         eq(col("author"), lit(AUTHOR.0)),
         eq(col("folder"), lit(row_uuid(0).0)),
@@ -165,7 +165,7 @@ fn single_subscription_latency(c: &mut Criterion) {
             b.iter(|| {
                 next += 1;
                 db.insert("documents", cells(next))
-                    .expect("direct subscribed insert should succeed");
+                    .expect("core subscribed insert should succeed");
                 assert_eq!(read_added_len(block_on(subscription.next_event())), 1);
             });
         });
@@ -200,7 +200,7 @@ fn fanout_latency(c: &mut Criterion) {
                 b.iter(|| {
                     next += 1;
                     db.insert("documents", cells(next))
-                        .expect("direct fanout insert should succeed");
+                        .expect("core fanout insert should succeed");
 
                     let notified = subscriptions
                         .iter_mut()
@@ -264,7 +264,7 @@ fn filtered_subscription_latency(c: &mut Criterion) {
                 b.iter(|| {
                     next += 2;
                     db.insert("documents", filtered_cells(next))
-                        .expect("direct filtered insert should succeed");
+                        .expect("core filtered insert should succeed");
                     assert_eq!(read_added_len(block_on(subscription.next_event())), 1);
                 });
             },
@@ -298,9 +298,9 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                     for _ in 0..batch_size {
                         next += 2;
                         tx.insert("documents", filtered_cells(next))
-                            .expect("direct batch insert should stage");
+                            .expect("core batch insert should stage");
                     }
-                    tx.commit().expect("direct batch insert should commit");
+                    tx.commit().expect("core batch insert should commit");
                     assert_eq!(
                         read_added_len(block_on(subscription.next_event())),
                         batch_size

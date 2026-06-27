@@ -9,7 +9,7 @@ members = [
   # "crates/jazz-rn/rust",
   "crates/wasm-tracing",
   # The old Axum todo server examples expect a Send + Sync JazzClient in shared
-  # router state. Direct-core Db ownership is currently local-thread by design;
+  # router state. Core Db ownership is currently local-thread by design;
   # keep these examples as integration targets, but out of workspace-wide green
   # gates until they are rebuilt around the new server boundary.
   # "examples/todo-server-rs",

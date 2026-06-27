@@ -33,7 +33,7 @@
 
 ### Low
 
-- [**postmessage-stream-adapter-for-worker-bridge**](todo/issues/postmessage-stream-adapter-for-worker-bridge.md) — The browser main-thread ↔ worker bridge currently uses a bespoke `postMessage` path. A future cleanup should carry the same direct core wire-frame batches across worker and network boundaries, without reviving the removed alpha transport manager.
+- [**postmessage-stream-adapter-for-worker-bridge**](todo/issues/postmessage-stream-adapter-for-worker-bridge.md) — The browser main-thread ↔ worker bridge currently uses a bespoke `postMessage` path. A future cleanup should carry the same core wire-frame batches across worker and network boundaries, without reviving the removed alpha transport manager.
 - [**text-encoded-storage-enums**](todo/issues/text-encoded-storage-enums.md) — Flat row storage currently encodes enum-like fields as text, which is larger than necessary and adds avoidable decode overhead on hot storage paths.
 - [**ws-route-clones-every-inbound-frame**](todo/issues/ws-route-clones-every-inbound-frame.md) — `crates/jazz-tools/src/routes.rs:1345` does `let inner = inner.to_vec();` before handing the payload to `process_ws_client_frame(&inner)`. The borrow from `frame_decode(&data)` would survive the `.await` because `data` owns the bytes, so the clone is avoidable — pass `&[u8]` through directly.
 
