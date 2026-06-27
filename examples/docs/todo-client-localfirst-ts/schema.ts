@@ -17,14 +17,10 @@ const schema = {
   // #endregion schema-todo-client-ts
 
   // #region schema-files-and-blobs-ts
-  file_parts: s.table({
-    data: s.bytes(),
-  }),
   files: s.table({
     name: s.string().optional(),
-    mimeType: s.string(),
-    partIds: s.array(s.ref("file_parts")),
-    partSizes: s.array(s.int()),
+    mime_type: s.string(),
+    data: s.bytes(),
   }),
   uploads: s.table({
     owner_id: s.string(),

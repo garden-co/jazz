@@ -115,7 +115,7 @@ fn file_referencing_schema(array_edge: bool) -> Schema {
     schema
 }
 
-fn multi_hop_inherited_parts_schema() -> Schema {
+fn multi_hop_inherited_pages_schema() -> Schema {
     SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
@@ -125,7 +125,7 @@ fn multi_hop_inherited_parts_schema() -> Schema {
             }),
         ))
         .table(
-            TableSchema::builder("files")
+            TableSchema::builder("documents")
                 .column("title", ColumnType::Text)
                 .nullable_fk_column("folder_id", "folders")
                 .policies(permissions(|p| {
@@ -135,13 +135,13 @@ fn multi_hop_inherited_parts_schema() -> Schema {
                 })),
         )
         .table(
-            TableSchema::builder("file_parts")
+            TableSchema::builder("pages")
                 .column("title", ColumnType::Text)
-                .nullable_fk_column("file_id", "files")
+                .nullable_fk_column("document_id", "documents")
                 .policies(permissions(|p| {
                     p.allow_insert().always();
                     p.allow_read()
-                        .where_(inherited_non_null_policy(Operation::Select, "file_id"));
+                        .where_(inherited_non_null_policy(Operation::Select, "document_id"));
                 })),
         )
         .build()
@@ -1967,53 +1967,53 @@ async fn inherited_referencing_array_membership_preserves_set_semantics() {
 }
 
 /// Verifies that non-recursive forward inheritance can compose across multiple
-/// tables, such as `folders -> files -> file_parts`.
+/// tables, such as `folders -> documents -> pages`.
 #[tokio::test]
 #[should_panic(
     expected = "forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 )]
 async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
-    let schema = multi_hop_inherited_parts_schema();
+    let schema = multi_hop_inherited_pages_schema();
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "file_parts", READY_TIMEOUT).await;
-    let alice = connect_ready_user(&server, &schema, "alice", "file_parts", READY_TIMEOUT).await;
-    let dave = connect_ready_user(&server, &schema, "dave", "file_parts", READY_TIMEOUT).await;
+    let admin = connect_ready_client(&server, &schema, "admin", "pages", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "pages", READY_TIMEOUT).await;
+    let dave = connect_ready_user(&server, &schema, "dave", "pages", READY_TIMEOUT).await;
 
     let folder_id = create_folder(&admin, "folders", "Shared Folder", &["alice"], false).await;
-    let file_id = admin
+    let document_id = admin
         .insert(
-            "files",
+            "documents",
             row_input!(
                 "title" => "Spec.pdf",
                 "folder_id" => Value::Uuid(folder_id)
             ),
         )
-        .expect("create file")
+        .expect("create document")
         .0;
-    let part_id = admin
+    let page_id = admin
         .insert(
-            "file_parts",
+            "pages",
             row_input!(
                 "title" => "Page 1",
-                "file_id" => Value::Uuid(file_id)
+                "document_id" => Value::Uuid(document_id)
             ),
         )
-        .expect("create file part")
+        .expect("create page")
         .0;
 
-    let query = QueryBuilder::new("file_parts").build();
+    let query = QueryBuilder::new("pages").build();
     let alice_rows = wait_for_rows(
         &alice,
         query.clone(),
-        "forward INHERITS SELECT fails to expose child rows to parent-authorized sessions, so alice sees file parts through the folder -> file -> part chain",
+        "forward INHERITS SELECT fails to expose child rows to parent-authorized sessions, so alice sees pages through the folder -> document -> page chain",
         |rows| {
             has_row(
                 &rows,
-                part_id,
-                &["Page 1".into(), Value::Uuid(file_id)],
+                page_id,
+                &["Page 1".into(), Value::Uuid(document_id)],
             )
             .then_some(rows)
         },
@@ -2021,8 +2021,8 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
     .await;
     assert!(has_row(
         &alice_rows,
-        part_id,
-        &["Page 1".into(), Value::Uuid(file_id)],
+        page_id,
+        &["Page 1".into(), Value::Uuid(document_id)],
     ));
 
     let dave_rows = wait_for_query(

@@ -76,7 +76,6 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
     const ssrExternal: true | string[] =
       existingSsr === true ? true : Array.from(new Set([...(existingSsr ?? []), "jazz-napi"]));
     return {
-      worker: { format: "es" as const },
       optimizeDeps: {
         exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])),
       },

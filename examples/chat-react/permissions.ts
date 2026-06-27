@@ -66,10 +66,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.attachments.allowInsert.where(allowedTo.read("messageId"));
 
   policy.files.allowInsert.where({});
-  policy.file_parts.allowInsert.where({});
 
   policy.files.allowRead.where(allowedTo.readReferencing(policy.attachments, "fileId"));
-  policy.file_parts.allowRead.where(allowedTo.readReferencing(policy.files, "partIds"));
   policy.files.allowDelete.where(allowedTo.deleteReferencing(policy.attachments, "fileId"));
-  policy.file_parts.allowDelete.where(allowedTo.deleteReferencing(policy.files, "partIds"));
 });

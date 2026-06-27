@@ -1131,7 +1131,7 @@ export class Db {
     await this.ensureBridgeReady();
   }
 
-  private async waitForDurableWorkerSettle(): Promise<void> {
+  private async waitForDurableRuntimeSettle(): Promise<void> {
     await this.ensureBridgeReady();
   }
 
@@ -1140,7 +1140,7 @@ export class Db {
     handle.wait = (async (options: { tier: DurabilityTier }) => {
       await this.ensureWriteWaitReady(options);
       const result = await wait(options);
-      await this.waitForDurableWorkerSettle();
+      await this.waitForDurableRuntimeSettle();
       return result;
     }) as THandle["wait"];
     return handle;

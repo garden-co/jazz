@@ -108,7 +108,7 @@ describe("files and blobs docs snippets", () => {
     expect(stream).toBeInstanceOf(ReadableStream);
   });
 
-  it("deletes file parts, then the file, then the parent upload", async () => {
+  it("deletes the file, then the parent upload", async () => {
     const db = makeDb();
     db.one
       .mockResolvedValueOnce({
@@ -120,17 +120,14 @@ describe("files and blobs docs snippets", () => {
       .mockResolvedValueOnce({
         id: "file-1",
         name: "hello.txt",
-        mimeType: "text/plain",
-        partIds: ["part-1", "part-2"],
-        partSizes: [5, 5],
+        mime_type: "text/plain",
+        data: new Uint8Array([1, 2, 3]),
       });
 
     await deleteUploadWithFile(db as unknown as Db, "upload-1");
 
-    expect(db.delete).toHaveBeenNthCalledWith(1, app.file_parts, "part-1");
-    expect(db.delete).toHaveBeenNthCalledWith(2, app.file_parts, "part-2");
-    expect(db.delete).toHaveBeenNthCalledWith(3, app.files, "file-1");
-    expect(db.delete).toHaveBeenNthCalledWith(4, app.uploads, "upload-1");
+    expect(db.delete).toHaveBeenNthCalledWith(1, app.files, "file-1");
+    expect(db.delete).toHaveBeenNthCalledWith(2, app.uploads, "upload-1");
   });
 
   it("compiles the documented file permission chain", () => {
@@ -140,23 +137,11 @@ describe("files and blobs docs snippets", () => {
       source_table: "uploads",
       via_column: "fileId",
     });
-    expect(fileBlobPermissions.file_parts.select?.using).toEqual({
-      type: "InheritsReferencing",
-      operation: "Select",
-      source_table: "files",
-      via_column: "partIds",
-    });
     expect(fileBlobPermissions.files.delete?.using).toEqual({
       type: "InheritsReferencing",
       operation: "Delete",
       source_table: "uploads",
       via_column: "fileId",
-    });
-    expect(fileBlobPermissions.file_parts.delete?.using).toEqual({
-      type: "InheritsReferencing",
-      operation: "Delete",
-      source_table: "files",
-      via_column: "partIds",
     });
   });
 });

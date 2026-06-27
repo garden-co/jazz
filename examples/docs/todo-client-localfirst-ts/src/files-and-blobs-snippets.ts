@@ -69,10 +69,7 @@ export async function deleteUploadWithFile(db: Db, uploadId: string) {
   const file = await db.one(app.files.where({ id: upload.fileId }), { tier: "edge" });
 
   if (file) {
-    // Delete chunks and the file while the parent upload row still exists.
-    for (const partId of file.partIds) {
-      db.delete(app.file_parts, partId);
-    }
+    // Delete the file while the parent upload row still grants access.
     db.delete(app.files, file.id);
   }
 

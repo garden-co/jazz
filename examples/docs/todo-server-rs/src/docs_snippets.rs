@@ -419,8 +419,6 @@ pub async fn clear_nullable_fields(
 }
 // #endregion writing-nullable-update-rust
 
-const CHUNK_SIZE: usize = 64 * 1024;
-
 // #region files-create-from-bytes-rust
 pub async fn create_file_from_bytes(
     client: &JazzClient,
@@ -428,22 +426,9 @@ pub async fn create_file_from_bytes(
     name: Option<&str>,
     mime_type: &str,
 ) -> jazz_tools::Result<ObjectId> {
-    let mut part_ids = Vec::new();
-    let mut part_sizes = Vec::new();
-
-    for chunk in data.chunks(CHUNK_SIZE) {
-        let (part_id, _, _) = client.insert(
-            "file_parts",
-            jazz_tools::row_input!("data" => chunk.to_vec()),
-        )?;
-        part_ids.push(Value::Uuid(part_id));
-        part_sizes.push(Value::Integer(chunk.len() as i32));
-    }
-
     let mut file_values = jazz_tools::row_input!(
-        "mimeType" => mime_type,
-        "partIds" => part_ids,
-        "partSizes" => part_sizes,
+        "mime_type" => mime_type,
+        "data" => data.to_vec(),
     );
     if let Some(name) = name {
         file_values.insert("name".to_string(), name.into());
@@ -500,7 +485,7 @@ pub async fn load_file_bytes(
     let files = client
         .query(
             QueryBuilder::new("files")
-                .select(&["partIds"])
+                .select(&["data"])
                 .filter_eq("_id", Value::Uuid(*file_id))
                 .build(),
             Some(DurabilityTier::EdgeServer),
@@ -510,32 +495,11 @@ pub async fn load_file_bytes(
     let Some((_, row)) = files.first() else {
         return Ok(None);
     };
-    let Value::Array(part_ids) = &row[0] else {
-        return Ok(None);
-    };
 
-    let mut data = Vec::new();
-    for part_ref in part_ids {
-        let Value::Uuid(part_id) = part_ref else {
-            continue;
-        };
-        let parts = client
-            .query(
-                QueryBuilder::new("file_parts")
-                    .select(&["data"])
-                    .filter_eq("_id", Value::Uuid(*part_id))
-                    .build(),
-                Some(DurabilityTier::EdgeServer),
-            )
-            .await?;
-        if let Some((_, row)) = parts.first()
-            && let Value::Bytea(chunk) = &row[0]
-        {
-            data.extend_from_slice(chunk);
-        }
+    match &row[0] {
+        Value::Bytea(data) => Ok(Some(data.clone())),
+        _ => Ok(None),
     }
-
-    Ok(Some(data))
 }
 // #endregion files-load-rust
 
@@ -561,27 +525,7 @@ pub async fn delete_upload_with_file(
         return Ok(());
     };
 
-    let files = client
-        .query(
-            QueryBuilder::new("files")
-                .select(&["partIds"])
-                .filter_eq("_id", Value::Uuid(*file_id))
-                .build(),
-            Some(DurabilityTier::EdgeServer),
-        )
-        .await?;
-
-    if let Some((file_row_id, row)) = files.first() {
-        if let Value::Array(part_ids) = &row[0] {
-            // Delete chunks while the parent file row still exists.
-            for part_ref in part_ids {
-                if let Value::Uuid(part_id) = part_ref {
-                    client.delete(*part_id)?;
-                }
-            }
-        }
-        client.delete(*file_row_id)?;
-    }
+    client.delete(*file_id)?;
 
     client.delete(upload_id)?;
     Ok(())

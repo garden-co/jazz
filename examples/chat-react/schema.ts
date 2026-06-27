@@ -47,14 +47,10 @@ const schema = {
     fileId: s.ref("files"),
     size: s.int(),
   }),
-  file_parts: s.table({
-    data: s.bytes(),
-  }),
   files: s.table({
     name: s.string().optional(),
-    mimeType: s.string(),
-    partIds: s.array(s.ref("file_parts")),
-    partSizes: s.array(s.int()),
+    mime_type: s.string(),
+    data: s.bytes(),
   }),
 };
 

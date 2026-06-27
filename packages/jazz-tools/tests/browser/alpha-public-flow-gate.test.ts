@@ -111,7 +111,7 @@ describe("alpha public package flow", () => {
     ).toBe(true);
   });
 
-  it.skip("TODO(alpha direct core): reopens public persistent OPFS data after local writes; blocked because public Db does not wire async WasmDb.openBrowser yet", async () => {
+  it.skip("TODO(alpha direct core): reopens public persistent OPFS data after local writes; blocked because WasmDb.openBrowser must run in a dedicated worker and public Db does not have a sync-compatible direct-core worker runtime yet", async () => {
     const appId = uniqueDbName("alpha-public-local-reopen");
     const persistentDbName = uniqueDbName("alpha-public-local-reopen-opfs");
     const sharedSecret = generateAuthSecret();

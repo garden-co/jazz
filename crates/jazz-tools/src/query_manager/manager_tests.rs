@@ -796,44 +796,44 @@ fn join_schema_with_magic_permissions() -> Schema {
 // Array subquery (correlated subquery) tests
 // ========================================================================
 
-fn file_storage_schema() -> Schema {
+fn bundle_items_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
-        TableName::new("file_parts"),
+        TableName::new("bundle_items"),
         RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]).into(),
     );
     schema.insert(
-        TableName::new("files"),
+        TableName::new("bundles"),
         RowDescriptor::new(vec![
             ColumnDescriptor::new(
-                "parts",
+                "items",
                 ColumnType::Array {
                     element: Box::new(ColumnType::Uuid),
                 },
             )
-            .references("file_parts"),
+            .references("bundle_items"),
         ])
         .into(),
     );
     schema
 }
 
-fn files_with_parts_descriptor() -> RowDescriptor {
+fn bundles_with_items_descriptor() -> RowDescriptor {
     // Sub-row has schema columns only; id is in Value::Row { id, .. }
-    let part_descriptor =
+    let item_descriptor =
         RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]);
     RowDescriptor::new(vec![
         ColumnDescriptor::new(
-            "parts",
+            "items",
             ColumnType::Array {
                 element: Box::new(ColumnType::Uuid),
             },
         ),
         ColumnDescriptor::new(
-            "part_rows",
+            "item_rows",
             ColumnType::Array {
                 element: Box::new(ColumnType::Row {
-                    columns: Box::new(part_descriptor),
+                    columns: Box::new(item_descriptor),
                 }),
             },
         ),
