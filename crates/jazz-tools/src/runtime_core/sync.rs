@@ -125,7 +125,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             entry.payload,
             crate::sync_manager::SyncPayload::CatalogueEntryUpdated { .. }
         ) {
-            #[cfg(feature = "transport")]
+            #[cfg(feature = "legacy-alpha-transport")]
             self.mark_transport_catalogue_state_hash_dirty();
         }
         if entry.payload.writes_storage() {

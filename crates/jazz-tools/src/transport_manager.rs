@@ -81,7 +81,7 @@ pub struct TransportHandle {
     /// be notified without polling. Kept alongside `ever_connected` so the
     /// wasm transport and other non-native wait paths can still read the
     /// latched state synchronously.
-    #[cfg(feature = "transport-websocket")]
+    #[cfg(feature = "legacy-alpha-transport")]
     pub(crate) connected_rx: tokio::sync::watch::Receiver<bool>,
     pub control_tx: mpsc::UnboundedSender<TransportControl>,
     /// Client's current catalogue-state digest. The TransportManager reads
@@ -381,7 +381,7 @@ pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     /// task so it can broadcast `true` once on the first handshake. Only
     /// present for the native Tokio WebSocket wait path; the wasm transport
     /// relies solely on the `AtomicBool` above.
-    #[cfg(feature = "transport-websocket")]
+    #[cfg(feature = "legacy-alpha-transport")]
     connected_tx: tokio::sync::watch::Sender<bool>,
     control_rx: mpsc::UnboundedReceiver<TransportControl>,
     /// Shared with `TransportHandle::catalogue_state_hash`. Read at each
@@ -413,7 +413,7 @@ pub fn create_with_retry_config<W: StreamAdapter, T: TickNotifier>(
     let (inbound_tx, inbound_rx) = mpsc::unbounded();
     let (control_tx, control_rx) = mpsc::unbounded();
     let ever_connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    #[cfg(feature = "transport-websocket")]
+    #[cfg(feature = "legacy-alpha-transport")]
     let (connected_tx, connected_rx) = tokio::sync::watch::channel(false);
     let catalogue_state_hash = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let declared_schema_hash = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
@@ -423,7 +423,7 @@ pub fn create_with_retry_config<W: StreamAdapter, T: TickNotifier>(
         outbox_tx,
         inbound_rx,
         ever_connected: ever_connected.clone(),
-        #[cfg(feature = "transport-websocket")]
+        #[cfg(feature = "legacy-alpha-transport")]
         connected_rx,
         control_tx,
         catalogue_state_hash: catalogue_state_hash.clone(),
@@ -440,7 +440,7 @@ pub fn create_with_retry_config<W: StreamAdapter, T: TickNotifier>(
         retry_config,
         client_id,
         ever_connected,
-        #[cfg(feature = "transport-websocket")]
+        #[cfg(feature = "legacy-alpha-transport")]
         connected_tx,
         control_rx,
         catalogue_state_hash,
@@ -502,7 +502,7 @@ pub(crate) enum HandshakeResult {
 
 /// Handshake helpers shared between the Tokio and WASM run loops.
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
-    #[cfg(all(test, feature = "transport-websocket"))]
+    #[cfg(all(test, feature = "legacy-alpha-transport"))]
     pub(crate) fn try_recv_outbox_for_test(&mut self) -> Option<OutboxEntry> {
         self.outbox_rx.try_recv().ok()
     }
@@ -903,7 +903,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                         next_sync_seq: resp.next_sync_seq,
                     });
                     self.tick.notify();
-                    #[cfg(feature = "transport-websocket")]
+                    #[cfg(feature = "legacy-alpha-transport")]
                     let _ = self.connected_tx.send(true);
                     self.reconnect.reset();
                     match self.run_connected(&mut ws).await {

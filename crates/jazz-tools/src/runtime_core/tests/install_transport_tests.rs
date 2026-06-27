@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "transport-websocket")]
+#[cfg(feature = "legacy-alpha-transport")]
 mod install_transport_tests {
     use super::*;
     use crate::transport_manager::{AuthConfig, StreamAdapter, TickNotifier};
