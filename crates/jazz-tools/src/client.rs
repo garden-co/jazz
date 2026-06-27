@@ -41,8 +41,7 @@ use base64::Engine;
 #[cfg(feature = "direct-core-client")]
 use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
-    LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
-    Propagation as CorePropagation, ReadOpts as CoreReadOpts,
+    LocalUpdates as CoreLocalUpdates, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
 };
 #[cfg(feature = "direct-core-client")]
@@ -65,8 +64,6 @@ type DynStorage = Box<dyn Storage + Send>;
 type ClientRuntime = TokioRuntime<DynStorage>;
 #[cfg(feature = "direct-core-client")]
 type DirectCoreDb = CoreDb<CoreMemoryStorage>;
-#[cfg(feature = "direct-core-client")]
-type DirectCoreConnection = Rc<std::cell::RefCell<CorePeerConnection<CoreMemoryStorage>>>;
 
 #[derive(Debug, Deserialize)]
 struct UnverifiedJwtClaims {
@@ -143,7 +140,6 @@ struct DirectCoreEngine {
 #[cfg(feature = "direct-core-client")]
 struct DirectCoreInner {
     db: Rc<DirectCoreDb>,
-    connection: DirectCoreConnection,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
 }
@@ -316,12 +312,13 @@ impl DirectCoreEngine {
         tokio::task::spawn_local(async move {
             loop {
                 state.notify.notified().await;
-                let urgency = scheduler.take();
-                if urgency == Some(TickUrgency::Deferred) {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                if inner.borrow().connection.borrow_mut().tick().is_err() {
-                    break;
+                while let Some(urgency) = scheduler.take() {
+                    if urgency == TickUrgency::Deferred {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    if inner.borrow().db.tick().is_err() {
+                        return;
+                    }
                 }
             }
         });
@@ -361,10 +358,9 @@ impl DirectCoreInner {
         )
         .await
         .map_err(|error| JazzError::Connection(error.to_string()))?;
-        let connection = db.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
+        db.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
         Ok(Self {
             db,
-            connection,
             write_map: HashMap::new(),
             row_tables: HashMap::new(),
         })

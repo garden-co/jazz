@@ -1032,6 +1032,51 @@ fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
 }
 
 #[test]
+fn local_write_is_readable_synchronously_without_running_tick() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let scheduler = Rc::new(RecordingScheduler::default());
+    db.set_tick_scheduler(Some(scheduler.clone()));
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("read before tick", false),
+    )
+    .unwrap();
+
+    let rows = db.read(&prepared_query).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(scheduler.take(), vec![TickUrgency::Deferred]);
+}
+
+#[test]
+fn local_write_notifies_subscription_synchronously_without_running_tick() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let scheduler = Rc::new(RecordingScheduler::default());
+    db.set_tick_scheduler(Some(scheduler.clone()));
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+    let mut subscription =
+        doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
+    assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
+
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("notify before tick", false),
+    )
+    .unwrap();
+
+    let (added, updated, removed) =
+        delta_rows(doctest_support::block_on(subscription.next_event()).unwrap());
+    assert_eq!(added.len(), 1);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(scheduler.take(), vec![TickUrgency::Deferred]);
+}
+
+#[test]
 fn db_facade_schedules_immediate_tick_for_propagated_query_coverage() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let scheduler = Rc::new(RecordingScheduler::default());
@@ -1048,6 +1093,45 @@ fn db_facade_schedules_immediate_tick_for_propagated_query_coverage() {
             include_deleted: false,
         },
     );
+
+    assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
+}
+
+#[test]
+fn db_facade_schedules_immediate_tick_for_upstream_connection() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let scheduler = Rc::new(RecordingScheduler::default());
+    db.set_tick_scheduler(Some(scheduler.clone()));
+    let (client_transport, _server_transport) = duplex();
+
+    let _upstream = db.connect_upstream(client_transport);
+
+    assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
+}
+
+#[test]
+fn upstream_inbound_application_schedules_immediate_tick() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x51, author, &schema);
+    let client = open_db(0x52, author, &schema);
+    let scheduler = Rc::new(RecordingScheduler::default());
+    client.set_tick_scheduler(Some(scheduler.clone()));
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    scheduler.take();
+
+    let query = client.table("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    scheduler.take();
+
+    client.tick().unwrap();
+    assert!(scheduler.take().is_empty());
+    server.tick().unwrap();
+    assert!(scheduler.take().is_empty());
+    client.tick().unwrap();
 
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
 }

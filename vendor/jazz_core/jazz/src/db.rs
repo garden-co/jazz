@@ -1558,9 +1558,7 @@ where
     }
 
     fn schedule_tick(&self, urgency: TickUrgency) {
-        if let Some(scheduler) = self.scheduler.borrow().as_ref() {
-            scheduler.schedule_tick(urgency);
-        }
+        schedule_tick_in(&self.scheduler, urgency);
     }
 
     fn register_write_state_waiter(&self, tx_id: TxId) -> WriteStateChange {
@@ -2201,6 +2199,7 @@ where
                 if applied {
                     stats.subscription_events +=
                         refresh_subscriptions_in(&self.node, &self.subscriptions)?;
+                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                 }
             }
             ConnectionLink::Subscriber {
@@ -2212,7 +2211,10 @@ where
                 registered_shape_opts,
                 served_current_rows,
             } => {
+                let mut applied_inbound = false;
+                let mut scheduled_immediate = false;
                 while let Some(message) = self.transport.try_recv() {
+                    applied_inbound = true;
                     match message {
                         SyncMessage::RegisterShape {
                             shape_id,
@@ -2279,9 +2281,8 @@ where
                                             .unwrap_or_default(),
                                     },
                                 );
-                                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
-                                    scheduler.schedule_tick(TickUrgency::Immediate);
-                                }
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                scheduled_immediate = true;
                             }
                         }
                         other => {
@@ -2321,13 +2322,14 @@ where
                                         tx_id,
                                         unit: Some(unit),
                                     });
-                                    if let Some(scheduler) = self.scheduler.borrow().as_ref() {
-                                        scheduler.schedule_tick(TickUrgency::Deferred);
-                                    }
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                 }
                             }
                         }
                     }
+                }
+                if applied_inbound && !scheduled_immediate {
+                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                 }
                 for (shape, binding) in served.values() {
                     let update = {
@@ -2360,6 +2362,12 @@ where
             }
         }
         Ok(stats)
+    }
+}
+
+fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrgency) {
+    if let Some(scheduler) = scheduler.borrow().as_ref() {
+        scheduler.schedule_tick(urgency);
     }
 }
 
