@@ -12,6 +12,7 @@ use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures_channel::oneshot;
 use futures_core::Stream;
 use groove::records::Value;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
@@ -92,6 +93,12 @@ where
 type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamSubscriptions = Rc<RefCell<Vec<PendingUpstreamSubscription>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
+type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
+
+struct WriteStateWaiter {
+    id: u64,
+    sender: oneshot::Sender<()>,
+}
 
 #[derive(Clone)]
 struct PendingUpstreamSubscription {
@@ -117,6 +124,43 @@ pub struct WriteState {
     pub fate: Fate,
     /// Highest durability tier observed by this `Db`.
     pub durability: DurabilityTier,
+}
+
+/// Future that resolves when a database observes a write-state change.
+///
+/// This is a wake primitive: callers should read [`Db::write_state`] before
+/// registering it, read again after registration, and then re-read after it
+/// resolves.
+pub struct WriteStateChange {
+    waiters: WriteStateWaiters,
+    tx_id: TxId,
+    waiter_id: u64,
+    receiver: oneshot::Receiver<()>,
+}
+
+impl Future for WriteStateChange {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.receiver).poll(cx) {
+            Poll::Ready(_) => Poll::Ready(()),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for WriteStateChange {
+    fn drop(&mut self) {
+        let mut waiters = self.waiters.borrow_mut();
+        let Some(tx_waiters) = waiters.get_mut(&self.tx_id) else {
+            return;
+        };
+        tx_waiters.retain(|waiter| waiter.id != self.waiter_id);
+        let empty = tx_waiters.is_empty();
+        if empty {
+            waiters.remove(&self.tx_id);
+        }
+    }
 }
 
 impl<S> Db<S>
@@ -234,6 +278,14 @@ where
             ));
         };
         Ok(WriteState { fate, durability })
+    }
+
+    /// Wait until this database observes another state transition for `tx_id`.
+    ///
+    /// Callers should always check [`Db::write_state`] before and after
+    /// registering this future; this method is a wake primitive, not a predicate.
+    pub fn next_write_state_change(&self, tx_id: TxId) -> WriteStateChange {
+        self.node.register_write_state_waiter(tx_id)
     }
 
     /// Start a query rooted at `table`.
@@ -1453,6 +1505,8 @@ where
     upstream_subscriptions: PendingUpstreamSubscriptions,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
+    write_state_waiters: WriteStateWaiters,
+    next_write_state_waiter_id: Cell<u64>,
 }
 
 impl<S> Node<S>
@@ -1468,6 +1522,8 @@ where
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
+            write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
+            next_write_state_waiter_id: Cell::new(1),
         }
     }
 
@@ -1488,6 +1544,27 @@ where
     fn schedule_tick(&self, urgency: TickUrgency) {
         if let Some(scheduler) = self.scheduler.borrow().as_ref() {
             scheduler.schedule_tick(urgency);
+        }
+    }
+
+    fn register_write_state_waiter(&self, tx_id: TxId) -> WriteStateChange {
+        let waiter_id = self.next_write_state_waiter_id.get();
+        self.next_write_state_waiter_id
+            .set(waiter_id.wrapping_add(1).max(1));
+        let (sender, receiver) = oneshot::channel();
+        self.write_state_waiters
+            .borrow_mut()
+            .entry(tx_id)
+            .or_default()
+            .push(WriteStateWaiter {
+                id: waiter_id,
+                sender,
+            });
+        WriteStateChange {
+            waiters: Rc::clone(&self.write_state_waiters),
+            tx_id,
+            waiter_id,
+            receiver,
         }
     }
 
@@ -1525,6 +1602,7 @@ where
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             scheduler: Rc::clone(&self.scheduler),
+            write_state_waiters: Rc::clone(&self.write_state_waiters),
             link: ConnectionLink::Upstream {
                 pending,
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
@@ -1620,6 +1698,7 @@ where
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             scheduler: Rc::clone(&self.scheduler),
+            write_state_waiters: Rc::clone(&self.write_state_waiters),
             link: ConnectionLink::Subscriber {
                 peer,
                 ingest_context: CommitUnitIngestContext { identity, trust },
@@ -1921,6 +2000,7 @@ where
     node: Rc<RefCell<NodeState<S>>>,
     subscriptions: SubscriptionList,
     scheduler: SharedTickScheduler,
+    write_state_waiters: WriteStateWaiters,
     link: ConnectionLink,
     last_resume_bytes: Option<usize>,
 }
@@ -2081,7 +2161,11 @@ where
                 }
                 let mut applied = false;
                 while let Some(message) = self.transport.try_recv() {
+                    let write_state_tx_id = write_state_update_tx_id(&message);
                     self.node.borrow_mut().apply_sync_message(message)?;
+                    if let Some(tx_id) = write_state_tx_id {
+                        notify_write_state_waiters(&self.write_state_waiters, tx_id);
+                    }
                     applied = true;
                 }
                 if applied {
@@ -2177,6 +2261,7 @@ where
                                 }
                                 _ => None,
                             };
+                            let write_state_tx_id = write_state_update_tx_id(&other);
                             // RegisterShape (registers the shape ahead of its
                             // binding), plus the write-upload path: any
                             // responses (e.g. fate updates) flow back to the
@@ -2188,6 +2273,9 @@ where
                                     other,
                                     Some(*ingest_context),
                                 )?;
+                            if let Some(tx_id) = write_state_tx_id {
+                                notify_write_state_waiters(&self.write_state_waiters, tx_id);
+                            }
                             for response in responses {
                                 send_with_content_extents(
                                     &self.node,
@@ -2315,6 +2403,22 @@ fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
     match message {
         SyncMessage::ViewUpdate { subscription, .. } => Some(*subscription),
         _ => None,
+    }
+}
+
+fn write_state_update_tx_id(message: &SyncMessage) -> Option<TxId> {
+    match message {
+        SyncMessage::FateUpdate { tx_id, .. } => Some(*tx_id),
+        _ => None,
+    }
+}
+
+fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) {
+    let Some(waiters) = waiters.borrow_mut().remove(&tx_id) else {
+        return;
+    };
+    for waiter in waiters {
+        let _ = waiter.sender.send(());
     }
 }
 
