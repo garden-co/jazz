@@ -72,12 +72,17 @@ function authorBytesForSubject(subject: string, fallbackSeed: string): Uint8Arra
 }
 
 export class WasmCoreSource extends CoreSource<DbConfig> {
+  private module: WasmModule | null = null;
+
   private get wasmModule(): WasmModule {
-    return this.loadedCore as WasmModule;
+    if (!this.module) {
+      throw new Error("WASM core source is not loaded");
+    }
+    return this.module;
   }
 
-  protected override async loadCore(config: DbConfig): Promise<WasmModule> {
-    return await loadWasmModule(config.runtimeSources);
+  override async load(config: DbConfig): Promise<void> {
+    this.module ??= await loadWasmModule(config.runtimeSources);
   }
 
   override createClient({

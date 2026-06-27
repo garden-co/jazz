@@ -38,7 +38,6 @@ import {
   type DeleteOptions,
 } from "./client.js";
 import { type CoreSource, type RuntimeTokenOptions } from "./core-source.js";
-import { SYSTEM_READ_SESSION } from "./system-identity.js";
 import { WasmCoreSource } from "./wasm-core-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
@@ -880,7 +879,7 @@ export class Db {
   private clients = new Map<string, JazzClient>();
   private clientSchemas = new Map<string, WasmSchema>();
   private config: DbConfig;
-  private readonly coreSource: AnyCoreSource | null;
+  private readonly coreSource: AnyCoreSource;
   private readonly authStateStore;
   private disposeCoreTelemetry: (() => void) | null = null;
   private _localFirstSecret: string | null = null;
@@ -900,7 +899,7 @@ export class Db {
    */
   protected constructor(
     config: DbConfig,
-    coreSource: AnyCoreSource | null,
+    coreSource: AnyCoreSource,
     authStateOptions?: AuthStateStoreOptions,
   ) {
     this.config = config;
@@ -943,10 +942,6 @@ export class Db {
   }
 
   private mintLocalFirstToken(secret: string, audience: string, ttlSeconds: number): string {
-    if (!this.coreSource) {
-      throw new Error("Db core source is not initialized for this Db implementation");
-    }
-
     return this.coreSource.mintLocalFirstToken({
       secret,
       audience,
@@ -1013,10 +1008,6 @@ export class Db {
    *
    */
   protected getClient(schema: WasmSchema): JazzClient {
-    if (!this.coreSource) {
-      throw new Error("Db core source is not initialized for this Db implementation");
-    }
-
     const runtimeSchema =
       this.coreSource.supportsPolicyBypass && shouldBypassLocalPolicies(this.config)
         ? getPolicyStrippedSchema(schema)
@@ -1056,7 +1047,7 @@ export class Db {
 
   private installMainThreadCoreTelemetry(): void {
     const collectorUrl = this.resolveTelemetryCollectorUrl();
-    if (!collectorUrl || !this.coreSource || this.disposeCoreTelemetry) {
+    if (!collectorUrl || this.disposeCoreTelemetry) {
       return;
     }
 
@@ -1674,75 +1665,6 @@ export class Db {
 }
 
 /**
- * A Db implementation that delegates all operations to an existing {@link JazzClient}.
- * Used only for tests.
- */
-class ClientBackedDb extends Db {
-  private readonly hasScopedAuthState: boolean;
-
-  constructor(
-    config: DbConfig,
-    private readonly runtimeClient: JazzClient,
-    private readonly session?: Session,
-    private readonly attribution?: string,
-    scopedAuthState?: AuthState,
-  ) {
-    super(
-      config,
-      null,
-      scopedAuthState
-        ? {
-            initialState: scopedAuthState,
-            lockAuthenticatedState: true,
-          }
-        : undefined,
-    );
-    this.hasScopedAuthState = scopedAuthState !== undefined;
-  }
-
-  protected override getClient(_schema: WasmSchema): JazzClient {
-    return this.runtimeClient;
-  }
-
-  override updateAuthToken(jwtToken: string | null): void {
-    if (this.hasScopedAuthState) {
-      return;
-    }
-
-    if (!this.applyAuthUpdate(jwtToken)) {
-      return;
-    }
-
-    this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
-  }
-
-  override updateCookieSession(cookieSession: Session | null): void {
-    if (this.hasScopedAuthState) {
-      return;
-    }
-
-    if (!this.applyCookieSessionUpdate(cookieSession)) {
-      return;
-    }
-
-    this.runtimeClient.updateCookieSession(cookieSession ?? undefined);
-  }
-
-  protected override getRuntimeOperationContext(): DbRuntimeOperationContext {
-    return {
-      session: this.session,
-      attribution: this.attribution,
-      readSession:
-        this.session ?? (this.attribution !== undefined ? SYSTEM_READ_SESSION : undefined),
-    };
-  }
-
-  override async shutdown(): Promise<void> {
-    // The owning JazzContext owns the runtime lifecycle.
-  }
-}
-
-/**
  * Generate a 32-byte ephemeral seed for anonymous auth.
  *
  * Uses `globalThis.crypto.getRandomValues`, which is available in all
@@ -1841,23 +1763,4 @@ export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
 
 export async function createDb(config: DbConfig): Promise<Db> {
   return await createDbWithCoreSource(config, new WasmCoreSource());
-}
-
-export function createDbFromClient(
-  config: DbConfig,
-  client: JazzClient,
-  session?: Session,
-  attribution?: string,
-  scopedAuthState?: AuthState,
-): Db {
-  return new ClientBackedDb(
-    config,
-    client,
-    session,
-    attribution,
-    scopedAuthState ??
-      (session || attribution
-        ? { authMode: session?.authMode ?? "external", session: session ?? null }
-        : undefined),
-  );
 }

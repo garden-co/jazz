@@ -1,15 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
-import { Db, createDbFromClient, type QueryBuilder, type TableProxy } from "./db.js";
+import { Db, type DbConfig, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
 import { WriteResult, JazzClient, type InsertResult, WriteHandle } from "./client.js";
 import type { Session } from "./context.js";
+import { CoreSource, type CoreClientContext } from "./core-source.js";
+
+class TestCoreSource extends CoreSource<DbConfig> {
+  constructor(private readonly client: JazzClient) {
+    super();
+  }
+
+  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
+    return this.client;
+  }
+}
 
 class TestDb extends Db {
   constructor(
     private readonly testClient: JazzClient,
     private readonly testContext: { session?: Session } | null = null,
   ) {
-    super({ appId: "schema-order-test" }, null);
+    super({ appId: "schema-order-test" }, new TestCoreSource(testClient));
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
@@ -471,7 +482,7 @@ describe("Db runtime schema order", () => {
       update,
       upsert,
     } as unknown as JazzClient;
-    const db = createDbFromClient({ appId: "client-backed-db-test" }, client);
+    const db = new TestDb(client);
     const table = {
       _table: "todos",
       _schema: generatedSchema,

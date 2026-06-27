@@ -1,5 +1,6 @@
 import { JazzClient, type Runtime } from "../client.js";
-import { createDbFromClient, type QueryBuilder } from "../db.js";
+import { Db, type DbConfig, type QueryBuilder } from "../db.js";
+import { CoreSource, type CoreClientContext } from "../core-source.js";
 import type { WasmRow, WasmSchema } from "../../drivers/types.js";
 
 const DEFAULT_TABLE_COUNT = 24;
@@ -41,6 +42,27 @@ export interface SchemaMarshallingBenchResult {
     getSchemaAvgMsPerCall: number;
     getSchemaAvgMsPerIteration: number;
   };
+}
+
+class RuntimeCoreSource extends CoreSource<DbConfig> {
+  constructor(private readonly runtime: Runtime) {
+    super();
+  }
+
+  override createClient({
+    config,
+    schema,
+    onAuthFailure,
+  }: CoreClientContext<DbConfig>): JazzClient {
+    return JazzClient.connectWithRuntime(
+      this.runtime,
+      {
+        appId: config.appId,
+        schema,
+      },
+      { onAuthFailure },
+    );
+  }
 }
 
 export function createSyntheticRuntimeSchema(options?: {
@@ -182,7 +204,10 @@ export async function runSchemaMarshallingBench(
     appId: `schema-marshalling-bench-${options.label}`,
     schema: options.schema,
   });
-  const db = createDbFromClient({ appId: `schema-marshalling-db-${options.label}` }, client);
+  const db = Db.create(
+    { appId: `schema-marshalling-db-${options.label}` },
+    new RuntimeCoreSource(runtime),
+  );
   const query = createQuery(options.schema, tableName);
 
   for (let index = 0; index < warmupIterations; index += 1) {
