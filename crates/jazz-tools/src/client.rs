@@ -10,18 +10,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(feature = "direct-core-client", feature = "rocksdb"))]
 use std::time::Duration;
 
-use crate::query_manager::query::Query;
-use crate::query_manager::session::{Session, WriteContext};
-#[cfg(feature = "direct-core-client")]
-use crate::query_manager::types::OrderedRowDelta;
 #[cfg(feature = "test-utils")]
 use crate::query_manager::types::RowPolicyMode;
-#[cfg(any(feature = "direct-core-client", feature = "test-utils"))]
-use crate::query_manager::types::Schema;
-#[cfg(feature = "direct-core-client")]
-use crate::query_manager::types::TableName;
-use crate::query_manager::types::Value;
 use crate::row_histories::BatchId;
+#[cfg(feature = "direct-core-client")]
+use crate::schema_api::OrderedRowDelta;
+#[cfg(any(feature = "direct-core-client", feature = "test-utils"))]
+use crate::schema_api::Schema;
+#[cfg(feature = "direct-core-client")]
+use crate::schema_api::TableName;
+use crate::schema_api::{Query, Session, Value, WriteContext};
 #[cfg(feature = "direct-core-client")]
 use crate::server::direct_client::DirectCoreWebSocketTransport;
 #[cfg(feature = "direct-core-client")]
@@ -1575,7 +1573,7 @@ impl JazzClient {
     }
 
     /// Get the current schema.
-    pub fn schema(&self) -> Result<crate::query_manager::types::Schema> {
+    pub fn schema(&self) -> Result<Schema> {
         #[cfg(feature = "direct-core-client")]
         {
             Ok(self.alpha_schema.clone())
@@ -1660,12 +1658,12 @@ impl Drop for JazzClient {
 mod tests {
     use super::*;
     #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    use crate::query_manager::policy::PolicyExpr;
-    use crate::query_manager::types::Schema;
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
-    use crate::query_manager::types::{SchemaHash, TableName, TablePolicies};
-    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
+    use crate::schema_api::PolicyExpr;
+    use crate::schema_api::Schema;
+    #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
+    use crate::schema_api::{SchemaHash, TableName, TablePolicies};
     use crate::schema_manager::AppId;
     #[cfg(all(feature = "rocksdb", feature = "legacy-alpha-engine"))]
     use crate::schema_manager::SchemaManager;

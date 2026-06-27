@@ -8,9 +8,10 @@ use jazz::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
 };
 
-use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-use crate::query_manager::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Schema, TableName, Value,
+use crate::query_manager::policy::{CmpOp, PolicyValue};
+use crate::schema_api::{
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
+    TableSchema, Value,
 };
 
 const ALPHA_USER_ID_SESSION_PATH: &str = "user_id";
@@ -54,7 +55,7 @@ pub(crate) fn convert_alpha_schema(
 fn convert_table(
     schema: &Schema,
     name: &TableName,
-    table: &crate::query_manager::types::TableSchema,
+    table: &TableSchema,
 ) -> Result<CoreTableSchema, DirectSchemaConversionError> {
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
@@ -182,7 +183,7 @@ fn convert_merge_strategy(
     }
 }
 
-fn write_policy(table: &crate::query_manager::types::TableSchema) -> Option<&PolicyExpr> {
+fn write_policy(table: &TableSchema) -> Option<&PolicyExpr> {
     table
         .policies
         .insert
@@ -195,7 +196,7 @@ fn write_policy(table: &crate::query_manager::types::TableSchema) -> Option<&Pol
 
 fn convert_optional_policy(
     schema: &Schema,
-    table_schema: &crate::query_manager::types::TableSchema,
+    table_schema: &TableSchema,
     table: &TableName,
     path: &str,
     expr: Option<&PolicyExpr>,
@@ -206,7 +207,7 @@ fn convert_optional_policy(
 
 fn convert_policy(
     schema: &Schema,
-    table_schema: &crate::query_manager::types::TableSchema,
+    table_schema: &TableSchema,
     table: &TableName,
     path: &str,
     expr: &PolicyExpr,
@@ -259,7 +260,7 @@ fn is_direct_inherited_select(expr: &PolicyExpr) -> bool {
 
 fn append_policy_clause(
     schema: &Schema,
-    table_schema: &crate::query_manager::types::TableSchema,
+    table_schema: &TableSchema,
     table: &TableName,
     path: &str,
     query: Query,
@@ -277,7 +278,7 @@ fn append_policy_clause(
 
 fn append_inherited_select_policy(
     schema: &Schema,
-    table_schema: &crate::query_manager::types::TableSchema,
+    table_schema: &TableSchema,
     table: &TableName,
     path: &str,
     query: Query,
@@ -425,10 +426,10 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> DirectSchemaConve
 mod tests {
     use super::*;
     use crate::object::ObjectId;
-    use crate::query_manager::policy::{CmpOp, PolicyExpr, PolicyValue};
-    use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, TablePolicies,
-        TableSchemaBuilder,
+    use crate::query_manager::policy::{CmpOp, PolicyValue};
+    use crate::schema_api::{
+        ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, SchemaBuilder, TablePolicies,
+        TableSchema,
     };
     use jazz::query::{JoinTarget, Operand, Predicate};
     use uuid::Uuid;
@@ -436,9 +437,9 @@ mod tests {
     #[test]
     fn converts_supported_columns_references_and_indexes() {
         let schema = SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("projects").column("name", ColumnType::Text))
+            .table(TableSchema::builder("projects").column("name", ColumnType::Text))
             .table(
-                TableSchemaBuilder::new("todos")
+                TableSchema::builder("todos")
                     .column("title", ColumnType::Text)
                     .column("done", ColumnType::Boolean)
                     .column("created", ColumnType::Timestamp)
@@ -474,7 +475,7 @@ mod tests {
     #[test]
     fn converts_public_integer_as_direct_core_u32_and_rejects_defaults() {
         let integer_schema = SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("todos").column("count", ColumnType::Integer))
+            .table(TableSchema::builder("todos").column("count", ColumnType::Integer))
             .build();
         let integer_table = convert_alpha_schema(&integer_schema)
             .unwrap()
@@ -493,7 +494,7 @@ mod tests {
         );
 
         let integer_array_schema = SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("todos").column(
+            .table(TableSchema::builder("todos").column(
                 "partSizes",
                 ColumnType::Array {
                     element: Box::new(ColumnType::Integer),
@@ -518,9 +519,9 @@ mod tests {
 
         let default_schema = [(
             TableName::new("todos"),
-            crate::query_manager::types::TableSchema::new(RowDescriptor::new(vec![
+            TableSchema::new(RowDescriptor::new(vec![
                 ColumnDescriptor::new("title", ColumnType::Text)
-                    .default(crate::query_manager::types::Value::Text("x".to_owned())),
+                    .default(Value::Text("x".to_owned())),
             ])),
         )]
         .into_iter()
