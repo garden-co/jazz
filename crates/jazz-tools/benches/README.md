@@ -1,10 +1,8 @@
 # Benchmark porting status
 
-This directory contains both active Criterion benches and legacy benchmark source
-material while the old `jazz-tools` engine is being replaced.
-
-Legacy source material lives under `archive/` with non-Rust suffixes so it is
-visibly archival and cannot be mistaken for an active direct-core benchmark.
+This directory contains active Criterion benches for the direct-core benchmark
+path. Old deep-internal `RuntimeCore` benchmark sources are not retained as
+source material here.
 
 ## Active benches
 
@@ -54,16 +52,10 @@ than old helper behavior:
 
 ## Intended next ports
 
-Next ports should prioritize the inactive deep-internal scenarios before they
-are reintroduced:
+Next ports should rebuild any missing measurement intent against the public
+direct-core API before reintroducing it:
 
 - `memory_benchmark`
-- `archive/realistic_phase1.rs.txt`
-
-Inactive legacy benches should remain in the tree as source material for
-scenarios, scale factors, fixtures, and expected measurement coverage. Port them
-by rebuilding the scenarios against the public direct-core API rather than by
-reviving the old RuntimeCore internals.
 
 The old `server_authorization_scope_benchmark` file was removed after its
 measurement intent was ported to `direct_authorization_scope_benchmark`.

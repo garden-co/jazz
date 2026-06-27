@@ -21,8 +21,20 @@ use crate::storage::StorageError;
 use crate::sync::{ClientId, DurabilityTier};
 #[cfg(test)]
 use crate::sync_manager::ConnectionSchemaDiagnostics;
+use crate::sync_manager::QueryPropagation;
 #[cfg(test)]
-use crate::sync_manager::{InboxEntry, QueryPropagation, SyncPayload};
+use crate::sync_manager::{InboxEntry, SyncPayload};
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ServerSubscriptionTelemetryGroup {
+    #[serde(rename = "groupKey")]
+    pub group_key: String,
+    pub count: usize,
+    pub table: String,
+    pub query: String,
+    pub branches: Vec<String>,
+    pub propagation: QueryPropagation,
+}
 
 /// Errors from server-local catalogue operations.
 #[allow(dead_code)]
@@ -280,17 +292,13 @@ impl DirectCatalogueStore {
         }))
     }
 
-    pub(crate) fn server_subscription_telemetry(
-        &self,
-    ) -> Vec<crate::query_manager::manager::ServerSubscriptionTelemetryGroup> {
+    pub(crate) fn server_subscription_telemetry(&self) -> Vec<ServerSubscriptionTelemetryGroup> {
         #[cfg(test)]
         {
             use std::collections::HashMap;
 
-            let mut groups = HashMap::<
-                (String, Vec<String>, String),
-                crate::query_manager::manager::ServerSubscriptionTelemetryGroup,
-            >::new();
+            let mut groups =
+                HashMap::<(String, Vec<String>, String), ServerSubscriptionTelemetryGroup>::new();
             let subscriptions = self.test_query_subscriptions.lock().unwrap();
             for (query_json, branches, propagation, query) in subscriptions.iter() {
                 let propagation_label = match propagation {
@@ -309,7 +317,7 @@ impl DirectCatalogueStore {
                     .or_insert_with(|| {
                         let group_key =
                             format!("{propagation_label}:{}:{group_index}", query.table.as_str());
-                        crate::query_manager::manager::ServerSubscriptionTelemetryGroup {
+                        ServerSubscriptionTelemetryGroup {
                             group_key,
                             count: 1,
                             table: query.table.as_str().to_string(),
