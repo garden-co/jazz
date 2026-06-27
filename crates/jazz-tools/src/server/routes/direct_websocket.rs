@@ -1,6 +1,7 @@
 //! Direct jazz_core WebSocket boundary.
 //!
-//! This route intentionally does not share the alpha `/ws` transport framing.
+//! This route intentionally does not share the legacy `SyncPayload` `/ws`
+//! transport framing.
 //! It accepts postcard-encoded batches of raw `jazz::wire::WireFrame` bytes,
 //! matching the core server binding/server carrier shape.
 
@@ -39,10 +40,10 @@ static DIRECT_WS_ADMISSIONS: OnceLock<std::sync::Mutex<DirectWsAdmissionRegistry
 
 /// Direct jazz_core websocket endpoint.
 ///
-/// This is a protocol boundary, not a compatibility shim for the alpha
+/// This is a protocol boundary, not a compatibility shim for the legacy
 /// `SyncPayload` websocket. The semantic `SyncMessage` loop is deliberately
-/// gated on the server owning the state needed to open a real direct
-/// `jazz::Db` peer.
+/// gated on the server owning the state needed to open a real direct `jazz::Db`
+/// peer.
 pub(super) async fn direct_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
@@ -915,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_ws_limits_match_alpha_frame_hardening() {
+    fn direct_ws_limits_are_capped_for_direct_websocket() {
         assert_eq!(DIRECT_WS_MAX_FRAME_BYTES, 1 << 20);
         assert_eq!(DIRECT_WS_MAX_MESSAGE_BYTES, DIRECT_WS_MAX_FRAME_BYTES);
     }
@@ -1065,7 +1066,7 @@ mod tests {
 
     // Internal route-boundary test: this proves the reusable direct-core
     // websocket client helper negotiates the real /apps/<APP_ID>/ws route
-    // without reintroducing the legacy alpha websocket handler.
+    // without reintroducing the legacy SyncPayload websocket handler.
     #[tokio::test]
     async fn direct_core_websocket_client_helper_negotiates_route_hello() {
         let state = make_direct_ws_test_state().await;

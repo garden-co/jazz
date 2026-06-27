@@ -1,6 +1,5 @@
 #[cfg(test)]
 pub mod bindings;
-pub mod encoding;
 pub mod magic_columns;
 pub mod policy;
 pub mod query;

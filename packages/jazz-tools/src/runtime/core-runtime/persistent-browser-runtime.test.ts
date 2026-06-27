@@ -40,6 +40,12 @@ class FakeWorker {
       this.onmessage?.({ data: { id, ok: true, result } } as MessageEvent);
     });
   }
+
+  reject(id: number, message: string): void {
+    queueMicrotask(() => {
+      this.onmessage?.({ data: { id, ok: false, error: { message } } } as MessageEvent);
+    });
+  }
 }
 
 describe("PersistentBrowserOpfsRuntime", () => {
@@ -48,7 +54,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     FakeWorker.instances = [];
   });
 
-  it("waits on the worker transaction id for proxied writes", async () => {
+  it("returns a pending write handle and waits on the worker transaction id", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
     const runtime = new PersistentBrowserOpfsRuntime(
@@ -66,7 +72,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
       undefined,
       "00000000-0000-0000-0000-000000000001",
     );
-    expect(insert.transactionId).toMatch(/^worker-write-/);
+    expect(insert.transactionId).toMatch(/^pending-worker-write-/);
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
@@ -85,6 +91,40 @@ describe("PersistentBrowserOpfsRuntime", () => {
     worker.respond(waitMessage!.id, undefined);
 
     await expect(waitPromise).resolves.toBeUndefined();
+    await runtime.close();
+  });
+
+  it("rejects waits when the worker write fails before direct-core returns a transaction id", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-write-failure-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const update = runtime.update(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      { title: { type: "Text", value: "rejected by worker" } },
+      undefined,
+    );
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "update")).toBe(true);
+    });
+    const updateMessage = worker.messages.find((message) => message.method === "update");
+    expect(updateMessage).toBeDefined();
+    worker.reject(updateMessage!.id, "core runtime rejected write");
+
+    await expect(runtime.waitForTransaction(update.transactionId, "local")).rejects.toThrow(
+      "core runtime rejected write",
+    );
+    expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(false);
+
     await runtime.close();
   });
 

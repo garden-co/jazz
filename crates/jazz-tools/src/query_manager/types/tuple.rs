@@ -6,8 +6,8 @@ use crate::metadata::RowProvenance;
 use crate::object::{BranchName, ObjectId};
 use crate::transaction::BatchId;
 
-use super::encoding::{decode_row, encode_row};
 use super::*;
+use crate::row_format::{decode_row, encode_row};
 
 // ============================================================================
 // Unified Tuple Model - For JOIN support and progressive materialization

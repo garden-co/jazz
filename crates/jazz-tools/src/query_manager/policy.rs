@@ -4,12 +4,12 @@
 //! between rows in the database. Each operation (SELECT, INSERT, UPDATE, DELETE)
 //! can have its own policy expression.
 
-use super::encoding::{column_is_null, decode_column};
 use super::magic_columns::{MagicColumnKind, magic_column_kind};
 use super::relation_ir::{PredicateExpr, RelExpr, RowIdRef, ValueRef};
 use super::session::Session;
 use super::types::{RowDescriptor, Value};
 use crate::metadata::RowProvenance;
+use crate::row_format::{column_is_null, decode_column};
 use serde::{Deserialize, Serialize};
 
 /// Comparison operators for policy expressions.
@@ -2530,8 +2530,8 @@ mod tests {
     // evaluate_simple_parts tests
     // ========================================================================
 
-    use crate::query_manager::encoding::encode_row;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
+    use crate::row_format::encode_row;
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
