@@ -120,6 +120,9 @@ export type { OpfsOwnerRequest as PersistentBrowserOpfsOwnerRequest };
 export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly worker: Worker;
   private readonly pending = new Map<number, PendingCall>();
+  // Runtime writes are synchronous, but the worker owns the CoreRuntime that can
+  // produce the real direct-core transaction id. These ids are pending handles
+  // that are only valid for waitForTransaction translation below.
   private readonly writes = new Map<string, Promise<string>>();
   private readonly subscriptions = new Map<number, Function>();
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
@@ -220,7 +223,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
 
   async waitForTransaction(transactionId: string, tier: string): Promise<void> {
     await this.opened;
-    const workerTransactionId = (await this.writes.get(transactionId)) ?? transactionId;
+    const pendingWrite = this.writes.get(transactionId);
+    const workerTransactionId = pendingWrite ? await pendingWrite : transactionId;
     await this.call("waitForTransaction", workerTransactionId, tier);
   }
 
@@ -322,7 +326,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   private writeId(): string {
-    return `worker-write-${this.nextCallId++}`;
+    return `pending-worker-write-${this.nextCallId++}`;
   }
 
   private call<Method extends WorkerMethod>(
@@ -361,9 +365,13 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     ...args: RequestArgs<Method>
   ): void {
     // The worker owns the real CoreRuntime, so durability waits must use the
-    // worker's transaction id.
+    // worker's transaction id. The public Runtime API is synchronous, so the
+    // result returned from insert/update/etc. is only a pending handle.
     const write = this.opened.then(async () => {
       const result = (await this.send(method, args)) as { transactionId: string };
+      if (!result || typeof result.transactionId !== "string") {
+        throw new Error("Persistent browser worker write did not return a transaction id");
+      }
       return result.transactionId;
     });
     this.writes.set(transactionId, write);

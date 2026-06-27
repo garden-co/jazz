@@ -1,16 +1,14 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, RwLock as StdRwLock};
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use tokio::time::Instant;
 
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
 use crate::schema_manager::AppId;
 use crate::sync::ClientId;
-use crate::sync::vocabulary::SyncPayload;
 use jazz_server::StorageConfig;
 
 mod builder;
@@ -46,185 +44,7 @@ pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, T
 /// attacker meaningful amplification before the cap bites.
 pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 4;
 
-#[derive(Debug, Clone)]
-pub struct SequencedSyncUpdate {
-    pub seq: u64,
-    pub payload: SyncPayload,
-}
-
-struct PreparedSyncDispatch {
-    connection_id: u64,
-    sender: mpsc::UnboundedSender<SequencedSyncUpdate>,
-    update: SequencedSyncUpdate,
-}
-
-struct ConnectionStreamState {
-    client_id: ClientId,
-    next_sync_seq: u64,
-    sender: mpsc::UnboundedSender<SequencedSyncUpdate>,
-    /// Set to `true` by `register_connection` immediately before this
-    /// stream is removed during per-client cap eviction. The connection
-    /// task reads it after `sync_rx.recv()` returns `None` to distinguish
-    /// eviction from a normal disconnect and emit a `RateLimited` error
-    /// frame.
-    evicted: Arc<AtomicBool>,
-}
-
-/// Result of registering a connection with the hub.
-pub struct ConnectionRegistration {
-    /// First sequence number to use for outbound payloads.
-    pub next_sync_seq: u64,
-    /// Receives sequenced sync updates dispatched to this connection.
-    pub receiver: mpsc::UnboundedReceiver<SequencedSyncUpdate>,
-    /// Set to `true` when this connection has been evicted by the
-    /// per-client cap. The connection task observes it after the
-    /// receiver returns `None`.
-    pub evicted: Arc<AtomicBool>,
-}
-
-#[derive(Default)]
-pub struct ConnectionEventHub {
-    streams: Mutex<HashMap<u64, ConnectionStreamState>>,
-}
-
-impl ConnectionEventHub {
-    pub fn register_connection(
-        &self,
-        connection_id: u64,
-        client_id: ClientId,
-    ) -> ConnectionRegistration {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let evicted = Arc::new(AtomicBool::new(false));
-        let mut streams = self.streams.lock().unwrap();
-        streams.insert(
-            connection_id,
-            ConnectionStreamState {
-                client_id,
-                next_sync_seq: 1,
-                sender,
-                evicted: evicted.clone(),
-            },
-        );
-
-        // Fast path: no eviction needed. Count without allocating; only
-        // walk + sort if we're actually past the cap.
-        let same_client_count = streams
-            .values()
-            .filter(|state| state.client_id == client_id)
-            .count();
-        if same_client_count > PER_CLIENT_CONNECTION_CAP {
-            // Evict the oldest connection(s) for this client_id past
-            // the cap. Connection IDs are assigned by a monotonic
-            // `fetch_add` in `handle_ws_connection`, so the smallest
-            // IDs were assigned earliest. Two registrations can race
-            // between the fetch and the lock here, but ordering by ID
-            // is still a stable, well-defined oldest-first tiebreaker.
-            //
-            // Eviction marks the per-stream `evicted` flag, then drops
-            // the stream's sender. The connection task's
-            // `sync_rx.recv()` returns `None` on its next select tick;
-            // it reads the flag, emits a `RateLimited` error frame,
-            // and runs `ws_cleanup` — which removes itself from
-            // `ServerState::connections`.
-            let mut ids_for_client: Vec<u64> = streams
-                .iter()
-                .filter_map(|(id, state)| (state.client_id == client_id).then_some(*id))
-                .collect();
-            ids_for_client.sort_unstable();
-            let evict_count = same_client_count - PER_CLIENT_CONNECTION_CAP;
-            for evicted_id in &ids_for_client[..evict_count] {
-                if let Some(state) = streams.get(evicted_id) {
-                    state
-                        .evicted
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                streams.remove(evicted_id);
-            }
-            tracing::warn!(
-                %client_id,
-                cap = PER_CLIENT_CONNECTION_CAP,
-                evicted = evict_count,
-                "evicting oldest ws connections past per-client cap"
-            );
-        }
-
-        ConnectionRegistration {
-            next_sync_seq: 1,
-            receiver,
-            evicted,
-        }
-    }
-
-    pub fn unregister_connection(&self, connection_id: u64) {
-        self.streams.lock().unwrap().remove(&connection_id);
-    }
-
-    fn prepare_payload(
-        &self,
-        client_id: ClientId,
-        payload: SyncPayload,
-    ) -> Vec<PreparedSyncDispatch> {
-        let mut prepared = Vec::new();
-        let mut streams = self.streams.lock().unwrap();
-
-        for (&connection_id, state) in streams.iter_mut() {
-            if state.client_id != client_id {
-                continue;
-            }
-
-            let seq = state.next_sync_seq;
-            let through_seq = seq.saturating_sub(1);
-            let payload = match &payload {
-                SyncPayload::QuerySettled {
-                    query_id,
-                    tier,
-                    scope,
-                    ..
-                } => SyncPayload::QuerySettled {
-                    query_id: *query_id,
-                    tier: *tier,
-                    scope: scope.clone(),
-                    through_seq,
-                },
-                _ => payload.clone(),
-            };
-            prepared.push(PreparedSyncDispatch {
-                connection_id,
-                sender: state.sender.clone(),
-                update: SequencedSyncUpdate { seq, payload },
-            });
-            state.next_sync_seq += 1;
-        }
-
-        prepared
-    }
-
-    fn dispatch_prepared(&self, prepared: Vec<PreparedSyncDispatch>) {
-        let mut stale_connection_ids = Vec::new();
-
-        for dispatch in prepared {
-            if dispatch.sender.send(dispatch.update).is_err() {
-                stale_connection_ids.push(dispatch.connection_id);
-            }
-        }
-
-        if stale_connection_ids.is_empty() {
-            return;
-        }
-
-        let mut streams = self.streams.lock().unwrap();
-        for connection_id in stale_connection_ids {
-            streams.remove(&connection_id);
-        }
-    }
-
-    pub fn dispatch_payload(&self, client_id: ClientId, payload: SyncPayload) {
-        let prepared = self.prepare_payload(client_id, payload);
-        self.dispatch_prepared(prepared);
-    }
-}
-
-/// Tracks when a client's last SSE connection closed, pending reap after TTL.
+/// Tracks retired alpha connection disconnect markers, pending TTL cleanup.
 #[derive(Clone, Copy)]
 pub struct DisconnectCandidate {
     /// When the last SSE connection closed.
@@ -255,8 +75,6 @@ pub struct ServerState {
     pub app_id: AppId,
     pub connections: RwLock<HashMap<u64, ConnectionState>>,
     pub next_connection_id: std::sync::atomic::AtomicU64,
-    /// Per-connection fanout for sequenced stream delivery.
-    pub connection_event_hub: Arc<ConnectionEventHub>,
     /// Authentication configuration.
     pub auth_config: AuthConfig,
     /// Upstream HTTP base URL used by edge servers to forward catalogue HTTP requests.
@@ -267,7 +85,7 @@ pub struct ServerState {
     pub http_client: reqwest::Client,
     /// Configured verifier for external JWTs.
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
-    /// Clients that lost their SSE stream, waiting to be reaped after TTL.
+    /// Retired alpha disconnect markers, waiting to be cleared after TTL.
     pub disconnect_candidates: RwLock<HashMap<ClientId, DisconnectCandidate>>,
     /// Client state TTL. Default: 5 minutes.
     /// Disconnected clients are reaped after this duration.
@@ -280,7 +98,7 @@ pub struct ServerState {
     pub shutdown: ShutdownController,
 }
 
-/// State for a single SSE connection.
+/// State for a retired alpha connection marker.
 pub struct ConnectionState {
     pub client_id: ClientId,
 }
@@ -362,7 +180,7 @@ impl ServerState {
         }
     }
 
-    /// Record that a connection closed. If this was the last SSE connection
+    /// Record that a connection closed. If this was the last alpha connection
     /// for the given client_id, add it to disconnect_candidates.
     ///
     /// The connections check and candidate insertion are done under the
@@ -542,7 +360,6 @@ mod tests {
             app_id,
             connections: RwLock::new(HashMap::new()),
             next_connection_id: std::sync::atomic::AtomicU64::new(1),
-            connection_event_hub: Arc::new(ConnectionEventHub::default()),
             auth_config: AuthConfig::default(),
             upstream_http_url: None,
             topology: ServerTopology::Core,

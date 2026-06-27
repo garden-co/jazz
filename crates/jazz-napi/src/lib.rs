@@ -1645,7 +1645,7 @@ pub struct JazzServer {
 }
 
 enum JazzServerInner {
-    Alpha(CoreJazzServer),
+    Core(CoreJazzServer),
 }
 
 #[napi]
@@ -1732,49 +1732,49 @@ impl JazzServer {
         .await;
 
         Ok(Self {
-            inner: Mutex::new(Some(JazzServerInner::Alpha(server))),
+            inner: Mutex::new(Some(JazzServerInner::Core(server))),
         })
     }
 
     #[napi(getter, js_name = "appId")]
     pub fn app_id(&self) -> napi::Result<String> {
         self.with_server(|server| match server {
-            JazzServerInner::Alpha(server) => server.app_id().to_string(),
+            JazzServerInner::Core(server) => server.app_id().to_string(),
         })
     }
 
     #[napi(getter)]
     pub fn url(&self) -> napi::Result<String> {
         self.with_server(|server| match server {
-            JazzServerInner::Alpha(server) => server.base_url(),
+            JazzServerInner::Core(server) => server.base_url(),
         })
     }
 
     #[napi(getter)]
     pub fn port(&self) -> napi::Result<u16> {
         self.with_server(|server| match server {
-            JazzServerInner::Alpha(server) => server.port(),
+            JazzServerInner::Core(server) => server.port(),
         })
     }
 
     #[napi(getter, js_name = "dataDir")]
     pub fn data_dir(&self) -> napi::Result<String> {
         self.with_server(|server| match server {
-            JazzServerInner::Alpha(server) => server.data_dir().to_string_lossy().into_owned(),
+            JazzServerInner::Core(server) => server.data_dir().to_string_lossy().into_owned(),
         })
     }
 
     #[napi(getter, js_name = "backendSecret")]
     pub fn backend_secret(&self) -> napi::Result<String> {
         self.with_server(|server| match server {
-            JazzServerInner::Alpha(server) => server.backend_secret().to_string(),
+            JazzServerInner::Core(server) => server.backend_secret().to_string(),
         })
     }
 
     #[napi(getter, js_name = "adminSecret")]
     pub fn admin_secret(&self) -> napi::Result<String> {
         self.with_server(|server| match server {
-            JazzServerInner::Alpha(server) => server.admin_secret().to_string(),
+            JazzServerInner::Core(server) => server.admin_secret().to_string(),
         })
     }
 
@@ -1788,7 +1788,7 @@ impl JazzServer {
 
         if let Some(server) = server {
             match server {
-                JazzServerInner::Alpha(server) => server.shutdown().await,
+                JazzServerInner::Core(server) => server.shutdown().await,
             }
         }
 
