@@ -59,14 +59,10 @@ The schema is written directly in **TypeScript** (`schema.ts`). Jazz validates t
 import { schema as s } from "jazz-tools";
 
 const schema = {
-  file_parts: s.table({
-    data: s.bytes(),
-  }),
   files: s.table({
     name: s.string().optional(),
-    mimeType: s.string(),
-    partIds: s.array(s.ref("file_parts")),
-    partSizes: s.array(s.int()),
+    mime_type: s.string(),
+    data: s.bytes(),
   }),
   instruments: s.table({
     name: s.string(),
@@ -85,7 +81,7 @@ type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 ```
 
-`s.ref()` declares foreign keys. For uploaded audio, Wequencer uses the conventional `files` / `file_parts` tables and stores a `soundFileId` reference on each instrument. The same file gives us the typed `app` entry point — shown on the next slide.
+`s.ref()` declares foreign keys. For uploaded audio, Wequencer stores bytes in `files` rows and keeps a `soundFileId` reference on each instrument. The same file gives us the typed `app` entry point — shown on the next slide.
 
 ---
 
@@ -284,7 +280,7 @@ Identity flows through `session.current?.user_id` — the same ID that colours y
 
 ![bg right:45% 85%](screenshots/06-instrument-add-form.png)
 
-Instruments can be added at runtime. Upload any audio file — Jazz stores it in the conventional `files` / `file_parts` tables, and the instrument row keeps a `soundFileId` reference.
+Instruments can be added at runtime. Upload any audio file — Jazz stores it in the `files` table, and the instrument row keeps a `soundFileId` reference.
 
 ```typescript
 const storedFile = await db.createFileFromBlob(app, file, { tier: "edge" });

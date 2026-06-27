@@ -6,7 +6,6 @@ const db = await createDb({
   serverUrl: "https://my-jazz-server.example.com",
   runtimeSources: {
     wasmUrl: "/static/jazz/jazz_wasm_bg.wasm",
-    workerUrl: "/static/jazz/worker/jazz-worker.js",
   },
 });
 // #endregion context-setup-ts-runtime-sources

@@ -1,7 +1,7 @@
 /**
  * Browser integration tests for history & conflict management.
  *
- * Exercises the full browser stack: WASM bindings, Web Worker bridge,
+ * Exercises the full browser stack: WASM bindings,
  * OPFS persistence, and binary sync transport — layers the Rust E2E
  * tests don't cover.
  *
@@ -126,7 +126,7 @@ describe("History & Conflict Management", () => {
     const { id } = await withTimeout(
       dbAlice.insert(todos, { title: uniqueTitle, done: false }).wait({ tier: "local" }),
       10000,
-      "Alice insert(worker) did not resolve",
+      "Alice insert(local runtime) did not resolve",
     );
 
     // Wait for Bob to see it

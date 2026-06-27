@@ -65,14 +65,12 @@ describe("jazzPlugin", () => {
     expect(plugin.name).toBe("jazz");
   });
 
-  it("config hook injects worker format and optimizeDeps exclude", () => {
+  it("config hook injects optimizeDeps exclude", () => {
     const plugin = jazzPlugin();
     const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
     const result = config!({}) as {
-      worker?: { format?: string };
       optimizeDeps?: { exclude?: string[] };
     };
-    expect(result.worker?.format).toBe("es");
     expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
   });
 

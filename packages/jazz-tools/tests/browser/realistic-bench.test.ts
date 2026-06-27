@@ -2505,7 +2505,7 @@ describe("realistic browser benchmark harness", () => {
     }
   }, 180_000);
 
-  it("runs local and server-backed realistic scenarios against worker OPFS runtime", async () => {
+  it("runs local and server-backed realistic scenarios against browser OPFS runtime", async () => {
     const restoreLogs = elevateBenchLogLevel();
     const cfg = scaledProfile(profile);
     progressLog(`bench start profile=${cfg.id}`);

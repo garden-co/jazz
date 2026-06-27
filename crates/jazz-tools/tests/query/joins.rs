@@ -3,7 +3,7 @@
 use jazz_tools::{QueryBuilder, Value};
 
 use crate::common::{
-    ClientPair, NO_DELTA_WINDOW, QUERY_TIMEOUT, create_file, create_file_part, create_org,
+    ClientPair, NO_DELTA_WINDOW, QUERY_TIMEOUT, create_bundle, create_bundle_item, create_org,
     create_post, create_team, create_user,
 };
 use crate::support::{
@@ -302,31 +302,31 @@ async fn subscribe_all_reacts_to_scalar_fk_updates_in_projected_join_queries() {
 /// Verifies that replacing a UUID array foreign key causes a projected join
 /// subscription to react to both the departing and arriving joined rows.
 ///
-/// A file starts with `parts = [part_a]`. The subscription projects
-/// files -> file_parts (result_element_index 1), surfacing part rows. The
-/// writer replaces the array with `[part_b]`. Both part_a and part_b must
+/// A bundle starts with `items = [item_a]`. The subscription projects
+/// bundles -> bundle_items (result_element_index 1), surfacing item rows. The
+/// writer replaces the array with `[item_b]`. Both item_a and item_b must
 /// appear somewhere in the stream log, and the final query result must
-/// contain only part_b.
+/// contain only item_b.
 ///
 /// ```text
-/// writer ──create file (parts=[part_a])────► server
-/// subscriber query result: [part_a]
+/// writer ──create bundle (items=[item_a])────► server
+/// subscriber query result: [item_a]
 ///
-/// writer ──update file.parts -> [part_b]───► server ──► subscriber
-///   stream: change for part_a AND part_b
-///   query result: [part_b]
+/// writer ──update bundle.items -> [item_b]───► server ──► subscriber
+///   stream: change for item_a AND item_b
+///   query result: [item_b]
 /// ```
 #[tokio::test]
 async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries() {
     let pair = ClientPair::start().await;
 
-    let part_a = create_file_part(&pair.writer, "A").await;
-    let part_b = create_file_part(&pair.writer, "B").await;
-    let file_id = create_file(&pair.writer, "File", &[part_a]).await;
+    let item_a = create_bundle_item(&pair.writer, "A").await;
+    let item_b = create_bundle_item(&pair.writer, "B").await;
+    let bundle_id = create_bundle(&pair.writer, "Bundle", &[item_a]).await;
 
-    let query = QueryBuilder::new("files")
-        .join("file_parts")
-        .on("files.parts", "file_parts._id")
+    let query = QueryBuilder::new("bundles")
+        .join("bundle_items")
+        .on("bundles.items", "bundle_items._id")
         .result_element_index(1)
         .build();
 
@@ -334,35 +334,35 @@ async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries
         .subscriber
         .subscribe(query.clone())
         .await
-        .expect("subscribe to file parts hop query");
+        .expect("subscribe to bundle items hop query");
     let mut log = Vec::new();
 
     wait_for_rows(
         &pair.subscriber,
         query.clone(),
-        "initial file part row",
-        |rows| (rows.len() == 1 && rows[0].0 == part_a).then_some(()),
+        "initial bundle item row",
+        |rows| (rows.len() == 1 && rows[0].0 == item_a).then_some(()),
     )
     .await;
 
     pair.writer
         .update(
-            file_id,
-            vec![("parts".to_string(), Value::Array(vec![Value::Uuid(part_b)]))],
+            bundle_id,
+            vec![("items".to_string(), Value::Array(vec![Value::Uuid(item_b)]))],
         )
-        .expect("swap file part ids");
+        .expect("swap bundle item ids");
 
-    let rows = wait_for_rows(&pair.subscriber, query, "updated file part row", |rows| {
-        (rows.len() == 1 && rows[0].0 == part_b).then_some(rows)
+    let rows = wait_for_rows(&pair.subscriber, query, "updated bundle item row", |rows| {
+        (rows.len() == 1 && rows[0].0 == item_b).then_some(rows)
     })
     .await;
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, part_b);
+    assert_eq!(rows[0].0, item_b);
     assert_eq!(rows[0].1[0], Value::Text("B".to_string()));
 
     collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
-    assert!(has_any_change(&log, part_a));
-    assert!(has_any_change(&log, part_b));
+    assert!(has_any_change(&log, item_a));
+    assert!(has_any_change(&log, item_b));
 
     pair.shutdown().await;
 }
