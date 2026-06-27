@@ -5,6 +5,7 @@ import {
   resolveDefaultDurabilityTier,
   type MutationErrorEvent,
   type Runtime,
+  type TransactionalRuntime,
   PersistedWriteRejectedError,
 } from "./client.js";
 import type { AppContext } from "./context.js";
@@ -82,7 +83,7 @@ function makeFakeRuntime() {
     onMutationError: vi.fn<Runtime["onMutationError"]>((callback) => {
       mutationErrorCallback = callback;
     }),
-    beginTransaction: vi.fn<Runtime["beginTransaction"]>((kind) => {
+    beginTransaction: vi.fn<TransactionalRuntime["beginTransaction"]>((kind) => {
       nextTransactionNumber += 1;
       return `transaction-${kind}-${nextTransactionNumber}`;
     }),
@@ -90,9 +91,9 @@ function makeFakeRuntime() {
     disconnect: vi.fn<Runtime["disconnect"]>(),
     commitTransaction: vi.fn<(transaction_id: string) => void>(),
     waitForTransaction: vi.fn<Runtime["waitForTransaction"]>(async () => undefined),
-    rollbackTransaction: vi.fn<Runtime["rollbackTransaction"]>(() => false),
+    rollbackTransaction: vi.fn<TransactionalRuntime["rollbackTransaction"]>(() => false),
     close: vi.fn(),
-  } satisfies Runtime;
+  } satisfies TransactionalRuntime;
 
   return Object.assign(runtime, {
     emitMutationError(event: MutationErrorEvent) {

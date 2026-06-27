@@ -63,10 +63,7 @@ export interface Runtime {
     write_context_json?: string | null,
   ): DirectMutationResult;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
-  beginTransaction(transactionKind: TransactionKind): string;
-  commitTransaction(transactionId: string): void;
   waitForTransaction(transactionId: string, tier: string): Promise<void>;
-  rollbackTransaction(transactionId: string): boolean;
   query(
     query_json: string,
     session_json?: string | null,
@@ -90,6 +87,12 @@ export interface Runtime {
   updateAuth(auth_json: string): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
+}
+
+export interface TransactionalRuntime extends Runtime {
+  beginTransaction(transactionKind: TransactionKind): string;
+  commitTransaction(transactionId: string): void;
+  rollbackTransaction(transactionId: string): boolean;
 }
 
 /**
@@ -383,6 +386,18 @@ function normalizeSubscriptionCallbackArgs(
 
 type TransactionId = string;
 
+function requireTransactionalRuntime(runtime: Runtime): TransactionalRuntime {
+  if (
+    typeof (runtime as Partial<TransactionalRuntime>).beginTransaction === "function" &&
+    typeof (runtime as Partial<TransactionalRuntime>).commitTransaction === "function" &&
+    typeof (runtime as Partial<TransactionalRuntime>).rollbackTransaction === "function"
+  ) {
+    return runtime as TransactionalRuntime;
+  }
+
+  throw new Error("This Jazz runtime does not support transactions");
+}
+
 function normalizeUpdatedAt(updatedAt?: number): number | undefined {
   if (updatedAt === undefined) {
     return undefined;
@@ -612,7 +627,7 @@ export class JazzClient {
   }
 
   beginTransaction(kind: TransactionKind): TransactionId {
-    return this.runtime.beginTransaction(kind);
+    return requireTransactionalRuntime(this.runtime).beginTransaction(kind);
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
@@ -620,12 +635,12 @@ export class JazzClient {
   }
 
   commitTransaction(transactionId: TransactionId): WriteHandle {
-    this.runtime.commitTransaction(transactionId);
+    requireTransactionalRuntime(this.runtime).commitTransaction(transactionId);
     return new WriteHandle(transactionId, this);
   }
 
   rollbackTransaction(transactionId: TransactionId): void {
-    this.runtime.rollbackTransaction(transactionId);
+    requireTransactionalRuntime(this.runtime).rollbackTransaction(transactionId);
   }
 
   /**
