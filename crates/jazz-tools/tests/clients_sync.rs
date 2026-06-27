@@ -4,16 +4,50 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::env;
+use std::ffi::OsString;
 use std::time::Duration;
 
 use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
 use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
-    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, SchemaBuilder,
+    SubscriptionStream, TableSchema, Value,
 };
+use serial_test::serial;
 use support::{publish_allow_all_permissions, wait_for_query};
 use uuid::Uuid;
+
+const DIRECT_CORE_LOCAL_TICK_DRIVER_ENV: &str = "JAZZ_DIRECT_CORE_LOCAL_TICK_DRIVER";
+
+struct ScopedDirectCoreLocalTickDriverEnv {
+    previous: Option<OsString>,
+}
+
+impl ScopedDirectCoreLocalTickDriverEnv {
+    fn enable() -> Self {
+        let previous = env::var_os(DIRECT_CORE_LOCAL_TICK_DRIVER_ENV);
+        // SAFETY: this guard is used only by a serial test and restores the
+        // previous value before the test exits.
+        unsafe {
+            env::set_var(DIRECT_CORE_LOCAL_TICK_DRIVER_ENV, "1");
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for ScopedDirectCoreLocalTickDriverEnv {
+    fn drop(&mut self) {
+        // SAFETY: guarded test-scoped restoration of the process environment.
+        unsafe {
+            match &self.previous {
+                Some(value) => env::set_var(DIRECT_CORE_LOCAL_TICK_DRIVER_ENV, value),
+                None => env::remove_var(DIRECT_CORE_LOCAL_TICK_DRIVER_ENV),
+            }
+        }
+    }
+}
 
 fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
@@ -36,6 +70,39 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
         |_| Some(()),
     )
     .await;
+}
+
+async fn wait_for_subscription_driven_query<F>(
+    client: &JazzClient,
+    stream: &mut SubscriptionStream,
+    query: jazz_tools::Query,
+    timeout: Duration,
+    description: &str,
+    mut predicate: F,
+) -> Vec<(ObjectId, Vec<Value>)>
+where
+    F: FnMut(&[(ObjectId, Vec<Value>)]) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let now = tokio::time::Instant::now();
+        assert!(now < deadline, "timed out waiting for {description}");
+
+        tokio::time::timeout(deadline - now, stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for subscription event: {description}"))
+            .unwrap_or_else(|| {
+                panic!("subscription stream closed while waiting for {description}")
+            });
+
+        let rows = client
+            .query(query.clone(), None)
+            .await
+            .unwrap_or_else(|error| panic!("local query after subscription event failed: {error}"));
+        if predicate(&rows) {
+            return rows;
+        }
+    }
 }
 
 #[tokio::test]
@@ -200,82 +267,133 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
     server.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
+#[serial]
 async fn jazz_tools_cli_two_clients_sync_values() {
-    let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_a = JazzClient::connect(
-        server.make_client_context_for_user(schema.clone(), "sync-values-user"),
-    )
-    .await
-    .expect("connect client a");
-    let client_b =
-        JazzClient::connect(server.make_client_context_for_user(schema, "sync-values-user"))
+    let _env = ScopedDirectCoreLocalTickDriverEnv::enable();
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = test_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client_a = JazzClient::connect(
+                server.make_client_context_for_user(schema.clone(), "sync-values-user"),
+            )
+            .await
+            .expect("connect client a");
+            let client_b = JazzClient::connect(
+                server.make_client_context_for_user(schema, "sync-values-user"),
+            )
             .await
             .expect("connect client b");
+            assert!(
+                client_a.direct_core_local_driver_active(),
+                "client a should exercise the direct-core local tick driver"
+            );
+            assert!(
+                client_b.direct_core_local_driver_active(),
+                "client b should exercise the direct-core local tick driver"
+            );
 
-    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
-    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
+            let query = QueryBuilder::new("todos").build();
+            let mut stream_a = client_a
+                .subscribe(query.clone())
+                .await
+                .expect("subscribe client a");
+            let mut stream_b = client_b
+                .subscribe(query.clone())
+                .await
+                .expect("subscribe client b");
 
-    client_a
-        .insert(
-            "todos",
-            HashMap::from([
-                (
-                    "title".to_string(),
-                    Value::Text("shared-through-server".to_string()),
-                ),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
-        .expect("create from client a");
+            tokio::time::timeout(Duration::from_secs(5), stream_a.next())
+                .await
+                .expect("client a subscription should open")
+                .expect("client a subscription stream should stay open");
+            tokio::time::timeout(Duration::from_secs(5), stream_b.next())
+                .await
+                .expect("client b subscription should open")
+                .expect("client b subscription stream should stay open");
 
-    let rows_on_b = wait_for_query(
-        &client_b,
-        QueryBuilder::new("todos").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "todos count 1",
-        |rows| (rows.len() == 1).then_some(rows),
-    )
-    .await;
-    let todo_id = rows_on_b[0].0;
+            client_a
+                .insert(
+                    "todos",
+                    HashMap::from([
+                        (
+                            "title".to_string(),
+                            Value::Text("shared-through-server".to_string()),
+                        ),
+                        ("completed".to_string(), Value::Boolean(false)),
+                    ]),
+                )
+                .expect("create from client a");
 
-    client_b
-        .update(
-            todo_id,
-            vec![("completed".to_string(), Value::Boolean(true))],
-        )
-        .expect("update from client b");
+            let rows_on_b = wait_for_subscription_driven_query(
+                &client_b,
+                &mut stream_b,
+                query.clone(),
+                Duration::from_secs(10),
+                "client b observes client a insert",
+                |rows| {
+                    rows.len() == 1
+                        && rows[0].1
+                            == vec![
+                                Value::Text("shared-through-server".to_string()),
+                                Value::Boolean(false),
+                            ]
+                },
+            )
+            .await;
+            let todo_id = rows_on_b[0].0;
 
-    let rows_on_a = wait_for_query(
-        &client_a,
-        QueryBuilder::new("todos").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "todo completed=true",
-        |rows| {
-            let has_expected_completed = rows.iter().any(|(_, values)| {
-                values
-                    .iter()
-                    .any(|value| matches!(value, Value::Boolean(flag) if *flag))
-            });
+            client_b
+                .insert(
+                    "todos",
+                    HashMap::from([
+                        (
+                            "title".to_string(),
+                            Value::Text("from-client-b".to_string()),
+                        ),
+                        ("completed".to_string(), Value::Boolean(true)),
+                    ]),
+                )
+                .expect("create from client b");
 
-            (!rows.is_empty() && has_expected_completed).then_some(rows)
-        },
-    )
-    .await;
-    assert!(
-        rows_on_a[0]
-            .1
-            .iter()
-            .any(|value| matches!(value, Value::Boolean(true))),
-        "client a should observe client b's update through the server"
-    );
+            let rows_on_a = wait_for_subscription_driven_query(
+                &client_a,
+                &mut stream_a,
+                query,
+                Duration::from_secs(10),
+                "client a observes client b insert",
+                |rows| {
+                    let titles = rows
+                        .iter()
+                        .flat_map(|(_, values)| values.iter())
+                        .filter_map(|value| match value {
+                            Value::Text(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<BTreeSet<_>>();
 
-    client_a.shutdown().await.expect("shutdown client a");
-    client_b.shutdown().await.expect("shutdown client b");
-    server.shutdown().await;
+                    rows.len() == 2
+                        && titles == BTreeSet::from(["shared-through-server", "from-client-b"])
+                },
+            )
+            .await;
+            assert_eq!(
+                rows_on_a.len(),
+                2,
+                "client a should observe client b's insert through scheduler-driven sync"
+            );
+            assert!(
+                rows_on_a.iter().any(|(id, _)| *id == todo_id),
+                "client a should retain the row created by client a"
+            );
+
+            client_a.shutdown().await.expect("shutdown client a");
+            client_b.shutdown().await.expect("shutdown client b");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 #[tokio::test]
