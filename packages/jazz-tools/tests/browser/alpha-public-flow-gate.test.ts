@@ -111,7 +111,7 @@ describe("alpha public package flow", () => {
     ).toBe(true);
   });
 
-  it.skip("TODO(alpha direct core): reopens public persistent OPFS data after local writes; blocked because direct in-process persistence does not expose a durable flush/wait gate yet", async () => {
+  it.skip("TODO(alpha direct core): reopens public persistent OPFS data after local writes; blocked because public Db does not wire async WasmDb.openBrowser yet", async () => {
     const appId = uniqueDbName("alpha-public-local-reopen");
     const persistentDbName = uniqueDbName("alpha-public-local-reopen-opfs");
     const sharedSecret = generateAuthSecret();
@@ -143,7 +143,52 @@ describe("alpha public package flow", () => {
     expect(await db.one(app.todos.where({ id: created.id }), { tier: "local" })).toEqual(created);
   });
 
-  it.skip("TODO(alpha direct core): opens public createDb with persistent OPFS and direct websocket server config, then converges todo CRUD; blocked because edge wait currently throws TypeError: write.nextWriteStateChange is not a function", async () => {
+  it("opens public createDb with direct websocket server config and converges between clients", async () => {
+    const requestedAppId = uniqueDbName("alpha-public-websocket-flow");
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+
+    const sharedSecret = generateAuthSecret();
+    const dbA = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
+    const dbB = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
+    const snapshots: Todo[][] = [];
+    const unsubscribe = ctx.trackSubscription(
+      dbB.subscribeAll(app.todos.orderBy("title"), (delta) => {
+        snapshots.push([...delta.all]);
+      }),
+    );
+
+    const created = await withTimeout(
+      dbA
+        .insert(app.todos, {
+          title: "Adopt alpha websocket flow",
+          done: false,
+          list: "launch",
+        })
+        .wait({ tier: "edge" }),
+      10_000,
+      "writer insert was not accepted at the server",
+    );
+
+    const rowsOnB = await waitForSubscribedTodoSummaries(dbB, ["Adopt alpha websocket flow:open"]);
+    expect(rowsOnB).toEqual([created]);
+
+    await withTimeout(
+      dbA.update(app.todos, created.id, { done: true }).wait({ tier: "edge" }),
+      10_000,
+      "writer update was not accepted at the server",
+    );
+    await expectTodoSummaries(dbB, ["Adopt alpha websocket flow:done"], "local");
+
+    unsubscribe();
+    expect(
+      snapshots.some((rows) =>
+        rows.some((todo) => todo.id === created.id && todo.title === created.title),
+      ),
+    ).toBe(true);
+  });
+
+  it.skip("TODO(alpha direct core): opens public createDb with persistent OPFS and direct websocket server config, then converges todo CRUD; blocked on direct browser persistence/reopen and cross-client subscription convergence", async () => {
     const requestedAppId = uniqueDbName("alpha-public-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
@@ -243,7 +288,7 @@ describe("alpha public package flow", () => {
     expect((await dbB.all(app.todos)).some((todo) => todo.id === secondRow.id)).toBe(false);
   });
 
-  it.skip("TODO(alpha direct core): keeps deleted rows hidden by default and restores them over websocket; blocked because edge wait currently throws TypeError: write.nextWriteStateChange is not a function", async () => {
+  it.skip("TODO(alpha direct core): keeps deleted rows hidden by default and restores them over websocket; blocked on websocket subscription convergence after direct-core edge writes", async () => {
     const requestedAppId = uniqueDbName("alpha-public-delete-restore");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
@@ -311,7 +356,7 @@ describe("alpha public package flow", () => {
     expect(rowsOnB).toEqual([restored]);
   });
 
-  it.skip("TODO(alpha direct core): exposes edge-confirmed browser deletes through includeDeleted over direct websocket; blocked because edge wait currently throws TypeError: write.nextWriteStateChange is not a function", async () => {
+  it.skip("TODO(alpha direct core): exposes edge-confirmed browser deletes through includeDeleted over direct websocket; blocked on websocket includeDeleted convergence after direct-core edge writes", async () => {
     const requestedAppId = uniqueDbName("alpha-public-include-deleted");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
@@ -344,7 +389,7 @@ describe("alpha public package flow", () => {
     expect(Object.keys(deletedTodo).includes("deleted")).toBe(false);
   });
 
-  it.skip("TODO(alpha direct core): opens public file/blob helpers with persistent OPFS and direct websocket server config, then converges file rows; blocked by the same edge wait gap as the todo websocket gate", async () => {
+  it.skip("TODO(alpha direct core): opens public file/blob helpers with persistent OPFS and direct websocket server config, then converges file rows; blocked by the same persistence/websocket convergence gaps as the todo gate", async () => {
     const requestedAppId = uniqueDbName("alpha-public-file-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, filePermissions, fileApp);
@@ -440,6 +485,23 @@ async function openAlphaDb(
         type: "persistent",
         dbName: options.uniqueLabel === false ? label : uniqueDbName(label),
       },
+    }),
+  );
+}
+
+async function openAlphaMemoryDb(
+  appId: string,
+  serverUrl: string,
+  adminSecret: string,
+  secret: string,
+): Promise<Db> {
+  return ctx.track(
+    await createDb({
+      appId,
+      serverUrl,
+      adminSecret,
+      secret,
+      driver: { type: "memory" },
     }),
   );
 }

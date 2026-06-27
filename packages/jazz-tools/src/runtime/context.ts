@@ -60,7 +60,7 @@ export interface AppContext {
   /** Optional server URL for sync */
   serverUrl?: string;
 
-  /** Optional runtime source overrides for WASM and worker loading. */
+  /** Optional runtime source overrides for WASM loading. */
   runtimeSources?: RuntimeSourcesConfig;
 
   /** Storage driver mode (defaults to persistent). */
