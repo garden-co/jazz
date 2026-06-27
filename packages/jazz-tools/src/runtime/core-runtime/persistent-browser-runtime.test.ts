@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
 import {
-  PersistentBrowserRuntime,
-  type PersistentBrowserWorkerRequest,
+  PersistentBrowserOpfsProxyRuntime,
+  type PersistentBrowserOpfsOwnerRequest,
 } from "./persistent-browser-runtime.js";
 
 const schema = {
@@ -16,13 +16,14 @@ class FakeWorker {
 
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
-  messages: PersistentBrowserWorkerRequest[] = [];
+  messages: PersistentBrowserOpfsOwnerRequest[] = [];
+  terminated = false;
 
   constructor() {
     FakeWorker.instances.push(this);
   }
 
-  postMessage(message: PersistentBrowserWorkerRequest): void {
+  postMessage(message: PersistentBrowserOpfsOwnerRequest): void {
     this.messages.push(message);
 
     if (message.method === "open") {
@@ -30,7 +31,9 @@ class FakeWorker {
     }
   }
 
-  terminate(): void {}
+  terminate(): void {
+    this.terminated = true;
+  }
 
   respond(id: number, result: unknown): void {
     queueMicrotask(() => {
@@ -39,7 +42,7 @@ class FakeWorker {
   }
 }
 
-describe("PersistentBrowserRuntime", () => {
+describe("PersistentBrowserOpfsProxyRuntime", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     FakeWorker.instances = [];
@@ -48,7 +51,7 @@ describe("PersistentBrowserRuntime", () => {
   it("waits on the worker transaction id for proxied writes", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
-    const runtime = new PersistentBrowserRuntime(
+    const runtime = new PersistentBrowserOpfsProxyRuntime(
       undefined,
       schema,
       "persistent-browser-runtime-test",
@@ -83,5 +86,29 @@ describe("PersistentBrowserRuntime", () => {
 
     await expect(waitPromise).resolves.toBeUndefined();
     await runtime.close();
+  });
+
+  it("terminates locally on close without sending an OPFS owner close command", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsProxyRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-close-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "open")).toBe(true);
+    });
+
+    await runtime.close();
+
+    expect(worker.terminated).toBe(true);
+    expect(
+      worker.messages.some((message) => (message as { method: string }).method === "close"),
+    ).toBe(false);
   });
 });

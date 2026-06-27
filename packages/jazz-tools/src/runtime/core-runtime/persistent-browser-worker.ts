@@ -2,11 +2,11 @@ import { loadWasmModule, type Runtime } from "../client.js";
 import { openConfig } from "./direct-codec.js";
 import { encodeDirectSchema } from "./direct-schema-codec.js";
 import { CoreRuntime } from "./runtime.js";
-import type { PersistentBrowserWorkerRequest } from "./persistent-browser-runtime.js";
+import type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-runtime.js";
 
-type OpenMessage = Extract<PersistentBrowserWorkerRequest, { method: "open" }>;
+type OpenMessage = Extract<PersistentBrowserOpfsOwnerRequest, { method: "open" }>;
 type WriteMessage = Extract<
-  PersistentBrowserWorkerRequest,
+  PersistentBrowserOpfsOwnerRequest,
   { method: "insert" | "restore" | "update" | "upsert" | "delete" }
 >;
 
@@ -16,15 +16,15 @@ let runtimeWasmModule: Awaited<ReturnType<typeof loadWasmModule>> | null = null;
 const pendingWriteTransactionIds = new Set<string>();
 
 const workerScope = self as unknown as {
-  onmessage: ((event: MessageEvent<PersistentBrowserWorkerRequest>) => void) | null;
+  onmessage: ((event: MessageEvent<PersistentBrowserOpfsOwnerRequest>) => void) | null;
   postMessage(message: unknown): void;
 };
 
-workerScope.onmessage = (event: MessageEvent<PersistentBrowserWorkerRequest>) => {
+workerScope.onmessage = (event: MessageEvent<PersistentBrowserOpfsOwnerRequest>) => {
   void handleMessage(event.data);
 };
 
-async function handleMessage(message: PersistentBrowserWorkerRequest): Promise<void> {
+async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promise<void> {
   try {
     switch (message.method) {
       case "open": {
@@ -69,15 +69,6 @@ async function handleMessage(message: PersistentBrowserWorkerRequest): Promise<v
         const [handle] = message.args;
         getRuntime().unsubscribe(handle);
         postResult(message.id, undefined);
-        return;
-      }
-      case "close": {
-        const result = await getRuntime().close?.();
-        runtime = null;
-        runtimeNamespace = null;
-        runtimeWasmModule = null;
-        pendingWriteTransactionIds.clear();
-        postResult(message.id, result);
         return;
       }
       case "clearClientStorage": {
