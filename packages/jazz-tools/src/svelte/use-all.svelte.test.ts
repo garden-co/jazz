@@ -32,7 +32,7 @@ vi.mock("./context.svelte.js", () => ({
   getJazzContext: () => ({
     db: null,
     session: null,
-    manager: {
+    subscriptionStore: {
       makeQueryKey: mocks.makeQueryKey,
       getCacheEntry: mocks.getCacheEntry,
     },

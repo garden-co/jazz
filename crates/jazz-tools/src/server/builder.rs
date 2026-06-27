@@ -76,6 +76,7 @@ pub struct ServerBuilder {
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
     core_server_schema: Option<JazzSchema>,
+    #[cfg(any(test, feature = "test-utils"))]
     sync_tracer: Option<crate::sync::SyncTracer>,
     upstream_url: Option<String>,
     shutdown_timeout: Duration,
@@ -96,6 +97,7 @@ impl ServerBuilder {
                 path: PathBuf::from("./data"),
             },
             core_server_schema: None,
+            #[cfg(any(test, feature = "test-utils"))]
             sync_tracer: None,
             upstream_url: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
@@ -104,6 +106,7 @@ impl ServerBuilder {
         }
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn with_sync_tracer(mut self, tracer: crate::sync::SyncTracer) -> Self {
         self.sync_tracer = Some(tracer);
         self
@@ -195,6 +198,7 @@ impl ServerBuilder {
             http_client,
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
+            #[cfg(any(test, feature = "test-utils"))]
             sync_tracer: self.sync_tracer.clone(),
             core_server: std::sync::RwLock::new(core_server),
             core_server_storage_config,

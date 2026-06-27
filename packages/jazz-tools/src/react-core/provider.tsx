@@ -13,7 +13,7 @@ import {
 } from "../runtime/client-registry.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
-import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
+import { trackPromise } from "../subscriptions-orchestrator.js";
 
 type CoreJazzDb = {
   getAuthState(): AuthState;
@@ -23,7 +23,6 @@ type CoreJazzDb = {
 
 type CoreJazzClient = {
   db: CoreJazzDb;
-  manager: SubscriptionsOrchestrator;
   session?: Session | null;
   shutdown: () => Promise<void>;
 };

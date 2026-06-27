@@ -37,6 +37,7 @@ pub struct JazzServerBuilder {
     upstream_url: Option<String>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
+    /// Legacy alpha sync tracer kept only for integration-test observability.
     sync_tracer: Option<crate::sync::SyncTracer>,
 }
 
@@ -116,6 +117,7 @@ impl JazzServerBuilder {
         self
     }
 
+    /// Attach the legacy alpha sync tracer for test observability.
     pub fn with_tracer(mut self, tracer: crate::sync::SyncTracer) -> Self {
         self.sync_tracer = Some(tracer);
         self

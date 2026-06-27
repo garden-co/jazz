@@ -54,8 +54,8 @@ export class QuerySubscription<T extends { id: string }> {
         return;
       }
 
-      const manager = ctx.manager;
-      if (!manager) return;
+      const store = ctx.subscriptionStore;
+      if (!store) return;
 
       const resolvedOptions = resolve(options);
 
@@ -68,8 +68,8 @@ export class QuerySubscription<T extends { id: string }> {
       // which lets the class be used inside `$effect.root` and `.svelte.ts`.
       let unsubscribe: (() => void) | null = null;
       try {
-        const key = manager.makeQueryKey(resolvedQuery, resolvedOptions);
-        const entry = manager.getCacheEntry<T>(key);
+        const key = store.makeQueryKey(resolvedQuery, resolvedOptions);
+        const entry = store.getCacheEntry<T>(key);
 
         // Apply initial state from cache
         if (entry.state.status === "fulfilled") {

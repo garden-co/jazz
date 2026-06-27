@@ -21,7 +21,6 @@ export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/
 
 interface JazzClientContextValue {
   db: Db;
-  manager: CreatedJazzClient["manager"];
   session: Session | null;
   shutdown: CreatedJazzClient["shutdown"];
 }

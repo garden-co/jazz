@@ -7,6 +7,7 @@ import type {
   SubscriptionDelta,
   UseAllState,
 } from "../shared/index.js";
+import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
 
 /**
@@ -102,7 +103,7 @@ export function useAll<T extends { id: string }>(
   query: MaybeRefOrGetter<QueryBuilder<T> | undefined>,
   options?: MaybeRefOrGetter<QueryOptions | undefined>,
 ): UseAllResult<T> {
-  const { manager } = useJazzClient();
+  const store = getSubscriptionStore(useJazzClient());
   const data = ref<T[] | undefined>(undefined) as Ref<T[] | undefined>;
   const error = ref<Error | null>(null);
   const loading = ref(true);
@@ -120,8 +121,8 @@ export function useAll<T extends { id: string }>(
     loading.value = true;
     error.value = null;
 
-    const key = manager.makeQueryKey(resolvedQuery, resolvedOptions);
-    const entry = manager.getCacheEntry<T>(key);
+    const key = store.makeQueryKey(resolvedQuery, resolvedOptions);
+    const entry = store.getCacheEntry<T>(key);
     const unsubscribe = subscribeToEntry(entry, data, error, loading);
 
     onCleanup(() => {
@@ -148,11 +149,11 @@ export async function useAllSuspense<T extends { id: string }>(
   query: QueryBuilder<T>,
   options?: QueryOptions,
 ): Promise<UseAllSuspenseResult<T>> {
-  const { manager } = useJazzClient();
+  const store = getSubscriptionStore(useJazzClient());
   const { data, error } = useAll<T>(query, options);
 
-  const key = manager.makeQueryKey(query, options);
-  const entry = manager.getCacheEntry<T>(key);
+  const key = store.makeQueryKey(query, options);
+  const entry = store.getCacheEntry<T>(key);
   await entry.promise;
 
   return { data, error };

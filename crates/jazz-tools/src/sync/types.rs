@@ -1,12 +1,17 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(any(test, feature = "test-utils"))]
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
+#[cfg(any(test, feature = "test-utils"))]
 use crate::query_manager::query::Query;
+#[cfg(any(test, feature = "test-utils"))]
 use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
-use crate::sync::{ClientId, DurabilityTier, ServerId};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::sync::DurabilityTier;
+use crate::sync::{ClientId, ServerId};
 
 /// Unique identifier for a query subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,6 +55,10 @@ pub enum SyncError {
 }
 
 /// Payload for sync messages between peers.
+///
+/// Legacy alpha sync vocabulary kept only for test observability. Product sync
+/// uses direct websocket/core events.
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncPayload {
     /// Semantic update for one catalogue/system entry.
@@ -128,6 +137,7 @@ impl ConnectionSchemaDiagnostics {
 /// Sessions contain claims as a JSON object.
 /// postcard does not support the dynamic deserialization style it expects (deserialize_any)
 /// so we need a custom serializer/deserializer to serialize/deserialize the claims as a string.
+#[cfg(any(test, feature = "test-utils"))]
 mod query_subscription_session_serde {
     use crate::query_manager::session::{AuthMode, Session};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -185,6 +195,7 @@ mod query_subscription_session_serde {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl SyncPayload {
     pub fn object_id(&self) -> Option<ObjectId> {
         match self {
