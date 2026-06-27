@@ -14,7 +14,7 @@ use jazz_tools::schema_api::PolicyExpr;
 use jazz_tools::schema_api::SchemaHash;
 use jazz_tools::schema_api::TablePolicies;
 use jazz_tools::row_input;
-use jazz_tools::schema_manager::{Lens, LensOp, LensTransform};
+use jazz_tools::schema_lens::{Lens, LensOp, LensTransform};
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,

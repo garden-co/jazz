@@ -128,7 +128,7 @@ struct ClientEngineInner {
     db: Backend,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
-    transactions: HashMap<BatchId, DirectTransactionState>,
+    transactions: HashMap<BatchId, MergeableTransactionState>,
 }
 
 #[cfg(feature = "client-engine")]
@@ -270,7 +270,7 @@ impl Backend {
 
     fn commit_writes(
         &self,
-        writes: Vec<DirectTransactionWrite>,
+        writes: Vec<MergeableTransactionWrite>,
     ) -> std::result::Result<(CoreTxId, Vec<(ObjectId, String)>), CoreDbError> {
         match self {
             Self::Memory(db) => commit_core_writes(db, writes),
@@ -345,7 +345,7 @@ impl Backend {
 #[cfg(feature = "client-engine")]
 fn commit_core_writes<S>(
     db: &CoreDb<S>,
-    writes: Vec<DirectTransactionWrite>,
+    writes: Vec<MergeableTransactionWrite>,
 ) -> std::result::Result<(CoreTxId, Vec<(ObjectId, String)>), CoreDbError>
 where
     S: jazz::groove::storage::OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
@@ -369,12 +369,12 @@ where
 }
 
 #[cfg(feature = "client-engine")]
-struct DirectTransactionState {
-    writes: Vec<DirectTransactionWrite>,
+struct MergeableTransactionState {
+    writes: Vec<MergeableTransactionWrite>,
 }
 
 #[cfg(feature = "client-engine")]
-struct DirectTransactionWrite {
+struct MergeableTransactionWrite {
     table: String,
     row_id: ObjectId,
     cells: jazz::db::RowCells,
@@ -517,7 +517,7 @@ impl ClientEngine {
             .transactions
             .get_mut(&batch_id)
             .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
-        tx.writes.push(DirectTransactionWrite {
+        tx.writes.push(MergeableTransactionWrite {
             table: table.clone(),
             row_id,
             cells,
@@ -553,7 +553,7 @@ impl ClientEngine {
             .transactions
             .get_mut(&batch_id)
             .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
-        tx.writes.push(DirectTransactionWrite {
+        tx.writes.push(MergeableTransactionWrite {
             table: table.clone(),
             row_id: object_id,
             cells,
@@ -592,7 +592,7 @@ impl ClientEngine {
             .transactions
             .get_mut(&batch_id)
             .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
-        tx.writes.push(DirectTransactionWrite {
+        tx.writes.push(MergeableTransactionWrite {
             table,
             row_id,
             cells,
@@ -625,7 +625,7 @@ impl ClientEngine {
             .transactions
             .get_mut(&batch_id)
             .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
-        tx.writes.push(DirectTransactionWrite {
+        tx.writes.push(MergeableTransactionWrite {
             table,
             row_id,
             cells: jazz::db::RowCells::new(),
@@ -643,7 +643,7 @@ impl ClientEngine {
         }
         inner
             .transactions
-            .insert(batch_id, DirectTransactionState { writes: Vec::new() });
+            .insert(batch_id, MergeableTransactionState { writes: Vec::new() });
         Ok(batch_id)
     }
 
