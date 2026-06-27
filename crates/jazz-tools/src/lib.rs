@@ -36,10 +36,6 @@ pub mod test_support;
 #[allow(dead_code)]
 pub(crate) mod wire_types;
 
-#[cfg(feature = "legacy-alpha-engine")]
-#[allow(dead_code)]
-pub(crate) mod runtime_tokio;
-
 pub mod transport_auth;
 pub mod transport_error;
 
