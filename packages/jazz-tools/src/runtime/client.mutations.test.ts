@@ -89,8 +89,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     unsubscribe: () => {},
     commitTransaction: vi.fn(),
     rollbackTransaction: () => false,
-    getSchema: () => ({}),
-    getSchemaHash: () => "schema-hash",
   };
   const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
 

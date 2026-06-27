@@ -203,8 +203,6 @@ describe("JazzClient runtime helpers", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      getSchema: () => ({}),
-      getSchemaHash: () => "schema-hash",
     };
 
     const JazzClientCtor = JazzClient as unknown as {
