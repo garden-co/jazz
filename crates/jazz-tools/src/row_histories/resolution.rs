@@ -28,7 +28,7 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, RowDescriptor, Value,
 };
 use crate::row_format::{EncodingError, encode_row, encode_value_with_type};
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 
 use super::codecs::{flat_user_values, malformed, tier_satisfies};
 use super::types::{BatchId, ComputedVisiblePreview, StoredRowBatch, VisibleRowEntry};

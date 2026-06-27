@@ -15,7 +15,7 @@ use crate::schema_api::Schema;
 use crate::schema_manager::AppId;
 
 use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
-use crate::sync_manager::ClientId;
+use crate::sync::ClientId;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 

@@ -25,7 +25,7 @@ use crate::storage::{
     IndexMutation, RawTableHeader, RowLocator, RowRawTableId, RowRawTableKind, Storage,
     StorageError, scan_row_raw_table_headers_with_storage,
 };
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 use crate::test_support::persist_test_schema;
 
 /// Factory type for persistence tests that reopen storage at a given path.

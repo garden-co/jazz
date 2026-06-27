@@ -133,7 +133,7 @@ mod tests {
         ColumnType, Schema, SchemaBuilder, TableSchema, Value as QueryValue,
     };
     use crate::sync::ClientId;
-    use crate::sync_manager::ConnectionSchemaDiagnostics;
+    use crate::sync::vocabulary::ConnectionSchemaDiagnostics;
     use axum::body;
     use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};

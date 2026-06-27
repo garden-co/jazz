@@ -57,7 +57,7 @@ use crate::row_histories::{
     decode_flat_history_row_with_codecs, decode_flat_visible_row_entry_with_codecs,
     flat_row_codecs,
 };
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 
 // ============================================================================
 // Storage Types

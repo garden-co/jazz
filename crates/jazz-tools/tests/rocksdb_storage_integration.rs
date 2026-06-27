@@ -17,7 +17,7 @@ use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch, VisibleRowEnt
 use jazz_tools::schema_manager::encoding::encode_schema;
 use jazz_tools::server::{JazzServer, TestJwtIssuer};
 use jazz_tools::storage::{RocksDBStorage, Storage};
-use jazz_tools::sync_manager::DurabilityTier;
+use jazz_tools::sync::DurabilityTier;
 use jazz_tools::{
     AppContext, ClientStorage, ColumnType, JazzClient, QueryBuilder, SchemaBuilder, TableSchema,
     Value,

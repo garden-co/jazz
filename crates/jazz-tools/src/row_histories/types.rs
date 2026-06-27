@@ -14,7 +14,7 @@ use crate::object::ObjectId;
 use crate::query_manager::types::{RowBytes, RowDescriptor, SharedString, Value};
 use crate::row_format::{EncodingError, encode_row};
 use crate::storage::{RowLocator, Storage, StorageError};
-use crate::sync_manager::DurabilityTier;
+use crate::sync::DurabilityTier;
 
 use super::codecs::{compute_row_digest, flat_user_values, malformed, tier_satisfies};
 use super::resolution::{
