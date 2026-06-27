@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 
@@ -66,15 +66,22 @@ vi.mock("../dev-tools/index.js", () => ({
 
 import { createExtensionJazzClient, createJazzClient } from "./create-jazz-client.js";
 
-function createMockDb(appId = "test-app", session: Session | null = null) {
+const originalWindow = (globalThis as { window?: unknown }).window;
+
+function createMockDb(
+  appId = "test-app",
+  session: Session | null = null,
+  config: DbConfig = { appId },
+) {
   return {
     getAuthState: vi.fn(() => ({
       status: session ? "authenticated" : "unauthenticated",
       session,
     })),
     onAuthChanged: vi.fn(() => () => {}),
+    deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
-    getConfig: vi.fn(() => ({ appId })),
+    getConfig: vi.fn(() => config),
   };
 }
 
@@ -82,6 +89,14 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   beforeEach(() => {
     mocks.reset();
     mocks.trackPromise.mockImplementation((promise) => promise);
+  });
+
+  afterEach(() => {
+    if (originalWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window?: unknown }).window = originalWindow;
+    }
   });
 
   it("AGC-01: initialises orchestrator and shuts down cleanly", async () => {
@@ -156,6 +171,78 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     await createJazzClient(config);
 
     expect(mocks.createDb).toHaveBeenCalledWith(config);
+  });
+
+  it("AGC-05: exposes window.__jazz.clearStorage for the only live namespace", async () => {
+    (globalThis as { window?: unknown }).window = {} as unknown;
+
+    const config: DbConfig = {
+      appId: "web-client-unit-5",
+      driver: { type: "persistent", dbName: "alice-cache" },
+    };
+    const db = createMockDb(config.appId, null, config);
+    mocks.createDb.mockResolvedValue(db);
+
+    const client = await createJazzClient(config);
+
+    const api = (
+      window as {
+        __jazz?: {
+          clearStorage(namespace?: string): Promise<void>;
+          listLiveStorageNamespaces(): string[];
+        };
+      }
+    ).__jazz;
+
+    expect(api?.listLiveStorageNamespaces()).toEqual(["alice-cache"]);
+
+    await api?.clearStorage();
+
+    expect(db.deleteClientStorage).toHaveBeenCalledTimes(1);
+
+    await client.shutdown();
+    expect(api?.listLiveStorageNamespaces()).toEqual([]);
+  });
+
+  it("AGC-06: requires a namespace when multiple live contexts exist", async () => {
+    (globalThis as { window?: unknown }).window = {} as unknown;
+
+    const aliceConfig: DbConfig = {
+      appId: "web-client-unit-6-alice",
+      driver: { type: "persistent", dbName: "alice-cache" },
+    };
+    const bobConfig: DbConfig = {
+      appId: "web-client-unit-6-bob",
+      driver: { type: "persistent", dbName: "bob-cache" },
+    };
+    const aliceDb = createMockDb(aliceConfig.appId, null, aliceConfig);
+    const bobDb = createMockDb(bobConfig.appId, null, bobConfig);
+    mocks.createDb.mockResolvedValueOnce(aliceDb).mockResolvedValueOnce(bobDb);
+
+    const aliceClient = await createJazzClient(aliceConfig);
+    const bobClient = await createJazzClient(bobConfig);
+
+    const api = (
+      window as {
+        __jazz?: {
+          clearStorage(namespace?: string): Promise<void>;
+          listLiveStorageNamespaces(): string[];
+        };
+      }
+    ).__jazz;
+
+    await expect(api?.clearStorage()).rejects.toThrow(
+      /Multiple live Jazz storage contexts.*alice-cache, bob-cache/u,
+    );
+
+    await api?.clearStorage("bob-cache");
+
+    expect(aliceDb.deleteClientStorage).not.toHaveBeenCalled();
+    expect(bobDb.deleteClientStorage).toHaveBeenCalledTimes(1);
+    expect(api?.listLiveStorageNamespaces()).toEqual(["alice-cache", "bob-cache"]);
+
+    await aliceClient.shutdown();
+    await bobClient.shutdown();
   });
 });
 
