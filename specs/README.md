@@ -10,7 +10,11 @@ The easiest way to picture the runtime is:
 - current reads come from compact visible entries
 - history, replay, sync, and durability all speak the same row-batch language
 
-These docs describe the system as it works today.
+These docs are being migrated with the alpha graft. The authoritative new engine
+is the vendored `jazz_core` direct-core path; older `jazz-tools` RuntimeCore,
+QueryManager, SyncManager, and storage docs are retained as legacy/status-quo
+notes for API shape, tests, and integration scaffolding while their behavior is
+ported or deleted.
 
 ## Reading Order
 
@@ -24,7 +28,7 @@ These docs describe the system as it works today.
 
 ### 2. Querying Current State
 
-**[Query Manager](status-quo/query_manager.md)** — Reactive query graphs over current relational state. Covers index-first planning, materialization, subscriptions, policies, and branch/schema-aware execution.
+**[Query Manager](status-quo/query_manager.md)** — Legacy alpha reactive query graphs over current relational state. Use this for public query/API vocabulary and migration context; direct-core/Groove should own new execution semantics.
 
 **[Subgraph Sharing](status-quo/subgraph_sharing.md)** — Deeper dive on nested array subqueries and how the current graph engine reuses compiled subgraph templates.
 
@@ -36,15 +40,15 @@ These docs describe the system as it works today.
 
 ### 4. Sync and Runtime Orchestration
 
-**[Sync Manager](status-quo/sync_manager.md)** — Query-scoped sync, role-aware writes, row-batch replication, and delivery/settled signals across worker, edge, and global tiers.
+**[Sync Manager](status-quo/sync_manager.md)** — Legacy alpha query-scoped sync and row-batch replication. New network sync should stay on direct core wire frames.
 
 **[Query/Sync Integration](status-quo/query_sync_integration.md)** — How query subscriptions become sync scopes, how initial snapshots are replayed, and how live row changes flow back into subscription updates.
 
-**[Batched Tick Orchestration](status-quo/batched_tick_orchestration.md)** — How `RuntimeCore` coordinates local work, queued sync traffic, and storage flushing without making local writes feel asynchronous.
+**[Batched Tick Orchestration](status-quo/batched_tick_orchestration.md)** — Legacy alpha `RuntimeCore` scheduling notes. The remaining module is quarantined behind `legacy-alpha-engine`.
 
 ### 5. Transport and Adapters
 
-**[HTTP Transport](status-quo/http_transport.md)** — The concrete app-scoped WebSocket + HTTP route surface used by clients and servers.
+**[HTTP Transport](status-quo/http_transport.md)** — The app-scoped HTTP/admin routes and direct-core WebSocket route. The old alpha websocket transport has been deleted.
 
 **[Browser Adapters](status-quo/browser_adapters.md)** — How browser apps are split between an in-memory main-thread runtime and a persistent worker runtime backed by OPFS.
 
@@ -59,16 +63,14 @@ These docs describe the system as it works today.
 ```text
 Typed App + Db APIs
   -> Query builders, inserts, updates, subscriptions
-  -> RuntimeCore<Storage, Scheduler, SyncSender>
-     -> SchemaManager
-        -> QueryManager
-     -> SyncManager
-     -> MonotonicClock
-     -> Storage
-        -> raw tables and indices
-        -> row locators and metadata
-        -> visible entries + row histories + batch records
-        -> catalogue entries
+  -> direct-core Db / Node
+     -> Groove incremental queries
+     -> direct core wire frames
+     -> direct core storage
+  -> jazz-tools facade/scaffolding still being removed
+     -> public schema/query types
+     -> admin catalogue routes
+     -> legacy RuntimeCore/QueryManager/SyncManager tests behind quarantine
 ```
 
 If you want one sentence to hold onto while reading the rest:
