@@ -21,9 +21,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::sync_manager::{ClientId, QueryId, SyncPayload};
-pub use crate::transport_error::{
-    ErrorCode, ErrorResponse, UnauthenticatedCode, UnauthenticatedResponse,
-};
+use crate::transport_error::ErrorCode;
 
 /// Unique identifier for a client's streaming connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -43,20 +41,6 @@ pub struct SyncBatchRequest {
     pub payloads: Vec<SyncPayload>,
     /// Client ID for source tracking.
     pub client_id: ClientId,
-}
-
-/// Per-payload result within a `SyncBatchResponse`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncPayloadResult {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// Response to a `SyncBatchRequest` — one result per input payload, in order.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncBatchResponse {
-    pub results: Vec<SyncPayloadResult>,
 }
 
 // ============================================================================
@@ -146,7 +130,6 @@ pub enum DecodeError {
     UnexpectedEof,
     InvalidTag(u8),
     InvalidUtf8,
-    InvalidUuid,
     InvalidPayload,
     TrailingBytes,
     LengthOverflow,
@@ -154,7 +137,14 @@ pub enum DecodeError {
 
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            DecodeError::UnexpectedEof => f.write_str("unexpected end of transport frame"),
+            DecodeError::InvalidTag(tag) => write!(f, "invalid transport frame tag {tag}"),
+            DecodeError::InvalidUtf8 => f.write_str("invalid transport frame utf-8"),
+            DecodeError::InvalidPayload => f.write_str("invalid transport sync payload"),
+            DecodeError::TrailingBytes => f.write_str("trailing bytes in transport frame"),
+            DecodeError::LengthOverflow => f.write_str("transport frame length overflow"),
+        }
     }
 }
 
@@ -213,10 +203,6 @@ impl<'a> WireReader<'a> {
         self.read_exact(len)
     }
 
-    fn read_uuid(&mut self) -> DecodeResult<Uuid> {
-        Uuid::from_slice(self.read_exact(16)?).map_err(|_| DecodeError::InvalidUuid)
-    }
-
     fn read_option_u64(&mut self) -> DecodeResult<Option<u64>> {
         match self.read_u8()? {
             0 => Ok(None),
@@ -256,14 +242,6 @@ fn push_u32(out: &mut Vec<u8>, value: usize) -> Result<(), DecodeError> {
     Ok(())
 }
 
-fn push_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_be_bytes());
-}
-
-fn push_string(out: &mut Vec<u8>, value: &str) -> Result<(), DecodeError> {
-    push_bytes(out, value.as_bytes())
-}
-
 fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), DecodeError> {
     push_u32(out, bytes.len())?;
     out.extend_from_slice(bytes);
@@ -274,46 +252,11 @@ fn push_uuid(out: &mut Vec<u8>, uuid: Uuid) {
     out.extend_from_slice(uuid.as_bytes());
 }
 
-fn push_option_u64(out: &mut Vec<u8>, value: Option<u64>) {
-    match value {
-        Some(value) => {
-            push_u8(out, 1);
-            push_u64(out, value);
-        }
-        None => push_u8(out, 0),
-    }
-}
-
-fn push_option_string(out: &mut Vec<u8>, value: Option<&str>) -> Result<(), DecodeError> {
-    match value {
-        Some(value) => {
-            push_u8(out, 1);
-            push_string(out, value)
-        }
-        None => {
-            push_u8(out, 0);
-            Ok(())
-        }
-    }
-}
-
 fn push_sync_payload(out: &mut Vec<u8>, payload: &SyncPayload) -> Result<(), DecodeError> {
     let bytes = payload
         .to_bytes()
         .map_err(|_| DecodeError::InvalidPayload)?;
     push_bytes(out, &bytes)
-}
-
-fn encode_error_code(code: ErrorCode) -> u8 {
-    match code {
-        ErrorCode::BadRequest => 0,
-        ErrorCode::IncompatibleProtocol => 1,
-        ErrorCode::Unauthorized => 2,
-        ErrorCode::Forbidden => 3,
-        ErrorCode::NotFound => 4,
-        ErrorCode::Internal => 5,
-        ErrorCode::RateLimited => 6,
-    }
 }
 
 fn decode_error_code(tag: u8) -> DecodeResult<ErrorCode> {
@@ -330,55 +273,6 @@ fn decode_error_code(tag: u8) -> DecodeResult<ErrorCode> {
 }
 
 impl ServerEvent {
-    /// Encode the post-handshake event payload as a compact binary envelope.
-    ///
-    /// The envelope mirrors the worker bridge: sync rows remain postcard
-    /// `SyncPayload` bytes, while transport metadata is a tiny explicit binary
-    /// header around those payload bytes.
-    pub fn encode_payload(&self) -> DecodeResult<Vec<u8>> {
-        let mut out = Vec::new();
-        match self {
-            ServerEvent::Connected {
-                connection_id,
-                client_id,
-                next_sync_seq,
-                catalogue_state_hash,
-            } => {
-                push_u8(&mut out, SERVER_CONNECTED);
-                push_u64(&mut out, connection_id.0);
-                push_string(&mut out, client_id)?;
-                push_option_u64(&mut out, *next_sync_seq);
-                push_option_string(&mut out, catalogue_state_hash.as_deref())?;
-            }
-            ServerEvent::Subscribed { query_id } => {
-                push_u8(&mut out, SERVER_SUBSCRIBED);
-                push_u64(&mut out, query_id.0);
-            }
-            ServerEvent::SyncUpdate { seq, payload } => {
-                push_u8(&mut out, SERVER_SYNC_UPDATE);
-                push_option_u64(&mut out, *seq);
-                push_sync_payload(&mut out, payload)?;
-            }
-            ServerEvent::SyncUpdateBatch { updates } => {
-                push_u8(&mut out, SERVER_SYNC_UPDATE_BATCH);
-                push_u32(&mut out, updates.len())?;
-                for update in updates {
-                    push_option_u64(&mut out, update.seq);
-                    push_sync_payload(&mut out, &update.payload)?;
-                }
-            }
-            ServerEvent::Error { message, code } => {
-                push_u8(&mut out, SERVER_ERROR);
-                push_u8(&mut out, encode_error_code(*code));
-                push_string(&mut out, message)?;
-            }
-            ServerEvent::Heartbeat => {
-                push_u8(&mut out, SERVER_HEARTBEAT);
-            }
-        }
-        Ok(out)
-    }
-
     /// Decode a post-handshake event payload from the compact binary envelope.
     pub fn decode_payload(bytes: &[u8]) -> DecodeResult<Self> {
         let mut reader = WireReader::new(bytes);
@@ -417,17 +311,6 @@ impl ServerEvent {
         reader.finish()?;
         Ok(event)
     }
-
-    /// Test/helper convenience: encode as a compressed post-handshake frame.
-    pub fn encode_frame(&self) -> Vec<u8> {
-        crate::transport_manager::frame_encode(&self.encode_payload().unwrap_or_default())
-    }
-
-    /// Test/helper convenience: decode a compressed post-handshake frame.
-    pub fn decode_frame(buf: &[u8]) -> Option<Self> {
-        let payload = crate::transport_manager::frame_decode(buf)?;
-        Self::decode_payload(&payload).ok()
-    }
 }
 
 impl SyncBatchRequest {
@@ -441,51 +324,6 @@ impl SyncBatchRequest {
         }
         Ok(out)
     }
-
-    pub fn decode_payload(bytes: &[u8]) -> DecodeResult<Self> {
-        let mut reader = WireReader::new(bytes);
-        match reader.read_u8()? {
-            CLIENT_SYNC_BATCH_REQUEST => {}
-            tag => return Err(DecodeError::InvalidTag(tag)),
-        }
-        let client_id = ClientId(reader.read_uuid()?);
-        let len = reader.read_u32()? as usize;
-        let mut payloads = Vec::with_capacity(len);
-        for _ in 0..len {
-            payloads.push(reader.read_sync_payload()?);
-        }
-        reader.finish()?;
-        Ok(Self {
-            client_id,
-            payloads,
-        })
-    }
-}
-
-impl SyncBatchResponse {
-    pub fn encode_payload(&self) -> DecodeResult<Vec<u8>> {
-        let mut out = Vec::new();
-        push_u32(&mut out, self.results.len())?;
-        for result in &self.results {
-            push_u8(&mut out, u8::from(result.ok));
-            push_option_string(&mut out, result.error.as_deref())?;
-        }
-        Ok(out)
-    }
-
-    pub fn decode_payload(bytes: &[u8]) -> DecodeResult<Self> {
-        let mut reader = WireReader::new(bytes);
-        let len = reader.read_u32()? as usize;
-        let mut results = Vec::with_capacity(len);
-        for _ in 0..len {
-            results.push(SyncPayloadResult {
-                ok: reader.read_u8()? != 0,
-                error: reader.read_option_string()?,
-            });
-        }
-        reader.finish()?;
-        Ok(Self { results })
-    }
 }
 
 pub fn encode_outbox_entry_payload(
@@ -495,136 +333,4 @@ pub fn encode_outbox_entry_payload(
     push_u8(&mut out, CLIENT_OUTBOX_ENTRY);
     push_sync_payload(&mut out, &entry.payload)?;
     Ok(out)
-}
-
-pub fn decode_outbox_entry_payload(bytes: &[u8]) -> DecodeResult<SyncPayload> {
-    let mut reader = WireReader::new(bytes);
-    match reader.read_u8()? {
-        CLIENT_OUTBOX_ENTRY => {}
-        tag => return Err(DecodeError::InvalidTag(tag)),
-    }
-    let payload = reader.read_sync_payload()?;
-    reader.finish()?;
-    Ok(payload)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_server_event_frame_roundtrip() {
-        let event = ServerEvent::Connected {
-            connection_id: ConnectionId(42),
-            client_id: "test-client-id".to_string(),
-            next_sync_seq: None,
-            catalogue_state_hash: Some("digest-123".to_string()),
-        };
-
-        let frame = event.encode_frame();
-        assert!(frame.len() > 4);
-
-        let decoded = ServerEvent::decode_frame(&frame).unwrap();
-        match decoded {
-            ServerEvent::Connected {
-                catalogue_state_hash,
-                ..
-            } => {
-                assert_eq!(catalogue_state_hash.as_deref(), Some("digest-123"));
-            }
-            other => panic!("Expected Connected event, got {:?}", other.variant_name()),
-        }
-    }
-
-    #[test]
-    fn test_heartbeat_frame_roundtrip() {
-        let event = ServerEvent::Heartbeat;
-        let frame = event.encode_frame();
-
-        let decoded = ServerEvent::decode_frame(&frame).unwrap();
-        assert!(matches!(decoded, ServerEvent::Heartbeat));
-    }
-
-    #[test]
-    fn test_decode_frame_incomplete() {
-        // Too short for length prefix
-        assert!(ServerEvent::decode_frame(&[0, 0]).is_none());
-
-        // Length says 100 bytes but only 4 available
-        let buf = [0, 0, 0, 100, 1, 2, 3, 4];
-        assert!(ServerEvent::decode_frame(&buf).is_none());
-    }
-
-    #[test]
-    fn test_error_response_constructors() {
-        let err = ErrorResponse::bad_request("invalid query");
-        assert_eq!(err.code, ErrorCode::BadRequest);
-        assert_eq!(err.error, "invalid query");
-
-        let err = ErrorResponse::forbidden("not allowed");
-        assert_eq!(err.code, ErrorCode::Forbidden);
-
-        let err = UnauthenticatedResponse::expired("JWT expired");
-        assert_eq!(err.error, "unauthenticated");
-        assert_eq!(err.code, UnauthenticatedCode::Expired);
-        assert_eq!(err.message, "JWT expired");
-    }
-
-    #[test]
-    fn test_sync_batch_request_postcard_roundtrip() {
-        use crate::metadata::RowProvenance;
-        use crate::object::ObjectId;
-        use crate::row_histories::{RowState, StoredRowBatch};
-        use crate::sync_manager::ClientId;
-
-        let row_id = ObjectId::new();
-        let payload = SyncPayload::RowBatchCreated {
-            metadata: None,
-            row: StoredRowBatch::new(
-                row_id,
-                "main",
-                Vec::new(),
-                b"alice".to_vec(),
-                RowProvenance::for_insert(row_id.to_string(), 1_000),
-                Default::default(),
-                RowState::VisibleDirect,
-                None,
-            ),
-        };
-        let request = SyncBatchRequest {
-            payloads: vec![payload],
-            client_id: ClientId::new(),
-        };
-
-        let bytes = request.encode_payload().unwrap();
-        assert!(bytes.len() < 512);
-
-        let parsed = SyncBatchRequest::decode_payload(&bytes).unwrap();
-        assert_eq!(parsed.payloads.len(), 1);
-        assert!(matches!(
-            parsed.payloads[0],
-            SyncPayload::RowBatchCreated { .. }
-        ));
-    }
-
-    #[test]
-    fn test_sync_batch_response_postcard_roundtrip() {
-        let response = SyncBatchResponse {
-            results: vec![
-                SyncPayloadResult {
-                    ok: true,
-                    error: None,
-                },
-                SyncPayloadResult {
-                    ok: false,
-                    error: Some("bad payload".into()),
-                },
-            ],
-        };
-        let bytes = response.encode_payload().unwrap();
-        let decoded = SyncBatchResponse::decode_payload(&bytes).unwrap();
-        assert_eq!(decoded.results.len(), 2);
-        assert!(decoded.results[0].ok);
-        assert_eq!(decoded.results[1].error.as_deref(), Some("bad payload"));
-    }
 }
