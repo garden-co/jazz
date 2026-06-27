@@ -234,7 +234,7 @@ describe("db.all browser integration", () => {
     {
       name: "in-array-element",
       conditions: [{ column: "tags", op: "in", value: ["work"] }],
-      expectedTitles: [],
+      expectedTitles: ["alpha", "gamma"],
     },
     {
       name: "contains-text",

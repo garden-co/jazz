@@ -197,6 +197,23 @@ Until deleted, treat them as replacement targets only.
   The runtime is no longer a general server sync runtime: shutdown does not
   disconnect alpha transports, disconnected-client sweeping only expires
   markers, and test-only alpha websocket frame injection fails closed.
+- Exact catalogue-runtime replacement gap: admin catalogue HTTP still depends
+  on the alpha `TokioRuntime`/`SchemaManager`/`storage` stack to persist and
+  rehydrate schema, permissions, and lens catalogue entries. That runtime is
+  now documented and named as admin-catalogue-only, and `storage` is no longer
+  a normal public Rust module outside `test-utils`, but the remaining migration
+  is to move catalogue persistence/rehydration behind direct core storage
+  without reintroducing alpha row/query/sync serving.
+- Direct prepared reads now cover the browser gate's include, hop, UUID-array
+  hop, gather, and array-membership `IN` shapes without a broad table fallback.
+  Relation-shaped subscriptions reuse the same direct recompute path, but their
+  current wake source is the seed/root subscription. Writes that only affect a
+  downstream joined/include target row are a known remaining wake-coverage gap.
+- Richer public-builder local gates cover arrays, binary large values, nullable
+  refs, integer predicates, and filtered subscriptions. The equivalent
+  websocket gate is still skipped because publishing public `schema.int()`
+  currently fails against the core server's unsigned fixed-schema integer
+  support.
 - The direct websocket route is the intended sync boundary. Old
   `transport_protocol.rs`, `transport_manager.rs`, and `sync_manager` code
   should not regain ownership of `/ws` semantics.

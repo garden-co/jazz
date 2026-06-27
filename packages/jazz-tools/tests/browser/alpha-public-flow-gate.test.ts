@@ -6,6 +6,7 @@ import {
   schema,
   type CompiledPermissions,
   type Db,
+  type Query,
   type RowOf,
 } from "../../src/index.js";
 import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
@@ -26,6 +27,21 @@ const app = schema.defineApp({
   }),
 });
 
+const richApp = schema.defineApp({
+  users: schema.table({
+    name: schema.string(),
+  }),
+  todos: schema.table({
+    title: schema.string(),
+    done: schema.boolean(),
+    list: schema.string(),
+    priority: schema.int(),
+    tags: schema.array(schema.string()),
+    payload: schema.bytes().optional(),
+    ownerId: schema.ref("users").optional(),
+  }),
+});
+
 const fileApp = schema.defineApp({
   files: schema.table({
     name: schema.string(),
@@ -41,6 +57,17 @@ const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.todos.allowDelete.always(),
 ]);
 
+const richPermissions = schema.definePermissions(richApp, ({ policy }) => [
+  policy.users.allowRead.always(),
+  policy.users.allowInsert.always(),
+  policy.users.allowUpdate.always(),
+  policy.users.allowDelete.always(),
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
+
 const filePermissions = schema.definePermissions(fileApp, ({ policy }) => [
   policy.files.allowRead.always(),
   policy.files.allowInsert.always(),
@@ -49,6 +76,7 @@ const filePermissions = schema.definePermissions(fileApp, ({ policy }) => [
 ]);
 
 type Todo = RowOf<typeof app.todos>;
+type RichTodo = RowOf<typeof richApp.todos>;
 
 const ctx = new TestCleanup();
 
@@ -143,6 +171,71 @@ describe("alpha public package flow", () => {
     expect(await db.one(app.todos.where({ id: created.id }), { tier: "local" })).toEqual(created);
   });
 
+  it("gates richer public row shapes through local direct core queries and subscriptions", async () => {
+    const appId = uniqueDbName("alpha-public-rich-local-flow");
+    const persistentDbName = uniqueDbName("alpha-public-rich-local-opfs");
+    const db = ctx.track(
+      await createDb({
+        appId,
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName: persistentDbName },
+      }),
+    );
+    const snapshots: RichTodo[][] = [];
+    const richQuery = richApp.todos
+      .where({ tags: { contains: "alpha" }, priority: { gte: 5 } })
+      .orderBy("priority", "desc")
+      .limit(1);
+    const unsubscribe = ctx.trackSubscription(
+      db.subscribeAll(richQuery, (delta) => {
+        snapshots.push([...delta.all]);
+      }),
+    );
+
+    const owner = await db.insert(richApp.users, { name: "Alpha Owner" }).wait({ tier: "local" });
+    await db
+      .insert(richApp.todos, {
+        title: "Ignore low-priority rich row",
+        done: false,
+        list: "launch",
+        priority: 2,
+        tags: ["alpha"],
+        payload: null,
+        ownerId: null,
+      })
+      .wait({ tier: "local" });
+    const created = await db
+      .insert(richApp.todos, {
+        title: "Adopt alpha rich row",
+        done: false,
+        list: "launch",
+        priority: 7,
+        tags: ["alpha", "direct-core"],
+        payload: new Uint8Array([4, 5, 6, 7]),
+        ownerId: owner.id,
+      })
+      .wait({ tier: "local" });
+
+    expect(await db.one(richQuery, { tier: "local" })).toEqual(created);
+    await waitForCondition(
+      async () =>
+        snapshots.some(
+          (rows) =>
+            rows.length === 1 &&
+            rows[0]?.id === created.id &&
+            rows[0].ownerId === owner.id &&
+            rows[0].payload instanceof Uint8Array &&
+            rows[0].payload.length === 4,
+        ),
+      5_000,
+      "richer local subscribeAll snapshot",
+    );
+
+    await db.update(richApp.todos, created.id, { payload: null }).wait({ tier: "local" });
+    expect(await db.one(richQuery, { tier: "local" })).toEqual({ ...created, payload: null });
+    unsubscribe();
+  });
+
   it("opens public createDb with direct websocket server config and converges between clients", async () => {
     const requestedAppId = uniqueDbName("alpha-public-websocket-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
@@ -186,6 +279,12 @@ describe("alpha public package flow", () => {
         rows.some((todo) => todo.id === created.id && todo.title === created.title),
       ),
     ).toBe(true);
+  });
+
+  it.skip("TODO(alpha direct core): publish richer public row shapes over websocket once core server accepts public signed INTEGER columns; current schema publish fails with `INTEGER is signed, but core server fixed schemas only support unsigned integer columns`", async () => {
+    const requestedAppId = uniqueDbName("alpha-public-rich-websocket-flow");
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
   });
 
   it("opens public createDb with persistent OPFS and direct websocket server config, then converges todo CRUD", async () => {
@@ -563,7 +662,11 @@ async function expectTodoSummaries(
   expect([...rows].sort(byTitle).map(summary)).toEqual(summaries);
 }
 
-async function waitForSubscribedTodoSummaries(db: Db, summaries: string[]): Promise<Todo[]> {
+async function waitForSubscribedTodoSummaries(
+  db: Db,
+  summaries: string[],
+  query: Query<"todos"> = app.todos.orderBy("title"),
+): Promise<Todo[]> {
   return await new Promise<Todo[]>((resolve, reject) => {
     let lastRows: Todo[] = [];
     let unsubscribe: () => void = () => {};
@@ -577,7 +680,7 @@ async function waitForSubscribedTodoSummaries(db: Db, summaries: string[]): Prom
       );
     }, 15_000);
     unsubscribe = ctx.trackSubscription(
-      db.subscribeAll(app.todos.orderBy("title"), (delta) => {
+      db.subscribeAll(query, (delta) => {
         lastRows = [...delta.all];
         if (summariesEqual([...lastRows].sort(byTitle), summaries)) {
           clearTimeout(timeout);

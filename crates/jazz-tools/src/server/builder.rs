@@ -170,7 +170,7 @@ impl ServerBuilder {
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
-        let (catalogue_runtime, connection_event_hub) = self.build_catalogue_runtime()?;
+        let (catalogue_runtime, connection_event_hub) = self.build_admin_catalogue_runtime()?;
         let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
@@ -224,7 +224,13 @@ impl ServerBuilder {
     }
 
     #[allow(clippy::type_complexity)]
-    fn build_catalogue_runtime(
+    /// Build the temporary alpha runtime used only by admin catalogue HTTP
+    /// handlers and schema rehydration.
+    ///
+    /// Websocket sync is owned by `CoreServer`; this runtime must not become a
+    /// parallel server sync engine again while catalogue persistence is being
+    /// migrated.
+    fn build_admin_catalogue_runtime(
         &self,
     ) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
         let connection_event_hub = Arc::new(ConnectionEventHub::default());

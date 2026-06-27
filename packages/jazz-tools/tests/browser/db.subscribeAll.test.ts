@@ -240,9 +240,9 @@ describe("db.subscribeAll browser integration", () => {
     {
       name: "lt",
       query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "priority", op: "lt", value: 0 }],
+        conditions: [{ column: "priority", op: "lt", value: 2 }],
       }),
-      insert: { title: "lt-hit", done: false, priority: -1, owner_id: undefined, tags: ["x"] },
+      insert: { title: "lt-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
     },
     {
       name: "lte",
