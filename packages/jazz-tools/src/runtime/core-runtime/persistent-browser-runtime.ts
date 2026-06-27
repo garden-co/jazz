@@ -7,7 +7,6 @@ import type {
 } from "../client.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
-import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import { encodeCellsForPatch, encodeCellsForRow, formatUuid, parseUuid } from "./runtime.js";
 
 type PendingCall = {
