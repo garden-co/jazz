@@ -332,11 +332,14 @@ pub(super) async fn schema_handler(
         }
     };
 
-    match state.catalogue.known_schema(&state.runtime, &schema_hash) {
+    match state
+        .catalogue
+        .known_schema(&state.catalogue_runtime, &schema_hash)
+    {
         Ok(Some(schema)) => {
             let published_at = match state
                 .catalogue
-                .schema_published_at(&state.runtime, &schema_hash)
+                .schema_published_at(&state.catalogue_runtime, &schema_hash)
             {
                 Ok(timestamp) => timestamp,
                 Err(err) => {
@@ -410,11 +413,17 @@ pub(super) async fn schema_hashes_handler(
         };
     }
 
-    match state.catalogue.known_schema_hashes(&state.runtime) {
+    match state
+        .catalogue
+        .known_schema_hashes(&state.catalogue_runtime)
+    {
         Ok(hashes) => {
             let mut schemas = Vec::with_capacity(hashes.len());
             for hash in &hashes {
-                let published_at = match state.catalogue.schema_published_at(&state.runtime, hash) {
+                let published_at = match state
+                    .catalogue
+                    .schema_published_at(&state.catalogue_runtime, hash)
+                {
                     Ok(timestamp) => timestamp,
                     Err(err) => {
                         return Err((
@@ -506,7 +515,7 @@ pub(super) async fn schema_connectivity_handler(
 
     match state
         .catalogue
-        .are_schema_hashes_connected(&state.runtime, from_hash, to_hash)
+        .are_schema_hashes_connected(&state.catalogue_runtime, from_hash, to_hash)
     {
         Ok(connected) => (
             StatusCode::OK,
@@ -625,7 +634,7 @@ pub(super) async fn publish_schema_handler(
     }
     let object_id = match state
         .catalogue
-        .publish_schema(&state.runtime, request.schema)
+        .publish_schema(&state.catalogue_runtime, request.schema)
     {
         Ok(object_id) => object_id,
         Err(err) => {
@@ -679,7 +688,10 @@ pub(super) async fn permissions_head_handler(
         };
     }
 
-    match state.catalogue.current_permissions_head(&state.runtime) {
+    match state
+        .catalogue
+        .current_permissions_head(&state.catalogue_runtime)
+    {
         Ok(head) => {
             let head = head.map(permissions_head_view);
             (StatusCode::OK, Json(PermissionsHeadResponse { head })).into_response()
@@ -724,7 +736,10 @@ pub(super) async fn permissions_handler(
         };
     }
 
-    match state.catalogue.current_permissions(&state.runtime) {
+    match state
+        .catalogue
+        .current_permissions(&state.catalogue_runtime)
+    {
         Ok(current) => (
             StatusCode::OK,
             Json(match current {
@@ -817,29 +832,31 @@ pub(super) async fn publish_permissions_handler(
         None => None,
     };
 
-    let mut schema_with_permissions =
-        match state.catalogue.known_schema(&state.runtime, &schema_hash) {
-            Ok(Some(schema)) => schema,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::not_found(format!(
-                        "target schema catalogue not found for hash {}",
-                        schema_hash
-                    ))),
-                )
-                    .into_response();
-            }
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::internal(format!(
-                        "failed to read known schemas: {err}"
-                    ))),
-                )
-                    .into_response();
-            }
-        };
+    let mut schema_with_permissions = match state
+        .catalogue
+        .known_schema(&state.catalogue_runtime, &schema_hash)
+    {
+        Ok(Some(schema)) => schema,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "target schema catalogue not found for hash {}",
+                    schema_hash
+                ))),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(format!(
+                    "failed to read known schemas: {err}"
+                ))),
+            )
+                .into_response();
+        }
+    };
 
     let permissions = request
         .permissions
@@ -881,12 +898,15 @@ pub(super) async fn publish_permissions_handler(
         };
 
     match state.catalogue.publish_permissions_bundle(
-        &state.runtime,
+        &state.catalogue_runtime,
         schema_hash,
         permissions,
         expected_parent_bundle_object_id,
     ) {
-        Ok(_) => match state.catalogue.current_permissions_head(&state.runtime) {
+        Ok(_) => match state
+            .catalogue
+            .current_permissions_head(&state.catalogue_runtime)
+        {
             Ok(head) => {
                 if let Some(schema) = direct_schema {
                     let core_server = match state.core_server() {
@@ -1013,7 +1033,10 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    let source_schema = match state.catalogue.known_schema(&state.runtime, &source_hash) {
+    let source_schema = match state
+        .catalogue
+        .known_schema(&state.catalogue_runtime, &source_hash)
+    {
         Ok(Some(schema)) => schema,
         Ok(None) => {
             return (
@@ -1036,7 +1059,10 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    let target_schema = match state.catalogue.known_schema(&state.runtime, &target_hash) {
+    let target_schema = match state
+        .catalogue
+        .known_schema(&state.catalogue_runtime, &target_hash)
+    {
         Ok(Some(schema)) => schema,
         Ok(None) => {
             return (
@@ -1180,7 +1206,10 @@ pub(super) async fn publish_migration_handler(
     }
 
     let lens = Lens::new(source_hash, target_hash, forward);
-    let object_id = match state.catalogue.publish_lens(&state.runtime, &lens) {
+    let object_id = match state
+        .catalogue
+        .publish_lens(&state.catalogue_runtime, &lens)
+    {
         Ok(object_id) => object_id,
         Err(err) => {
             return (
@@ -1193,7 +1222,7 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    if let Err(err) = state.runtime.flush().await {
+    if let Err(err) = state.catalogue_runtime.flush().await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
@@ -1262,7 +1291,7 @@ pub(super) async fn admin_subscription_introspection_handler(
             .into_response();
     }
 
-    match state.runtime.server_subscription_telemetry() {
+    match state.catalogue_runtime.server_subscription_telemetry() {
         Ok(queries) => Json(AdminSubscriptionIntrospectionResponse {
             app_id: state.app_id.to_string(),
             generated_at: unix_timestamp_millis(),

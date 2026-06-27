@@ -9,9 +9,9 @@ use crate::server::DynStorage;
 
 /// Server-local catalogue facade.
 ///
-/// This is intentionally a thin wrapper over the existing Tokio runtime and
-/// schema manager. Storage authority still lives in the runtime; this facade
-/// only gives server/admin routes one place to call for catalogue operations.
+/// This is intentionally a thin wrapper over the legacy Tokio runtime and
+/// schema manager while catalogue storage is being moved behind direct core.
+/// Production websocket sync must not route through this store.
 #[derive(Debug, Default)]
 pub struct ServerCatalogue;
 

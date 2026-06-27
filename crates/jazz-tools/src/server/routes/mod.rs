@@ -1367,7 +1367,7 @@ mod tests {
 
         let state = make_state_with_schema(v2).await;
         state
-            .runtime
+            .catalogue_runtime
             .add_known_schema(v1)
             .expect("seed known schema for connectivity test");
         let app = make_test_router(state.clone());
@@ -1670,7 +1670,7 @@ mod tests {
 
         let state = make_state_with_schema(v2).await;
         state
-            .runtime
+            .catalogue_runtime
             .add_known_schema(v1)
             .expect("seed known schema for publish test");
         let app = make_test_router(state.clone());
@@ -1717,7 +1717,7 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
 
         let lens = state
-            .runtime
+            .catalogue_runtime
             .with_schema_manager(|schema_manager| {
                 schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
             })
@@ -1750,7 +1750,7 @@ mod tests {
 
         let state = make_state_with_schema(v2).await;
         state
-            .runtime
+            .catalogue_runtime
             .add_known_schema(v1)
             .expect("seed known schema for publish test");
         let app = make_test_router(state.clone());
@@ -1784,7 +1784,7 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
 
         let lens = state
-            .runtime
+            .catalogue_runtime
             .with_schema_manager(|schema_manager| {
                 schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
             })
@@ -1841,7 +1841,7 @@ mod tests {
 
         let state = make_state_with_schema(v2.clone()).await;
         state
-            .runtime
+            .catalogue_runtime
             .add_known_schema(v1.clone())
             .expect("seed known schema for publish test");
         let app = make_test_router(state.clone());
@@ -1878,7 +1878,7 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
 
         let lens = state
-            .runtime
+            .catalogue_runtime
             .with_schema_manager(|schema_manager| {
                 schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
             })
@@ -2020,9 +2020,9 @@ mod tests {
             (4_u64, filtered_query, QueryPropagation::Full),
         ] {
             let client_id = ClientId::new();
-            state.runtime.add_client(client_id, None).unwrap();
+            state.catalogue_runtime.add_client(client_id, None).unwrap();
             state
-                .runtime
+                .catalogue_runtime
                 .push_sync_inbox(InboxEntry {
                     source: Source::Client(client_id),
                     payload: SyncPayload::QuerySubscription {
@@ -2036,7 +2036,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        state.runtime.flush().await.unwrap();
+        state.catalogue_runtime.flush().await.unwrap();
 
         let response = make_test_router(state.clone())
             .oneshot(
@@ -2105,10 +2105,10 @@ mod tests {
         let state = make_state_with_schema(schema).await;
 
         let client_id = ClientId::new();
-        let _ = state.runtime.ensure_client_as_backend(client_id);
+        let _ = state.catalogue_runtime.ensure_client_as_backend(client_id);
 
         let diagnostics = state
-            .runtime
+            .catalogue_runtime
             .with_schema_manager(|sm| sm.connection_schema_diagnostics(declared_hash))
             .expect("compute diagnostics");
 
