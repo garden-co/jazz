@@ -14,44 +14,18 @@ pub fn parse_query_value(value: JsonValue) -> Result<Query, String> {
 mod tests {
     use super::{parse_query_json, parse_query_value};
     use crate::query_manager::query::{ArraySubqueryRequirement, Query};
-    use crate::query_manager::relation_ir::{PredicateCmpOp, PredicateExpr, RelExpr, ValueRef};
-    use crate::query_manager::types::Value;
 
     #[test]
-    fn parses_canonical_relation_ir_payload() {
+    fn parses_public_query_payload() {
         let raw = serde_json::json!({
             "table": "todos",
             "branches": ["main"],
-            "relation_ir": {
-                "Filter": {
-                    "input": { "TableScan": { "table": "todos" } },
-                    "predicate": {
-                        "Cmp": {
-                            "left": { "column": "done" },
-                            "op": "Eq",
-                            "right": { "Literal": { "type": "Boolean", "value": true } }
-                        }
-                    }
-                }
-            }
+            "limit": 10
         });
 
         let query = parse_query_json(&raw.to_string()).expect("parse query");
         assert_eq!(query.table.as_str(), "todos");
-        match query.relation_ir {
-            RelExpr::Filter { input, predicate } => {
-                assert!(matches!(*input, RelExpr::TableScan { .. }));
-                assert_eq!(
-                    predicate,
-                    PredicateExpr::Cmp {
-                        left: crate::query_manager::relation_ir::ColumnRef::unscoped("done"),
-                        op: PredicateCmpOp::Eq,
-                        right: ValueRef::Literal(Value::Boolean(true)),
-                    }
-                );
-            }
-            other => panic!("unexpected relation_ir: {:?}", other),
-        }
+        assert_eq!(query.limit, Some(10));
     }
 
     #[test]
@@ -59,30 +33,11 @@ mod tests {
         let raw = serde_json::json!({
             "table": "todos",
             "branches": ["main"],
-            "relation_ir": {
-                "Filter": {
-                    "input": { "TableScan": { "table": "todos" } },
-                    "predicate": {
-                        "Cmp": {
-                            "left": { "column": "title" },
-                            "op": "Eq",
-                            "right": { "Literal": { "type": "Text", "value": "hello" } }
-                        }
-                    }
-                }
-            }
+            "offset": 3
         });
 
         let query: Query = parse_query_value(raw).expect("parse query");
-        match query.relation_ir {
-            RelExpr::Filter { predicate, .. } => match predicate {
-                PredicateExpr::Cmp { right, .. } => {
-                    assert_eq!(right, ValueRef::Literal(Value::Text("hello".to_string())));
-                }
-                other => panic!("unexpected predicate: {:?}", other),
-            },
-            other => panic!("unexpected relation_ir: {:?}", other),
-        }
+        assert_eq!(query.offset, 3);
     }
 
     #[test]
@@ -102,7 +57,7 @@ mod tests {
                 "requirement": "AtLeastOne",
                 "nested_arrays": []
             }],
-            "relation_ir": { "TableScan": { "table": "todos" } }
+            "limit": 1
         });
 
         let query = parse_query_json(&raw.to_string()).expect("parse query");
@@ -111,21 +66,5 @@ mod tests {
             query.array_subqueries[0].requirement,
             ArraySubqueryRequirement::AtLeastOne
         );
-    }
-
-    #[test]
-    fn rejects_internally_tagged_relation_ir_payload() {
-        let raw = serde_json::json!({
-            "table": "todos",
-            "branches": ["main"],
-            "relation_ir": {
-                "type": "TableScan",
-                "table": "todos"
-            }
-        });
-
-        let error =
-            parse_query_json(&raw.to_string()).expect_err("internally-tagged payload should fail");
-        assert!(error.contains("Parse error"), "{error}");
     }
 }

@@ -7,7 +7,6 @@ pub mod descriptor;
 pub mod policy;
 pub mod row;
 pub mod schema;
-pub mod tuple;
 pub mod value;
 
 // Re-export all public items from sub-modules
@@ -16,7 +15,6 @@ pub use descriptor::*;
 pub use policy::*;
 pub use row::*;
 pub use schema::*;
-pub use tuple::*;
 pub use value::*;
 
 // Import PolicyExpr for use by schema module

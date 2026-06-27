@@ -709,7 +709,7 @@ function translateBuiltRelationToRelExpr(
  * - hopTo => Join + Project
  * - gather => Gather with step Join + Project
  */
-export function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): RelExpr {
+function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): RelExpr {
   const builder = normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
   const hops = builder.hops;

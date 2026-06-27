@@ -2,11 +2,7 @@ use std::collections::HashMap;
 
 use super::*;
 
-// ============================================================================
-// TupleDescriptor - Describes structure of tuples in a node's output
-// ============================================================================
-
-/// Describes which element of a tuple contains a given set of columns.
+/// Describes which joined table contains a given set of columns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ElementDescriptor {
     /// Table name or alias for this element.
@@ -17,24 +13,14 @@ pub struct ElementDescriptor {
     pub column_offset: usize,
 }
 
-/// Describes the structure of tuples in a node's output.
-///
-/// Maps global column indices to (element_index, local_column_index) pairs,
-/// enabling FilterNode to find data in multi-element tuples (e.g., after joins).
-///
-/// Also tracks per-element materialization state to enable lazy materialization.
+/// Describes the column layout of a joined row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TupleDescriptor {
-    /// Descriptors for each element in the tuple.
     elements: Vec<ElementDescriptor>,
-    /// Total columns across all elements.
     total_columns: usize,
-    /// Per-element materialization state.
-    materialization: MaterializationState,
 }
 
 impl TupleDescriptor {
-    /// Create a single-element tuple descriptor (ID-only by default).
     pub fn single(table: impl Into<TableName>, descriptor: RowDescriptor) -> Self {
         let total_columns = descriptor.columns.len();
         Self {
@@ -44,46 +30,28 @@ impl TupleDescriptor {
                 column_offset: 0,
             }],
             total_columns,
-            materialization: MaterializationState::all_ids(1),
         }
     }
 
-    /// Create a single-element tuple descriptor with explicit materialization state.
+    /// Compatibility constructor; materialization state is no longer tracked.
     pub fn single_with_materialization(
         table: impl Into<TableName>,
         descriptor: RowDescriptor,
-        materialized: bool,
+        _materialized: bool,
     ) -> Self {
-        let total_columns = descriptor.columns.len();
-        Self {
-            elements: vec![ElementDescriptor {
-                table: table.into(),
-                descriptor,
-                column_offset: 0,
-            }],
-            total_columns,
-            materialization: if materialized {
-                MaterializationState::all_materialized(1)
-            } else {
-                MaterializationState::all_ids(1)
-            },
-        }
+        Self::single(table, descriptor)
     }
 
-    /// Create a tuple descriptor from multiple element descriptors (all ID-only).
     pub fn from_elements(elements: Vec<ElementDescriptor>) -> Self {
-        let element_count = elements.len();
         let total_columns = elements
             .last()
             .map_or(0, |e| e.column_offset + e.descriptor.columns.len());
         Self {
             elements,
             total_columns,
-            materialization: MaterializationState::all_ids(element_count),
         }
     }
 
-    /// Create a tuple descriptor from table names and their descriptors (all ID-only).
     /// Computes column_offset for each element automatically.
     pub fn from_tables<T>(tables: &[(T, RowDescriptor)]) -> Self
     where
@@ -103,13 +71,10 @@ impl TupleDescriptor {
 
         Self {
             total_columns: offset,
-            materialization: MaterializationState::all_ids(elements.len()),
             elements,
         }
     }
 
-    /// Concatenate two descriptors (for join output).
-    /// Combines elements from both and concatenates materialization states.
     pub fn concat(left: &Self, right: &Self) -> Self {
         let mut elements = left.elements.clone();
         let left_cols = left.total_columns;
@@ -122,50 +87,21 @@ impl TupleDescriptor {
         }
         Self {
             total_columns: left.total_columns + right.total_columns,
-            materialization: left.materialization.concat(&right.materialization),
             elements,
         }
     }
 
-    /// Get the materialization state.
-    pub fn materialization(&self) -> &MaterializationState {
-        &self.materialization
-    }
-
-    /// Return a new descriptor with specified elements marked as materialized.
-    pub fn with_materialized(self, elements: &std::collections::HashSet<usize>) -> Self {
-        Self {
-            materialization: self.materialization.with_all_materialized(elements),
-            ..self
-        }
-    }
-
-    /// Return a new descriptor with all elements marked as materialized.
+    /// Compatibility shim; materialization state is no longer tracked.
     pub fn with_all_materialized(self) -> Self {
-        Self {
-            materialization: self.materialization.materialize_all(),
-            ..self
-        }
+        self
     }
 
-    /// Validate that all required elements are materialized.
-    /// Returns Ok if all are materialized, Err with message otherwise.
+    /// Compatibility shim; materialization state is no longer tracked.
     pub fn assert_materialized(
         &self,
-        elements: &std::collections::HashSet<usize>,
+        _elements: &std::collections::HashSet<usize>,
     ) -> Result<(), String> {
-        let unmaterialized: Vec<_> = elements
-            .iter()
-            .filter(|&&i| !self.materialization.is_materialized(i))
-            .collect();
-        if unmaterialized.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
-                "Elements {:?} are not materialized but required",
-                unmaterialized
-            ))
-        }
+        Ok(())
     }
 
     /// Get column index by name, searching all elements.

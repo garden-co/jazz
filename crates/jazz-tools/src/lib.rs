@@ -19,8 +19,6 @@ pub mod sync;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
 pub mod transaction;
-#[allow(dead_code)]
-pub(crate) mod wire_types;
 
 pub mod transport_auth;
 pub mod transport_error;
@@ -38,7 +36,8 @@ use thiserror::Error;
 pub use schema_api::{
     BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, OrderedRowDelta,
     PolicyExpr, Query, QueryBuilder, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder,
-    SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext,
+    SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext, permissions,
+    policy_expr,
 };
 pub use schema_manager::AppId;
 

@@ -6,5 +6,6 @@ pub use crate::query_manager::session::{Session, WriteContext};
 pub use crate::query_manager::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
     RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    permissions, policy_expr,
 };
 pub use crate::transaction::BatchId;

@@ -107,7 +107,7 @@ fn convert_column(
     if column.default.is_some() {
         return Err(err(
             format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            "column defaults are not supported by direct fixed-schema conversion yet",
+            "column defaults are not supported by core schema conversion yet",
         ));
     }
     let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;
@@ -154,15 +154,15 @@ fn convert_column_type(
         )),
         ColumnType::BatchId => Err(err(
             format!("$.{}.{}", table.as_str(), column),
-            "BatchId columns are not supported by direct fixed-schema conversion yet",
+            "BatchId columns are not supported by core schema conversion yet",
         )),
         ColumnType::Json { .. } => Err(err(
             format!("$.{}.{}", table.as_str(), column),
-            "Json columns are not supported by direct fixed-schema conversion yet",
+            "Json columns are not supported by core schema conversion yet",
         )),
         ColumnType::Row { .. } => Err(err(
             format!("$.{}.{}", table.as_str(), column),
-            "nested Row columns are not supported by direct fixed-schema conversion yet",
+            "nested Row columns are not supported by core schema conversion yet",
         )),
     }
 }
@@ -176,7 +176,7 @@ fn convert_merge_strategy(
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
         ColumnMergeStrategy::GSet => Err(err(
             format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            "GSet merge strategy is not supported by direct fixed-schema conversion yet",
+            "GSet merge strategy is not supported by core schema conversion yet",
         )),
     }
 }
@@ -370,7 +370,7 @@ fn convert_policy_predicate(
         )),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
-            format!("direct fixed-schema policies do not support {other:?} yet"),
+            format!("core schema policies do not support {other:?} yet"),
         )),
     }
 }
@@ -389,7 +389,7 @@ fn convert_policy_operand(
         PolicyValue::SessionRef(path_segments) => Err(err(
             format!("$.{}.{}", table.as_str(), path),
             format!(
-                "direct fixed-schema policies only support session.user_id references, got session.{}",
+                "core schema policies only support session.user_id references, got session.{}",
                 path_segments.join(".")
             ),
         )),
@@ -411,7 +411,7 @@ fn convert_policy_literal(
         Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
-            format!("direct fixed-schema policies do not support {other:?} literals yet"),
+            format!("core schema policies do not support {other:?} literals yet"),
         )),
     }
 }
@@ -624,7 +624,7 @@ mod tests {
 
         let error = convert_public_schema(&schema).unwrap_err();
         assert!(error.to_string().starts_with(
-            "$.todos.policies.select.using: direct fixed-schema policies do not support SessionContains"
+            "$.todos.policies.select.using: core schema policies do not support SessionContains"
         ));
     }
 

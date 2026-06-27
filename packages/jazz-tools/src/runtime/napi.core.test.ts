@@ -875,7 +875,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     }
   }, 15_000);
 
-  it("reopens a persistent direct DB and reads previously written rows", async () => {
+  it("reopens a persistent database and reads previously written rows", async () => {
     const { NapiDb } = await loadNapiModule();
     const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-core-"));
     const dataPath = join(tempDir, "db");
