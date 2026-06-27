@@ -4,17 +4,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
+use crate::AppId;
 use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::ObjectId;
 use crate::query_manager::types::{Schema, SchemaHash, TableName, TablePolicies};
+use crate::schema_manager::Lens;
 use crate::schema_manager::encoding::{
     decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
     decode_schema, encode_lens_transform, encode_permissions_bundle, encode_permissions_head,
     encode_schema,
 };
-use crate::schema_manager::manager::{CurrentPermissionsSummary, PermissionsHeadSummary};
-use crate::schema_manager::{AppId, Lens};
 use crate::server::catalogue_storage::{
     CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,
 };
@@ -22,6 +22,20 @@ use crate::server::catalogue_storage::{
 use crate::sync::vocabulary::ConnectionSchemaDiagnostics;
 #[cfg(test)]
 use crate::sync::{ClientId, DurabilityTier};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PermissionsHeadSummary {
+    pub schema_hash: SchemaHash,
+    pub version: u64,
+    pub parent_bundle_object_id: Option<ObjectId>,
+    pub bundle_object_id: ObjectId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CurrentPermissionsSummary {
+    pub head: PermissionsHeadSummary,
+    pub permissions: HashMap<TableName, TablePolicies>,
+}
 
 /// Errors from server-local catalogue operations.
 #[allow(dead_code)]

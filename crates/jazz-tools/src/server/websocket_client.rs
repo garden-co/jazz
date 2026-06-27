@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::schema_manager::AppId;
+use crate::AppId;
 use crate::transport_auth::AuthConfig;
 
 const DIRECT_CLIENT_SUPPORTED_FEATURES: u64 =

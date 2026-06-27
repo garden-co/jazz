@@ -10,9 +10,9 @@ use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
 use crate::AppContext;
+use crate::AppId;
 use crate::middleware::AuthConfig;
 use crate::schema_api::Schema;
-use crate::schema_manager::AppId;
 
 use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use tokio::sync::oneshot;

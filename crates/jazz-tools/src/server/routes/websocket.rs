@@ -72,7 +72,7 @@ struct WebSocketAdmission {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct WebSocketAdmissionKey {
-    app_id: crate::schema_manager::AppId,
+    app_id: crate::AppId,
     identity: AuthorId,
 }
 
@@ -782,9 +782,9 @@ mod tests {
     use jazz::wire::{TransportError, WireTransport};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
+    use crate::AppId;
     use crate::middleware::AuthConfig;
     use crate::schema_api::Schema;
-    use crate::schema_manager::AppId;
     use crate::server::websocket_client::WebSocketTransport;
     use crate::server::{ServerBuilder, StorageBackend};
 

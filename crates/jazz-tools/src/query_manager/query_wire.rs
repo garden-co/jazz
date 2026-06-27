@@ -13,7 +13,7 @@ pub fn parse_query_value(value: JsonValue) -> Result<Query, String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_query_json, parse_query_value};
-    use crate::query_manager::query::{ArraySubqueryRequirement, Query};
+    use crate::query_api::query::{ArraySubqueryRequirement, Query};
 
     #[test]
     fn parses_public_query_payload() {

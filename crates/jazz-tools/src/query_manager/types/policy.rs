@@ -1,9 +1,7 @@
 use super::*;
 use crate::object::ObjectId;
-use crate::query_manager::policy::{CmpOp, Operation, PolicyValue};
-use crate::query_manager::relation_ir::{
-    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
-};
+use crate::query_api::policy::{CmpOp, Operation, PolicyValue};
+use crate::query_api::relation_ir::{ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

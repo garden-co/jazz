@@ -39,9 +39,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::warn;
 
+use crate::AppId;
 use crate::identity;
-use crate::query_manager::session::Session;
-use crate::schema_manager::AppId;
+use crate::query_api::session::Session;
 use crate::server::ServerState;
 use crate::transport_error::UnauthenticatedResponse;
 
@@ -920,7 +920,7 @@ pub fn resolve_verified_jwt_session(
     Ok(Session {
         user_id: subject.to_string(),
         claims,
-        auth_mode: crate::query_manager::session::AuthMode::External,
+        auth_mode: crate::query_api::session::AuthMode::External,
     })
 }
 
@@ -1029,8 +1029,8 @@ pub async fn extract_session(
             )
             .map_err(local_first_auth_error)?;
             let auth_mode = match issuer {
-                identity::ANONYMOUS_ISSUER => crate::query_manager::session::AuthMode::Anonymous,
-                _ => crate::query_manager::session::AuthMode::LocalFirst,
+                identity::ANONYMOUS_ISSUER => crate::query_api::session::AuthMode::Anonymous,
+                _ => crate::query_api::session::AuthMode::LocalFirst,
             };
             return Ok(Some(Session {
                 user_id: verified.user_id,
@@ -1350,7 +1350,7 @@ mod tests {
         assert_eq!(session.user_id, "user-42");
         assert_eq!(
             session.auth_mode,
-            crate::query_manager::session::AuthMode::External
+            crate::query_api::session::AuthMode::External
         );
         assert_eq!(session.claims["subject"], "user-42");
         assert_eq!(session.claims["issuer"], "https://issuer.example");
@@ -1465,7 +1465,7 @@ mod tests {
 
         assert_eq!(
             session.auth_mode,
-            crate::query_manager::session::AuthMode::LocalFirst
+            crate::query_api::session::AuthMode::LocalFirst
         );
         if let serde_json::Value::Object(map) = &session.claims {
             assert!(
@@ -1629,7 +1629,7 @@ mod tests {
 
         assert_eq!(
             session.auth_mode,
-            crate::query_manager::session::AuthMode::Anonymous
+            crate::query_api::session::AuthMode::Anonymous
         );
     }
 }

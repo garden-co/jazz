@@ -1,3 +1,4 @@
+pub mod app_id;
 pub mod catalogue;
 pub mod commit;
 pub mod digest;
@@ -9,7 +10,12 @@ pub mod object;
 #[cfg(feature = "otel-core")]
 pub mod otel;
 #[allow(dead_code, unused_imports, clippy::wrong_self_convention)]
-pub(crate) mod query_manager;
+#[path = "query_manager/mod.rs"]
+pub(crate) mod query_api;
+#[allow(dead_code, unused_imports)]
+pub(crate) mod query_manager {
+    pub(crate) use crate::query_api::*;
+}
 pub mod row_format;
 pub mod schema_api;
 pub mod schema_manager;
@@ -33,13 +39,13 @@ use std::path::PathBuf;
 #[cfg(feature = "client")]
 use thiserror::Error;
 
+pub use app_id::AppId;
 pub use schema_api::{
     BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, OrderedRowDelta,
     PolicyExpr, Query, QueryBuilder, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder,
     SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext, permissions,
     policy_expr,
 };
-pub use schema_manager::AppId;
 
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};

@@ -2,8 +2,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use crate::object::BranchName;
-
 use super::*;
 
 // ============================================================================
@@ -327,106 +325,4 @@ pub mod hex {
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| "invalid hex character"))
             .collect()
     }
-}
-
-// ============================================================================
-// Composed Branch Name - Environment-qualified branch naming
-// ============================================================================
-
-/// A branch name composed of environment, schema hash, and user branch.
-/// Format: `{env}-{schemaHash8}-{userBranch}`
-/// Example: `dev-a1b2c3d4-main`, `prod-f9e8d7c6-feature-x`
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ComposedBranchName {
-    pub env: String,
-    pub schema_hash: SchemaHash,
-    pub user_branch: String,
-}
-
-impl ComposedBranchName {
-    /// Create a new composed branch name.
-    pub fn new(env: &str, schema_hash: SchemaHash, user_branch: &str) -> Self {
-        Self {
-            env: env.to_string(),
-            schema_hash,
-            user_branch: user_branch.to_string(),
-        }
-    }
-
-    /// Create from a schema, computing the hash automatically.
-    pub fn from_schema(env: &str, schema: &Schema, user_branch: &str) -> Self {
-        Self::new(env, SchemaHash::compute(schema), user_branch)
-    }
-
-    /// Convert to a BranchName string: "{env}-{hash8}-{userBranch}"
-    pub fn to_branch_name(&self) -> BranchName {
-        BranchName::new(format!(
-            "{}-{}-{}",
-            self.env,
-            self.schema_hash.short(),
-            self.user_branch
-        ))
-    }
-
-    /// Parse a BranchName back into its components.
-    /// Returns None if the format doesn't match.
-    pub fn parse(name: &BranchName) -> Option<Self> {
-        let s = name.as_str();
-        let parts: Vec<&str> = s.splitn(3, '-').collect();
-        if parts.len() != 3 {
-            return None;
-        }
-
-        let env = parts[0].to_string();
-        let hash_str = parts[1];
-        let user_branch = parts[2].to_string();
-
-        // Validate hash is 12 hex chars (6 bytes)
-        if hash_str.len() != 12 || !hash_str.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
-
-        // We can't fully reconstruct the hash from just 12 chars,
-        // so we store a partial hash. For matching purposes, we use a zeroed hash
-        // with the short portion filled in.
-        let mut hash_bytes = [0u8; 32];
-        if let Ok(bytes) = hex_decode(hash_str) {
-            hash_bytes[..6].copy_from_slice(&bytes);
-        }
-
-        Some(Self {
-            env,
-            schema_hash: SchemaHash::from_bytes(hash_bytes),
-            user_branch,
-        })
-    }
-
-    /// Check if this branch matches an environment and user branch,
-    /// ignoring the schema hash (for finding related branches).
-    pub fn matches_env_and_branch(&self, env: &str, user_branch: &str) -> bool {
-        self.env == env && self.user_branch == user_branch
-    }
-}
-
-impl std::fmt::Display for ComposedBranchName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}-{}-{}",
-            self.env,
-            self.schema_hash.short(),
-            self.user_branch
-        )
-    }
-}
-
-/// Decode a hex string to bytes.
-fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
-    if !s.len().is_multiple_of(2) {
-        return Err(());
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| ()))
-        .collect()
 }

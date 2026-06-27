@@ -125,8 +125,9 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode, Uri};
     use axum::response::Json;
 
+    use crate::AppId;
     use crate::query_manager::types::{SchemaHash, TableName};
-    use crate::schema_manager::{AppId, LensOp};
+    use crate::schema_manager::LensOp;
     use std::time::Duration;
 
     use crate::query_manager::types::{
