@@ -518,7 +518,7 @@ export function buildNativeCriterionCommand(benchmark) {
     "--features",
     features,
     "--bench",
-    "realistic_phase1_core",
+    "realistic_phase1",
     "--",
     benchmark.criterion_filter,
   ];

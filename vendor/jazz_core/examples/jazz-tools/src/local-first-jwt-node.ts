@@ -4,7 +4,7 @@ import {
   createLocalFirstJwtWithSigner,
   localFirstPrivateKeyDer,
   type LocalFirstJwtOptions,
-} from "./local-first-jwt-core.js";
+} from "./local-first-jwt-shared.js";
 
 export function createLocalFirstJwt(options: LocalFirstJwtOptions): string {
   return createLocalFirstJwtWithSigner(options, (signingInput, privateKeyDer) => {

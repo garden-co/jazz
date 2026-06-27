@@ -239,7 +239,7 @@ fn filtered_documents_query(db: &DirectDb) -> jazz::db::PreparedQuery {
 }
 
 fn core_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core/insert");
+    let mut group = c.benchmark_group("db/insert");
 
     for initial_rows in [1_000usize] {
         group.throughput(Throughput::Elements(1));
@@ -267,7 +267,7 @@ fn core_insert(c: &mut Criterion) {
 }
 
 fn core_update_and_read(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core/update_read");
+    let mut group = c.benchmark_group("db/update_read");
 
     for row_count in [1_000usize] {
         group.throughput(Throughput::Elements(1));
@@ -302,7 +302,7 @@ fn core_update_and_read(c: &mut Criterion) {
 }
 
 fn core_filtered_prepared_read(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core/filtered_prepared_read");
+    let mut group = c.benchmark_group("db/filtered_prepared_read");
 
     for row_count in [1_000usize] {
         group.throughput(Throughput::Elements(row_count as u64));
@@ -327,7 +327,7 @@ fn core_filtered_prepared_read(c: &mut Criterion) {
 }
 
 fn core_reachable_policy_read(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core/reachable_policy_read");
+    let mut group = c.benchmark_group("db/reachable_policy_read");
 
     for row_count in [1_000usize] {
         group.throughput(Throughput::Elements(row_count as u64));
@@ -352,7 +352,7 @@ fn core_reachable_policy_read(c: &mut Criterion) {
 }
 
 fn core_subscribed_write(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core/subscribed_write");
+    let mut group = c.benchmark_group("db/subscribed_write");
 
     for row_count in [1_000usize] {
         group.throughput(Throughput::Elements(1));
@@ -390,7 +390,7 @@ fn core_subscribed_write(c: &mut Criterion) {
 }
 
 fn core_owner_policy_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core/owner_policy_insert");
+    let mut group = c.benchmark_group("db/owner_policy_insert");
 
     for initial_rows in [1_000usize] {
         group.throughput(Throughput::Elements(1));

@@ -34,8 +34,8 @@ test("native benchmark catalog defines RocksDB and SQLite variants for each nati
   assert.ok(ids.has("native-criterion:sqlite:r4_hot_task_history"));
   assert.ok(ids.has("native-criterion:rocksdb:r9_subscribed_write"));
   assert.ok(ids.has("native-criterion:sqlite:r9_subscribed_write"));
-  assert.ok(ids.has("native-criterion:rocksdb:r10_core_sync_fanout"));
-  assert.ok(ids.has("native-criterion:sqlite:r10_core_sync_fanout"));
+  assert.ok(ids.has("native-criterion:rocksdb:r10_sync_fanout"));
+  assert.ok(ids.has("native-criterion:sqlite:r10_sync_fanout"));
   assert.ok(ids.has("native-criterion:rocksdb:r11_byte_wire_resume"));
   assert.ok(ids.has("native-criterion:sqlite:r11_byte_wire_resume"));
   assert.ok(ids.has("native-criterion:rocksdb:r12_recursive_permissions"));
@@ -55,14 +55,14 @@ test("native benchmark catalog targets storage-backed engine-specific Criterion 
 
   assert.ok(rocksdbCrud, "expected RocksDB CRUD benchmark entry");
   assert.equal(rocksdbCrud.storage_engine, "rocksdb");
-  assert.equal(rocksdbCrud.criterion_filter, "realistic_phase1_core/r1_crud");
+  assert.equal(rocksdbCrud.criterion_filter, "realistic_phase1/r1_crud");
 
   assert.ok(sqliteCrud, "expected SQLite CRUD benchmark entry");
   assert.equal(sqliteCrud.storage_engine, "sqlite");
-  assert.equal(sqliteCrud.criterion_filter, "realistic_phase1_core/r1_crud");
+  assert.equal(sqliteCrud.criterion_filter, "realistic_phase1/r1_crud");
 
   assert.ok(rocksdbColdLoad, "expected RocksDB cold-load benchmark entry");
-  assert.equal(rocksdbColdLoad.criterion_filter, "realistic_phase1_core/r3_rocksdb_cold_load");
+  assert.equal(rocksdbColdLoad.criterion_filter, "realistic_phase1/r3_rocksdb_cold_load");
 });
 
 test("jazz-sim catalog defines fast scenarios and encoded wire canaries", () => {
@@ -149,9 +149,9 @@ test("native Criterion command opts into the RocksDB storage backend", () => {
     "--features",
     "rocksdb",
     "--bench",
-    "realistic_phase1_core",
+    "realistic_phase1",
     "--",
-    "realistic_phase1_core/r3_rocksdb_cold_load",
+    "realistic_phase1/r3_rocksdb_cold_load",
   ]);
 });
 
@@ -171,9 +171,9 @@ test("native Criterion command opts into the SQLite storage backend", () => {
     "--features",
     "sqlite",
     "--bench",
-    "realistic_phase1_core",
+    "realistic_phase1",
     "--",
-    "realistic_phase1_core/r2_reads",
+    "realistic_phase1/r2_reads",
   ]);
 });
 
@@ -193,11 +193,11 @@ test("benchmark workflow prebuilds the RocksDB-backed and SQLite-backed native b
   );
   assert.match(
     workflow,
-    /cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1_core --no-run/,
+    /cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 --no-run/,
   );
   assert.match(
     workflow,
-    /cargo bench -p jazz-tools --features sqlite --bench realistic_phase1_core --no-run/,
+    /cargo bench -p jazz-tools --features sqlite --bench realistic_phase1 --no-run/,
   );
 });
 

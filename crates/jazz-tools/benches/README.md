@@ -10,9 +10,9 @@ The active bench harness is the explicit `[[bench]]` list in
 `crates/jazz-tools/Cargo.toml`:
 
 - `observer_write_path`
-- `core_benchmark`
-- `core_authorization_scope_benchmark`
-- `realistic_phase1_core`
+- `db_benchmark`
+- `authorization_scope_benchmark`
+- `realistic_phase1`
 - `insert_benchmark`
 - `update_benchmark`
 - `subscription_benchmark`
@@ -28,7 +28,7 @@ than old helper behavior:
   policy instead of old `INHERITS SELECT VIA folder_id` session recursion.
 - `subscription_benchmark` uses `Db::mergeable_tx()` for the batch case so the
   core benchmark measures one transaction-shaped subscription delta.
-- `realistic_phase1_core` is a smallest useful active slice of the old
+- `realistic_phase1` is a smallest useful active slice of the old
   realistic suite. It hard-codes the S profile and covers single-DB memory
   project-board CRUD, mixed reads, a RocksDB project-board cold-load
   reopen/prepare/first-read scenario, a hot-task comment/activity history workload
@@ -58,7 +58,7 @@ core API before reintroducing it:
 - `memory_benchmark`
 
 The old `server_authorization_scope_benchmark` file was removed after its
-measurement intent was ported to `core_authorization_scope_benchmark`.
+measurement intent was ported to `authorization_scope_benchmark`.
 
 The old `memory_benchmark` file was removed rather than left as a broken
 RuntimeCore path. Reintroduce it after the `Db` facade exposes retained

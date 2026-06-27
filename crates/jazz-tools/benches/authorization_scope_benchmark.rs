@@ -119,7 +119,7 @@ fn subscribe_limit(db: &DirectDb, limit: usize) -> usize {
 }
 
 fn initial_authorized_scope(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core_authorization_scope/initial_limit");
+    let mut group = c.benchmark_group("authorization_scope/initial_limit");
 
     for row_count in [1_000usize, 2_000, 10_000] {
         group.throughput(Throughput::Elements(row_count as u64));
@@ -140,7 +140,7 @@ fn initial_authorized_scope(c: &mut Criterion) {
 }
 
 fn initial_authorized_scope_with_wide_schema(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core_authorization_scope/wide_schema");
+    let mut group = c.benchmark_group("authorization_scope/wide_schema");
 
     let (row_count, extra_columns) = (2_000usize, 256usize);
     group.throughput(Throughput::Elements(row_count as u64));
@@ -160,7 +160,7 @@ fn initial_authorized_scope_with_wide_schema(c: &mut Criterion) {
 }
 
 fn many_initial_authorized_scopes_share_schema_context(c: &mut Criterion) {
-    let mut group = c.benchmark_group("core_authorization_scope/many_subscriptions");
+    let mut group = c.benchmark_group("authorization_scope/many_subscriptions");
 
     let (row_count, extra_columns, subscription_count) = (1_000usize, 256usize, 25usize);
     group.throughput(Throughput::Elements(

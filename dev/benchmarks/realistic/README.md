@@ -42,28 +42,28 @@ RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realis
 Run the local realistic benchmark suite:
 
 ```bash
-cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1_core
+cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1
 ```
 
 It currently hard-codes the S profile inside
-`crates/jazz-tools/benches/realistic_phase1_core.rs` and runs the active
+`crates/jazz-tools/benches/realistic_phase1.rs` and runs the active
 core ports of selected realistic scenarios.
 
 Current topology coverage:
 
-- direct CRUD: `realistic_phase1_core/r1_crud`
-- direct reads: `realistic_phase1_core/r2_reads`
-- persisted cold-load (`M1_rocksdb`): `realistic_phase1_core/r3_rocksdb_cold_load` (requires `--features rocksdb`)
-- hot task history with multiple subscriptions: `realistic_phase1_core/r4_hot_task_history`
-- subscribed write path: `realistic_phase1_core/r9_subscribed_write`
-- core writer/server/reader sync fanout: `realistic_phase1_core/r10_core_sync_fanout`
-- byte-wire reconnect/resume canary: `realistic_phase1_core/r11_byte_wire_resume`
-- recursive permission read/subscription visibility: `realistic_phase1_core/r12_recursive_permissions`
+- CRUD: `realistic_phase1/r1_crud`
+- reads: `realistic_phase1/r2_reads`
+- persisted cold-load (`M1_rocksdb`): `realistic_phase1/r3_rocksdb_cold_load` (requires `--features rocksdb`)
+- hot task history with multiple subscriptions: `realistic_phase1/r4_hot_task_history`
+- subscribed write path: `realistic_phase1/r9_subscribed_write`
+- writer/server/reader sync fanout: `realistic_phase1/r10_sync_fanout`
+- byte-wire reconnect/resume canary: `realistic_phase1/r11_byte_wire_resume`
+- recursive permission read/subscription visibility: `realistic_phase1/r12_recursive_permissions`
 
 Run only the cold-load benchmark:
 
 ```bash
-cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1_core -- realistic_phase1_core/r3_rocksdb_cold_load
+cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- realistic_phase1/r3_rocksdb_cold_load
 ```
 
 Export consolidated Criterion artifacts (JSON + markdown summary) from `target/criterion`:
@@ -76,7 +76,7 @@ pnpm bench:realistic:export-criterion -- \
 
 The `criterion_realistic_phase1.*` artifact filenames are retained for history
 ingestion compatibility. New Criterion output is filtered from the active
-`realistic_phase1_core/` prefix by default.
+`realistic_phase1/` prefix by default.
 
 ## Browser Runner (OPFS Worker)
 

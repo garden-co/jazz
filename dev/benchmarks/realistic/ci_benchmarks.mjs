@@ -38,63 +38,63 @@ const NATIVE_CRITERION_SCENARIOS = [
     id: "r1_crud",
     label: "Criterion R1 CRUD",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1_core/r1_crud",
-      sqlite: "realistic_phase1_core/r1_crud",
+      rocksdb: "realistic_phase1/r1_crud",
+      sqlite: "realistic_phase1/r1_crud",
     },
   },
   {
     id: "r2_reads",
     label: "Criterion R2 reads",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1_core/r2_reads",
-      sqlite: "realistic_phase1_core/r2_reads",
+      rocksdb: "realistic_phase1/r2_reads",
+      sqlite: "realistic_phase1/r2_reads",
     },
   },
   {
     id: "r3_rocksdb_cold_load",
     label: "Criterion R3 RocksDB cold-load",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1_core/r3_rocksdb_cold_load",
+      rocksdb: "realistic_phase1/r3_rocksdb_cold_load",
     },
   },
   {
     id: "r4_hot_task_history",
     label: "Criterion R4 hot task history",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1_core/r4_hot_task_history",
-      sqlite: "realistic_phase1_core/r4_hot_task_history",
+      rocksdb: "realistic_phase1/r4_hot_task_history",
+      sqlite: "realistic_phase1/r4_hot_task_history",
     },
   },
   {
     id: "r9_subscribed_write",
     label: "Criterion R9 subscribed write",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1_core/r9_subscribed_write",
-      sqlite: "realistic_phase1_core/r9_subscribed_write",
+      rocksdb: "realistic_phase1/r9_subscribed_write",
+      sqlite: "realistic_phase1/r9_subscribed_write",
     },
   },
   {
-    id: "r10_core_sync_fanout",
+    id: "r10_sync_fanout",
     label: "Criterion R10 direct sync fanout",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1_core/r10_core_sync_fanout",
-      sqlite: "realistic_phase1_core/r10_core_sync_fanout",
+      rocksdb: "realistic_phase1/r10_sync_fanout",
+      sqlite: "realistic_phase1/r10_sync_fanout",
     },
   },
   {
     id: "r11_byte_wire_resume",
     label: "Criterion R11 byte-wire resume",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1_core/r11_byte_wire_resume",
-      sqlite: "realistic_phase1_core/r11_byte_wire_resume",
+      rocksdb: "realistic_phase1/r11_byte_wire_resume",
+      sqlite: "realistic_phase1/r11_byte_wire_resume",
     },
   },
   {
     id: "r12_recursive_permissions",
     label: "Criterion R12 recursive permissions",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1_core/r12_recursive_permissions",
-      sqlite: "realistic_phase1_core/r12_recursive_permissions",
+      rocksdb: "realistic_phase1/r12_recursive_permissions",
+      sqlite: "realistic_phase1/r12_recursive_permissions",
     },
   },
 ];
