@@ -6,10 +6,8 @@ import {
   QueryExecutionOptions,
   QueryInput,
   Row,
-  Runtime,
   Session,
   SubscriptionCallback,
-  UpdateOptions,
   Value,
   WasmSchema,
 } from "../index.js";
