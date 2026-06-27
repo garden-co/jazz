@@ -1,10 +1,8 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz_tools::query_manager::types::SchemaHash;
-use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
 use jazz_tools::server::{JazzServer, ServerState};
 use jazz_tools::storage::MemoryStorage;
@@ -324,49 +322,43 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
     .expect("encode jwt")
 }
 
-fn build_catalogue_push_runtime(
-    schema_manager: SchemaManager,
-    storage: MemoryStorage,
+fn flush_catalogue_outbox_to_state(
+    schema_manager: &mut SchemaManager,
+    storage: &mut MemoryStorage,
     state: Arc<ServerState>,
     client_id: ClientId,
-    in_flight_pushes: Arc<AtomicUsize>,
-    push_errors: Arc<Mutex<Vec<String>>>,
-) -> TokioRuntime<MemoryStorage> {
-    TokioRuntime::new(schema_manager, storage, move |entry: OutboxEntry| {
+    server_id: ServerId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    schema_manager
+        .query_manager_mut()
+        .sync_manager_mut()
+        .add_server_with_storage(server_id, false, storage);
+    schema_manager.process(storage);
+
+    let outbox = schema_manager
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    for entry in outbox {
         let OutboxEntry {
             destination,
             payload,
         } = entry;
         if let Destination::Server(_) = destination {
-            in_flight_pushes.fetch_add(1, Ordering::AcqRel);
-            let state = state.clone();
-            let push_errors = push_errors.clone();
-            let in_flight_pushes = in_flight_pushes.clone();
-            tokio::spawn(async move {
-                let entry = InboxEntry {
+            state
+                .catalogue_store
+                .push_sync_inbox(InboxEntry {
                     source: Source::Client(client_id),
                     payload,
-                };
-                if let Err(error) = state.catalogue_store.push_sync_inbox(entry) {
-                    if let Ok(mut errors) = push_errors.lock() {
-                        errors.push(format!("push catalogue sync payload: {error}"));
-                    }
-                }
-                if let Err(error) = state.catalogue_store.flush() {
-                    if let Ok(mut errors) = push_errors.lock() {
-                        errors.push(format!("flush catalogue sync payload: {error}"));
-                    }
-                }
-                in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
-            });
+                })
+                .map_err(|error| format!("push catalogue sync payload: {error}"))?;
+            state
+                .catalogue_store
+                .flush()
+                .map_err(|error| format!("flush catalogue sync payload: {error}"))?;
         }
-    })
-}
-
-async fn wait_for_in_flight_pushes(in_flight_pushes: &Arc<AtomicUsize>) {
-    while in_flight_pushes.load(Ordering::Acquire) > 0 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    Ok(())
 }
 
 pub async fn push_catalogue_in_memory(
@@ -383,30 +375,26 @@ pub async fn push_catalogue_in_memory(
         .ensure_client_as_backend(client_id)
         .map_err(|e| format!("register admin client: {e:?}"))?;
 
-    let in_flight_pushes = Arc::new(AtomicUsize::new(0));
-    let push_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let server_id = ServerId::default();
 
     let mut schema_by_hash: std::collections::HashMap<SchemaHash, &Schema> =
         std::collections::HashMap::with_capacity(schemas.len());
     for schema in schemas {
         schema_by_hash.insert(SchemaHash::compute(schema), schema);
-        let schema_manager =
+        let mut schema_manager =
             SchemaManager::new(SyncManager::new(), schema.clone(), app_id, env, user_branch)
                 .map_err(|error| {
                     format!("Failed to initialize schema manager for schema push: {error:?}")
                 })?;
-        let runtime = build_catalogue_push_runtime(
-            schema_manager,
-            MemoryStorage::default(),
+        let mut storage = MemoryStorage::default();
+        schema_manager.persist_schema(&mut storage);
+        flush_catalogue_outbox_to_state(
+            &mut schema_manager,
+            &mut storage,
             state.clone(),
             client_id,
-            in_flight_pushes.clone(),
-            push_errors.clone(),
-        );
-
-        runtime.persist_schema()?;
-        runtime.add_server(ServerId::default())?;
-        runtime.flush().await?;
+            server_id,
+        )?;
     }
 
     for lens in lenses {
@@ -427,29 +415,13 @@ pub async fn push_catalogue_in_memory(
         )
         .map_err(|error| format!("Failed to initialize schema manager for lens push: {error:?}"))?;
         schema_manager.persist_lens(&mut storage, lens);
-        let runtime = build_catalogue_push_runtime(
-            schema_manager,
-            storage,
+        flush_catalogue_outbox_to_state(
+            &mut schema_manager,
+            &mut storage,
             state.clone(),
             client_id,
-            in_flight_pushes.clone(),
-            push_errors.clone(),
-        );
-
-        runtime.add_server(ServerId::default())?;
-        runtime.flush().await?;
-    }
-
-    wait_for_in_flight_pushes(&in_flight_pushes).await;
-
-    let errors = push_errors.lock().unwrap().clone();
-    if !errors.is_empty() {
-        return Err(format!(
-            "Schema push encountered {} sync error(s): {}",
-            errors.len(),
-            errors.join("; ")
-        )
-        .into());
+            server_id,
+        )?;
     }
 
     Ok(())
