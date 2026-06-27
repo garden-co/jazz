@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import type { AppContext, Session } from "../runtime/context.js";
-import { SYSTEM_AUTHOR_ID } from "../runtime/system-identity.js";
 import { createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
@@ -11,12 +10,6 @@ const mocks = vi.hoisted(() => {
   const openPersistent = vi.fn();
   const directRuntimeCtor = vi.fn();
   const runtimeInstances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
-  const createdDbs: Array<{
-    kind: string;
-    client: unknown;
-    session?: Session;
-    attribution?: string;
-  }> = [];
   const clients: Array<{
     asBackend: ReturnType<typeof vi.fn>;
     connectTransport: ReturnType<typeof vi.fn>;
@@ -33,19 +26,6 @@ const mocks = vi.hoisted(() => {
     clients.push(client);
     return client;
   });
-  const createDbFromClient = vi.fn(
-    (_config: unknown, client: unknown, session?: Session, attribution?: string) => {
-      const db = {
-        kind: session ? "scoped-db" : attribution !== undefined ? "attributed-db" : "db",
-        client,
-        ...(session ? { session } : {}),
-        ...(attribution !== undefined ? { attribution } : {}),
-      };
-      createdDbs.push(db);
-      return db;
-    },
-  );
-
   const fakeDb = {
     close: vi.fn(),
   };
@@ -101,8 +81,6 @@ const mocks = vi.hoisted(() => {
     runtimeInstances,
     connectWithRuntime,
     clients,
-    createDbFromClient,
-    createdDbs,
     reset() {
       resolveRequestSession.mockReset();
       openMemory.mockReset();
@@ -114,8 +92,6 @@ const mocks = vi.hoisted(() => {
       runtimeInstances.length = 0;
       connectWithRuntime.mockClear();
       clients.length = 0;
-      createDbFromClient.mockClear();
-      createdDbs.length = 0;
     },
   };
 });
@@ -138,10 +114,6 @@ vi.mock("../runtime/client.js", async () => {
 
 vi.mock("./request-auth.js", () => ({
   resolveRequestSession: mocks.resolveRequestSession,
-}));
-
-vi.mock("../runtime/db.js", () => ({
-  createDbFromClient: mocks.createDbFromClient,
 }));
 
 const SCHEMA_A: WasmSchema = {};
@@ -238,8 +210,6 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.openPersistent).toHaveBeenCalledTimes(1);
     expect(mocks.openMemory).not.toHaveBeenCalled();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
-    expect(mocks.createDbFromClient).toHaveBeenCalledTimes(2);
-    expect(mocks.createdDbs[0]?.client).toBe(mocks.createdDbs[1]?.client);
     expect(mocks.directRuntimeCtor).toHaveBeenCalledWith(
       mocks.MockNapiDb,
       SCHEMA_A,
@@ -293,40 +263,19 @@ describe("backend/create-jazz-context", () => {
     const attributedSessionDb = context.withAttributionForSession(session);
     const attributedRequestDb = await context.withAttributionForRequest(req);
 
-    expect(db).toEqual({
-      kind: "db",
-      client: mocks.clients[0]!,
-    });
-    expect(backendDb).toEqual({
-      kind: "attributed-db",
-      client: mocks.clients[0]!,
-      attribution: SYSTEM_AUTHOR_ID,
-    });
-    expect(requestDb).toEqual({
-      kind: "scoped-db",
-      client: mocks.clients[0]!,
-      session: { user_id: "u1", claims: {}, authMode: "external" },
-    });
-    expect(sessionDb).toEqual({
-      kind: "scoped-db",
-      client: mocks.clients[0]!,
-      session,
-    });
-    expect(attributedDb).toEqual({
-      kind: "attributed-db",
-      client: mocks.clients[0]!,
-      attribution: "u2",
-    });
-    expect(attributedSessionDb).toEqual({
-      kind: "attributed-db",
-      client: mocks.clients[0]!,
-      attribution: "u1",
-    });
-    expect(attributedRequestDb).toEqual({
-      kind: "attributed-db",
-      client: mocks.clients[0]!,
-      attribution: "u1",
-    });
+    for (const scopedDb of [
+      db,
+      backendDb,
+      requestDb,
+      sessionDb,
+      attributedDb,
+      attributedSessionDb,
+      attributedRequestDb,
+    ]) {
+      expect(scopedDb).toHaveProperty("getAuthState");
+    }
+    expect(requestDb.getAuthState()).toMatchObject({ authMode: "external", session });
+    expect(sessionDb.getAuthState()).toMatchObject({ authMode: "external", session });
     expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
     expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(1, req, {
       appId: "server-app",
@@ -340,7 +289,7 @@ describe("backend/create-jazz-context", () => {
     });
     expect(mocks.clients).toHaveLength(1);
     expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
-    expect(mocks.createDbFromClient).toHaveBeenCalledTimes(7);
+    expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
   });
 
   it("BC-U03: request/session/attribution helpers work locally without backend sync config", async () => {

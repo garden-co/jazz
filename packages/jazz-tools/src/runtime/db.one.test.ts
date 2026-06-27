@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { createDbFromClient } from "./db.js";
+import { Db, type DbConfig } from "./db.js";
 import type { JazzClient, Row } from "./client.js";
+import { CoreSource, type CoreClientContext } from "./core-source.js";
+import type { WasmSchema } from "../drivers/types.js";
 
 const todoSchema = {
   todos: s.table({
@@ -21,6 +23,26 @@ const todoRow: Row = {
 };
 
 type QuerySpy = ReturnType<typeof vi.fn<(queryJson: string, options?: unknown) => Promise<Row[]>>>;
+
+class TestCoreSource extends CoreSource<DbConfig> {
+  constructor(private readonly client: JazzClient) {
+    super();
+  }
+
+  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
+    return this.client;
+  }
+}
+
+class TestDb extends Db {
+  constructor(client: JazzClient) {
+    super({ appId: "db-one-limit-test" }, new TestCoreSource(client));
+  }
+
+  protected override getClient(_schema: WasmSchema): JazzClient {
+    return super.getClient(_schema);
+  }
+}
 
 function makeClient() {
   const query = vi.fn(async (_queryJson: string, _options?: unknown) => [todoRow]);
@@ -51,7 +73,7 @@ function rootLimit(queryJson: string): number | undefined {
 describe("Db.one", () => {
   it("adds limit 1 before executing an unbounded query", async () => {
     const { client, query } = makeClient();
-    const db = createDbFromClient({ appId: "db-one-limit-test" }, client);
+    const db = new TestDb(client);
 
     await db.one(app.todos.where({ done: false }));
 
@@ -60,7 +82,7 @@ describe("Db.one", () => {
 
   it("narrows explicit limits above one", async () => {
     const { client, query } = makeClient();
-    const db = createDbFromClient({ appId: "db-one-limit-test" }, client);
+    const db = new TestDb(client);
 
     await db.one(app.todos.limit(10));
 
@@ -69,7 +91,7 @@ describe("Db.one", () => {
 
   it("overrides explicit limit 0", async () => {
     const { client, query } = makeClient();
-    const db = createDbFromClient({ appId: "db-one-limit-test" }, client);
+    const db = new TestDb(client);
 
     await db.one(app.todos.limit(0));
 
@@ -78,7 +100,7 @@ describe("Db.one", () => {
 
   it("adds limit 1 before executing an explicit mergeable transaction query", async () => {
     const { client, query, beginTransaction } = makeClient();
-    const db = createDbFromClient({ appId: "db-one-limit-test" }, client);
+    const db = new TestDb(client);
     const tx = db.beginTransaction();
 
     await tx.one(app.todos.where({ done: false }));
