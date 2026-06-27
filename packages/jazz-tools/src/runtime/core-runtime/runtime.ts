@@ -93,7 +93,11 @@ type CoreDb = {
   delete(table: string, rowId: Uint8Array): DirectWrite;
   deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): DirectWrite;
   mergeableTx(): DirectTx;
-  setTickScheduler?(callback: (error: Error | null, urgency: string) => void): void;
+  setTickScheduler?(
+    callback:
+      | ((urgency: "immediate" | "deferred") => void)
+      | ((error: Error | null, urgency: string) => void),
+  ): void;
   connectUpstream(): DirectTransport;
   tick(): void;
   close?(): void;
@@ -216,12 +220,12 @@ export class CoreRuntime implements Runtime {
       : Runtime.openMemory(this.schemaBytes, this.configBytes);
     if (this.db.setTickScheduler) {
       this.coreSchedulerInstalled = true;
-      this.db.setTickScheduler((error, urgency) => {
-        if (error) return;
+      this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
+        const urgency = typeof first === "string" ? first : second;
         if (urgency === "immediate" || urgency === "deferred") {
           this.scheduleCoreWake(urgency);
         }
-      });
+      }) as (error: Error | null, urgency: string) => void);
     }
   }
 
