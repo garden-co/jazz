@@ -189,11 +189,27 @@ Until deleted, treat them as replacement targets only.
 
 ## Immediate Integration Gaps
 
-- Delete or gut old alpha engine internals listed under "Replace Or Delete".
-- Decide which existing package names survive as wrappers (`jazz-wasm`,
-  `jazz-napi`, `jazz-rn`, `jazz-tools`) and wire those wrappers directly to
-  `vendor/jazz_core`.
+- Delete or gut old alpha engine internals listed under "Replace Or Delete",
+  starting at the active dual-runtime server wiring:
+  `crates/jazz-tools/src/server/builder.rs` still builds both the old
+  `TokioRuntime` path and the direct `CoreServer` path.
+- The direct websocket route is the intended sync boundary. Old
+  `transport_protocol.rs`, `transport_manager.rs`, and `sync_manager` code
+  should not regain ownership of `/ws` semantics.
+- Persistent browser runtime should stay a worker-owned direct core DB, with the
+  main thread acting as the public API/proxy surface. `CoreRuntime::fromDb`
+  exists so the worker no longer pretends an already-open OPFS DB is
+  `openMemory`.
+- The current sharp correctness gap is restore replay through the direct
+  websocket server. The copied core now has unit coverage for cold maintained
+  view rehydrate after restore, but
+  `packages/jazz-tools/src/runtime/core-runtime/server-convergence.test.ts`
+  still contains a skipped end-to-end regression: after insert -> delete ->
+  restore, a fresh websocket subscriber does not replay the restored row. The
+  browser public alpha gate has the same gap in
+  `packages/jazz-tools/tests/browser/alpha-public-flow-gate.test.ts`.
+- Public shell APIs (`Db`, `JazzClient`, schema DSL, framework adapters, tests,
+  examples) should remain; duplicate execution/query/sync/storage internals
+  should be hollowed or deleted once direct-core gates cover the behavior.
 - Resolve crate/package name collisions before adding copied core crates to the
   root Cargo or pnpm workspaces.
-- Rebuild TypeScript runtime/worker/server boundaries around the copied core.
-- Convert alpha tests/examples into the primary compatibility gate.

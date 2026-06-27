@@ -1,10 +1,5 @@
 import type { RuntimeSourcesConfig } from "../context.js";
-import {
-  loadWasmModule,
-  type MutationErrorEvent,
-  type Runtime,
-  type WasmModule,
-} from "../client.js";
+import { loadWasmModule, type MutationErrorEvent, type Runtime } from "../client.js";
 import { openConfig } from "./direct-codec.js";
 import { encodeDirectSchema } from "./direct-schema-codec.js";
 import { CoreRuntime } from "./runtime.js";
@@ -105,16 +100,7 @@ async function openRuntime(message: OpenMessage): Promise<void> {
     openConfig(node, author, 1, true),
   );
 
-  runtime = new CoreRuntime(
-    {
-      openMemory: () => db as never,
-    } as unknown as WasmModule["WasmDb"],
-    schema as never,
-    node,
-    author,
-    1,
-    true,
-  );
+  runtime = CoreRuntime.fromDb(db as never, schema as never, node, author, 1, true);
   runtime.onMutationError((payload: MutationErrorEvent) => {
     workerScope.postMessage({ event: "mutationError", payload });
   });

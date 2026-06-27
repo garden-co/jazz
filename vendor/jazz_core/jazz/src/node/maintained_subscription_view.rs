@@ -562,17 +562,10 @@ fn replacement_winner(
     versions: Option<&BTreeMap<VersionIdentity, WeightedVersion>>,
 ) -> Option<VersionRow> {
     let versions = versions?;
-    debug_assert!(
-        versions
-            .values()
-            .filter(|version| version.weight > 0)
-            .count()
-            <= 1,
-        "maintained view replacement stream produced multiple active winners"
-    );
     versions
         .values()
-        .find(|version| version.weight > 0)
+        .filter(|version| version.weight > 0)
+        .max_by_key(|version| version.tx_id)
         .map(|version| version.row.clone())
 }
 

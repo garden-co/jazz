@@ -2771,8 +2771,7 @@ fn result_rows_matching(
     .into_iter()
     .map(|field| rows.descriptor.field_index(field).unwrap())
     .chain(table.columns.iter().map(|column| {
-        rows.descriptor
-            .field_index(&format!("user_{}", column.name))
+        regular_or_tagged_field_index(&rows.descriptor, table, &format!("user_{}", column.name))
             .unwrap()
     }))
     .collect::<Vec<_>>();
@@ -2928,7 +2927,7 @@ fn reconstruct_version_row_from_tagged_values(
         .iter()
         .map(|field| {
             let field_name = field.name.as_ref().unwrap();
-            let idx = tagged_descriptor.field_index(field_name).unwrap();
+            let idx = regular_or_tagged_field_index(tagged_descriptor, table, field_name).unwrap();
             if is_deletion && field_name == "_deletion" {
                 match &tagged_values[idx] {
                     Value::Nullable(Some(value)) => match value.as_ref() {
@@ -2949,6 +2948,21 @@ fn reconstruct_version_row_from_tagged_values(
         table: groove::Intern::new(table.name.clone()),
         record: OwnedRecord::new(raw, storage_descriptor),
     }
+}
+
+fn regular_or_tagged_field_index(
+    descriptor: &groove::records::RecordDescriptor,
+    table: &TableSchema,
+    field_name: &str,
+) -> Option<usize> {
+    descriptor.field_index(field_name).or_else(|| {
+        field_name.strip_prefix("user_").and_then(|column| {
+            descriptor.field_index(&crate::node::query_eval::maintained_view_tagged_user_field(
+                &table.name,
+                column,
+            ))
+        })
+    })
 }
 
 #[test]
