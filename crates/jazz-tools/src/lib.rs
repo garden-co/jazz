@@ -26,8 +26,6 @@ pub mod sync;
 // from `test_support` when behavior must be asserted from integration tests.
 #[allow(dead_code)]
 pub(crate) mod storage;
-#[allow(dead_code, unused_imports)]
-pub(crate) mod sync_manager;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
 #[allow(dead_code)]
