@@ -129,14 +129,18 @@ websocket convergence. Delete/restore over websocket is unskipped: the writer
 can edge-accept the restore, and a fresh websocket client can query the
 restored row.
 
-The alpha docs React todo app now also has a direct-core browser websocket gate
-in `examples/docs/todo-client-localfirst-react/tests/browser/todo-app.test.tsx`.
-That gate runs the real `JazzProvider`, `useDb`, and `useAll` flow against the
-Rust local test server for both persistent OPFS clients and in-memory clients.
-It currently uses distinct local-first `secret` values for app identity but
-admin-backed websocket admission for server convergence. A local-first-only
-websocket convergence test with no `adminSecret` still times out and remains an
-auth/admission integration gap, not a row encoding or React subscription gap.
+The alpha docs React todo app now also has a direct-core browser websocket
+canary in
+`examples/todo-client-localfirst-react/tests/browser/todo-app-direct-core.test.tsx`.
+That gate runs the real `JazzProvider`, `useDb`, and `useAll` flow with two
+persistent OPFS clients connected to one local Rust Jazz server. It verifies
+DOM-driven create/update/delete and bidirectional subscription observation over
+the direct websocket path. The old core/edge browser setup has been collapsed
+out of this canary. A DOM-driven OPFS remount/reopen assertion remains skipped:
+the existing app-level remount test times out after a DOM insert, and the real
+`TodoList` path does not expose the public `WriteHandle` needed to wait for
+local durability before unmount. That is now tracked as a browser durability
+API/testability gap, not as covered app persistence.
 
 ## Current gaps versus alpha
 
@@ -313,6 +317,11 @@ auth/admission integration gap, not a row encoding or React subscription gap.
   `PersistentBrowserOpfsProxyRuntime`. That worker owns the real
   `WasmDb.openBrowser(...)` database because OPFS requires worker ownership; it
   is not a compatibility broker, tab leader, or second engine.
+  Keep the small direct-core JS boundary glue (`core-runtime` codecs,
+  websocket framing, and persistent-browser worker/proxy runtime) because it
+  adapts package calls to the shared WASM/NAPI core. Do not recreate the old
+  parallel browser broker, worker bridge, sync transport, leader-election, or
+  package-worker protocol paths around it.
 - Node HTTP, todo WebSocket, shared-todo WebSocket, and chat WebSocket smokes
   now run directly on `createDb`/`WasmDb.connectUpstream()`. WebSocket frames are
   opaque byte batches; row decoding stays at the app/test edge.
@@ -467,11 +476,12 @@ The landed smallest vertical slice is:
    cross-origin-isolated `SharedArrayBuffer`/`Atomics.wait` synchronous RPC path
    where available. The mirror is the preferred default because public package
    users should not need cross-origin isolation just to write local state.
-4. The local OPFS reopen gate is unskipped: insert, local wait, shutdown,
-   reopen, and local query-by-id pass through public `createDb`.
-5. The persistent OPFS websocket gate is unskipped for todo CRUD: writer edge
-   waits, local subscription snapshots, shutdown/reopen, and second-client
-   convergence all pass through public `createDb`.
+4. The local OPFS reopen gate is unskipped for the package-level direct `Db`
+   API, but still skipped for the real React DOM todo flow until app code can
+   wait for local durability before unmount.
+5. The persistent OPFS websocket gate is unskipped for React todo CRUD and
+   second-client convergence through one direct-core server; shutdown/reopen of
+   that DOM-driven todo flow remains the durability gap above.
 6. The includeDeleted websocket gate is unskipped for edge-confirmed deletes.
 7. The file/blob websocket gate is unskipped: binary-large-value `files.data`
    survives persistent OPFS reopen and converges to a second websocket client.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -184,6 +184,64 @@ const removedBrowserRuntimeBuildArtifacts = [
   "worker/jazz-worker.d.ts",
 ] as const;
 
+const removedBrowserRuntimeExportNames = [
+  "BrowserBrokerClient",
+  "BrowserBrokerError",
+  "BrowserBrokerProtocol",
+  "BrowserBrokerWorker",
+  "BrowserRuntimeClient",
+  "BrowserRuntimeProtocol",
+  "BrokerWorker",
+  "LeaderLock",
+  "SyncTransport",
+  "WorkerBridge",
+  "createBrowserBrokerClient",
+  "createSyncTransport",
+  "createWithWorker",
+] as const;
+
+const removedBrowserRuntimeExportPathFragments = [
+  "browser-broker",
+  "broker-worker",
+  "leader-lock",
+  "sync-transport",
+  "worker-bridge",
+  "jazz-broker-worker",
+  "jazz-worker",
+] as const;
+
+const intendedDirectCoreRuntimeBuildArtifacts = [
+  "runtime/core-runtime/direct-codec.js",
+  "runtime/core-runtime/direct-codec.d.ts",
+  "runtime/core-runtime/direct-row-codec.js",
+  "runtime/core-runtime/direct-row-codec.d.ts",
+  "runtime/core-runtime/direct-schema-codec.js",
+  "runtime/core-runtime/direct-schema-codec.d.ts",
+  "runtime/core-runtime/direct-websocket.js",
+  "runtime/core-runtime/direct-websocket.d.ts",
+  "runtime/core-runtime/persistent-browser-runtime.js",
+  "runtime/core-runtime/persistent-browser-runtime.d.ts",
+  "runtime/core-runtime/persistent-browser-worker.js",
+  "runtime/core-runtime/persistent-browser-worker.d.ts",
+] as const;
+
+function listDistFiles(dir: string, prefix = ""): string[] {
+  const files: string[] = [];
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const absolutePath = join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      files.push(...listDistFiles(absolutePath, relativePath));
+    } else {
+      files.push(relativePath);
+    }
+  }
+
+  return files;
+}
+
 describe("package root public API", () => {
   it("exposes intended runtime APIs without direct-core internals", () => {
     for (const publicRuntimeExport of [
@@ -237,11 +295,48 @@ describe("package root public API", () => {
         `package root helper export ${internalHelperRuntimeExport}`,
       ).not.toHaveProperty(internalHelperRuntimeExport);
     }
+
+    for (const removedBrowserRuntimeExport of removedBrowserRuntimeExportNames) {
+      expect(runtime, `runtime removed export ${removedBrowserRuntimeExport}`).not.toHaveProperty(
+        removedBrowserRuntimeExport,
+      );
+      expect(
+        packageRoot,
+        `package root removed export ${removedBrowserRuntimeExport}`,
+      ).not.toHaveProperty(removedBrowserRuntimeExport);
+    }
   });
 
   it("does not leave deleted browser worker build artifacts in the package surface", () => {
     for (const artifact of removedBrowserRuntimeBuildArtifacts) {
       expect(existsSync(join(packageRootDir, "..", "dist", artifact)), artifact).toBe(false);
+    }
+  });
+
+  it("does not publish subpath exports for deleted browser runtime paths", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDir, "..", "package.json"), "utf8"),
+    ) as { exports: Record<string, unknown> };
+    const exportedPaths = JSON.stringify(packageJson.exports);
+
+    for (const removedPathFragment of removedBrowserRuntimeExportPathFragments) {
+      expect(exportedPaths, removedPathFragment).not.toContain(removedPathFragment);
+    }
+  });
+
+  it("builds only the intended direct-core browser runtime boundary glue", () => {
+    const distDir = join(packageRootDir, "..", "dist");
+    const distFiles = listDistFiles(distDir);
+    const unexpectedBrowserRuntimeFiles = distFiles.filter(
+      (file) =>
+        removedBrowserRuntimeExportPathFragments.some((fragment) => file.includes(fragment)) &&
+        !file.includes(".test."),
+    );
+
+    expect(unexpectedBrowserRuntimeFiles).toEqual([]);
+
+    for (const artifact of intendedDirectCoreRuntimeBuildArtifacts) {
+      expect(existsSync(join(distDir, artifact)), artifact).toBe(true);
     }
   });
 });
