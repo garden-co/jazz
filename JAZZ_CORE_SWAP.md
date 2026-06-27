@@ -199,6 +199,10 @@ Until deleted, treat them as replacement targets only.
 - `ServerState::process_ws_client_frame` is gated to `test-utils`; it exists
   only for legacy in-process tests that still inject alpha `SyncPayload` frames,
   not for production server traffic.
+- Edge upstream sync currently fails closed when `--upstream-url` is set. This
+  intentionally removes the old alpha `TransportManager` path that was pointed
+  at the direct core websocket route; server-to-server sync should be rebuilt on
+  direct core wire frames instead.
 - Persistent browser runtime should stay a worker-owned direct core DB, with the
   main thread acting as the public API/proxy surface. `CoreRuntime::fromDb`
   exists so the worker no longer pretends an already-open OPFS DB is
