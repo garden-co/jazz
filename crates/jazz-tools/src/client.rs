@@ -194,20 +194,6 @@ impl DirectCoreTickScheduler {
         self.state.completed_ticks.load(Ordering::Acquire)
     }
 
-    async fn wait_for_completed_tick_after(&self, previous: u64) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        if self
-            .wait_for_completed_tick_after_until(previous, deadline)
-            .await
-        {
-            Ok(())
-        } else {
-            Err(JazzError::Connection(
-                "timed out waiting for direct core initial tick".to_string(),
-            ))
-        }
-    }
-
     async fn wait_for_completed_tick_after_until(
         &self,
         previous: u64,
@@ -258,11 +244,7 @@ impl DirectCoreEngine {
         )
         .await?;
         let inner = Rc::new(std::cell::RefCell::new(inner));
-        let completed_ticks = scheduler.completed_ticks();
         Self::spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
-        scheduler
-            .wait_for_completed_tick_after(completed_ticks)
-            .await?;
         Ok(Rc::new(Self { inner, scheduler }))
     }
 
@@ -273,15 +255,7 @@ impl DirectCoreEngine {
         table: String,
         wait_for_coverage: bool,
     ) -> Result<Vec<jazz::node::CurrentRow>> {
-        DirectCoreInner::handle_query(
-            &self.inner,
-            &self.scheduler,
-            query,
-            opts,
-            table,
-            wait_for_coverage,
-        )
-        .await
+        DirectCoreInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
     }
 
     async fn subscribe(
@@ -429,7 +403,6 @@ impl DirectCoreInner {
 
     async fn handle_query(
         inner: &Rc<std::cell::RefCell<Self>>,
-        scheduler: &DirectCoreTickScheduler,
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
@@ -443,24 +416,7 @@ impl DirectCoreInner {
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
         if wait_for_coverage {
-            inner.borrow().db.propagate_query_with_opts(&prepared, opts);
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            while !inner.borrow().db.query_is_covered(&prepared)
-                && tokio::time::Instant::now() < deadline
-            {
-                let completed_ticks = scheduler.completed_ticks();
-                if !scheduler
-                    .wait_for_completed_tick_after_until(completed_ticks, deadline)
-                    .await
-                {
-                    break;
-                }
-            }
-            if !inner.borrow().db.query_is_covered(&prepared) {
-                return Err(JazzError::Query(
-                    "timed out waiting for direct core query coverage".to_string(),
-                ));
-            }
+            Self::wait_for_query_coverage(inner, &prepared, opts).await?;
         }
         let (db, prepared) = {
             let inner = inner.borrow();
@@ -472,6 +428,51 @@ impl DirectCoreInner {
             .map_err(|error| JazzError::Query(error.to_string()))?;
         inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
+    }
+
+    async fn wait_for_query_coverage(
+        inner: &Rc<std::cell::RefCell<Self>>,
+        prepared: &jazz::db::PreparedQuery,
+        opts: CoreReadOpts,
+    ) -> Result<()> {
+        if inner.borrow().db.query_is_covered(prepared) {
+            return Ok(());
+        }
+        let mut stream = {
+            let inner = inner.borrow();
+            inner
+                .db
+                .subscribe(prepared, opts)
+                .await
+                .map_err(|error| JazzError::Query(error.to_string()))?
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if inner.borrow().db.query_is_covered(prepared) {
+                return Ok(());
+            }
+            let event = tokio::time::timeout_at(deadline, stream.next_event())
+                .await
+                .map_err(|_| {
+                    JazzError::Query("timed out waiting for direct core query coverage".to_string())
+                })?;
+            match event {
+                Some(CoreSubscriptionEvent::Opened { settled, .. })
+                | Some(CoreSubscriptionEvent::Reset { settled, .. })
+                | Some(CoreSubscriptionEvent::Delta { settled, .. })
+                    if settled =>
+                {
+                    return Ok(());
+                }
+                Some(CoreSubscriptionEvent::Closed) | None => {
+                    return Err(JazzError::Query(
+                        "direct core query coverage subscription closed before settling"
+                            .to_string(),
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
     }
 
     async fn handle_subscribe(
