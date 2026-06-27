@@ -46,6 +46,15 @@ fn delta_rows(event: SubscriptionEvent) -> (Vec<CurrentRow>, Vec<CurrentRow>, Ve
     }
 }
 
+fn event_settled(event: &SubscriptionEvent) -> bool {
+    match event {
+        SubscriptionEvent::Opened { settled, .. }
+        | SubscriptionEvent::Delta { settled, .. }
+        | SubscriptionEvent::Reset { settled, .. } => *settled,
+        SubscriptionEvent::Closed => false,
+    }
+}
+
 fn global_subscribe_opts() -> ReadOpts {
     ReadOpts {
         tier: DurabilityTier::Global,
@@ -2033,7 +2042,9 @@ fn db_sync_surface_round_trips_subscription_to_client() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    let opened = block_on(subscription.next_event()).unwrap();
+    assert!(!event_settled(&opened));
+    assert!(opened_rows(opened).is_empty());
 
     // Drive: client announces the shape -> server serves -> client applies.
     client.tick().unwrap(); // RegisterShape + BindingDelta upstream
@@ -2057,6 +2068,36 @@ fn db_sync_surface_round_trips_subscription_to_client() {
     server.tick().unwrap();
     client.tick().unwrap();
     assert_eq!(prepared_read(&client, &query).len(), 2);
+}
+
+#[test]
+fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let opened = block_on(subscription.next_event()).unwrap();
+    assert!(!event_settled(&opened));
+    assert!(opened_rows(opened).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let settled = block_on(subscription.next_event()).unwrap();
+    assert!(event_settled(&settled));
+    let (added, updated, removed) = delta_rows(settled);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
 }
 
 #[test]

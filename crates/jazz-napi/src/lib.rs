@@ -1400,21 +1400,40 @@ fn direct_subscription_event_to_json(
     event: &DirectSubscriptionEvent,
 ) -> napi::Result<serde_json::Value> {
     match event {
-        DirectSubscriptionEvent::Opened { current, .. }
-        | DirectSubscriptionEvent::Reset { current, .. } => {
+        DirectSubscriptionEvent::Opened {
+            current,
+            settled,
+            tier,
+        }
+        | DirectSubscriptionEvent::Reset {
+            current,
+            settled,
+            tier,
+        } => {
             let rows = encode_direct_rows(current)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            Ok(serde_json::json!({ "type": "snapshot", "rows": rows }))
+            Ok(serde_json::json!({
+                "type": "snapshot",
+                "rows": rows,
+                "settled": settled,
+                "tier": format!("{tier:?}"),
+            }))
         }
         DirectSubscriptionEvent::Delta {
             added,
             updated,
             removed,
-            ..
+            settled,
+            tier,
         } => {
             let delta = encode_direct_subscription_delta(added, updated, removed)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            Ok(serde_json::json!({ "type": "delta", "delta": delta }))
+            Ok(serde_json::json!({
+                "type": "delta",
+                "delta": delta,
+                "settled": settled,
+                "tier": format!("{tier:?}"),
+            }))
         }
         DirectSubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
     }
