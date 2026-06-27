@@ -54,28 +54,17 @@ type ByteChunkInit = {
   data: Uint8Array;
 };
 
-type StoredFilePart = {
-  id: string;
-  data: Uint8Array;
-};
-
-type StoredFilePartInit = {
-  data: Uint8Array;
-};
-
 type StoredFile = {
   id: string;
   name: string;
-  mimeType: string;
-  partIds: string[];
-  partSizes: number[];
+  mime_type: string;
+  data: Uint8Array;
 };
 
 type StoredFileInit = {
   name: string;
-  mimeType: string;
-  partIds: string[];
-  partSizes: number[];
+  mime_type: string;
+  data: Uint8Array;
 };
 
 type PolicyTodo = {
@@ -126,24 +115,11 @@ const BYTEA_SCHEMA: WasmSchema = {
 };
 
 const FILE_STORAGE_SCHEMA: WasmSchema = {
-  file_parts: {
-    columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
-  },
   files: {
     columns: [
       { name: "name", column_type: { type: "Text" }, nullable: false },
-      { name: "mimeType", column_type: { type: "Text" }, nullable: false },
-      {
-        name: "partIds",
-        column_type: { type: "Array", element: { type: "Uuid" } },
-        nullable: false,
-        references: "file_parts",
-      },
-      {
-        name: "partSizes",
-        column_type: { type: "Array", element: { type: "Integer" } },
-        nullable: false,
-      },
+      { name: "mime_type", column_type: { type: "Text" }, nullable: false },
+      { name: "data", column_type: { type: "Bytea" }, nullable: false },
     ],
   },
 };
@@ -228,10 +204,6 @@ function makeWhereTable<Row, Init>(table: string, schema: WasmSchema): WhereTabl
 }
 
 const byteChunksTable = makeWhereTable<ByteChunk, ByteChunkInit>("byte_chunks", BYTEA_SCHEMA);
-const filePartsTable = makeWhereTable<StoredFilePart, StoredFilePartInit>(
-  "file_parts",
-  FILE_STORAGE_SCHEMA,
-);
 const filesTable = makeWhereTable<StoredFile, StoredFileInit>("files", FILE_STORAGE_SCHEMA);
 
 function makePolicyTodosTable(schema: WasmSchema): TableProxy<PolicyTodo, PolicyTodoInit> {
@@ -973,7 +945,7 @@ describe("NAPI integration", () => {
     }
   }, 30_000);
 
-  it("stores Blob chunks in conventional file_parts.data when using createFileFromBlob", async () => {
+  it("stores Blob bytes in files.data when using createFileFromBlob", async () => {
     const dataRoot = await createTempDir("jazz-napi-bytea-file-");
     const dataPath = join(dataRoot, "runtime.skv");
     let context: {
@@ -994,18 +966,18 @@ describe("NAPI integration", () => {
       const file = await context.db().createFileFromBlob(
         {
           files: filesTable,
-          file_parts: filePartsTable,
         },
         new Blob([new Uint8Array([7, 8, 9])], { type: "application/octet-stream" }),
         { name: "probe.bin" },
       );
 
-      const part = await context.db().one(filePartsTable.where({ id: file.partIds[0] }), {
+      const storedFile = await context.db().one(filesTable.where({ id: file.id }), {
         tier: "local",
       });
 
-      expect(part).not.toBeNull();
-      expect(Array.from(part?.data ?? [])).toEqual([7, 8, 9]);
+      expect(storedFile).not.toBeNull();
+      expect(storedFile?.mime_type).toBe("application/octet-stream");
+      expect(Array.from(storedFile?.data ?? [])).toEqual([7, 8, 9]);
     } finally {
       if (context) {
         await context.shutdown();

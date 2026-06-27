@@ -69,12 +69,10 @@ export { translateQuery } from "./query-adapter.js";
 export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";
 export { toValue, toWriteRecord } from "./value-converter.js";
 export {
-  DEFAULT_FILE_CHUNK_SIZE_BYTES,
-  MAX_FILE_PART_BYTES,
   FileNotFoundError,
   IncompleteFileDataError,
-  type ConventionalFileApp,
-  type ConventionalFileRow,
+  type BinaryLargeValueFileApp,
+  type BinaryLargeValueFileRow,
   type FileReadOptions,
   type FileWriteOptions,
 } from "./file-storage.js";
