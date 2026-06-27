@@ -19,8 +19,6 @@ pub struct AuthAdmissionConfig {
     pub static_bearer_token: Option<String>,
     /// Static JWT verifier accepted by this process-local admission gate.
     pub jwt_verifier: Option<JwtVerifierConfig>,
-    /// Whether the legacy `?identity=<author-hex>` path is still accepted.
-    pub allow_legacy_query_identity: bool,
     /// Whether local-first JWT auth is allowed by configuration.
     pub allow_local_first_auth: bool,
     /// Optional app id/audience that local-first JWTs must target.
@@ -34,7 +32,6 @@ impl Default for AuthAdmissionConfig {
         Self {
             static_bearer_token: None,
             jwt_verifier: None,
-            allow_legacy_query_identity: false,
             allow_local_first_auth: false,
             expected_audience: None,
             anonymous_subject: "anonymous".to_owned(),
@@ -43,32 +40,22 @@ impl Default for AuthAdmissionConfig {
 }
 
 impl AuthAdmissionConfig {
-    /// Anonymous local/test admission that still trusts `?identity=<author-hex>`.
-    pub fn legacy_query_identity() -> Self {
-        Self {
-            allow_legacy_query_identity: true,
-            ..Self::default()
-        }
-    }
-
-    /// Require a static bearer token and disable `?identity` trust.
+    /// Require a static bearer token.
     pub fn static_bearer(token: impl Into<String>) -> Self {
         Self {
             static_bearer_token: Some(token.into()),
             jwt_verifier: None,
-            allow_legacy_query_identity: false,
             allow_local_first_auth: false,
             expected_audience: None,
             anonymous_subject: "anonymous".to_owned(),
         }
     }
 
-    /// Require a signed JWT and disable `?identity` trust.
+    /// Require a signed JWT.
     pub fn jwt(verifier: JwtVerifierConfig) -> Self {
         Self {
             static_bearer_token: None,
             jwt_verifier: Some(verifier),
-            allow_legacy_query_identity: false,
             allow_local_first_auth: false,
             expected_audience: None,
             anonymous_subject: "anonymous".to_owned(),
@@ -201,8 +188,6 @@ pub enum AuthAdmissionError {
     InvalidJwt(String),
     /// The first-frame handshake was malformed.
     InvalidHandshake(String),
-    /// Legacy query identity was supplied while disabled by policy.
-    LegacyQueryIdentityDisabled,
 }
 
 impl fmt::Display for AuthAdmissionError {
@@ -212,7 +197,6 @@ impl fmt::Display for AuthAdmissionError {
             Self::InvalidBearer => write!(f, "invalid bearer auth"),
             Self::InvalidJwt(error) => write!(f, "invalid bearer JWT: {error}"),
             Self::InvalidHandshake(error) => write!(f, "invalid auth handshake: {error}"),
-            Self::LegacyQueryIdentityDisabled => write!(f, "legacy query identity is disabled"),
         }
     }
 }
