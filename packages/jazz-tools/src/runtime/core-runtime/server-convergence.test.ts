@@ -90,7 +90,7 @@ describe("CoreRuntime server convergence", () => {
       );
       await waitForPromise(
         observedBySubscription,
-        "client B subscription did not observe the direct WASM insert",
+        "client B subscription did not observe the core runtime insert",
       );
 
       const convergedRows = await waitFor(async () => {
@@ -226,7 +226,7 @@ describe("CoreRuntime server convergence", () => {
       });
       await waitForPromise(
         replayedToSubscription,
-        "reader subscription did not replay the persisted direct WASM insert after restart",
+        "reader subscription did not replay the persisted core runtime insert after restart",
       );
 
       const persistedRow = await waitFor(async () => {
@@ -450,7 +450,7 @@ async function waitFor<T>(read: () => Promise<T | undefined>, timeoutMs = 5_000)
     await new Promise((resolve) => setTimeout(resolve, 25));
   } while (Date.now() < deadline);
 
-  throw new Error(`Timed out waiting for direct WASM convergence; last value: ${lastValue}`);
+  throw new Error(`Timed out waiting for core runtime convergence; last value: ${lastValue}`);
 }
 
 async function waitForPromise<T>(

@@ -17,7 +17,7 @@ The active bench harness is the explicit `[[bench]]` list in
 - `update_benchmark`
 - `subscription_benchmark`
 
-All active Criterion benches now exercise the new `jazz_core`/`jazz` facade
+All active Criterion benches now exercise the workspace `jazz` engine facade
 directly instead of going through the legacy
 `jazz-tools::runtime_core::RuntimeCore` stack.
 

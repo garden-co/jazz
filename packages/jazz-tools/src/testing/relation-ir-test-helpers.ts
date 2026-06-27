@@ -9,7 +9,7 @@ function getVariantEntry(value: unknown): [string, unknown] | null {
   return entries[0] ?? null;
 }
 
-function toLegacyValueForTest(value: unknown): unknown {
+function toAssertionValueForTest(value: unknown): unknown {
   if (!isRecord(value) || typeof value.type !== "string") {
     return value;
   }
@@ -21,10 +21,10 @@ function toLegacyValueForTest(value: unknown): unknown {
 
   const payload = value.value;
   if (variant === "Array" && Array.isArray(payload)) {
-    return { Array: payload.map(toLegacyValueForTest) };
+    return { Array: payload.map(toAssertionValueForTest) };
   }
   if (variant === "Row" && Array.isArray(payload)) {
-    return { Row: payload.map(toLegacyValueForTest) };
+    return { Row: payload.map(toAssertionValueForTest) };
   }
   if (variant === "Bytea" && payload instanceof Uint8Array) {
     return { Bytea: [...payload] };
@@ -32,14 +32,14 @@ function toLegacyValueForTest(value: unknown): unknown {
   return { [variant]: payload };
 }
 
-function toLegacyRelValueRefForTest(value: unknown): unknown {
+function toAssertionRelValueRefForTest(value: unknown): unknown {
   const entry = getVariantEntry(value);
   if (!entry) return value;
 
   const [variant, payload] = entry;
   switch (variant) {
     case "Literal":
-      return { type: "Literal", value: toLegacyValueForTest(payload) };
+      return { type: "Literal", value: toAssertionValueForTest(payload) };
     case "SessionRef":
       return { type: "SessionRef", path: payload };
     case "OuterColumn":
@@ -53,7 +53,7 @@ function toLegacyRelValueRefForTest(value: unknown): unknown {
   }
 }
 
-function toLegacyRelPredicateForTest(value: unknown): unknown {
+function toAssertionRelPredicateForTest(value: unknown): unknown {
   if (value === "True" || value === "False") {
     return { type: value };
   }
@@ -67,12 +67,12 @@ function toLegacyRelPredicateForTest(value: unknown): unknown {
       return {
         type: variant,
         exprs: Array.isArray(payload)
-          ? payload.map((item) => toLegacyRelPredicateForTest(item))
+          ? payload.map((item) => toAssertionRelPredicateForTest(item))
           : [],
       };
     }
     if (variant === "Not") {
-      return { type: "Not", expr: toLegacyRelPredicateForTest(payload) };
+      return { type: "Not", expr: toAssertionRelPredicateForTest(payload) };
     }
     return value;
   }
@@ -83,7 +83,7 @@ function toLegacyRelPredicateForTest(value: unknown): unknown {
         type: "Cmp",
         left: payload.left,
         op: payload.op,
-        right: toLegacyRelValueRefForTest(payload.right),
+        right: toAssertionRelValueRefForTest(payload.right),
       };
     case "IsNull":
       return { type: "IsNull", column: payload.column };
@@ -94,40 +94,40 @@ function toLegacyRelPredicateForTest(value: unknown): unknown {
         type: "In",
         left: payload.left,
         values: Array.isArray(payload.values)
-          ? payload.values.map((item) => toLegacyRelValueRefForTest(item))
+          ? payload.values.map((item) => toAssertionRelValueRefForTest(item))
           : [],
       };
     case "Contains":
       return {
         type: "Contains",
         left: payload.left,
-        value: toLegacyRelValueRefForTest(payload.right),
+        value: toAssertionRelValueRefForTest(payload.right),
       };
     case "And":
       return {
         type: "And",
         exprs: Array.isArray(payload)
-          ? payload.map((item) => toLegacyRelPredicateForTest(item))
+          ? payload.map((item) => toAssertionRelPredicateForTest(item))
           : [],
       };
     case "Or":
       return {
         type: "Or",
         exprs: Array.isArray(payload)
-          ? payload.map((item) => toLegacyRelPredicateForTest(item))
+          ? payload.map((item) => toAssertionRelPredicateForTest(item))
           : [],
       };
     case "Not":
       return {
         type: "Not",
-        expr: toLegacyRelPredicateForTest(payload),
+        expr: toAssertionRelPredicateForTest(payload),
       };
     default:
       return value;
   }
 }
 
-function toLegacyRelKeyRefForTest(value: unknown): unknown {
+function toAssertionRelKeyRefForTest(value: unknown): unknown {
   const entry = getVariantEntry(value);
   if (!entry) return value;
   const [variant, payload] = entry;
@@ -140,7 +140,7 @@ function toLegacyRelKeyRefForTest(value: unknown): unknown {
   return value;
 }
 
-function toLegacyRelProjectExprForTest(value: unknown): unknown {
+function toAssertionRelProjectExprForTest(value: unknown): unknown {
   const entry = getVariantEntry(value);
   if (!entry) return value;
   const [variant, payload] = entry;
@@ -153,7 +153,7 @@ function toLegacyRelProjectExprForTest(value: unknown): unknown {
   return value;
 }
 
-export function toLegacyRelExprForTest(value: unknown): any {
+export function toAssertionRelExprForTest(value: unknown): any {
   const entry = getVariantEntry(value);
   if (!entry) return value;
 
@@ -168,70 +168,70 @@ export function toLegacyRelExprForTest(value: unknown): any {
     case "Filter":
       return {
         type: "Filter",
-        input: toLegacyRelExprForTest(payload.input),
-        predicate: toLegacyRelPredicateForTest(payload.predicate),
+        input: toAssertionRelExprForTest(payload.input),
+        predicate: toAssertionRelPredicateForTest(payload.predicate),
       };
     case "Union":
       return {
         type: "Union",
         inputs: Array.isArray(payload.inputs)
-          ? payload.inputs.map((input) => toLegacyRelExprForTest(input))
+          ? payload.inputs.map((input) => toAssertionRelExprForTest(input))
           : [],
       };
     case "Join":
       return {
         type: "Join",
-        left: toLegacyRelExprForTest(payload.left),
-        right: toLegacyRelExprForTest(payload.right),
+        left: toAssertionRelExprForTest(payload.left),
+        right: toAssertionRelExprForTest(payload.right),
         on: payload.on,
         joinKind: payload.join_kind,
       };
     case "Project":
       return {
         type: "Project",
-        input: toLegacyRelExprForTest(payload.input),
+        input: toAssertionRelExprForTest(payload.input),
         columns: Array.isArray(payload.columns)
           ? payload.columns.map((column) => ({
               alias: isRecord(column) ? column.alias : undefined,
-              expr: toLegacyRelProjectExprForTest(isRecord(column) ? column.expr : undefined),
+              expr: toAssertionRelProjectExprForTest(isRecord(column) ? column.expr : undefined),
             }))
           : [],
       };
     case "Gather":
       return {
         type: "Gather",
-        seed: toLegacyRelExprForTest(payload.seed),
-        step: toLegacyRelExprForTest(payload.step),
-        frontierKey: toLegacyRelKeyRefForTest(payload.frontier_key),
+        seed: toAssertionRelExprForTest(payload.seed),
+        step: toAssertionRelExprForTest(payload.step),
+        frontierKey: toAssertionRelKeyRefForTest(payload.frontier_key),
         maxDepth: payload.max_depth,
         dedupeKey: Array.isArray(payload.dedupe_key)
-          ? payload.dedupe_key.map((key) => toLegacyRelKeyRefForTest(key))
+          ? payload.dedupe_key.map((key) => toAssertionRelKeyRefForTest(key))
           : [],
       };
     case "Distinct":
       return {
         type: "Distinct",
-        input: toLegacyRelExprForTest(payload.input),
+        input: toAssertionRelExprForTest(payload.input),
         key: Array.isArray(payload.key)
-          ? payload.key.map((key) => toLegacyRelKeyRefForTest(key))
+          ? payload.key.map((key) => toAssertionRelKeyRefForTest(key))
           : [],
       };
     case "OrderBy":
       return {
         type: "OrderBy",
-        input: toLegacyRelExprForTest(payload.input),
+        input: toAssertionRelExprForTest(payload.input),
         terms: payload.terms,
       };
     case "Offset":
       return {
         type: "Offset",
-        input: toLegacyRelExprForTest(payload.input),
+        input: toAssertionRelExprForTest(payload.input),
         offset: payload.offset,
       };
     case "Limit":
       return {
         type: "Limit",
-        input: toLegacyRelExprForTest(payload.input),
+        input: toAssertionRelExprForTest(payload.input),
         limit: payload.limit,
       };
     default:
@@ -239,7 +239,7 @@ export function toLegacyRelExprForTest(value: unknown): any {
   }
 }
 
-export function toLegacyPolicyExprWithRelForTest(value: unknown): any {
+export function toAssertionPolicyExprWithRelForTest(value: unknown): any {
   if (!isRecord(value) || typeof value.type !== "string") {
     return value;
   }
@@ -247,7 +247,7 @@ export function toLegacyPolicyExprWithRelForTest(value: unknown): any {
   if (value.type === "ExistsRel") {
     return {
       ...value,
-      rel: toLegacyRelExprForTest(value.rel),
+      rel: toAssertionRelExprForTest(value.rel),
     };
   }
 
@@ -255,7 +255,7 @@ export function toLegacyPolicyExprWithRelForTest(value: unknown): any {
     return {
       ...value,
       exprs: Array.isArray(value.exprs)
-        ? value.exprs.map((expr) => toLegacyPolicyExprWithRelForTest(expr))
+        ? value.exprs.map((expr) => toAssertionPolicyExprWithRelForTest(expr))
         : [],
     };
   }
@@ -263,14 +263,14 @@ export function toLegacyPolicyExprWithRelForTest(value: unknown): any {
   if (value.type === "Not") {
     return {
       ...value,
-      expr: toLegacyPolicyExprWithRelForTest(value.expr),
+      expr: toAssertionPolicyExprWithRelForTest(value.expr),
     };
   }
 
   if (value.type === "Exists") {
     return {
       ...value,
-      condition: toLegacyPolicyExprWithRelForTest(value.condition),
+      condition: toAssertionPolicyExprWithRelForTest(value.condition),
     };
   }
 

@@ -28,28 +28,28 @@ describe("runtime/createDb driver mode", () => {
     ).rejects.toThrow("driver.type='memory' requires serverUrl.");
   });
 
-  it("uses direct in-process path in browser when driver is persistent", async () => {
+  it("uses the in-process core runtime path in browser when driver is persistent", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).Worker = class {};
 
-    const directDb = {} as Db;
-    const createSpy = vi.spyOn(Db, "create").mockReturnValue(directDb);
+    const createdDb = {} as Db;
+    const createSpy = vi.spyOn(Db, "create").mockReturnValue(createdDb);
 
     const result = await createDb({
       appId: "driver-mode-persistent",
       driver: { type: "persistent", dbName: "driver-mode-db" },
     });
 
-    expect(result).toBe(directDb);
+    expect(result).toBe(createdDb);
     expect(createSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("uses direct in-memory path in browser when driver is memory", async () => {
+  it("uses the in-memory core runtime path in browser when driver is memory", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).Worker = class {};
 
-    const directDb = {} as Db;
-    const createSpy = vi.spyOn(Db, "create").mockReturnValue(directDb);
+    const createdDb = {} as Db;
+    const createSpy = vi.spyOn(Db, "create").mockReturnValue(createdDb);
 
     const result = await createDb({
       appId: "driver-mode-memory",
@@ -57,7 +57,7 @@ describe("runtime/createDb driver mode", () => {
       serverUrl: "http://localhost:1625",
     });
 
-    expect(result).toBe(directDb);
+    expect(result).toBe(createdDb);
     expect(createSpy).toHaveBeenCalledTimes(1);
   });
 });

@@ -16,7 +16,7 @@ describe("CoreRuntime server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
-  it("connects the direct upstream transport to the scoped websocket endpoint", async () => {
+  it("connects the native upstream transport to the scoped websocket endpoint", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
       constructor(url: string) {
@@ -126,7 +126,7 @@ describe("CoreRuntime server transport", () => {
     expect(dbTicks).toBe(0);
   });
 
-  it("requires direct db bindings to expose a tick scheduler", () => {
+  it("requires native db bindings to expose a tick scheduler", () => {
     expect(
       () =>
         new CoreRuntime(
@@ -486,7 +486,7 @@ describe("CoreRuntime server transport", () => {
     ).toThrow("Core runtime mergeable transaction cannot mix write identities");
   });
 
-  it("decodes fixed-width array columns from direct row batches", async () => {
+  it("decodes fixed-width array columns from native row batches", async () => {
     const runtime = new CoreRuntime(
       {
         openMemory: () =>
@@ -530,7 +530,7 @@ describe("CoreRuntime server transport", () => {
     ]);
   });
 
-  it("lowers scalar comparison relation IR into the prepared direct query", async () => {
+  it("lowers scalar comparison relation IR into the prepared native query", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
@@ -1107,7 +1107,7 @@ describe("CoreRuntime server transport", () => {
     expect(calls).toEqual([]);
   });
 
-  it("passes supported read tiers and propagation through direct read options", async () => {
+  it("passes supported read tiers and propagation through native read options", async () => {
     const readOptions: unknown[] = [];
     const propagated: unknown[] = [];
     const runtime = new CoreRuntime(
@@ -1167,7 +1167,7 @@ describe("CoreRuntime server transport", () => {
     ).rejects.toThrow("does not support read propagation");
   });
 
-  it("passes include_deleted query intent through direct read options", async () => {
+  it("passes include_deleted query intent through native read options", async () => {
     const readOptions: unknown[] = [];
     const runtime = new CoreRuntime(
       {
@@ -1210,7 +1210,7 @@ describe("CoreRuntime server transport", () => {
     ).toThrow("unsupported read tier");
   });
 
-  it("passes local-only subscription propagation through direct read options", () => {
+  it("passes local-only subscription propagation through native read options", () => {
     const readOptions: unknown[] = [];
     const propagated: unknown[] = [];
     const runtime = new CoreRuntime(
@@ -1392,7 +1392,7 @@ describe("CoreRuntime server transport", () => {
     ]);
   });
 
-  it("encodes public id equality relation filters into prepared direct queries", async () => {
+  it("encodes public id equality relation filters into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
@@ -1470,7 +1470,7 @@ describe("CoreRuntime server transport", () => {
     });
   });
 
-  it("encodes public id in conditions into prepared direct queries", async () => {
+  it("encodes public id in conditions into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
@@ -1594,7 +1594,7 @@ describe("CoreRuntime server transport", () => {
     });
   });
 
-  it("encodes range id comparisons into prepared direct queries", async () => {
+  it("encodes range id comparisons into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
