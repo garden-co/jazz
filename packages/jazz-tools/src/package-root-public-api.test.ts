@@ -222,7 +222,11 @@ const removedBrowserRuntimeExportPathFragments = [
   "jazz-worker",
 ] as const;
 
-const removedRuntimeBuildPathFragments = ["runtime/core-runtime/", "core-codec"] as const;
+const removedRuntimeBuildPathFragments = [
+  "runtime/core-runtime/",
+  "core-codec",
+  "runtime/native-row-format",
+] as const;
 
 const internalRuntimeExportPathFragments = [
   "/runtime/core-runtime",

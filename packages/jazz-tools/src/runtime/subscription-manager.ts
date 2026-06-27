@@ -12,7 +12,7 @@ import type {
   WasmRow,
   RowDelta as WireRowDelta,
 } from "../drivers/types.js";
-import { decodeNativeRow, decodeNativeRowObject } from "./native-row-format.js";
+import { decodeNativeRow, decodeNativeRowObject } from "./native-runtime/native-row-codec.js";
 
 export const RowChangeKind = {
   Added: 0 as const,
