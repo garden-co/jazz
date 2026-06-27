@@ -1,4 +1,4 @@
-//! Focused direct-core write-path benchmark for plain vs observed mutations.
+//! Focused core write-path benchmark for plain vs observed mutations.
 //!
 //! The reproduction case is a content-only update on a fixed-size table. That
 //! keeps result cardinality stable so the benchmark isolates the overhead of
@@ -55,7 +55,7 @@ fn open_db(seed: u64) -> BenchDb {
         )
         .with_id_source(SeededRowIdSource::new(seed)),
     ))
-    .expect("open direct observer benchmark db")
+    .expect("open core observer benchmark db")
 }
 
 fn document_cells(index: usize) -> BTreeMap<String, Value> {
@@ -76,7 +76,7 @@ fn seed_documents(db: &BenchDb, count: usize) -> Vec<RowUuid> {
     (0..count)
         .map(|index| {
             db.insert("documents", document_cells(index))
-                .expect("seed direct observer benchmark row")
+                .expect("seed core observer benchmark row")
                 .row_uuid()
         })
         .collect()
@@ -118,7 +118,7 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
                     row_index += 1;
 
                     db.update("documents", row, content_update(update_index))
-                        .expect("direct update without observer should succeed")
+                        .expect("core update without observer should succeed")
                 });
             },
         );
@@ -148,7 +148,7 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
                     row_index += 1;
 
                     db.update("documents", row, content_update(update_index))
-                        .expect("direct update with observer should succeed");
+                        .expect("core update with observer should succeed");
                     match block_on(subscription.next_event()) {
                         Some(SubscriptionEvent::Delta { updated, .. }) => updated.len(),
                         other => panic!("expected subscription delta event, got {other:?}"),

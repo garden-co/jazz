@@ -1,9 +1,9 @@
-//! Direct jazz_core update throughput benchmark for permissioned operations.
+//! core update throughput benchmark for permissioned operations.
 //!
 //! Measures updates/second through `jazz::db::Db<MemoryStorage>` so this
-//! exercises the direct core replacement path instead of the legacy
+//! exercises the core replacement path instead of the legacy
 //! RuntimeCore/SchemaManager/SyncManager layers. The single-row case cycles
-//! through owned documents; the batch case applies 100 direct updates per
+//! through owned documents; the batch case applies 100 core updates per
 //! iteration.
 
 #![allow(clippy::single_element_loop)]
@@ -19,7 +19,7 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
-type DirectCoreDb = Db<MemoryStorage>;
+type CoreDb = Db<MemoryStorage>;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 
@@ -44,7 +44,7 @@ fn schema() -> JazzSchema {
     ])
 }
 
-fn open_direct_core_db(seed: u64) -> DirectCoreDb {
+fn open_core_db(seed: u64) -> CoreDb {
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
@@ -63,7 +63,7 @@ fn open_direct_core_db(seed: u64) -> DirectCoreDb {
         )
         .with_id_source(SeededRowIdSource::new(seed)),
     ))
-    .expect("open direct update benchmark db")
+    .expect("open core update benchmark db")
 }
 
 fn document_cells(index: usize, folder: RowUuid) -> BTreeMap<String, Value> {
@@ -102,7 +102,7 @@ struct Fixture {
     owned_folders: Vec<RowUuid>,
 }
 
-fn seed_fixture(db: &DirectCoreDb, count: usize) -> Fixture {
+fn seed_fixture(db: &CoreDb, count: usize) -> Fixture {
     let folder_count = 32usize.min(count.max(1));
     let owned_folders = (0..folder_count)
         .map(|index| {
@@ -135,12 +135,12 @@ fn seed_fixture(db: &DirectCoreDb, count: usize) -> Fixture {
 }
 
 fn update_own_documents(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_core/update/own_documents");
+    let mut group = c.benchmark_group("core/update/own_documents");
 
     for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
-            let db = open_direct_core_db(1);
+            let db = open_core_db(1);
             let data = seed_fixture(&db, scale);
             let mut doc_idx = 0usize;
             let mut update_counter = 0u64;
@@ -172,7 +172,7 @@ fn update_own_documents(c: &mut Criterion) {
 }
 
 fn update_batch(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_core/update/batch");
+    let mut group = c.benchmark_group("core/update/batch");
 
     for scale in [1_000usize] {
         let batch_size = 100;
@@ -181,7 +181,7 @@ fn update_batch(c: &mut Criterion) {
             BenchmarkId::new("documents_x100", scale),
             &scale,
             |b, &scale| {
-                let db = open_direct_core_db(2);
+                let db = open_core_db(2);
                 let data = seed_fixture(&db, scale);
                 let doc_ids = data
                     .owned_documents

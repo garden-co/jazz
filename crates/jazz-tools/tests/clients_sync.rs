@@ -11,7 +11,7 @@ use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use jazz_tools::{ObjectId, SubscriptionStream};
 use support::{publish_allow_all_permissions, wait_for_query};
 use uuid::Uuid;
@@ -39,7 +39,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     .await;
 }
 
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 async fn wait_for_subscription_driven_query<F>(
     client: &JazzClient,
     stream: &mut SubscriptionStream,
@@ -173,30 +173,30 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
     server.shutdown().await;
 }
 
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 #[tokio::test(flavor = "current_thread")]
 async fn jazz_tools_cli_two_clients_sync_values() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client_a = JazzClient::connect_with_direct_core_local_driver(
+            let client_a = JazzClient::connect_with_local_driver(
                 server.make_client_context_for_user(schema.clone(), "sync-values-user"),
             )
             .await
             .expect("connect client a");
-            let client_b = JazzClient::connect_with_direct_core_local_driver(
+            let client_b = JazzClient::connect_with_local_driver(
                 server.make_client_context_for_user(schema, "sync-values-user"),
             )
             .await
             .expect("connect client b");
             assert!(
-                client_a.direct_core_local_driver_active(),
-                "client a should exercise the direct-core local tick driver"
+                client_a.local_driver_active(),
+                "client a should exercise the core local tick driver"
             );
             assert!(
-                client_b.direct_core_local_driver_active(),
-                "client b should exercise the direct-core local tick driver"
+                client_b.local_driver_active(),
+                "client b should exercise the core local tick driver"
             );
 
             let query = QueryBuilder::new("todos").build();
@@ -433,7 +433,7 @@ async fn delete_through_one_client_removes_row_from_peer_query_results() {
     server.shutdown().await;
 }
 
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 #[tokio::test(flavor = "current_thread")]
 async fn caller_supplied_uuid_is_used_for_created_row() {
     tokio::task::LocalSet::new()
@@ -447,14 +447,14 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
                 &schema,
             )
             .await;
-            let client = JazzClient::connect_with_direct_core_local_driver(
+            let client = JazzClient::connect_with_local_driver(
                 server.make_client_context_for_user(schema.clone(), "external-id-writer"),
             )
             .await
             .expect("connect writer");
             assert!(
-                client.direct_core_local_driver_active(),
-                "client should exercise the direct-core local tick driver"
+                client.local_driver_active(),
+                "client should exercise the core local tick driver"
             );
 
             wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
@@ -499,21 +499,21 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
         .await;
 }
 
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 #[tokio::test(flavor = "current_thread")]
-async fn wait_for_batch_reaches_edge_and_global_tiers_with_direct_core_local_driver() {
+async fn wait_for_batch_reaches_edge_and_global_tiers_with_core_local_driver() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let alice = JazzClient::connect_with_direct_core_local_driver(
+            let alice = JazzClient::connect_with_local_driver(
                 server.make_client_context_for_user(schema, "alice-direct-wait-for-batch"),
             )
             .await
             .expect("connect alice");
             assert!(
-                alice.direct_core_local_driver_active(),
-                "client should exercise the direct-core local tick driver"
+                alice.local_driver_active(),
+                "client should exercise the core local tick driver"
             );
 
             wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
@@ -528,11 +528,11 @@ async fn wait_for_batch_reaches_edge_and_global_tiers_with_direct_core_local_dri
             alice
                 .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
                 .await
-                .expect("edge wait_for_batch should resolve from scheduled direct-core progress");
+                .expect("edge wait_for_batch should resolve from scheduled core progress");
             alice
                 .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
                 .await
-                .expect("global wait_for_batch should resolve from scheduled direct-core progress");
+                .expect("global wait_for_batch should resolve from scheduled core progress");
 
             alice.shutdown().await.expect("shutdown alice");
             server.shutdown().await;

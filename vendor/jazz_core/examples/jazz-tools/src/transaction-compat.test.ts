@@ -96,7 +96,7 @@ test("public transactions stage writes and expose commit/rollback", async () => 
   assert.equal(findNote(ids.staged)?.body, "upsert updated");
 });
 
-test("exclusive transactions are explicitly unsupported by the direct facade", async () => {
+test("exclusive transactions are explicitly unsupported by the core facade", async () => {
   const db = await createDb({
     schema: app._schema,
     appId: "transaction-compat-exclusive-unsupported",

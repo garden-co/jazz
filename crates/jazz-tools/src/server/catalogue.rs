@@ -51,7 +51,7 @@ impl std::error::Error for CatalogueError {}
 /// This is intentionally a thin wrapper over the direct catalogue store.
 /// It may read and write admin catalogue metadata only: schemas, permissions,
 /// and lenses. Production websocket sync, row storage, query execution, and
-/// client lifecycle semantics must stay on the direct `CoreServer` path.
+/// client lifecycle semantics stay on the local server path.
 #[derive(Debug, Default)]
 pub struct ServerCatalogue;
 
@@ -78,7 +78,7 @@ pub(crate) trait CatalogueStore {
     fn close(&self) -> Result<(), CatalogueError>;
 }
 
-pub(crate) struct DirectCatalogueStore {
+pub(crate) struct StoredCatalogue {
     app_id: AppId,
     index: Mutex<CatalogueIndex>,
     #[cfg(test)]
@@ -90,7 +90,7 @@ pub(crate) struct DirectCatalogueStore {
     storage: Mutex<DynCatalogueStorage>,
 }
 
-impl DirectCatalogueStore {
+impl StoredCatalogue {
     pub(crate) fn new(
         app_id: AppId,
         initial_schema: Option<Schema>,
@@ -589,7 +589,7 @@ fn catalogue_metadata(app_id: AppId, object_type: ObjectType) -> HashMap<String,
     metadata
 }
 
-impl CatalogueStore for DirectCatalogueStore {
+impl CatalogueStore for StoredCatalogue {
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.known_schema_hashes())

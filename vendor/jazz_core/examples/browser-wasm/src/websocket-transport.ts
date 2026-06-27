@@ -1,4 +1,4 @@
-import { PostcardReader, PostcardWriter } from "./direct-codec.js";
+import { PostcardReader, PostcardWriter } from "./core-codec.js";
 
 export type MinimalWebSocket = {
   binaryType: "arraybuffer";

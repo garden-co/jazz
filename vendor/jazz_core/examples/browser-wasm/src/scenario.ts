@@ -74,7 +74,7 @@ export async function runWorkerBackedTour(
 
     const todoRowId = new Uint8Array(16).fill(0x7a);
     const initialCells = encodedTodoCells({
-      title: "Ship direct WasmDb",
+      title: "Ship core WasmDb",
       done: false,
       owner: accountAuthor,
     });
@@ -91,7 +91,7 @@ export async function runWorkerBackedTour(
     );
     const afterInsert = await subscriptionTodos(started.client, opened.subscription);
     progress({ type: "todo-transition", label: "insert", todos: afterInsert });
-    assertTodoSummaries("insert", afterInsert, ["Ship direct WasmDb:open"]);
+    assertTodoSummaries("insert", afterInsert, ["Ship core WasmDb:open"]);
 
     await waitForLocalWrite(
       started.client,
@@ -102,10 +102,10 @@ export async function runWorkerBackedTour(
     );
     const afterUpdate = await subscriptionTodos(started.client, opened.subscription);
     progress({ type: "todo-transition", label: "update", todos: afterUpdate });
-    assertTodoSummaries("update", afterUpdate, ["Ship direct WasmDb:done"]);
+    assertTodoSummaries("update", afterUpdate, ["Ship core WasmDb:done"]);
 
     const ownerRead = await readTodosAs(started.client, db, query, accountAuthor);
-    assertTodoSummaries("identity owner read", ownerRead, ["Ship direct WasmDb:done"]);
+    assertTodoSummaries("identity owner read", ownerRead, ["Ship core WasmDb:done"]);
 
     const otherAuthor = new Uint8Array(16).fill(0x88);
     const otherRead = await readTodosAs(started.client, db, query, otherAuthor);
@@ -144,7 +144,7 @@ export async function runWorkerBackedTour(
     await started.client.closeDb(db);
     await shutdownWorkerClient(started, log, "tour");
     progress({ type: "worker-shutdown" });
-    return { message: "Ready: browser worker ran the direct WasmDb todo flow." };
+    return { message: "Ready: browser worker ran the core WasmDb todo flow." };
   } catch (error) {
     await shutdownWorkerClient(started, log, "tour").catch(() => undefined);
     throw error;
@@ -393,8 +393,7 @@ export async function runDbAllByteaOrderSmoke(log: ScenarioLogger): Promise<Scen
     await started.client.closeDb(db);
     await shutdownWorkerClient(started, log, "db.all bytea/order");
     return {
-      message:
-        "Ready: browser direct db.all read returned Bytea rows with order, limit, and offset.",
+      message: "Ready: browser core db.all read returned Bytea rows with order, limit, and offset.",
     };
   } catch (error) {
     await shutdownWorkerClient(started, log, "db.all bytea/order").catch(() => undefined);
@@ -443,7 +442,7 @@ export async function runWebSocketBoundarySmoke(log: ScenarioLogger): Promise<Sc
     await sync.close();
     await started.client.closeDb(db);
     await shutdownWorkerClient(started, log, "websocket boundary");
-    return { message: "Ready: browser websocket boundary emitted opaque direct wire frames." };
+    return { message: "Ready: browser websocket boundary emitted opaque core wire frames." };
   } catch (error) {
     await shutdownWorkerClient(started, log, "websocket boundary").catch(() => undefined);
     throw error;

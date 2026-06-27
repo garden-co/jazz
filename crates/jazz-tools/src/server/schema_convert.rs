@@ -18,12 +18,12 @@ const PUBLIC_USER_ID_SESSION_PATH: &str = "user_id";
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DirectSchemaConversionError {
+pub(crate) struct SchemaConversionError {
     path: String,
     message: String,
 }
 
-impl DirectSchemaConversionError {
+impl SchemaConversionError {
     fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -32,17 +32,15 @@ impl DirectSchemaConversionError {
     }
 }
 
-impl fmt::Display for DirectSchemaConversionError {
+impl fmt::Display for SchemaConversionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.path, self.message)
     }
 }
 
-impl std::error::Error for DirectSchemaConversionError {}
+impl std::error::Error for SchemaConversionError {}
 
-pub(crate) fn convert_public_schema_to_direct_core(
-    schema: &Schema,
-) -> Result<JazzSchema, DirectSchemaConversionError> {
+pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
     let mut tables = schema.iter().collect::<Vec<_>>();
     tables.sort_by_key(|(name, _)| name.as_str());
     tables
@@ -56,7 +54,7 @@ fn convert_table(
     schema: &Schema,
     name: &TableName,
     table: &TableSchema,
-) -> Result<CoreTableSchema, DirectSchemaConversionError> {
+) -> Result<CoreTableSchema, SchemaConversionError> {
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
     let mut merge_strategies = BTreeMap::new();
@@ -105,7 +103,7 @@ fn convert_table(
 fn convert_column(
     table: &TableName,
     column: &ColumnDescriptor,
-) -> Result<CoreColumnSchema, DirectSchemaConversionError> {
+) -> Result<CoreColumnSchema, SchemaConversionError> {
     if column.default.is_some() {
         return Err(err(
             format!("$.{}.{}", table.as_str(), column.name.as_str()),
@@ -123,7 +121,7 @@ fn convert_column_type(
     table: &TableName,
     column: &str,
     column_type: &ColumnType,
-) -> Result<GrooveColumnType, DirectSchemaConversionError> {
+) -> Result<GrooveColumnType, SchemaConversionError> {
     match column_type {
         ColumnType::Boolean => Ok(GrooveColumnType::Bool),
         ColumnType::Text => Ok(GrooveColumnType::String),
@@ -146,9 +144,9 @@ fn convert_column_type(
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
-        // Direct core does not currently have signed integer cells. Public
+        // Core does not currently have signed integer cells. Public
         // INTEGER columns are therefore represented as U32 and the
-        // direct-core write path rejects negative values.
+        // core write path rejects negative values.
         ColumnType::Integer => Ok(GrooveColumnType::U32),
         ColumnType::BigInt => Err(err(
             format!("$.{}.{}", table.as_str(), column),
@@ -173,7 +171,7 @@ fn convert_merge_strategy(
     table: &TableName,
     column: &ColumnDescriptor,
     strategy: ColumnMergeStrategy,
-) -> Result<MergeStrategy, DirectSchemaConversionError> {
+) -> Result<MergeStrategy, SchemaConversionError> {
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
         ColumnMergeStrategy::GSet => Err(err(
@@ -200,7 +198,7 @@ fn convert_optional_policy(
     table: &TableName,
     path: &str,
     expr: Option<&PolicyExpr>,
-) -> Result<Option<Query>, DirectSchemaConversionError> {
+) -> Result<Option<Query>, SchemaConversionError> {
     expr.map(|expr| convert_policy(schema, table_schema, table, path, expr))
         .transpose()
 }
@@ -211,10 +209,10 @@ fn convert_policy(
     table: &TableName,
     path: &str,
     expr: &PolicyExpr,
-) -> Result<Query, DirectSchemaConversionError> {
+) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::And(exprs) => {
-            if !exprs.iter().any(is_direct_inherited_select) {
+            if !exprs.iter().any(is_core_inherited_select) {
                 return Ok(Query::from(table.as_str())
                     .filter(convert_policy_predicate(table, path, expr)?));
             }
@@ -247,7 +245,7 @@ fn convert_policy(
     }
 }
 
-fn is_direct_inherited_select(expr: &PolicyExpr) -> bool {
+fn is_core_inherited_select(expr: &PolicyExpr) -> bool {
     matches!(
         expr,
         PolicyExpr::Inherits {
@@ -265,7 +263,7 @@ fn append_policy_clause(
     path: &str,
     query: Query,
     expr: &PolicyExpr,
-) -> Result<Query, DirectSchemaConversionError> {
+) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::Inherits {
             operation: Operation::Select,
@@ -283,7 +281,7 @@ fn append_inherited_select_policy(
     path: &str,
     query: Query,
     via_column: &str,
-) -> Result<Query, DirectSchemaConversionError> {
+) -> Result<Query, SchemaConversionError> {
     let column = table_schema
         .columns
         .columns
@@ -325,7 +323,7 @@ fn convert_policy_predicate(
     table: &TableName,
     path: &str,
     expr: &PolicyExpr,
-) -> Result<Predicate, DirectSchemaConversionError> {
+) -> Result<Predicate, SchemaConversionError> {
     match expr {
         PolicyExpr::True => Ok(Predicate::All(Vec::new())),
         PolicyExpr::False => Ok(Predicate::Any(Vec::new())),
@@ -381,7 +379,7 @@ fn convert_policy_operand(
     table: &TableName,
     path: &str,
     value: &PolicyValue,
-) -> Result<Operand, DirectSchemaConversionError> {
+) -> Result<Operand, SchemaConversionError> {
     match value {
         PolicyValue::SessionRef(path_segments)
             if path_segments.as_slice() == [String::from(PUBLIC_USER_ID_SESSION_PATH)] =>
@@ -405,7 +403,7 @@ fn convert_policy_literal(
     table: &TableName,
     path: &str,
     value: &Value,
-) -> Result<GrooveValue, DirectSchemaConversionError> {
+) -> Result<GrooveValue, SchemaConversionError> {
     match value {
         Value::Null => Ok(GrooveValue::Nullable(None)),
         Value::Boolean(value) => Ok(GrooveValue::Bool(*value)),
@@ -418,8 +416,8 @@ fn convert_policy_literal(
     }
 }
 
-fn err(path: impl Into<String>, message: impl Into<String>) -> DirectSchemaConversionError {
-    DirectSchemaConversionError::new(path, message)
+fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionError {
+    SchemaConversionError::new(path, message)
 }
 
 #[cfg(test)]
@@ -451,7 +449,7 @@ mod tests {
             )
             .build();
 
-        let converted = convert_public_schema_to_direct_core(&schema).unwrap();
+        let converted = convert_public_schema(&schema).unwrap();
         let todos = converted
             .tables
             .iter()
@@ -474,11 +472,11 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_integer_as_direct_core_u32_and_rejects_defaults() {
+    fn converts_public_integer_as_core_u32_and_rejects_defaults() {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::Integer))
             .build();
-        let integer_table = convert_public_schema_to_direct_core(&integer_schema)
+        let integer_table = convert_public_schema(&integer_schema)
             .unwrap()
             .tables
             .into_iter()
@@ -502,7 +500,7 @@ mod tests {
                 },
             ))
             .build();
-        let integer_array_table = convert_public_schema_to_direct_core(&integer_array_schema)
+        let integer_array_table = convert_public_schema(&integer_array_schema)
             .unwrap()
             .tables
             .into_iter()
@@ -527,7 +525,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        assert!(convert_public_schema_to_direct_core(&default_schema).is_err());
+        assert!(convert_public_schema(&default_schema).is_err());
     }
 
     #[test]
@@ -572,7 +570,7 @@ mod tests {
             )
             .build();
 
-        let converted = convert_public_schema_to_direct_core(&schema).unwrap();
+        let converted = convert_public_schema(&schema).unwrap();
         let todos = converted
             .tables
             .iter()
@@ -624,7 +622,7 @@ mod tests {
             )
             .build();
 
-        let error = convert_public_schema_to_direct_core(&schema).unwrap_err();
+        let error = convert_public_schema(&schema).unwrap_err();
         assert!(error.to_string().starts_with(
             "$.todos.policies.select.using: direct fixed-schema policies do not support SessionContains"
         ));
@@ -657,7 +655,7 @@ mod tests {
             )
             .build();
 
-        let converted = convert_public_schema_to_direct_core(&schema).unwrap();
+        let converted = convert_public_schema(&schema).unwrap();
         let documents = converted
             .tables
             .iter()

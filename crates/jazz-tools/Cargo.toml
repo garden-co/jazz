@@ -23,8 +23,8 @@ test = false
 default = []
 rocksdb = ["dep:rocksdb", "jazz-server/rocksdb"]
 sqlite = ["dep:rusqlite"]
-client = ["direct-core-client"]
-direct-core-client = ["dep:thiserror", "server"]
+client = ["core-client"]
+core-client = ["dep:thiserror", "server"]
 server = [
   "dep:tokio",
   "dep:tokio-tungstenite",
@@ -155,21 +155,21 @@ rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 
 # Keep the active benchmark harness explicit. Old deep-internal RuntimeCore
 # benchmark sources are not retained here; reintroduce scenarios only after
-# porting them to the public direct-core API.
+# porting them to the public core API.
 [[bench]]
 name = "observer_write_path"
 harness = false
 
 [[bench]]
-name = "direct_core_benchmark"
+name = "core_benchmark"
 harness = false
 
 [[bench]]
-name = "direct_authorization_scope_benchmark"
+name = "core_authorization_scope_benchmark"
 harness = false
 
 [[bench]]
-name = "realistic_phase1_direct"
+name = "realistic_phase1_core"
 harness = false
 
 [[bench]]

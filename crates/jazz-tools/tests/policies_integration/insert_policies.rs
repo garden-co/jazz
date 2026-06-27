@@ -54,7 +54,7 @@ async fn rebac_insert_denied_by_simple_policy() {
     assert_client_policy_denied(err, "documents", Operation::Insert);
 }
 
-/// Verifies that permissive local runtimes allow direct writes to tables with
+/// Verifies that permissive local runtimes allow core writes to tables with
 /// no loaded permission bundle or explicit row policies.
 #[cfg(feature = "test-utils")]
 #[tokio::test]

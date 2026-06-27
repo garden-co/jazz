@@ -47,7 +47,7 @@ test("createJazzContext exposes db and asBackend over the same memory DB", async
   }
 });
 
-test("createJazzContext rejects persistent drivers until direct WasmDb persistence is exposed", async () => {
+test("createJazzContext rejects persistent drivers until core WasmDb persistence is exposed", async () => {
   await assert.rejects(
     createJazzContext({
       appId: "backend-persistent-test",
@@ -58,7 +58,7 @@ test("createJazzContext rejects persistent drivers until direct WasmDb persisten
   );
 });
 
-test("createJazzContext shutdown is idempotent and closes the direct facade", async () => {
+test("createJazzContext shutdown is idempotent and closes the core facade", async () => {
   CloseTrackingWasmDb.openCount = 0;
 
   const context = await createJazzContext({

@@ -1,16 +1,16 @@
 //! HTTP and WebSocket routes for the Jazz server.
 //!
 //! Split into submodules so each piece is independently navigable:
-//! - [`direct_websocket`] — jazz_core wire-frame WebSocket boundary
+//! - [`websocket`] — jazz_core wire-frame WebSocket boundary
 //! - [`http`] — HTTP endpoint handlers and their request/response types
 //! - [`utils`] — parser/validator helpers used by both
 //!
 //! The router builder [`create_router`] re-exports unchanged from this module
 //! so existing callers (`server::routes::create_router`) continue to resolve.
 
-mod direct_websocket;
 mod http;
 mod utils;
+mod websocket;
 
 use std::sync::Arc;
 
@@ -28,7 +28,6 @@ use tower_http::trace::TraceLayer;
 
 use crate::server::ServerState;
 
-use direct_websocket::direct_ws_handler;
 use http::{
     admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
     permissions_handler, permissions_head_handler, publish_migration_handler,
@@ -36,6 +35,7 @@ use http::{
     schema_handler, schema_hashes_handler,
 };
 use utils::parse_app_id_param;
+use websocket::ws_handler;
 
 async fn app_id_gate(
     State(state): State<Arc<ServerState>>,
@@ -97,7 +97,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             get(admin_subscription_introspection_handler),
         );
     let traced_routes = Router::new()
-        .route("/ws", axum::routing::any(direct_ws_handler))
+        .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .nest("/admin", admin_routes)
@@ -1996,7 +1996,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_subscription_introspection_returns_empty_direct_core_shell() {
+    async fn admin_subscription_introspection_returns_empty_core_shell() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -2032,7 +2032,7 @@ mod tests {
         let groups = json["queries"].as_array().expect("queries array");
         assert!(
             groups.is_empty(),
-            "subscription introspection must stay empty until backed by direct-core telemetry"
+            "subscription introspection must stay empty until backed by core telemetry"
         );
     }
 
@@ -2123,7 +2123,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn direct_ws_negotiates_against_fixed_schema_core_route() {
+    async fn ws_negotiates_against_fixed_schema_core_route() {
         let state = make_state_with_schema(Schema::new()).await;
         let app = create_router(state);
 

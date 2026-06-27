@@ -21,7 +21,7 @@ use crate::schema_manager::AppId;
 use crate::server::CatalogueRocksDbStorage;
 use crate::server::routes;
 use crate::server::{
-    CatalogueMemoryStorage, DirectCatalogueStore, DynCatalogueStorage, ServerState, ServerTopology,
+    CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology, StoredCatalogue,
 };
 #[cfg(test)]
 use crate::sync::DurabilityTier;
@@ -49,9 +49,9 @@ enum ServerSchemaMode {
 
 /// Storage backend selection for [`ServerBuilder::with_storage`].
 ///
-/// `Persistent` requires the RocksDB feature for durable direct-core server
+/// `Persistent` requires the RocksDB feature for durable core server
 /// storage. SQLite remains a client/native storage backend, but is not a
-/// supported direct-core server backend.
+/// supported core server backend.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
     InMemory,
@@ -193,7 +193,7 @@ impl ServerBuilder {
 
     /// Build the direct admin catalogue store used by HTTP catalogue routes.
     ///
-    fn build_catalogue_store(&self) -> Result<(DirectCatalogueStore, Option<Schema>), String> {
+    fn build_catalogue_store(&self) -> Result<(StoredCatalogue, Option<Schema>), String> {
         let storage = self.build_catalogue_storage()?;
         let initial_schema = match &self.schema_mode {
             ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
@@ -205,7 +205,7 @@ impl ServerBuilder {
             let schema_branches = test_schema_branches(initial_schema.as_ref());
             let local_durability_tiers =
                 std::collections::HashSet::from([self.local_durability_tier()]);
-            DirectCatalogueStore::with_test_observability(
+            StoredCatalogue::with_test_observability(
                 self.app_id,
                 initial_schema,
                 storage,
@@ -214,7 +214,7 @@ impl ServerBuilder {
             )
         };
         #[cfg(not(test))]
-        let store = DirectCatalogueStore::new(self.app_id, initial_schema, storage);
+        let store = StoredCatalogue::new(self.app_id, initial_schema, storage);
 
         let latest_catalogue_schema = store
             .latest_published_schema()
@@ -245,7 +245,7 @@ impl ServerBuilder {
             return Ok(None);
         };
         let storage_config = storage_config?;
-        let schema = crate::server::direct_schema::convert_public_schema_to_direct_core(&schema)
+        let schema = crate::server::schema_convert::convert_public_schema(&schema)
             .map_err(|error| format!("failed to build core server schema: {error}"))?;
         Ok(Some(
             crate::server::core_server::LocalCoreServerHandle::start_with_storage(
@@ -317,7 +317,7 @@ impl ServerBuilder {
             }
             #[cfg(feature = "sqlite")]
             StorageBackend::Sqlite { .. } => {
-                Err("direct-core server catalogue storage does not support sqlite".to_owned())
+                Err("core server catalogue storage does not support sqlite".to_owned())
             }
             #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
             StorageBackend::RocksDb { path } => {
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_rejects_edge_mode_with_admin_secret_until_direct_core_upstream_exists() {
+    async fn builder_rejects_edge_mode_with_admin_secret_until_core_upstream_exists() {
         let result = ServerBuilder::new(AppId::from_name("edge-builder-admin-secret-only"))
             .with_storage(StorageBackend::InMemory)
             .with_auth_config(AuthConfig {
@@ -720,7 +720,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_refuses_edge_tier_until_upstream_sync_uses_direct_core() {
+    async fn builder_refuses_edge_tier_until_upstream_sync_uses_core() {
         let result = ServerBuilder::new(AppId::from_name("edge-builder-tier"))
             .with_storage(StorageBackend::InMemory)
             .with_auth_config(AuthConfig {

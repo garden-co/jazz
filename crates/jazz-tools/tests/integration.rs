@@ -25,7 +25,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 const TEST_APP_ID: &str = "00000000-0000-0000-0000-000000000001";
 const TEST_ADMIN_SECRET: &str = "test-admin-secret";
 const TEST_SEED: [u8; 32] = [42u8; 32];
-const DIRECT_WS_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+const WS_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
 
 fn mint_test_token(audience: &str) -> String {
     jazz_tools::identity::mint_jazz_self_signed_token(
@@ -42,7 +42,7 @@ fn test_peer_identity() -> String {
     hex::encode(user_id.as_bytes())
 }
 
-fn direct_ws_prelude(jwt_token: &str) -> Vec<u8> {
+fn ws_prelude(jwt_token: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "peer_identity": test_peer_identity(),
         "auth": AuthConfig {
@@ -50,55 +50,55 @@ fn direct_ws_prelude(jwt_token: &str) -> Vec<u8> {
             ..Default::default()
         },
     }))
-    .expect("serialize direct ws prelude")
+    .expect("serialize websocket prelude")
 }
 
-fn direct_ws_client_hello_batch() -> Vec<u8> {
-    let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, DIRECT_WS_FEATURES));
-    let encoded = vec![encode_frame(&hello).expect("encode direct client hello")];
-    postcard::to_allocvec(&encoded).expect("encode direct hello batch")
+fn ws_client_hello_batch() -> Vec<u8> {
+    let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, WS_FEATURES));
+    let encoded = vec![encode_frame(&hello).expect("encode client hello")];
+    postcard::to_allocvec(&encoded).expect("encode websocket hello batch")
 }
 
-async fn direct_ws_handshake(
+async fn ws_handshake(
     port: u16,
     jwt_token: &str,
 ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let ws_url = format!("ws://127.0.0.1:{port}/apps/{TEST_APP_ID}/ws");
-    let (mut ws, _) = connect_async(&ws_url).await.expect("connect direct ws");
+    let (mut ws, _) = connect_async(&ws_url).await.expect("connect websocket");
 
-    ws.send(Message::Binary(direct_ws_prelude(jwt_token).into()))
+    ws.send(Message::Binary(ws_prelude(jwt_token).into()))
         .await
-        .expect("send direct ws auth prelude");
-    ws.send(Message::Binary(direct_ws_client_hello_batch().into()))
+        .expect("send websocket auth prelude");
+    ws.send(Message::Binary(ws_client_hello_batch().into()))
         .await
-        .expect("send direct ws hello");
+        .expect("send websocket hello");
 
     ws
 }
 
-async fn expect_direct_server_hello(
+async fn expect_core_server_hello(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) {
     let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
         .await
-        .expect("timeout waiting for direct server hello")
+        .expect("timeout waiting for server hello")
         .expect("stream ended")
         .expect("ws recv error");
     let Message::Binary(response) = response else {
-        panic!("expected binary direct server hello, got {response:?}");
+        panic!("expected binary server hello, got {response:?}");
     };
     let frames: Vec<Vec<u8>> =
-        postcard::from_bytes(&response).expect("decode direct ws response batch");
+        postcard::from_bytes(&response).expect("decode websocket response batch");
     assert_eq!(frames.len(), 1);
     let WireFrame::Hello(server_hello) =
-        decode_frame(&frames[0]).expect("decode direct server hello")
+        decode_frame(&frames[0]).expect("decode server hello")
     else {
-        panic!("expected direct server hello");
+        panic!("expected server hello");
     };
     assert_eq!(server_hello.role, WirePeerRole::Core);
-    assert_eq!(server_hello.features, DIRECT_WS_FEATURES);
+    assert_eq!(server_hello.features, WS_FEATURES);
 }
 
 async fn publish_test_schema(server: &TestServer) {
@@ -361,9 +361,9 @@ async fn test_ws_connection_receives_server_hello() {
     publish_test_schema(&server).await;
 
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
-    let mut ws = direct_ws_handshake(server.port, &token).await;
+    let mut ws = ws_handshake(server.port, &token).await;
 
-    expect_direct_server_hello(&mut ws).await;
+    expect_core_server_hello(&mut ws).await;
 }
 
 #[tokio::test]
@@ -372,12 +372,12 @@ async fn test_ws_connection_stays_open_after_handshake() {
     publish_test_schema(&server).await;
 
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
-    let mut ws = direct_ws_handshake(server.port, &token).await;
+    let mut ws = ws_handshake(server.port, &token).await;
 
-    expect_direct_server_hello(&mut ws).await;
+    expect_core_server_hello(&mut ws).await;
 
     // Drain frames for 100ms, confirming the connection stays open the whole time.
-    // The server may push direct WireFrame batches immediately after negotiation;
+    // The server may push WireFrame batches immediately after negotiation;
     // those are expected and should not fail this test.
     let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
     loop {

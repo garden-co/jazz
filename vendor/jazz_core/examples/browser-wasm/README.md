@@ -1,13 +1,13 @@
 # TS WASM Browser ABI Smoke Fixture
 
 This package is a low-level ABI smoke fixture for importing the
-`jazz-wasm/pkg-web` web-target build in a browser worker and driving direct
-`WasmDb` objects from the main thread. It intentionally exercises the direct
+`jazz-wasm/pkg-web` web-target build in a browser worker and driving core
+`WasmDb` objects from the main thread. It intentionally exercises the core
 WASM binding surface; it is not the recommended application worker
 architecture.
 
 The page starts `src/abi-smoke-worker.ts`, wraps it with the local
-`BrowserWasmAbiSmokeClient`, and sends direct `WasmDb` operations to the
+`BrowserWasmAbiSmokeClient`, and sends core `WasmDb` operations to the
 worker. The worker initializes the generated WASM module, owns the live
 `WasmDb`/transport objects in a `WasmAbiObjectRegistry`, revives transferred
 bytes, and executes the small allow-listed browser surface.
@@ -15,7 +15,7 @@ bytes, and executes the small allow-listed browser surface.
 The main thread owns the smoke flow, handle bookkeeping, status UI, and decoded
 row rendering, while the worker owns the WASM module instance and `WasmDb`
 objects. The browser-owned boundary is deliberately thin so the fixture stays
-close to the direct object model and can catch low-level ABI regressions.
+close to the core object model and can catch low-level ABI regressions.
 
 The fixture runs a browser worker-backed memory database scenario:
 
@@ -23,7 +23,7 @@ The fixture runs a browser worker-backed memory database scenario:
 - define a `todos` schema with `title` and `done`
 - prepare a `todos` table query
 - open a subscription with `WasmDb.subscribe`
-- insert `Ship direct WasmDb` with Record-encoded row/cell bytes
+- insert `Ship core WasmDb` with Record-encoded row/cell bytes
 - update the todo through `WasmDb.updateEncoded`
 - assert identity-scoped update dry-runs through `dbCanUpdateEncodedForIdentity`
   over the worker boundary, allowing the owner and denying a different identity
@@ -93,13 +93,13 @@ cursor and subscription correctness after reload, ABI error mapping, format
 versioning, quota/cleanup handling, and worker-safe concurrency.
 
 Rows and cells stay Record-encoded across both the worker boundary and the WASM
-boundary because this fixture is exercising direct `WasmDb` bindings, not a
+boundary because this fixture is exercising core `WasmDb` bindings, not a
 higher-level object mapper or app worker architecture. The example only decodes rows after `WasmDb` returns
 bytes; typed progress events then let the page render compact runtime,
 durability, read, and watch facts plus the decoded todo states while preserving
 the `#summary` and `#log` smoke anchors.
 
-The browser ABI smoke fixture owns its direct `WasmDb` browser glue locally. Domain-level helpers
+The browser ABI smoke fixture owns its core `WasmDb` browser glue locally. Domain-level helpers
 for schemas, encoded cells, and row views come from the `jazz-tools` package
 root; browser-specific query/config/event decoding stays inside this package.
 

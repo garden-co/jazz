@@ -3,8 +3,8 @@
 //! Authentication integration tests for the Jazz server.
 //!
 //! Tests the three auth mechanisms:
-//! 1. JWT authentication (frontend) — via direct websocket admission
-//! 2. Backend session impersonation — via direct websocket admission
+//! 1. JWT authentication (frontend) — via websocket admission
+//! 2. Backend session impersonation — via websocket admission
 //! 3. Admin authentication — via HTTP admin endpoints
 
 mod test_server;
@@ -78,7 +78,7 @@ fn encode_session(session: &Session) -> String {
 }
 
 #[derive(Debug)]
-enum DirectWsAdmissionResponse {
+enum WebSocketAdmissionResponse {
     Hello(WireHello),
     Error(WireError),
 }
@@ -91,90 +91,90 @@ fn author_uuid_string(author: jazz::ids::AuthorId) -> String {
     uuid::Uuid::from_bytes(*author.as_bytes()).to_string()
 }
 
-fn direct_ws_prelude(peer_identity: jazz::ids::AuthorId, auth: AuthConfig) -> Vec<u8> {
+fn ws_prelude(peer_identity: jazz::ids::AuthorId, auth: AuthConfig) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "peer_identity": hex::encode(peer_identity.as_bytes()),
         "auth": auth,
     }))
-    .expect("serialize direct websocket prelude")
+    .expect("serialize websocket prelude")
 }
 
-fn direct_ws_client_hello_batch() -> Vec<u8> {
+fn ws_client_hello_batch() -> Vec<u8> {
     let hello = WireFrame::Hello(WireHello::current(
         WirePeerRole::Client,
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
     ));
-    let encoded = vec![encode_frame(&hello).expect("encode direct client hello")];
-    postcard::to_allocvec(&encoded).expect("encode direct hello batch")
+    let encoded = vec![encode_frame(&hello).expect("encode client hello")];
+    postcard::to_allocvec(&encoded).expect("encode websocket hello batch")
 }
 
-fn decode_direct_ws_admission_response(bytes: &[u8]) -> Result<DirectWsAdmissionResponse, String> {
+fn decode_ws_admission_response(bytes: &[u8]) -> Result<WebSocketAdmissionResponse, String> {
     let frames: Vec<Vec<u8>> =
-        postcard::from_bytes(bytes).map_err(|e| format!("invalid direct frame batch: {e}"))?;
+        postcard::from_bytes(bytes).map_err(|e| format!("invalid frame batch: {e}"))?;
     if frames.len() != 1 {
-        return Err(format!("expected one direct frame, got {}", frames.len()));
+        return Err(format!("expected one frame, got {}", frames.len()));
     }
-    match decode_frame(&frames[0]).map_err(|e| format!("invalid direct wire frame: {e}"))? {
-        WireFrame::Hello(hello) => Ok(DirectWsAdmissionResponse::Hello(hello)),
-        WireFrame::Error(error) => Ok(DirectWsAdmissionResponse::Error(error)),
-        other => Err(format!("unexpected direct websocket response: {other:?}")),
+    match decode_frame(&frames[0]).map_err(|e| format!("invalid wire frame: {e}"))? {
+        WireFrame::Hello(hello) => Ok(WebSocketAdmissionResponse::Hello(hello)),
+        WireFrame::Error(error) => Ok(WebSocketAdmissionResponse::Error(error)),
+        other => Err(format!("unexpected websocket response: {other:?}")),
     }
 }
 
-async fn direct_ws_admit(
+async fn ws_admit(
     server: &TestServer,
     peer_identity: jazz::ids::AuthorId,
     auth: AuthConfig,
-) -> Result<DirectWsAdmissionResponse, String> {
+) -> Result<WebSocketAdmissionResponse, String> {
     let ws_url = format!("ws://127.0.0.1:{}/apps/{}/ws", server.port, server.app_id());
     let (mut ws, _) = connect_async(&ws_url)
         .await
         .map_err(|e| format!("ws connect failed: {e}"))?;
 
     ws.send(Message::Binary(
-        direct_ws_prelude(peer_identity, auth).into(),
+        ws_prelude(peer_identity, auth).into(),
     ))
     .await
     .map_err(|e| format!("ws send prelude failed: {e}"))?;
-    ws.send(Message::Binary(direct_ws_client_hello_batch().into()))
+    ws.send(Message::Binary(ws_client_hello_batch().into()))
         .await
         .map_err(|e| format!("ws send client hello failed: {e}"))?;
 
     use futures::StreamExt as _;
     match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
-        Ok(Some(Ok(Message::Binary(bytes)))) => decode_direct_ws_admission_response(&bytes),
+        Ok(Some(Ok(Message::Binary(bytes)))) => decode_ws_admission_response(&bytes),
         Ok(Some(Ok(Message::Close(_)))) | Ok(None) => Err("server closed connection".to_string()),
         Ok(Some(Ok(other))) => Err(format!("unexpected WS message: {other:?}")),
         Ok(Some(Err(e))) => Err(format!("ws recv error: {e}")),
-        Err(_) => Err("timed out waiting for direct websocket response".to_string()),
+        Err(_) => Err("timed out waiting for websocket response".to_string()),
     }
 }
 
-async fn direct_ws_connect(
+async fn ws_connect(
     server: &TestServer,
     peer_identity: jazz::ids::AuthorId,
     auth: AuthConfig,
 ) -> Result<WireHello, String> {
-    let response = direct_ws_admit(server, peer_identity, auth).await?;
+    let response = ws_admit(server, peer_identity, auth).await?;
     match response {
-        DirectWsAdmissionResponse::Hello(hello) if hello.role == WirePeerRole::Core => Ok(hello),
-        DirectWsAdmissionResponse::Hello(hello) => Err(format!(
-            "unexpected direct websocket hello role: {:?}",
+        WebSocketAdmissionResponse::Hello(hello) if hello.role == WirePeerRole::Core => Ok(hello),
+        WebSocketAdmissionResponse::Hello(hello) => Err(format!(
+            "unexpected websocket hello role: {:?}",
             hello.role
         )),
-        DirectWsAdmissionResponse::Error(error) => Err(error.message),
+        WebSocketAdmissionResponse::Error(error) => Err(error.message),
     }
 }
 
-async fn direct_ws_rejects(
+async fn ws_rejects(
     server: &TestServer,
     peer_identity: jazz::ids::AuthorId,
     auth: AuthConfig,
 ) -> Result<String, String> {
-    let response = direct_ws_admit(server, peer_identity, auth).await?;
+    let response = ws_admit(server, peer_identity, auth).await?;
     match response {
-        DirectWsAdmissionResponse::Error(error) => Ok(error.message),
-        DirectWsAdmissionResponse::Hello(_) => Err("direct websocket admitted client".to_string()),
+        WebSocketAdmissionResponse::Error(error) => Ok(error.message),
+        WebSocketAdmissionResponse::Hello(_) => Err("websocket admitted client".to_string()),
     }
 }
 
@@ -183,7 +183,7 @@ async fn ws_handshake(
     peer_identity: jazz::ids::AuthorId,
     auth: AuthConfig,
 ) -> Result<WireHello, String> {
-    direct_ws_connect(server, peer_identity, auth).await
+    ws_connect(server, peer_identity, auth).await
 }
 
 async fn ws_rejects(
@@ -191,7 +191,7 @@ async fn ws_rejects(
     peer_identity: jazz::ids::AuthorId,
     auth: AuthConfig,
 ) -> Result<String, String> {
-    direct_ws_rejects(server, peer_identity, auth).await
+    ws_rejects(server, peer_identity, auth).await
 }
 
 /// Build AuthConfig with a JWT token.
@@ -289,7 +289,7 @@ mod integration_tests {
             .json(&json!({ "schema": schema, "permissions": null }))
             .send()
             .await
-            .expect("publish minimal schema for direct websocket auth test");
+            .expect("publish minimal schema for websocket auth test");
         assert_eq!(response.status(), StatusCode::CREATED);
     }
 

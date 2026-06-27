@@ -1,4 +1,4 @@
-//! Insert throughput benchmark for permissioned direct-core operations.
+//! Insert throughput benchmark for permissioned core operations.
 //!
 //! Measures inserts/second with public `jazz::db::Db<MemoryStorage>` APIs.
 //!
@@ -26,7 +26,7 @@ type BenchDb = Db<MemoryStorage>;
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
-fn direct_core_schema() -> JazzSchema {
+fn schema_convert() -> JazzSchema {
     let folder_owner_policy =
         Policy::shape(Query::from("folders").filter(eq(col("owner"), claim("sub"))));
     let folder_access_policy = Policy::shape(Query::from("documents").join_via_column(
@@ -75,14 +75,14 @@ fn direct_core_schema() -> JazzSchema {
 }
 
 fn open_db(seed: u64) -> BenchDb {
-    let schema = direct_core_schema();
+    let schema = schema_convert();
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
 
-    // Open the public direct-core database path directly. This benchmark should
+    // Open the public core database path directly. This benchmark should
     // not route inserts through legacy runtime/schema/sync manager layers.
     block_on(Db::open(
         DbConfig::new(
@@ -95,7 +95,7 @@ fn open_db(seed: u64) -> BenchDb {
         )
         .with_id_source(SeededRowIdSource::new(seed)),
     ))
-    .expect("open direct insert benchmark db")
+    .expect("open core insert benchmark db")
 }
 
 fn row_uuid(index: usize) -> RowUuid {

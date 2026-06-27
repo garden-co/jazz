@@ -851,7 +851,7 @@ class CoreAbiDb implements Db {
     this.#assertOpen();
     if ((options.kind ?? "mergeable") === "exclusive") {
       throw new Error(
-        "exclusive transactions are not supported by the direct wasm object facade yet",
+        "exclusive transactions are not supported by the core wasm object facade yet",
       );
     }
     return new CoreAbiTransaction(this, this.#db.mergeableTx());
@@ -1395,7 +1395,7 @@ class CoreAbiTransaction implements Transaction {
   ): Row[] {
     this.#assertOpen();
     throw new Error(
-      "mergeable transaction reads are not supported by the direct wasm object facade yet",
+      "mergeable transaction reads are not supported by the core wasm object facade yet",
     );
   }
 
@@ -1405,7 +1405,7 @@ class CoreAbiTransaction implements Transaction {
   ): Row | null {
     this.#assertOpen();
     throw new Error(
-      "mergeable transaction reads are not supported by the direct wasm object facade yet",
+      "mergeable transaction reads are not supported by the core wasm object facade yet",
     );
   }
 

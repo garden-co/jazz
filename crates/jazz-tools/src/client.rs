@@ -2,72 +2,72 @@
 
 use std::collections::HashMap;
 use std::ops::Deref;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use std::rc::Rc;
 use std::sync::Arc;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(feature = "direct-core-client", feature = "rocksdb"))]
+#[cfg(any(feature = "core-client", feature = "rocksdb"))]
 use std::time::Duration;
 
 #[cfg(feature = "test-utils")]
 use crate::query_manager::types::RowPolicyMode;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use crate::schema_api::OrderedRowDelta;
-#[cfg(any(feature = "direct-core-client", feature = "test-utils"))]
+#[cfg(any(feature = "core-client", feature = "test-utils"))]
 use crate::schema_api::Schema;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use crate::schema_api::TableName;
 use crate::schema_api::{Query, Session, Value, WriteContext};
-#[cfg(feature = "direct-core-client")]
-use crate::server::direct_client::DirectCoreWebSocketTransport;
-#[cfg(feature = "direct-core-client")]
-use crate::server::direct_schema::convert_public_schema_to_direct_core;
+#[cfg(feature = "core-client")]
+use crate::server::schema_convert::convert_public_schema;
+#[cfg(feature = "core-client")]
+use crate::server::websocket_client::WebSocketTransport;
 #[cfg(feature = "test-utils")]
 use crate::sync::ClientId;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use crate::sync::DurabilityTier;
 use crate::transaction::BatchId;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use crate::transport_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
     LocalUpdates as CoreLocalUpdates, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, TickScheduler, TickUrgency,
     Transport as CoreTransport, WireTransportAdapter,
 };
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use jazz::groove::records::Value as CoreValue;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
-#[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
+#[cfg(all(feature = "core-client", feature = "rocksdb"))]
 use jazz::groove::storage::RocksDbStorage as CoreRocksDbStorage;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use jazz::tx::{
     DeletionEvent as CoreDeletionEvent, DurabilityTier as CoreDurabilityTier, Fate as CoreFate,
     TxId as CoreTxId,
 };
 use serde::Deserialize;
 use tokio::sync::RwLock;
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-#[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
+#[cfg(all(feature = "core-client", feature = "rocksdb"))]
 use crate::ClientStorage;
 use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
 
-#[cfg(feature = "direct-core-client")]
-type DirectCoreMemoryDb = CoreDb<CoreMemoryStorage>;
-#[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
-type DirectCoreRocksDb = CoreDb<CoreRocksDbStorage>;
+#[cfg(feature = "core-client")]
+type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
+#[cfg(all(feature = "core-client", feature = "rocksdb"))]
+type CoreRocksDb = CoreDb<CoreRocksDbStorage>;
 
-#[cfg(feature = "direct-core-client")]
-enum DirectCoreStorageBundle {
+#[cfg(feature = "core-client")]
+enum StorageBundle {
     Memory(CoreMemoryStorage),
     #[cfg(feature = "rocksdb")]
     RocksDb(CoreRocksDbStorage),
@@ -88,11 +88,11 @@ pub struct JazzClient {
     default_session: Option<Session>,
     /// Write metadata applied to mutations issued through this client.
     write_context: Option<WriteContext>,
-    /// Direct core engine backing the public client facade.
-    #[cfg(feature = "direct-core-client")]
-    engine: Rc<DirectCoreEngine>,
+    /// Core engine backing the public client facade.
+    #[cfg(feature = "core-client")]
+    engine: Rc<ClientEngine>,
     /// Public schema retained for the current public API surface.
-    #[cfg(feature = "direct-core-client")]
+    #[cfg(feature = "core-client")]
     public_schema: Schema,
     /// Whether a server URL was provided at construction time.
     has_server: bool,
@@ -107,9 +107,9 @@ impl Clone for JazzClient {
         Self {
             default_session: self.default_session.clone(),
             write_context: self.write_context.clone(),
-            #[cfg(feature = "direct-core-client")]
+            #[cfg(feature = "core-client")]
             engine: self.engine.clone(),
-            #[cfg(feature = "direct-core-client")]
+            #[cfg(feature = "core-client")]
             public_schema: self.public_schema.clone(),
             has_server: self.has_server,
             subscriptions: Arc::clone(&self.subscriptions),
@@ -118,28 +118,28 @@ impl Clone for JazzClient {
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-struct DirectCoreEngine {
-    inner: Rc<std::cell::RefCell<DirectCoreInner>>,
+#[cfg(feature = "core-client")]
+struct ClientEngine {
+    inner: Rc<std::cell::RefCell<ClientEngineInner>>,
 }
 
-#[cfg(feature = "direct-core-client")]
-struct DirectCoreInner {
-    db: DirectCoreBackend,
+#[cfg(feature = "core-client")]
+struct ClientEngineInner {
+    db: Backend,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<BatchId, DirectTransactionState>,
 }
 
-#[cfg(feature = "direct-core-client")]
-enum DirectCoreBackend {
-    Memory(Rc<DirectCoreMemoryDb>),
+#[cfg(feature = "core-client")]
+enum Backend {
+    Memory(Rc<CoreMemoryDb>),
     #[cfg(feature = "rocksdb")]
-    RocksDb(Rc<DirectCoreRocksDb>),
+    RocksDb(Rc<CoreRocksDb>),
 }
 
-#[cfg(feature = "direct-core-client")]
-impl Clone for DirectCoreBackend {
+#[cfg(feature = "core-client")]
+impl Clone for Backend {
     fn clone(&self) -> Self {
         match self {
             Self::Memory(db) => Self::Memory(Rc::clone(db)),
@@ -149,21 +149,21 @@ impl Clone for DirectCoreBackend {
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-impl DirectCoreBackend {
+#[cfg(feature = "core-client")]
+impl Backend {
     async fn open(
         schema: jazz::schema::JazzSchema,
-        storage: DirectCoreStorageBundle,
+        storage: StorageBundle,
         identity: CoreDbIdentity,
     ) -> Result<Self> {
         match storage {
-            DirectCoreStorageBundle::Memory(storage) => Ok(Self::Memory(Rc::new(
+            StorageBundle::Memory(storage) => Ok(Self::Memory(Rc::new(
                 CoreDb::open(CoreDbConfig::new(schema, storage, identity))
                     .await
                     .map_err(|error| JazzError::Connection(error.to_string()))?,
             ))),
             #[cfg(feature = "rocksdb")]
-            DirectCoreStorageBundle::RocksDb(storage) => Ok(Self::RocksDb(Rc::new(
+            StorageBundle::RocksDb(storage) => Ok(Self::RocksDb(Rc::new(
                 CoreDb::open(CoreDbConfig::new(schema, storage, identity))
                     .await
                     .map_err(|error| JazzError::Connection(error.to_string()))?,
@@ -171,7 +171,7 @@ impl DirectCoreBackend {
         }
     }
 
-    fn set_tick_scheduler(&self, scheduler: Rc<DirectCoreTickScheduler>) {
+    fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
         match self {
             Self::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
             #[cfg(feature = "rocksdb")]
@@ -273,9 +273,9 @@ impl DirectCoreBackend {
         writes: Vec<DirectTransactionWrite>,
     ) -> std::result::Result<(CoreTxId, Vec<(ObjectId, String)>), CoreDbError> {
         match self {
-            Self::Memory(db) => commit_direct_writes(db, writes),
+            Self::Memory(db) => commit_core_writes(db, writes),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => commit_direct_writes(db, writes),
+            Self::RocksDb(db) => commit_core_writes(db, writes),
         }
     }
 
@@ -342,8 +342,8 @@ impl DirectCoreBackend {
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-fn commit_direct_writes<S>(
+#[cfg(feature = "core-client")]
+fn commit_core_writes<S>(
     db: &CoreDb<S>,
     writes: Vec<DirectTransactionWrite>,
 ) -> std::result::Result<(CoreTxId, Vec<(ObjectId, String)>), CoreDbError>
@@ -368,12 +368,12 @@ where
     Ok((tx_id, touched_rows))
 }
 
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 struct DirectTransactionState {
     writes: Vec<DirectTransactionWrite>,
 }
 
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 struct DirectTransactionWrite {
     table: String,
     row_id: ObjectId,
@@ -382,21 +382,21 @@ struct DirectTransactionWrite {
 }
 
 #[derive(Default)]
-#[cfg(feature = "direct-core-client")]
-struct DirectCoreTickScheduler {
-    state: Arc<DirectCoreTickState>,
+#[cfg(feature = "core-client")]
+struct TickSchedulerImpl {
+    state: Arc<TickState>,
 }
 
 #[derive(Default)]
-#[cfg(feature = "direct-core-client")]
-struct DirectCoreTickState {
+#[cfg(feature = "core-client")]
+struct TickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
     notify: tokio::sync::Notify,
 }
 
-#[cfg(feature = "direct-core-client")]
-impl DirectCoreTickScheduler {
+#[cfg(feature = "core-client")]
+impl TickSchedulerImpl {
     fn take(&self) -> Option<TickUrgency> {
         if self.state.immediate.swap(false, Ordering::AcqRel) {
             self.state.deferred.store(false, Ordering::Release);
@@ -416,31 +416,31 @@ impl DirectCoreTickScheduler {
         self.state.notify.notify_one();
     }
 
-    fn wake_handle(&self) -> Arc<DirectCoreTickState> {
+    fn wake_handle(&self) -> Arc<TickState> {
         Arc::clone(&self.state)
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-impl TickScheduler for DirectCoreTickScheduler {
+#[cfg(feature = "core-client")]
+impl TickScheduler for TickSchedulerImpl {
     fn schedule_tick(&self, urgency: TickUrgency) {
         self.wake(urgency);
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-impl DirectCoreEngine {
+#[cfg(feature = "core-client")]
+impl ClientEngine {
     async fn start(
         schema: jazz::schema::JazzSchema,
-        storage: DirectCoreStorageBundle,
+        storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
         app_id: crate::schema_manager::AppId,
         auth: Option<WsAuthConfig>,
     ) -> Result<Rc<Self>> {
-        let scheduler = Rc::new(DirectCoreTickScheduler::default());
+        let scheduler = Rc::new(TickSchedulerImpl::default());
         let has_upstream = server_url.is_some();
-        let inner = DirectCoreInner::open(
+        let inner = ClientEngineInner::open(
             schema,
             storage,
             identity,
@@ -464,7 +464,7 @@ impl DirectCoreEngine {
         table: String,
         wait_for_coverage: bool,
     ) -> Result<Vec<jazz::node::CurrentRow>> {
-        DirectCoreInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
+        ClientEngineInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
     }
 
     async fn subscribe(
@@ -474,7 +474,7 @@ impl DirectCoreEngine {
         table: String,
         tx: mpsc::UnboundedSender<OrderedRowDelta>,
     ) -> Result<()> {
-        DirectCoreInner::handle_subscribe(&self.inner, query, opts, table, tx).await
+        ClientEngineInner::handle_subscribe(&self.inner, query, opts, table, tx).await
     }
 
     fn insert(
@@ -498,7 +498,7 @@ impl DirectCoreEngine {
                 .insert(&table, cells)
                 .map_err(|error| JazzError::Write(error.to_string()))?,
         };
-        JazzClient::check_direct_write_not_rejected(&inner.db, tx_id)?;
+        JazzClient::check_core_write_not_rejected(&inner.db, tx_id)?;
         let object_id = ObjectId::from_uuid(row_uuid.0);
         inner.remember_write(object_id, &table, tx_id);
         Ok((object_id, tx_id))
@@ -533,7 +533,7 @@ impl DirectCoreEngine {
             .db
             .upsert(&table, CoreRowUuid(row_id), cells)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_direct_write_not_rejected(&inner.db, write)?;
+        JazzClient::check_core_write_not_rejected(&inner.db, write)?;
         let object_id = ObjectId::from_uuid(row_id);
         inner.remember_write(object_id, &table, write);
         let tx_id = write;
@@ -567,14 +567,14 @@ impl DirectCoreEngine {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write(
-                "direct core update requires a row created or observed by this client".to_string(),
+                "core update requires a row created or observed by this client".to_string(),
             )
         })?;
         let write = inner
             .db
             .update(&table, CoreRowUuid(*row_id.uuid()), cells)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_direct_write_not_rejected(&inner.db, write)?;
+        JazzClient::check_core_write_not_rejected(&inner.db, write)?;
         inner.remember_write(row_id, &table, write);
         let tx_id = write;
         Ok(tx_id)
@@ -589,7 +589,7 @@ impl DirectCoreEngine {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write(
-                "direct core update requires a row created or observed by this client".to_string(),
+                "core update requires a row created or observed by this client".to_string(),
             )
         })?;
         let tx = inner
@@ -609,14 +609,14 @@ impl DirectCoreEngine {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write(
-                "direct core delete requires a row created or observed by this client".to_string(),
+                "core delete requires a row created or observed by this client".to_string(),
             )
         })?;
         let write = inner
             .db
             .delete(&table, CoreRowUuid(*row_id.uuid()))
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_direct_write_not_rejected(&inner.db, write)?;
+        JazzClient::check_core_write_not_rejected(&inner.db, write)?;
         inner.remember_write(row_id, &table, write);
         let tx_id = write;
         Ok(tx_id)
@@ -626,7 +626,7 @@ impl DirectCoreEngine {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write(
-                "direct core delete requires a row created or observed by this client".to_string(),
+                "core delete requires a row created or observed by this client".to_string(),
             )
         })?;
         let tx = inner
@@ -663,16 +663,16 @@ impl DirectCoreEngine {
             .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
         if state.writes.is_empty() {
             return Err(JazzError::Write(
-                "direct core transaction cannot commit without writes".to_string(),
+                "core transaction cannot commit without writes".to_string(),
             ));
         }
         let (tx_id, touched_rows) = inner
             .db
             .commit_writes(state.writes)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_direct_write_not_rejected(&inner.db, tx_id)?;
+        JazzClient::check_core_write_not_rejected(&inner.db, tx_id)?;
         inner.write_map.insert(batch_id, tx_id);
-        inner.write_map.insert(direct_batch_id(tx_id), tx_id);
+        inner.write_map.insert(core_batch_id(tx_id), tx_id);
         for (row_id, table) in touched_rows {
             inner.row_tables.insert(row_id, table);
         }
@@ -685,12 +685,12 @@ impl DirectCoreEngine {
     }
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
-        DirectCoreInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
+        ClientEngineInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
     }
 
     fn spawn_local_tick_driver(
-        inner: Rc<std::cell::RefCell<DirectCoreInner>>,
-        scheduler: Rc<DirectCoreTickScheduler>,
+        inner: Rc<std::cell::RefCell<ClientEngineInner>>,
+        scheduler: Rc<TickSchedulerImpl>,
     ) {
         let state = scheduler.wake_handle();
         tokio::task::spawn_local(async move {
@@ -709,27 +709,25 @@ impl DirectCoreEngine {
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-impl DirectCoreInner {
+#[cfg(feature = "core-client")]
+impl ClientEngineInner {
     async fn open(
         schema: jazz::schema::JazzSchema,
-        storage: DirectCoreStorageBundle,
+        storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
         app_id: crate::schema_manager::AppId,
         auth: Option<WsAuthConfig>,
-        scheduler: Rc<DirectCoreTickScheduler>,
+        scheduler: Rc<TickSchedulerImpl>,
     ) -> Result<Self> {
-        let db = DirectCoreBackend::open(schema, storage, identity).await?;
+        let db = Backend::open(schema, storage, identity).await?;
         db.set_tick_scheduler(scheduler.clone());
         if let Some(server_url) = server_url {
             let auth = auth.ok_or_else(|| {
-                JazzError::Connection(
-                    "direct core server connection missing auth config".to_string(),
-                )
+                JazzError::Connection("core server connection missing auth config".to_string())
             })?;
             let wake = scheduler.wake_handle();
-            let transport = DirectCoreWebSocketTransport::connect_with_wake(
+            let transport = WebSocketTransport::connect_with_wake(
                 &server_url,
                 app_id,
                 identity.author,
@@ -804,7 +802,7 @@ impl DirectCoreInner {
             let event = tokio::time::timeout_at(deadline, stream.next_event())
                 .await
                 .map_err(|_| {
-                    JazzError::Query("timed out waiting for direct core query coverage".to_string())
+                    JazzError::Query("timed out waiting for core query coverage".to_string())
                 })?;
             match event {
                 Some(CoreSubscriptionEvent::Opened { settled, .. })
@@ -816,8 +814,7 @@ impl DirectCoreInner {
                 }
                 Some(CoreSubscriptionEvent::Closed) | None => {
                     return Err(JazzError::Query(
-                        "direct core query coverage subscription closed before settling"
-                            .to_string(),
+                        "core query coverage subscription closed before settling".to_string(),
                     ));
                 }
                 Some(_) => {}
@@ -880,15 +877,13 @@ impl DirectCoreInner {
                     drop(borrowed);
                     if tokio::time::Instant::now() >= deadline {
                         return Err(JazzError::Sync(format!(
-                            "timed out waiting for direct core batch {batch_id}"
+                            "timed out waiting for core batch {batch_id}"
                         )));
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 } else {
-                    return Err(JazzError::Sync(format!(
-                        "unknown direct core batch {batch_id}"
-                    )));
+                    return Err(JazzError::Sync(format!("unknown core batch {batch_id}")));
                 }
             };
             let state = inner
@@ -906,7 +901,7 @@ impl DirectCoreInner {
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(JazzError::Sync(format!(
-                    "timed out waiting for direct core batch to reach {tier:?}"
+                    "timed out waiting for core batch to reach {tier:?}"
                 )));
             }
             let state = inner
@@ -928,14 +923,14 @@ impl DirectCoreInner {
                 .is_err()
             {
                 return Err(JazzError::Sync(format!(
-                    "timed out waiting for direct core batch to reach {tier:?}"
+                    "timed out waiting for core batch to reach {tier:?}"
                 )));
             }
         }
     }
 
     fn remember_write(&mut self, row_id: ObjectId, table: &str, tx_id: CoreTxId) {
-        self.write_map.insert(direct_batch_id(tx_id), tx_id);
+        self.write_map.insert(core_batch_id(tx_id), tx_id);
         self.row_tables.insert(row_id, table.to_string());
     }
 
@@ -1024,8 +1019,8 @@ fn default_session_from_context(context: &AppContext) -> Option<Session> {
         .and_then(session_from_unverified_jwt)
 }
 
-#[cfg(feature = "direct-core-client")]
-fn direct_core_identity(context: &AppContext, default_session: Option<&Session>) -> CoreDbIdentity {
+#[cfg(feature = "core-client")]
+fn core_identity(context: &AppContext, default_session: Option<&Session>) -> CoreDbIdentity {
     let node_uuid = context
         .client_id
         .map(|id| id.0)
@@ -1039,11 +1034,8 @@ fn direct_core_identity(context: &AppContext, default_session: Option<&Session>)
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-fn direct_core_storage(
-    schema: &jazz::schema::JazzSchema,
-    context: &AppContext,
-) -> Result<DirectCoreStorageBundle> {
+#[cfg(feature = "core-client")]
+fn core_storage(schema: &jazz::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -1052,35 +1044,31 @@ fn direct_core_storage(
     #[cfg(feature = "rocksdb")]
     {
         match context.storage {
-            ClientStorage::Memory => Ok(DirectCoreStorageBundle::Memory(CoreMemoryStorage::new(
-                &refs,
-            ))),
+            ClientStorage::Memory => Ok(StorageBundle::Memory(CoreMemoryStorage::new(&refs))),
             ClientStorage::Persistent => {
                 std::fs::create_dir_all(&context.data_dir)?;
                 let db_path = context.data_dir.join("jazz-core.rocksdb");
                 let storage = CoreRocksDbStorage::open(&db_path, &refs)
                     .map_err(|error| JazzError::Connection(error.to_string()))?;
-                Ok(DirectCoreStorageBundle::RocksDb(storage))
+                Ok(StorageBundle::RocksDb(storage))
             }
         }
     }
     #[cfg(not(feature = "rocksdb"))]
     {
         let _ = context;
-        Ok(DirectCoreStorageBundle::Memory(CoreMemoryStorage::new(
-            &refs,
-        )))
+        Ok(StorageBundle::Memory(CoreMemoryStorage::new(&refs)))
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-fn public_to_direct_core_value(value: Value) -> Result<CoreValue> {
+#[cfg(feature = "core-client")]
+fn public_to_core_value(value: Value) -> Result<CoreValue> {
     match value {
         Value::Boolean(value) => Ok(CoreValue::Bool(value)),
         Value::Text(value) => Ok(CoreValue::String(value)),
-        Value::Integer(value) => Ok(CoreValue::U32(encode_signed_i32_for_direct_core(value))),
+        Value::Integer(value) => Ok(CoreValue::U32(encode_signed_i32_for_core(value))),
         Value::BigInt(value) => u64::try_from(value).map(CoreValue::U64).map_err(|_| {
-            JazzError::Write("negative BIGINT values are not supported by direct core".to_string())
+            JazzError::Write("negative BIGINT values are not supported by core".to_string())
         }),
         Value::Double(value) => Ok(CoreValue::F64(value)),
         Value::Timestamp(value) => Ok(CoreValue::U64(value)),
@@ -1089,56 +1077,56 @@ fn public_to_direct_core_value(value: Value) -> Result<CoreValue> {
         Value::Null => Ok(CoreValue::Nullable(None)),
         Value::Array(values) => values
             .into_iter()
-            .map(public_to_direct_core_value)
+            .map(public_to_core_value)
             .collect::<Result<Vec<_>>>()
             .map(CoreValue::Array),
         other => Err(JazzError::Write(format!(
-            "direct core client does not support public value {other:?}"
+            "core client does not support public value {other:?}"
         ))),
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-fn encode_signed_i32_for_direct_core(value: i32) -> u32 {
+#[cfg(feature = "core-client")]
+fn encode_signed_i32_for_core(value: i32) -> u32 {
     u32::from_ne_bytes(value.to_ne_bytes()) ^ 0x8000_0000
 }
 
-#[cfg(feature = "direct-core-client")]
-fn decode_signed_i32_from_direct_core(value: u32) -> i32 {
+#[cfg(feature = "core-client")]
+fn decode_signed_i32_from_core(value: u32) -> i32 {
     i32::from_ne_bytes((value ^ 0x8000_0000).to_ne_bytes())
 }
 
-#[cfg(feature = "direct-core-client")]
-fn direct_core_to_public_value(value: CoreValue) -> Result<Value> {
+#[cfg(feature = "core-client")]
+fn core_to_public_value(value: CoreValue) -> Result<Value> {
     match value {
         CoreValue::Bool(value) => Ok(Value::Boolean(value)),
         CoreValue::String(value) => Ok(Value::Text(value)),
-        CoreValue::U32(value) => Ok(Value::Integer(decode_signed_i32_from_direct_core(value))),
+        CoreValue::U32(value) => Ok(Value::Integer(decode_signed_i32_from_core(value))),
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
         CoreValue::Uuid(value) => Ok(Value::Uuid(ObjectId::from_uuid(value))),
         CoreValue::Bytes(value) => Ok(Value::Bytea(value)),
         CoreValue::Nullable(None) => Ok(Value::Null),
-        CoreValue::Nullable(Some(value)) => direct_core_to_public_value(*value),
+        CoreValue::Nullable(Some(value)) => core_to_public_value(*value),
         CoreValue::Array(values) => values
             .into_iter()
-            .map(direct_core_to_public_value)
+            .map(core_to_public_value)
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
         other => Err(JazzError::Query(format!(
-            "direct core client does not support core value {other:?}"
+            "core client does not support core value {other:?}"
         ))),
     }
 }
 
-#[cfg(feature = "direct-core-client")]
-fn direct_batch_id(tx_id: CoreTxId) -> BatchId {
+#[cfg(feature = "core-client")]
+fn core_batch_id(tx_id: CoreTxId) -> BatchId {
     let mut bytes = *tx_id.node.0.as_bytes();
     bytes[..8].copy_from_slice(&tx_id.time.0.to_be_bytes());
     BatchId(bytes)
 }
 
-#[cfg(feature = "direct-core-client")]
+#[cfg(feature = "core-client")]
 fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
@@ -1147,21 +1135,19 @@ fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
 }
 
 impl JazzClient {
-    #[cfg(feature = "direct-core-client")]
-    fn check_direct_write_not_rejected(db: &DirectCoreBackend, tx_id: CoreTxId) -> Result<()> {
+    #[cfg(feature = "core-client")]
+    fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
         let state = db
             .write_state(tx_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
         if let CoreFate::Rejected(reason) = state.fate {
-            return Err(JazzError::Write(format!(
-                "direct core write rejected: {reason:?}"
-            )));
+            return Err(JazzError::Write(format!("core write rejected: {reason:?}")));
         }
         Ok(())
     }
 
-    #[cfg(feature = "direct-core-client")]
-    fn direct_read_opts(durability_tier: Option<DurabilityTier>) -> CoreReadOpts {
+    #[cfg(feature = "core-client")]
+    fn core_read_opts(durability_tier: Option<DurabilityTier>) -> CoreReadOpts {
         CoreReadOpts {
             tier: durability_tier
                 .map(core_tier)
@@ -1172,8 +1158,8 @@ impl JazzClient {
         }
     }
 
-    #[cfg(feature = "direct-core-client")]
-    fn direct_core_query(&self, query: &Query) -> Result<jazz::query::Query> {
+    #[cfg(feature = "core-client")]
+    fn core_query(&self, query: &Query) -> Result<jazz::query::Query> {
         if query.disjuncts.len() != 1
             || !query.disjuncts[0].conditions.is_empty()
             || !query.joins.is_empty()
@@ -1186,7 +1172,7 @@ impl JazzClient {
             || query.result_element_index.is_some()
         {
             return Err(JazzError::Query(
-                "direct core JazzClient currently supports simple table queries only".to_string(),
+                "core JazzClient currently supports simple table queries only".to_string(),
             ));
         }
         let mut core_query = jazz::query::Query::from(query.table.as_str());
@@ -1196,8 +1182,8 @@ impl JazzClient {
         Ok(core_query)
     }
 
-    #[cfg(feature = "direct-core-client")]
-    fn direct_rows_to_public(
+    #[cfg(feature = "core-client")]
+    fn core_rows_to_public(
         &self,
         query: &Query,
         rows: Vec<jazz::node::CurrentRow>,
@@ -1230,9 +1216,9 @@ impl JazzClient {
                             })?;
                         row.cell_at(position)
                             .ok_or_else(|| {
-                                JazzError::Query(format!("direct core row missing column {column}"))
+                                JazzError::Query(format!("core row missing column {column}"))
                             })
-                            .and_then(direct_core_to_public_value)
+                            .and_then(core_to_public_value)
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok((row_id, values))
@@ -1241,16 +1227,16 @@ impl JazzClient {
         Ok(rows)
     }
 
-    #[cfg(feature = "direct-core-client")]
-    fn direct_cells(values: HashMap<String, Value>) -> Result<jazz::db::RowCells> {
+    #[cfg(feature = "core-client")]
+    fn core_cells(values: HashMap<String, Value>) -> Result<jazz::db::RowCells> {
         values
             .into_iter()
-            .map(|(name, value)| Ok((name, public_to_direct_core_value(value)?)))
+            .map(|(name, value)| Ok((name, public_to_core_value(value)?)))
             .collect()
     }
 
-    #[cfg(feature = "direct-core-client")]
-    fn direct_ordered_values(
+    #[cfg(feature = "core-client")]
+    fn core_ordered_values(
         &self,
         table: &str,
         values: &HashMap<String, Value>,
@@ -1266,7 +1252,7 @@ impl JazzClient {
             .map(|column| {
                 values.get(column.name.as_str()).cloned().ok_or_else(|| {
                     JazzError::Write(format!(
-                        "direct core insert missing required column {}",
+                        "core insert missing required column {}",
                         column.name.as_str()
                     ))
                 })
@@ -1274,8 +1260,8 @@ impl JazzClient {
             .collect()
     }
 
-    #[cfg(feature = "direct-core-client")]
-    fn apply_direct_transaction_overlay(
+    #[cfg(feature = "core-client")]
+    fn apply_core_transaction_overlay(
         &self,
         query: &Query,
         batch_id: BatchId,
@@ -1314,7 +1300,7 @@ impl JazzClient {
 
             for (column, value) in &write.cells {
                 if let Some(position) = columns.iter().position(|candidate| candidate == column) {
-                    values[position] = direct_core_to_public_value(value.clone())?;
+                    values[position] = core_to_public_value(value.clone())?;
                 }
             }
 
@@ -1343,12 +1329,12 @@ impl JazzClient {
         let default_session = default_session_from_context(&context);
         let has_server = !context.server_url.is_empty();
 
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
-            let core_schema = convert_public_schema_to_direct_core(&context.schema)
+            let schema_convert = convert_public_schema(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
-            let identity = direct_core_identity(&context, default_session.as_ref());
-            let storage = direct_core_storage(&core_schema, &context)?;
+            let identity = core_identity(&context, default_session.as_ref());
+            let storage = core_storage(&schema_convert, &context)?;
             let auth = has_server.then(|| WsAuthConfig {
                 jwt_token: if context.backend_secret.is_some() {
                     None
@@ -1359,8 +1345,8 @@ impl JazzClient {
                 admin_secret: context.admin_secret.clone(),
                 backend_session: None,
             });
-            let direct_engine = DirectCoreEngine::start(
-                core_schema,
+            let core_engine = ClientEngine::start(
+                schema_convert,
                 storage,
                 identity,
                 has_server.then(|| context.server_url.clone()),
@@ -1372,7 +1358,7 @@ impl JazzClient {
             let client = Self {
                 default_session,
                 write_context: None,
-                engine: direct_engine,
+                engine: core_engine,
                 public_schema: context.schema.clone(),
                 has_server,
                 subscriptions: Arc::new(RwLock::new(HashMap::new())),
@@ -1394,18 +1380,18 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
             let _handle = SubscriptionHandle(
                 self.next_handle
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             );
             let (tx, rx) = mpsc::unbounded_channel::<OrderedRowDelta>();
-            let core_query = self.direct_core_query(&query)?;
+            let core_query = self.core_query(&query)?;
             self.engine
                 .subscribe(
                     core_query,
-                    Self::direct_read_opts(Some(DurabilityTier::EdgeServer)),
+                    Self::core_read_opts(Some(DurabilityTier::EdgeServer)),
                     query.table.as_str().to_string(),
                     tx,
                 )
@@ -1422,21 +1408,21 @@ impl JazzClient {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
-            let opts = Self::direct_read_opts(durability_tier);
+            let opts = Self::core_read_opts(durability_tier);
             let rows = self
                 .engine
                 .query_rows(
-                    self.direct_core_query(&query)?,
+                    self.core_query(&query)?,
                     opts,
                     query.table.as_str().to_string(),
                     durability_tier.is_some(),
                 )
                 .await?;
-            let mut rows = self.direct_rows_to_public(&query, rows)?;
+            let mut rows = self.core_rows_to_public(&query, rows)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
-                self.apply_direct_transaction_overlay(&query, batch_id, &mut rows)?;
+                self.apply_core_transaction_overlay(&query, batch_id, &mut rows)?;
             }
             Ok(rows)
         }
@@ -1458,10 +1444,10 @@ impl JazzClient {
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
-            let row_values = self.direct_ordered_values(table, &values)?;
-            let cells = Self::direct_cells(values)?;
+            let row_values = self.core_ordered_values(table, &values)?;
+            let cells = Self::core_cells(values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 let row_id = self.engine.stage_insert(
                     batch_id,
@@ -1474,7 +1460,7 @@ impl JazzClient {
                 let (row_id, tx_id) =
                     self.engine
                         .insert(table.to_string(), object_id.into(), cells)?;
-                let batch_id = direct_batch_id(tx_id);
+                let batch_id = core_batch_id(tx_id);
                 Ok((row_id, row_values, batch_id))
             }
         }
@@ -1487,45 +1473,45 @@ impl JazzClient {
         object_id: Uuid,
         values: HashMap<String, Value>,
     ) -> Result<BatchId> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
-            let cells = Self::direct_cells(values)?;
+            let cells = Self::core_cells(values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.engine
                     .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
                 Ok(batch_id)
             } else {
                 let tx_id = self.engine.upsert(table.to_string(), object_id, cells)?;
-                Ok(direct_batch_id(tx_id))
+                Ok(core_batch_id(tx_id))
             }
         }
     }
 
     /// Update a row.
     pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
-            let cells = Self::direct_cells(updates.into_iter().collect())?;
+            let cells = Self::core_cells(updates.into_iter().collect())?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.engine.stage_update(batch_id, object_id, cells)?;
                 Ok(batch_id)
             } else {
                 let tx_id = self.engine.update(object_id, cells)?;
-                Ok(direct_batch_id(tx_id))
+                Ok(core_batch_id(tx_id))
             }
         }
     }
 
     /// Delete a row.
     pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.engine.stage_delete(batch_id, object_id)?;
                 Ok(batch_id)
             } else {
                 let tx_id = self.engine.delete(object_id)?;
-                Ok(direct_batch_id(tx_id))
+                Ok(core_batch_id(tx_id))
             }
         }
     }
@@ -1536,7 +1522,7 @@ impl JazzClient {
     /// not visible to ordinary reads until the transaction is committed and
     /// accepted by the authority.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
             let batch_id = self.engine.begin_transaction()?;
             let client = self.with_write_context(WriteContext::default().with_batch_id(batch_id));
@@ -1546,7 +1532,7 @@ impl JazzClient {
 
     /// Commit an open transaction by batch id.
     pub fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
             self.engine.commit_transaction(batch_id)
         }
@@ -1556,14 +1542,14 @@ impl JazzClient {
     ///
     /// Returns whether a local batch record existed for the transaction.
     pub fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
             self.engine.rollback_transaction(batch_id)
         }
     }
 
     pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
             self.engine.wait_for_batch(batch_id, tier).await
         }
@@ -1578,7 +1564,7 @@ impl JazzClient {
 
     /// Get the current schema.
     pub fn schema(&self) -> Result<Schema> {
-        #[cfg(feature = "direct-core-client")]
+        #[cfg(feature = "core-client")]
         {
             Ok(self.public_schema.clone())
         }
@@ -1594,9 +1580,9 @@ impl JazzClient {
         JazzClient {
             default_session: self.default_session.clone(),
             write_context: Some(write_context),
-            #[cfg(feature = "direct-core-client")]
+            #[cfg(feature = "core-client")]
             engine: self.engine.clone(),
-            #[cfg(feature = "direct-core-client")]
+            #[cfg(feature = "core-client")]
             public_schema: self.public_schema.clone(),
             has_server: self.has_server,
             subscriptions: Arc::clone(&self.subscriptions),
@@ -1621,8 +1607,8 @@ impl JazzClient {
         None
     }
 
-    #[cfg(feature = "direct-core-client")]
-    pub fn direct_core_local_driver_active(&self) -> bool {
+    #[cfg(feature = "core-client")]
+    pub fn local_driver_active(&self) -> bool {
         true
     }
 
@@ -1633,8 +1619,8 @@ impl JazzClient {
             .expect("connect local JazzClient")
     }
 
-    #[cfg(feature = "direct-core-client")]
-    pub async fn connect_with_direct_core_local_driver(context: AppContext) -> Result<Self> {
+    #[cfg(feature = "core-client")]
+    pub async fn connect_with_local_driver(context: AppContext) -> Result<Self> {
         Self::connect_inner(context).await
     }
 
@@ -1720,19 +1706,19 @@ mod tests {
         format!("{header}.{payload}.sig")
     }
 
-    #[cfg(feature = "direct-core-client")]
+    #[cfg(feature = "core-client")]
     #[test]
-    fn direct_core_integer_bridge_preserves_signed_i32_bits() {
-        let core_value = public_to_direct_core_value(Value::Integer(-1))
-            .expect("negative i32 should encode for direct core");
+    fn core_integer_bridge_preserves_signed_i32_bits() {
+        let core_value =
+            public_to_core_value(Value::Integer(-1)).expect("negative i32 should encode for core");
 
         assert_eq!(core_value, CoreValue::U32(0x7fff_ffff));
         assert_eq!(
-            direct_core_to_public_value(core_value).expect("decode signed i32"),
+            core_to_public_value(core_value).expect("decode signed i32"),
             Value::Integer(-1)
         );
         assert_eq!(
-            public_to_direct_core_value(Value::Integer(0)).expect("encode zero"),
+            public_to_core_value(Value::Integer(0)).expect("encode zero"),
             CoreValue::U32(0x8000_0000)
         );
     }
@@ -1769,34 +1755,33 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "direct-core-client")]
+    #[cfg(feature = "core-client")]
     #[tokio::test]
-    async fn direct_core_engine_transaction_stages_and_commits() {
+    async fn core_engine_transaction_stages_and_commits() {
         let public_schema = declared_todo_schema();
-        let core_schema =
-            convert_public_schema_to_direct_core(&public_schema).expect("convert schema");
-        let storage = direct_core_storage(
-            &core_schema,
+        let schema_convert = convert_public_schema(&public_schema).expect("convert schema");
+        let storage = core_storage(
+            &schema_convert,
             &make_offline_context(
-                AppId::from_name("direct-core-transaction-test"),
+                AppId::from_name("core-transaction-test"),
                 TempDir::new().expect("tempdir").keep(),
                 public_schema.clone(),
             ),
         )
-        .expect("open direct core storage");
-        let engine = DirectCoreEngine::start(
-            core_schema.clone(),
+        .expect("open core storage");
+        let engine = ClientEngine::start(
+            schema_convert.clone(),
             storage,
             CoreDbIdentity {
                 node: CoreNodeUuid::from_bytes([0x11; 16]),
                 author: CoreAuthorId::from_bytes([0xa1; 16]),
             },
             None,
-            AppId::from_name("direct-core-transaction-test"),
+            AppId::from_name("core-transaction-test"),
             None,
         )
         .await
-        .expect("open direct core engine");
+        .expect("open core engine");
 
         let batch_id = engine.begin_transaction().expect("begin transaction");
         let row_id = engine
@@ -1838,9 +1823,9 @@ mod tests {
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn offline_persistent_client_rehydrates_rows_from_direct_core_storage() {
+    async fn offline_persistent_client_rehydrates_rows_from_core_storage() {
         let data_dir = TempDir::new().expect("temp client dir");
-        let app_id = AppId::from_name("client-direct-core-row-rehydrate");
+        let app_id = AppId::from_name("client-core-row-rehydrate");
         let context = make_offline_context_with_storage(
             app_id,
             data_dir.path().to_path_buf(),
@@ -1850,7 +1835,7 @@ mod tests {
 
         let client = JazzClient::connect(context.clone())
             .await
-            .expect("connect offline persistent direct core client");
+            .expect("connect offline persistent core client");
         let (row_id, _values, batch_id) = client
             .insert(
                 "todos",
@@ -1865,7 +1850,7 @@ mod tests {
 
         let restarted = JazzClient::connect(context)
             .await
-            .expect("reconnect offline persistent direct core client");
+            .expect("reconnect offline persistent core client");
         let rows = restarted
             .query(Query::new("todos"), Some(DurabilityTier::Local))
             .await
@@ -1882,9 +1867,9 @@ mod tests {
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn offline_memory_client_does_not_create_direct_core_rocksdb_dir() {
+    async fn offline_memory_client_does_not_create_core_rocksdb_dir() {
         let data_dir = TempDir::new().expect("temp client dir");
-        let app_id = AppId::from_name("client-direct-core-memory");
+        let app_id = AppId::from_name("client-core-memory");
         let context = make_offline_context_with_storage(
             app_id,
             data_dir.path().to_path_buf(),
@@ -1894,7 +1879,7 @@ mod tests {
 
         let client = JazzClient::connect(context)
             .await
-            .expect("connect offline memory direct core client");
+            .expect("connect offline memory core client");
         let (_row_id, _values, batch_id) = client
             .insert(
                 "todos",
@@ -1909,7 +1894,7 @@ mod tests {
 
         assert!(
             !data_dir.path().join("jazz-core.rocksdb").exists(),
-            "memory direct core storage should not create a RocksDB data directory"
+            "memory core storage should not create a RocksDB data directory"
         );
     }
 }

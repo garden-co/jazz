@@ -585,11 +585,9 @@ pub(super) async fn publish_schema_handler(
             .into_response();
     }
 
-    let direct_schema =
+    let schema_convert =
         match state.core_server().is_some() || state.core_server_storage_config.is_some() {
-            true => match crate::server::direct_schema::convert_public_schema_to_direct_core(
-                &request.schema,
-            ) {
+            true => match crate::server::schema_convert::convert_public_schema(&request.schema) {
                 Ok(schema) => Some(schema),
                 Err(err) => {
                     return (
@@ -605,7 +603,7 @@ pub(super) async fn publish_schema_handler(
         };
 
     let schema_hash = SchemaHash::compute(&request.schema);
-    if let Some(schema) = direct_schema.clone() {
+    if let Some(schema) = schema_convert.clone() {
         let core_server = match state.core_server() {
             Some(core_server) => core_server,
             None => match state.start_core_server(schema.clone()) {
@@ -874,26 +872,25 @@ pub(super) async fn publish_permissions_handler(
         table.policies = policies.clone();
     }
 
-    let direct_schema =
-        match state.core_server().is_some() || state.core_server_storage_config.is_some() {
-            true => {
-                match crate::server::direct_schema::convert_public_schema_to_direct_core(
-                    &schema_with_permissions,
-                ) {
-                    Ok(schema) => Some(schema),
-                    Err(err) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(ErrorResponse::bad_request(format!(
-                                "permissions schema is not supported by core server: {err}"
-                            ))),
-                        )
-                            .into_response();
-                    }
+    let schema_convert = match state.core_server().is_some()
+        || state.core_server_storage_config.is_some()
+    {
+        true => {
+            match crate::server::schema_convert::convert_public_schema(&schema_with_permissions) {
+                Ok(schema) => Some(schema),
+                Err(err) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::bad_request(format!(
+                            "permissions schema is not supported by core server: {err}"
+                        ))),
+                    )
+                        .into_response();
                 }
             }
-            false => None,
-        };
+        }
+        false => None,
+    };
 
     match state.catalogue.publish_permissions_bundle(
         &state.catalogue_store,
@@ -906,7 +903,7 @@ pub(super) async fn publish_permissions_handler(
             .current_permissions_head(&state.catalogue_store)
         {
             Ok(head) => {
-                if let Some(schema) = direct_schema {
+                if let Some(schema) = schema_convert {
                     let core_server = match state.core_server() {
                         Some(core_server) => core_server,
                         None => match state.start_core_server(schema.clone()) {

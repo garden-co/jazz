@@ -191,12 +191,12 @@ Until deleted, treat them as replacement targets only.
 
 - Delete or gut old alpha engine internals listed under "Replace Or Delete".
   The server no longer has `ServerState::catalogue_runtime`; admin
-  schema/permissions/lens HTTP now uses a storage-backed `DirectCatalogueStore`,
+  schema/permissions/lens HTTP now uses a storage-backed `StoredCatalogue`,
   while websocket sync stays on the direct `CoreServer` path. The test-only
   alpha websocket frame injection method has been removed; tests must use direct
   websocket/public-client paths or push catalogue payloads into the catalogue
   store explicitly.
-- Remaining catalogue-store simplification gap: `DirectCatalogueStore` now uses
+- Remaining catalogue-store simplification gap: `StoredCatalogue` now uses
   a storage-backed `CatalogueIndex` for schema hashes, publish timestamps,
   migration/lens connectivity, and permissions heads/bundles. The old
   `SchemaManager` no longer serves admin catalogue reads/writes and production
@@ -213,9 +213,9 @@ Until deleted, treat them as replacement targets only.
   would require a whole target-table trigger.
 - Richer public-builder gates cover arrays, binary large values, nullable refs,
   integer predicates, filtered subscriptions, and websocket convergence. Public
-  `schema.int()` is represented in direct core as `U32`, with writes and query
+  `schema.int()` is represented in core as `U32`, with writes and query
   literals restricted to the non-negative signed 32-bit subset (`0..=i32::MAX`).
-- The direct websocket route is the intended sync boundary. Old
+- The core WebSocket route is the intended sync boundary. Old
   `transport_protocol.rs` and `transport_manager.rs` code should not regain
   ownership of `/ws` semantics; the old `sync_manager` module has been deleted.
 - Runtime-facing HTTP/auth error DTOs now live in `transport_error.rs`; any
@@ -223,8 +223,8 @@ Until deleted, treat them as replacement targets only.
   transport surface or test compatibility, not shared server API.
 - The old alpha `TransportManager`, `transport_protocol`, runtime transport
   slot, and Tokio `connect`/`ws_stream` path are gated behind
-  `transport`/`transport-websocket`. Direct-core browser/server flows should
-  depend only on the direct websocket route/client helper, not the alpha
+  `transport`/`transport-websocket`. Core browser/server flows should
+  depend only on the core WebSocket route/client helper, not the alpha
   transport manager machinery.
 - `ServerState::process_ws_client_frame` has been removed. Remaining public
   `transport_protocol` symbols exist only because the gated legacy
@@ -232,19 +232,19 @@ Until deleted, treat them as replacement targets only.
   ingress path again.
 - Edge upstream sync currently fails closed when `--upstream-url` is set. This
   intentionally removes the old alpha `TransportManager` path that was pointed
-  at the direct core websocket route; server-to-server sync should be rebuilt on
-  direct core wire frames instead.
-- Persistent browser runtime should stay a worker-owned direct core DB, with the
+  at the core WebSocket route; server-to-server sync should be rebuilt on
+  core wire frames instead.
+- Persistent browser runtime should stay a worker-owned core DB, with the
   main thread acting as the public API/proxy surface. `CoreRuntime::fromDb`
   exists so the worker no longer pretends an already-open OPFS DB is
   `openMemory`. The main-thread/worker write protocol no longer sends a
   duplicate transaction id; the main thread keeps the public write handle while
-  the worker accepts direct core mutation calls over encoded row/patch-shaped
-  arguments. The worker implementation now names only the direct-core
+  the worker accepts core mutation calls over encoded row/patch-shaped
+  arguments. The worker implementation now names only the core
   capabilities it needs internally, instead of importing the full legacy
-  `Runtime` interface. Persistent browser reset is implemented as a direct
+  `Runtime` interface. Persistent browser reset is implemented as a core
   runtime capability: `db.logout({ wipeData: true })` / `deleteClientStorage()`
-  asks the worker to settle pending local writes, close/free the direct WASM DB,
+  asks the worker to settle pending local writes, close/free the core WASM DB,
   and destroy the scoped browser storage namespace.
 - The public TypeScript runtime/package root no longer exports internal helper
   plumbing such as query translators, row/value converters,
@@ -253,15 +253,15 @@ Until deleted, treat them as replacement targets only.
   types remain the intended high-level shell.
 - The base TypeScript `Runtime` interface no longer requires transaction
   methods. Transaction-capable runtimes opt into `TransactionalRuntime`; this
-  removes throw-only transaction methods from persistent browser direct-core
+  removes throw-only transaction methods from persistent browser core
   runtime while keeping real `CoreRuntime` mergeable transaction plumbing
   explicit.
-- Direct-core mergeable transactions support session-scoped writes through
+- Core mergeable transactions support session-scoped writes through
   identity-aware staging (`mergeable_tx_for_identity` /
   `mergeableTxForIdentity`). A mergeable transaction chooses its identity on
   first write and rejects mixed identities rather than silently writing under
   the wrong author.
-- Direct-core exclusive transactions are now exposed through WASM
+- Core exclusive transactions are now exposed through WASM
   (`exclusiveTx`) and the TypeScript runtime routes `beginExclusiveTransaction`
   through the same transaction lifecycle as mergeable transactions. Session-
   scoped exclusive writes still fail closed because core does not expose
@@ -276,27 +276,27 @@ Until deleted, treat them as replacement targets only.
   `jazz_tools::sync` and are re-exported from the crate root. The old
   `sync_manager` module has been deleted; needed compatibility vocabulary must
   live under `sync` or another non-legacy module.
-- Rust `JazzClient` no longer has a `ClientEngine::{Legacy, DirectCore}` split:
-  direct-core clients are the only live construction path. Server-backed
-  clients still connect over the direct websocket route; offline persistent
+- Rust `JazzClient` no longer has a legacy/core engine split:
+  core clients are the only live construction path. Server-backed
+  clients still connect over the core WebSocket route; offline persistent
   clients now use vendored core RocksDB storage at `jazz-core.rocksdb` and have
   first public row rehydrate coverage. Legacy catalogue rehydrate is
   intentionally not revived as a parallel engine.
-- Rust `JazzClient` mergeable transactions now stage writes on the direct-core
+- Rust `JazzClient` mergeable transactions now stage writes on the core
   path, expose open transaction writes through transaction-scoped reads, and
   commit to a direct mergeable transaction instead of falling back to the old
   alpha batch runtime.
-- Restore replay through the direct websocket server is covered by core
+- Restore replay through the core WebSocket server is covered by core
   regressions plus the unskipped TS server convergence and browser public alpha
   gates. Restore writes parent the current content/deletion winners, and view
   replay ships deletion-register witnesses for restored result rows.
 - Public shell APIs (`Db`, `JazzClient`, schema DSL, framework adapters, tests,
   examples) should remain; duplicate execution/query/sync/storage internals
-  should be hollowed or deleted once direct-core gates cover the behavior.
+  should be hollowed or deleted once core gates cover the behavior.
 - Remaining TS runtime cleanup pressure is concentrated around relation query
   and subscription recompute helpers in `core-runtime/runtime.ts` plus the
   query adapter's relation IR compiler. Those are useful integration scaffolds
-  but should be replaced by direct core prepared query/subscription lowering,
+  but should be replaced by core prepared query/subscription lowering,
   not allowed to become a second query engine.
 - Resolve crate/package name collisions before adding copied core crates to the
   root Cargo or pnpm workspaces.
