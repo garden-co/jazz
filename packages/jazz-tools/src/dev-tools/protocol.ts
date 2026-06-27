@@ -3,7 +3,6 @@ import type {
   DurabilityTier,
   InsertValues,
   QueryExecutionOptions,
-  QueryInput,
   Row,
   Value,
   WasmSchema,
@@ -47,7 +46,7 @@ export type DevtoolsAnnounceResponsePayload = {
 };
 
 export type DevtoolsClientQueryRequestPayload = {
-  query: string | QueryInput;
+  query: string;
   options?: QueryExecutionOptions;
   tier?: DurabilityTier;
 };
@@ -76,7 +75,7 @@ export type DevtoolsClientDeleteDurableRequestPayload = {
 export type DevtoolsClientDeleteDurableResponsePayload = { deleted: true };
 
 export type DevtoolsClientSubscribeRequestPayload = {
-  query: string | QueryInput;
+  query: string;
   options?: QueryExecutionOptions;
   tier?: DurabilityTier;
   subscriptionId: string;

@@ -4,7 +4,6 @@ import {
   DurabilityTier,
   InsertValues,
   QueryExecutionOptions,
-  QueryInput,
   Value,
   WasmSchema,
 } from "../index.js";
@@ -441,7 +440,7 @@ function hookRegistration(
           }
 
           const runtimeSubscriptionId = client.subscribe(
-            query as string | QueryInput,
+            query,
             (delta) => {
               window.postMessage(
                 {
@@ -467,7 +466,7 @@ function hookRegistration(
           return;
         }
 
-        const rows = await client.query(query as string | QueryInput, options);
+        const rows = await client.query(query, options);
         respond({ ok: true, payload: rows });
       } catch (error) {
         const errorMessage =
