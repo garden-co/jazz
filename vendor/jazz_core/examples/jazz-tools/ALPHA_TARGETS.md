@@ -331,9 +331,9 @@ API/testability gap, not as covered app persistence.
   The legacy `onMutationError` callback/event path has also been removed from
   the TypeScript runtime surface; direct-core writes report policy/durability
   rejection through retained write handles and `.wait(...)`. Old
-  SyncManager integration test modules are unwired from active Rust test
-  compilation so they no longer act as the semantic oracle for the replacement
-  engine.
+  SyncManager integration test modules have been removed from active source so
+  they no longer act as the semantic oracle for the replacement engine; new
+  coverage must assert public direct-core client/server/browser behavior.
   The old `query_manager` execution engine (`manager`, graph/graph_nodes,
   subscriptions, writes, old indexes, old policy graph/IR/counters, server
   query helpers, and their manager/rebac tests) has been deleted from the
