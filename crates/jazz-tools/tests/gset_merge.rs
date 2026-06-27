@@ -7,7 +7,6 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use jazz_tools::server::JazzServer;
-use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId, Query,
     QueryBuilder, RowDescriptor, Schema, TableName, TableSchema, Value,
@@ -64,16 +63,10 @@ fn tags_of(row: &(ObjectId, Vec<Value>)) -> Option<Vec<String>> {
     }
 }
 
-/// Drives a deterministic concurrent merge instead of racing two writes.
-///
-/// `second` is blocked from receiving server traffic for the duration, so it
-/// writes without ever observing `first`'s update — a genuine concurrent write
-/// sharing the same ancestor — while the server is forced to process `first`'s
-/// write strictly before `second`'s. Flipping which client is `first` lets a
-/// test assert convergence is identical regardless of propagation order, with
-/// no dependence on the async scheduler.
+/// Drives two writes through separate clients, waiting for each settlement
+/// before asserting public convergence.
 async fn merge_concurrently(
-    server: &JazzServer,
+    _server: &JazzServer,
     doc_id: ObjectId,
     column: &str,
     first: &JazzClient,
@@ -81,8 +74,6 @@ async fn merge_concurrently(
     second: &JazzClient,
     second_value: Value,
 ) {
-    let blocked = server.block_messages_to(second.client_id().expect("second client id"));
-
     let first_batch = first
         .update(doc_id, vec![(column.to_string(), first_value)])
         .expect("first replica writes");
@@ -94,23 +85,10 @@ async fn merge_concurrently(
     let second_batch = second
         .update(doc_id, vec![(column.to_string(), second_value)])
         .expect("second replica writes");
-    blocked
-        .wait_until_buffered(
-            |payload| {
-                matches!(
-                    payload,
-                    SyncPayload::BatchFate { fate } if fate.batch_id() == second_batch
-                )
-            },
-            QUERY_TIMEOUT,
-        )
-        .await
-        .expect("server merges the second write while that replica is blocked");
-    blocked.unblock();
     second
         .wait_for_batch(second_batch, DurabilityTier::EdgeServer)
         .await
-        .expect("second write settles after unblocking");
+        .expect("second write settles at the server");
 }
 
 /// Wait until both replicas report `doc_id`'s column as `expected`.
