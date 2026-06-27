@@ -12,7 +12,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::middleware::auth::validate_admin_secret;
-use crate::query_api::types::{ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value};
+use crate::public_api::types::{ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value};
 use crate::schema_lens::{Lens, LensOp, LensTransform};
 use crate::server::{ServerState, ShutdownPhase};
 use crate::transport_error::ErrorResponse;
@@ -583,9 +583,11 @@ pub(super) async fn publish_schema_handler(
             .into_response();
     }
 
-    let schema_convert =
-        match state.server_shell().is_some() || state.server_shell_storage_config.is_some() {
-            true => match crate::server::schema_convert::convert_public_schema(&request.schema) {
+    let public_schema_convert = match state.core_server_shell().is_some()
+        || state.core_server_shell_storage_config.is_some()
+    {
+        true => {
+            match crate::server::public_schema_convert::convert_public_schema(&request.schema) {
                 Ok(schema) => Some(schema),
                 Err(err) => {
                     return (
@@ -596,16 +598,17 @@ pub(super) async fn publish_schema_handler(
                     )
                         .into_response();
                 }
-            },
-            false => None,
-        };
+            }
+        }
+        false => None,
+    };
 
     let schema_hash = SchemaHash::compute(&request.schema);
-    if let Some(schema) = schema_convert.clone() {
-        let server_shell = match state.server_shell() {
-            Some(server_shell) => server_shell,
-            None => match state.start_server_shell(schema.clone()) {
-                Ok(server_shell) => server_shell,
+    if let Some(schema) = public_schema_convert.clone() {
+        let core_server_shell = match state.core_server_shell() {
+            Some(core_server_shell) => core_server_shell,
+            None => match state.start_core_server_shell(schema.clone()) {
+                Ok(core_server_shell) => core_server_shell,
                 Err(err) => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -617,7 +620,7 @@ pub(super) async fn publish_schema_handler(
                 }
             },
         };
-        if let Err(err) = server_shell.publish_schema(schema).await {
+        if let Err(err) = core_server_shell.publish_schema(schema).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(format!(
@@ -870,11 +873,13 @@ pub(super) async fn publish_permissions_handler(
         table.policies = policies.clone();
     }
 
-    let schema_convert = match state.server_shell().is_some()
-        || state.server_shell_storage_config.is_some()
+    let public_schema_convert = match state.core_server_shell().is_some()
+        || state.core_server_shell_storage_config.is_some()
     {
         true => {
-            match crate::server::schema_convert::convert_public_schema(&schema_with_permissions) {
+            match crate::server::public_schema_convert::convert_public_schema(
+                &schema_with_permissions,
+            ) {
                 Ok(schema) => Some(schema),
                 Err(err) => {
                     return (
@@ -901,11 +906,11 @@ pub(super) async fn publish_permissions_handler(
             .current_permissions_head(&state.catalogue_store)
         {
             Ok(head) => {
-                if let Some(schema) = schema_convert {
-                    let server_shell = match state.server_shell() {
-                        Some(server_shell) => server_shell,
-                        None => match state.start_server_shell(schema.clone()) {
-                            Ok(server_shell) => server_shell,
+                if let Some(schema) = public_schema_convert {
+                    let core_server_shell = match state.core_server_shell() {
+                        Some(core_server_shell) => core_server_shell,
+                        None => match state.start_core_server_shell(schema.clone()) {
+                            Ok(core_server_shell) => core_server_shell,
                             Err(err) => {
                                 return (
                                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -917,7 +922,7 @@ pub(super) async fn publish_permissions_handler(
                             }
                         },
                     };
-                    if let Err(err) = server_shell.publish_schema(schema).await {
+                    if let Err(err) = core_server_shell.publish_schema(schema).await {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse::internal(format!(

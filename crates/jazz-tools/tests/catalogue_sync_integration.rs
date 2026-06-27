@@ -10,9 +10,9 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::schema_api::PolicyExpr;
-use jazz_tools::schema_api::SchemaHash;
-use jazz_tools::schema_api::TablePolicies;
+use jazz_tools::public_schema::PolicyExpr;
+use jazz_tools::public_schema::SchemaHash;
+use jazz_tools::public_schema::TablePolicies;
 use jazz_tools::row_input;
 use jazz_tools::schema_lens::{Lens, LensOp, LensTransform};
 use jazz_tools::server::JazzServer;
@@ -584,7 +584,7 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
         .expect("decode edge schema publish response");
     assert_eq!(published_schema.hash, schema_hash);
 
-    let schema_convert_response = client
+    let public_schema_convert_response = client
         .get(format!(
             "{}/apps/{app_id}/schema/{schema_hash}",
             core.base_url()
@@ -593,13 +593,13 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
         .send()
         .await
         .expect("fetch schema from core");
-    assert_eq!(schema_convert_response.status(), StatusCode::OK);
-    let schema_convert: StoredSchemaHttpResponse = schema_convert_response
+    assert_eq!(public_schema_convert_response.status(), StatusCode::OK);
+    let public_schema_convert: StoredSchemaHttpResponse = public_schema_convert_response
         .json()
         .await
         .expect("decode core schema response");
     assert_eq!(
-        SchemaHash::compute(&schema_convert.schema).to_string(),
+        SchemaHash::compute(&public_schema_convert.schema).to_string(),
         schema_hash
     );
 

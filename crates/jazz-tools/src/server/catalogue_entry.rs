@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::admin_catalogue_row_format::{decode_row, encode_row};
 use crate::metadata::MetadataKey;
 use crate::object::ObjectId;
-use crate::query_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
-use crate::row_format::{decode_row, encode_row};
+use crate::public_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogueEntry {

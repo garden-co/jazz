@@ -26,7 +26,7 @@ type BenchDb = Db<MemoryStorage>;
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
-fn schema_convert() -> JazzSchema {
+fn public_schema_convert() -> JazzSchema {
     let folder_owner_policy =
         Policy::shape(Query::from("folders").filter(eq(col("owner"), claim("sub"))));
     let folder_access_policy = Policy::shape(Query::from("documents").join_via_column(
@@ -75,7 +75,7 @@ fn schema_convert() -> JazzSchema {
 }
 
 fn open_db(seed: u64) -> BenchDb {
-    let schema = schema_convert();
+    let schema = public_schema_convert();
     let column_families = schema.column_families();
     let refs = column_families
         .iter()

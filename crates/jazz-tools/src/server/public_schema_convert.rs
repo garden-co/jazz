@@ -8,8 +8,8 @@ use jazz::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
 };
 
-use crate::query_api::policy::{CmpOp, PolicyValue};
-use crate::schema_api::{
+use crate::public_api::policy::{CmpOp, PolicyValue};
+use crate::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
     TableSchema, Value,
 };
@@ -424,9 +424,9 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionE
 mod tests {
     use super::*;
     use crate::object::ObjectId;
-    use crate::query_api::policy::{CmpOp, PolicyValue};
-    use crate::query_api::types::TableSchemaBuilder;
-    use crate::schema_api::{
+    use crate::public_api::policy::{CmpOp, PolicyValue};
+    use crate::public_api::types::TableSchemaBuilder;
+    use crate::public_schema::{
         ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, SchemaBuilder, TablePolicies,
         TableSchema,
     };

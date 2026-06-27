@@ -94,7 +94,7 @@ export interface TransactionalRuntime extends Runtime {
 /**
  * Authentication configuration for connecting to a Jazz server.
  *
- * Maps directly to the Rust `AuthConfig` struct in `jazz-tools/src/transport_auth.rs`.
+ * Maps directly to the Rust `AuthConfig` struct in `jazz-tools/src/websocket_prelude_auth.rs`.
  * All fields are optional; supply only the ones relevant to your auth mode.
  */
 export interface AuthConfig {

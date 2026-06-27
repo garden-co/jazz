@@ -8,8 +8,8 @@ use super::magic_columns::{MagicColumnKind, magic_column_kind};
 use super::relation_ir::{PredicateExpr, RelExpr, RowIdRef, ValueRef};
 use super::session::Session;
 use super::types::{RowDescriptor, Value};
+use crate::admin_catalogue_row_format::{column_is_null, decode_column};
 use crate::metadata::RowProvenance;
-use crate::row_format::{column_is_null, decode_column};
 use serde::{Deserialize, Serialize};
 
 /// Comparison operators for policy expressions.
@@ -2390,10 +2390,10 @@ mod tests {
                     table: TableName::new("todo_shares"),
                 }),
                 predicate: PredicateExpr::Cmp {
-                    left: crate::query_api::relation_ir::ColumnRef::unscoped("todo_id"),
-                    op: crate::query_api::relation_ir::PredicateCmpOp::Eq,
+                    left: crate::public_api::relation_ir::ColumnRef::unscoped("todo_id"),
+                    op: crate::public_api::relation_ir::PredicateCmpOp::Eq,
                     right: ValueRef::OuterColumn(
-                        crate::query_api::relation_ir::ColumnRef::unscoped("id"),
+                        crate::public_api::relation_ir::ColumnRef::unscoped("id"),
                     ),
                 },
             },
@@ -2411,7 +2411,7 @@ mod tests {
                     predicate,
                     PredicateExpr::Cmp {
                         left,
-                        op: crate::query_api::relation_ir::PredicateCmpOp::Eq,
+                        op: crate::public_api::relation_ir::PredicateCmpOp::Eq,
                         right: ValueRef::Literal(Value::Text(value)),
                     } if left.column == "todo_id" && value == "todo-1"
                 ));
@@ -2432,9 +2432,9 @@ mod tests {
                 table: TableName::new("todo_shares"),
             }),
             predicate: PredicateExpr::Cmp {
-                left: crate::query_api::relation_ir::ColumnRef::unscoped("todo_id"),
-                op: crate::query_api::relation_ir::PredicateCmpOp::Eq,
-                right: ValueRef::OuterColumn(crate::query_api::relation_ir::ColumnRef::unscoped(
+                left: crate::public_api::relation_ir::ColumnRef::unscoped("todo_id"),
+                op: crate::public_api::relation_ir::PredicateCmpOp::Eq,
+                right: ValueRef::OuterColumn(crate::public_api::relation_ir::ColumnRef::unscoped(
                     "id",
                 )),
             },
@@ -2450,7 +2450,7 @@ mod tests {
             predicate,
             PredicateExpr::Cmp {
                 left,
-                op: crate::query_api::relation_ir::PredicateCmpOp::Eq,
+                op: crate::public_api::relation_ir::PredicateCmpOp::Eq,
                 right: ValueRef::Literal(Value::Uuid(bound_id)),
             } if left.column == "todo_id" && bound_id == row_id
         ));
@@ -2530,8 +2530,8 @@ mod tests {
     // evaluate_simple_parts tests
     // ========================================================================
 
-    use crate::query_api::types::{ColumnDescriptor, ColumnType};
-    use crate::row_format::encode_row;
+    use crate::admin_catalogue_row_format::encode_row;
+    use crate::public_api::types::{ColumnDescriptor, ColumnType};
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![

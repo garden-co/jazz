@@ -9,13 +9,13 @@ mod builder;
 mod catalogue;
 mod catalogue_entry;
 mod catalogue_storage;
+mod core_server_shell;
+pub mod core_websocket_transport;
+pub(crate) mod public_schema_convert;
 pub mod routes;
-pub(crate) mod schema_convert;
-mod server_shell;
 mod shutdown;
 #[cfg(feature = "test-utils")]
 mod testing;
-pub mod websocket_client;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub(crate) use catalogue::{PermissionsHeadSummary, ServerCatalogue, StoredCatalogue};
@@ -70,34 +70,35 @@ pub struct ServerState {
     /// Configured verifier for external JWTs.
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// Sendable handle to the local-owner server shell for the websocket route.
-    pub(crate) server_shell: StdRwLock<Option<server_shell::ServerShellHandle>>,
-    pub(crate) server_shell_storage_config: Option<StorageConfig>,
+    pub(crate) core_server_shell: StdRwLock<Option<core_server_shell::ServerShellHandle>>,
+    pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
     pub shutdown: ShutdownController,
 }
 
 impl ServerState {
-    pub(crate) fn server_shell(&self) -> Option<server_shell::ServerShellHandle> {
-        self.server_shell.read().unwrap().clone()
+    pub(crate) fn core_server_shell(&self) -> Option<core_server_shell::ServerShellHandle> {
+        self.core_server_shell.read().unwrap().clone()
     }
 
-    pub(crate) fn start_server_shell(
+    pub(crate) fn start_core_server_shell(
         &self,
         schema: jazz::schema::JazzSchema,
-    ) -> Result<server_shell::ServerShellHandle, String> {
-        if let Some(server_shell) = self.server_shell() {
-            return Ok(server_shell);
+    ) -> Result<core_server_shell::ServerShellHandle, String> {
+        if let Some(core_server_shell) = self.core_server_shell() {
+            return Ok(core_server_shell);
         }
 
         let storage_config = self
-            .server_shell_storage_config
+            .core_server_shell_storage_config
             .clone()
             .ok_or_else(|| "server shell storage is not configured".to_owned())?;
-        let mut server_shell = self.server_shell.write().unwrap();
-        if let Some(existing) = server_shell.clone() {
+        let mut core_server_shell = self.core_server_shell.write().unwrap();
+        if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = server_shell::ServerShellHandle::start_with_storage(schema, storage_config)?;
-        *server_shell = Some(started.clone());
+        let started =
+            core_server_shell::ServerShellHandle::start_with_storage(schema, storage_config)?;
+        *core_server_shell = Some(started.clone());
         Ok(started)
     }
 
@@ -162,7 +163,7 @@ mod tests {
     use super::*;
     use crate::AppId;
     use crate::middleware::AuthConfig;
-    use crate::query_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
+    use crate::public_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
     use crate::server::builder::{ServerBuilder, StorageBackend};
     use crate::server::catalogue_storage::CatalogueStorageResult;
 
@@ -241,8 +242,8 @@ mod tests {
                 .build()
                 .expect("build HTTP client"),
             jwt_verifier: None,
-            server_shell: StdRwLock::new(None),
-            server_shell_storage_config: None,
+            core_server_shell: StdRwLock::new(None),
+            core_server_shell_storage_config: None,
             shutdown: ShutdownController::new(timeout),
         })
     }
