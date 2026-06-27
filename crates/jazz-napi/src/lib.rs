@@ -28,6 +28,7 @@
 static GLOBAL: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
 use napi::bindgen_prelude::*;
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -45,9 +46,9 @@ use jazz::db::{
     PreparedQuery as DirectPreparedQueryInner, Propagation as DirectPropagation,
     ReadOpts as DirectReadOpts, RemovedRow as DirectRemovedRowInner, RowCells as DirectRowCells,
     SeededRowIdSource as DirectSeededRowIdSource, SubscriptionEvent as DirectSubscriptionEvent,
-    SubscriptionStream as DirectSubscriptionStream,
-    WireTransportAdapter as DirectWireTransportAdapter, WriteHandle as DirectWriteHandle,
-    block_on as direct_block_on,
+    SubscriptionStream as DirectSubscriptionStream, TickScheduler as DirectTickScheduler,
+    TickUrgency as DirectTickUrgency, WireTransportAdapter as DirectWireTransportAdapter,
+    WriteHandle as DirectWriteHandle, block_on as direct_block_on,
 };
 use jazz::groove::records::{
     BorrowedRecord as DirectBorrowedRecord, RecordDescriptor, Value as DirectValue,
@@ -179,6 +180,23 @@ struct DirectWireQueues {
 
 struct NapiWireTransport {
     queues: DirectWireQueues,
+}
+
+struct NapiTickScheduler {
+    callback: ThreadsafeFunction<String, ()>,
+}
+
+impl DirectTickScheduler for NapiTickScheduler {
+    fn schedule_tick(&self, urgency: DirectTickUrgency) {
+        let urgency = match urgency {
+            DirectTickUrgency::Immediate => "immediate",
+            DirectTickUrgency::Deferred => "deferred",
+        };
+        let _ = self.callback.call(
+            Ok(urgency.to_string()),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
+    }
 }
 
 impl DirectWireTransport for NapiWireTransport {
@@ -489,6 +507,20 @@ impl NapiDirectDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(DirectNapiDb::Persistent(Rc::new(db))))),
         })
+    }
+
+    #[napi(js_name = "setTickScheduler")]
+    pub fn set_tick_scheduler(&self, callback: ThreadsafeFunction<String, ()>) -> napi::Result<()> {
+        let scheduler = Rc::new(NapiTickScheduler { callback });
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
+            DirectNapiDb::Persistent(db) => db.set_tick_scheduler(Some(scheduler)),
+        }
+        Ok(())
     }
 
     #[napi(js_name = "prepareQuery")]
