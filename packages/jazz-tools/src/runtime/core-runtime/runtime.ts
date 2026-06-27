@@ -1427,9 +1427,10 @@ function subscriptionRecomputeQueryJson(queryJson: string): string | null {
   const hasArraySubqueries =
     Array.isArray(parsed.array_subqueries) && parsed.array_subqueries.length > 0;
   const relationKind = relationKindOf(parsed.relation_ir);
-  return hasArraySubqueries || relationKind === "Project" || relationKind === "Gather"
-    ? queryJson
-    : null;
+  if (relationKind === "Project" || relationKind === "Gather") {
+    throw unsupportedRelationQueryError();
+  }
+  return hasArraySubqueries ? queryJson : null;
 }
 
 function subscriptionTriggerQueryJsons(queryJson: string, schema: WasmSchema): string[] {

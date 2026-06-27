@@ -732,6 +732,142 @@ describe("CoreRuntime server transport", () => {
     expect(calls).toEqual([]);
   });
 
+  it("subscribes to supported root relation IR as one prepared native query", () => {
+    const calls: string[] = [];
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: (query: Uint8Array) => {
+              calls.push("prepareQuery");
+              preparedBytes = query;
+              return {};
+            },
+            subscribe: () => {
+              calls.push("subscribe");
+              return new ReadableStream();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      {
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            { name: "priority", column_type: { type: "Integer" }, nullable: false },
+          ],
+        },
+      },
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const handle = runtime.createSubscription(
+      JSON.stringify({
+        table: "todos",
+        select: ["title"],
+        relation_ir: {
+          Limit: {
+            input: {
+              Offset: {
+                input: {
+                  OrderBy: {
+                    input: {
+                      Filter: {
+                        input: { TableScan: { table: "todos" } },
+                        predicate: {
+                          Cmp: {
+                            left: { column: "title" },
+                            op: "Eq",
+                            right: { Literal: { type: "Text", value: "native" } },
+                          },
+                        },
+                      },
+                    },
+                    terms: [{ column: { column: "priority" }, direction: "Desc" }],
+                  },
+                },
+                offset: 2,
+              },
+            },
+            limit: 3,
+          },
+        },
+      }),
+    );
+
+    expect(handle).toBe(1);
+    expect(calls).toEqual(["prepareQuery", "subscribe"]);
+    expect(readPreparedQueryShape(preparedBytes!)).toEqual({
+      table: "todos",
+      predicates: [{ column: "title", opTag: 3, literalTag: 6, value: "native" }],
+      orderBy: [{ column: "priority", directionTag: 1 }],
+      limit: 3,
+      offset: 2,
+    });
+    expect(readPreparedSelect(preparedBytes!)).toEqual(["title"]);
+  });
+
+  it("rejects Gather subscriptions before preparing trigger fanout queries", () => {
+    const calls: string[] = [];
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            subscribe: () => {
+              calls.push("subscribe");
+              return new ReadableStream();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({
+          table: "todos",
+          relation_ir: {
+            Gather: {
+              seed: { TableScan: { table: "todos" } },
+              step: {
+                Project: {
+                  input: {
+                    Join: {
+                      left: { TableScan: { table: "todos" } },
+                      right: { TableScan: { table: "todos" } },
+                      on: [{ left: { column: "parent_id" }, right: { column: "id" } }],
+                    },
+                  },
+                },
+              },
+              max_depth: 3,
+            },
+          },
+        }),
+      ),
+    ).toThrow("refusing to run an overbroad table query");
+    expect(calls).toEqual([]);
+  });
+
   it("passes supported read tiers through and fails fast for unsupported read options", async () => {
     const runtime = directRuntimeWithEmptyDb();
 
@@ -1186,7 +1322,7 @@ function readPreparedComparison(query: Uint8Array): {
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
-  reader.option(() => undefined);
+  reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
   reader.readVec(() => undefined);
   reader.option(() => undefined);
   const limit = reader.option((optionReader) => optionReader.u64());
@@ -1219,6 +1355,23 @@ function readPreparedPredicateCount(query: Uint8Array): number {
   return reader.u64();
 }
 
+function readPreparedSelect(query: Uint8Array): string[] | undefined {
+  const reader = new PostcardReader(query);
+  reader.string();
+  reader.readVec(() => {
+    reader.u64();
+    reader.u64();
+    reader.string();
+    reader.u64();
+    reader.u64();
+    reader.string();
+  });
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  return reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
+}
+
 function readPreparedQueryShape(query: Uint8Array): {
   table: string;
   predicates: Array<{ column: string; opTag: number; literalTag: number; value: string }>;
@@ -1241,7 +1394,7 @@ function readPreparedQueryShape(query: Uint8Array): {
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
-  reader.option(() => undefined);
+  reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
   const orderByCount = reader.u64();
   const orderBy = Array.from({ length: orderByCount }, () => ({
     column: reader.string(),
