@@ -1,5 +1,7 @@
 # Query Manager - Legacy Alpha Facade
 
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
+
 The Query Manager is the old alpha relational execution layer. In the grafted
 core branch, its public schema/query vocabulary remains useful, but new
 execution semantics should be implemented in core / Groove and then
@@ -60,7 +62,7 @@ Instead:
 - the `_id` index acts as the manifest for "all rows in this table"
 - materialization only happens for rows that survived the earlier graph stages
 
-That is what makes the current table-first engine practical on local devices: the query layer can stay reactive without eagerly decoding every stored row.
+That is what made the legacy alpha table-first engine practical on local devices: the query layer could stay reactive without eagerly decoding every stored row.
 
 ## Materialization: Where Rows Become Rows Again
 
@@ -115,7 +117,7 @@ The Query Manager can attach a session to a query and use policy graphs to answe
 That is the reason sync can stay query-scoped without every transport layer
 needing to understand policy evaluation itself.
 
-The current runtime also carries an explicit row-policy mode:
+The legacy alpha runtime also carried an explicit row-policy mode:
 
 - `PermissiveLocal`: no compiled policy bundle is loaded in this runtime
 - `Enforcing`: this runtime must fail closed for missing explicit policy,

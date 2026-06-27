@@ -1,6 +1,8 @@
-# Row Histories — Status Quo
+# Row Histories — Legacy Alpha Status Quo
 
-This is the simplest way to think about Jazz today:
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
+
+This was the simplest way to think about the legacy alpha runtime:
 
 - every application table is still a table
 - every logical row has a stable row id
@@ -259,7 +261,7 @@ That split keeps the mental model tidy:
 | ---------------------------------------------------------------- | --------------------------------------------- |
 | `crates/jazz-tools/src/row_histories/mod.rs`                     | Row-history types and reducer logic           |
 | `crates/jazz-tools/src/storage/mod.rs`                           | Storage-backed persistence and lookup helpers |
-| `specs/status-quo/batches.md`                                    | Direct/transactional batch lifecycle summary  |
+| `specs/legacy-alpha-status-quo/batches.md`                       | Direct/transactional batch lifecycle summary  |
 | `crates/jazz-tools/src/row_format.rs`                            | Shared binary row/value encoding              |
 | `crates/jazz-tools/src/query_manager/graph_nodes/materialize.rs` | Visible-entry driven materialization          |
 | `crates/jazz-tools/src/sync_manager/types.rs`                    | Row-batch oriented sync payloads              |

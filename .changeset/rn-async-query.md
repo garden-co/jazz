@@ -1,6 +1,5 @@
 ---
 "jazz-tools": patch
-"jazz-rn": patch
 ---
 
 `jazz-rn`: `query` is now `async` and no longer blocks the React Native JS thread on one-shot reads.

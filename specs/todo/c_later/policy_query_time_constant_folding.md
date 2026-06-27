@@ -13,8 +13,8 @@ What remains open is the broader design for query-time folding/caching across al
 
 > Status quo background:
 >
-> - [Life of a subscription](../../status-quo/life_of_a_subscription.md)
-> - [Query Manager](../../status-quo/query_manager.md)
+> - [Life of a subscription](../../legacy-alpha-status-quo/life_of_a_subscription.md)
+> - [Query Manager](../../legacy-alpha-status-quo/query_manager.md)
 > - `packages/jazz-tools/src/permissions/index.ts`
 
 ## Problem

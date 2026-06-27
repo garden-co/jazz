@@ -1,6 +1,5 @@
 ---
 "jazz-tools": patch
-"jazz-rn": patch
 ---
 
 Fix React Native cold-start on offline and unblock initial subscriptions when the transport can't reach the server.

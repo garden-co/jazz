@@ -7,7 +7,7 @@ The bridge/runtime signal that unblocks edge/global-tier queries fires as soon a
 Affects two call sites:
 
 - **Worker path** — `packages/jazz-tools/src/worker/jazz-worker.ts:251-263` (`performUpstreamConnect`) posts `upstream-connected` immediately after `runtime.connect?.()` returns.
-- **Direct (non-worker) path** — `packages/jazz-tools/src/runtime/db.ts:591-595`. Direct clients with a `serverUrl` now default `defaultDurabilityTier` to `"edge"` (db.ts:567-572) and kick off `client.connectTransport(...)` synchronously, but there is no wait gate at all. A one-shot `db.query()` / `db.all()` issued during startup can resolve from local state before the WS handshake finishes, because `QueryManager` treats `!self.sync_manager.has_servers()` as "frontier complete" (`crates/jazz-tools/src/query_manager/subscriptions.rs:127-129`).
+- **Legacy alpha direct (non-worker) path** — `packages/jazz-tools/src/runtime/db.ts:591-595`. Direct clients with a `serverUrl` defaulted `defaultDurabilityTier` to `"edge"` (db.ts:567-572) and kicked off `client.connectTransport(...)` synchronously, but there was no wait gate. A one-shot `db.query()` / `db.all()` issued during startup could resolve from local state before the WS handshake finished, because legacy alpha `QueryManager` treated `!self.sync_manager.has_servers()` as "frontier complete" (`crates/jazz-tools/src/query_manager/subscriptions.rs:127-129`).
 
 ## Priority
 

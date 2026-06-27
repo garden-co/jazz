@@ -1,4 +1,6 @@
-# App Surface — Status Quo
+# App Surface — Legacy Alpha Status Quo
+
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
 
 Most Jazz users meet the system through two files:
 

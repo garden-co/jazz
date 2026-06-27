@@ -1,4 +1,6 @@
-# HTTP/WebSocket Direct Transport Protocol - Status Quo
+# HTTP/WebSocket Direct Transport Protocol - Legacy Alpha Status Quo
+
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
 
 Jazz uses a deliberately small transport surface:
 
@@ -77,7 +79,7 @@ That is a very intentional design choice. It means:
 
 can all use the same transport vocabulary instead of inventing a query-only side protocol.
 
-## Current Route Surface
+## Legacy Alpha Route Surface
 
 The in-repo server keeps a small route set:
 

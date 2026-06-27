@@ -1,4 +1,6 @@
-# Schema Manager — Status Quo
+# Schema Manager — Legacy Alpha Status Quo
+
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
 
 The Schema Manager lets one Jazz runtime understand more than one schema version at a time.
 

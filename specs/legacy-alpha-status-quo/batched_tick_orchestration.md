@@ -1,5 +1,7 @@
 # Batched Tick Orchestration - Legacy Alpha Runtime
 
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
+
 `RuntimeCore` was the old alpha runtime. In the grafted core branch it
 has been deleted from active `jazz-tools`; these notes are retained only as
 historical context for behavior that must be rebuilt on the core runtime.
