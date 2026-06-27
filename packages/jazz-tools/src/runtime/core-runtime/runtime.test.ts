@@ -814,6 +814,63 @@ describe("CoreRuntime server transport", () => {
     expect(readPreparedSelect(preparedBytes!)).toEqual(["title"]);
   });
 
+  it("encodes negative integer query literals as signed i32 bits for direct core", () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            subscribe: () => new ReadableStream(),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      {
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            { name: "priority", column_type: { type: "Integer" }, nullable: false },
+          ],
+        },
+      },
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.createSubscription(
+      JSON.stringify({
+        table: "todos",
+        relation_ir: {
+          Filter: {
+            input: { TableScan: { table: "todos" } },
+            predicate: {
+              Cmp: {
+                left: { column: "priority" },
+                op: "Lt",
+                right: { Literal: { type: "Integer", value: -1 } },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(readPreparedFirstLiteral(preparedBytes!)).toEqual({
+      column: "priority",
+      opTag: 8,
+      literalTag: 2,
+      value: 0x7fffffff,
+    });
+  });
+
   it("uses native subscription chunks for array subquery subscriptions", async () => {
     const calls: string[] = [];
     let controller: ReadableStreamDefaultController<unknown> | undefined;
@@ -1485,6 +1542,24 @@ function readPreparedQueryShape(query: Uint8Array): {
   const limit = reader.option((optionReader) => optionReader.u64());
   const offset = reader.u64();
   return { table, predicates, orderBy, limit, offset };
+}
+
+function readPreparedFirstLiteral(query: Uint8Array): {
+  column: string;
+  opTag: number;
+  literalTag: number;
+  value: number;
+} {
+  const reader = new PostcardReader(query);
+  reader.string();
+  expect(reader.u64()).toBeGreaterThan(0);
+  const opTag = reader.u64();
+  expect(reader.u64()).toBe(0);
+  const column = reader.string();
+  expect(reader.u64()).toBe(3);
+  const literalTag = reader.u64();
+  const value = reader.u64();
+  return { column, opTag, literalTag, value };
 }
 
 function unsupportedJoinRelationIr(): unknown {
