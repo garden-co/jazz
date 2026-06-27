@@ -37,8 +37,8 @@ import {
   resolveEffectiveQueryExecutionOptions,
   type DeleteOptions,
 } from "./client.js";
-import { type CoreSource, type RuntimeTokenOptions } from "./core-source.js";
-import { WasmCoreSource } from "./wasm-core-source.js";
+import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
+import { WasmRuntimeSource } from "./wasm-runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -64,7 +64,7 @@ import { resolveSelectedColumns } from "./select-projection.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
-type AnyCoreSource = CoreSource<any>;
+type AnyRuntimeSource = RuntimeSource<any>;
 
 /**
  * Configuration for creating a Db instance.
@@ -879,7 +879,7 @@ export class Db {
   private clients = new Map<string, JazzClient>();
   private clientSchemas = new Map<string, WasmSchema>();
   private config: DbConfig;
-  private readonly coreSource: AnyCoreSource;
+  private readonly runtimeSource: AnyRuntimeSource;
   private readonly authStateStore;
   private disposeCoreTelemetry: (() => void) | null = null;
   private _localFirstSecret: string | null = null;
@@ -899,11 +899,11 @@ export class Db {
    */
   protected constructor(
     config: DbConfig,
-    coreSource: AnyCoreSource,
+    runtimeSource: AnyRuntimeSource,
     authStateOptions?: AuthStateStoreOptions,
   ) {
     this.config = config;
-    this.coreSource = coreSource;
+    this.runtimeSource = runtimeSource;
     this.authStateStore = createAuthStateStore(config, authStateOptions);
   }
 
@@ -942,7 +942,7 @@ export class Db {
   }
 
   private mintLocalFirstToken(secret: string, audience: string, ttlSeconds: number): string {
-    return this.coreSource.mintLocalFirstToken({
+    return this.runtimeSource.mintLocalFirstToken({
       secret,
       audience,
       ttlSeconds,
@@ -998,8 +998,8 @@ export class Db {
    * Create a Db instance with a loaded core source.
    * @internal Use createDb() instead.
    */
-  static create(config: DbConfig, coreSource: AnyCoreSource): Db {
-    return new Db(config, coreSource);
+  static create(config: DbConfig, runtimeSource: AnyRuntimeSource): Db {
+    return new Db(config, runtimeSource);
   }
 
   /**
@@ -1009,7 +1009,7 @@ export class Db {
    */
   protected getClient(schema: WasmSchema): JazzClient {
     const runtimeSchema =
-      this.coreSource.supportsPolicyBypass && shouldBypassLocalPolicies(this.config)
+      this.runtimeSource.supportsPolicyBypass && shouldBypassLocalPolicies(this.config)
         ? getPolicyStrippedSchema(schema)
         : schema;
 
@@ -1018,7 +1018,7 @@ export class Db {
     const key = getRuntimeSchemaCacheKey(runtimeSchema);
     if (!this.clients.has(key)) {
       this.installMainThreadCoreTelemetry();
-      const client = this.coreSource.createClient({
+      const client = this.runtimeSource.createClient({
         config: { ...this.config },
         schema: runtimeSchema,
         onAuthFailure: (reason) => {
@@ -1052,7 +1052,7 @@ export class Db {
     }
 
     this.disposeCoreTelemetry =
-      this.coreSource.installTelemetry?.({
+      this.runtimeSource.installTelemetry?.({
         config: this.config,
         collectorUrl,
         runtimeThread: "main",
@@ -1685,7 +1685,7 @@ function generateEphemeralSeedBase64Url(): string {
  * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
  * Use the `wait` method when you need a Promise that resolves at a durability tier.
  *
- * Browser and backend runtimes open the core runtime in-process.
+ * Browser and backend runtimes open the native runtime in-process.
  *
  * @param config Database configuration
  * @returns Promise resolving to Db instance ready for queries and mutations
@@ -1711,9 +1711,9 @@ function createRuntimeTokenOptions(
   };
 }
 
-export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
+export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
-  coreSource: CoreSource<RuntimeConfig>,
+  runtimeSource: RuntimeSource<RuntimeConfig>,
 ): Promise<Db> {
   if (config.secret && (config.jwtToken || config.cookieSession)) {
     throw new Error("DbConfig error: secret, jwtToken, and cookieSession are mutually exclusive");
@@ -1723,7 +1723,7 @@ export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
   }
 
   let resolvedConfig = { ...config };
-  await coreSource.load(config);
+  await runtimeSource.load(config);
 
   // Local-first auth: resolve seed and mint a JWT
   let localFirstSecret: string | null = null;
@@ -1731,7 +1731,7 @@ export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
     const secret = config.secret;
     localFirstSecret = secret;
 
-    const jwtToken = coreSource.mintLocalFirstToken(
+    const jwtToken = runtimeSource.mintLocalFirstToken(
       createRuntimeTokenOptions(secret, config.appId, 3600),
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };
@@ -1740,7 +1740,7 @@ export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.
     const ephemeralSeed = generateEphemeralSeedBase64Url();
-    const jwtToken = coreSource.mintAnonymousToken(
+    const jwtToken = runtimeSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };
@@ -1752,7 +1752,7 @@ export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
     throw new Error("driver.type='memory' requires serverUrl.");
   }
 
-  const db = Db.create(resolvedConfig, coreSource as AnyCoreSource);
+  const db = Db.create(resolvedConfig, runtimeSource as AnyRuntimeSource);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600);
@@ -1762,5 +1762,5 @@ export async function createDbWithCoreSource<RuntimeConfig extends DbConfig>(
 }
 
 export async function createDb(config: DbConfig): Promise<Db> {
-  return await createDbWithCoreSource(config, new WasmCoreSource());
+  return await createDbWithRuntimeSource(config, new WasmRuntimeSource());
 }

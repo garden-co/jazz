@@ -1,6 +1,6 @@
 import { JazzClient, type Runtime } from "../client.js";
 import { Db, type DbConfig, type QueryBuilder } from "../db.js";
-import { CoreSource, type CoreClientContext } from "../core-source.js";
+import { RuntimeSource, type RuntimeClientContext } from "../runtime-source.js";
 import type { WasmRow, WasmSchema } from "../../drivers/types.js";
 
 const DEFAULT_TABLE_COUNT = 24;
@@ -44,7 +44,7 @@ export interface SchemaMarshallingBenchResult {
   };
 }
 
-class RuntimeCoreSource extends CoreSource<DbConfig> {
+class RuntimeSourceAdapter extends RuntimeSource<DbConfig> {
   constructor(private readonly runtime: Runtime) {
     super();
   }
@@ -53,7 +53,7 @@ class RuntimeCoreSource extends CoreSource<DbConfig> {
     config,
     schema,
     onAuthFailure,
-  }: CoreClientContext<DbConfig>): JazzClient {
+  }: RuntimeClientContext<DbConfig>): JazzClient {
     return JazzClient.connectWithRuntime(
       this.runtime,
       {
@@ -206,7 +206,7 @@ export async function runSchemaMarshallingBench(
   });
   const db = Db.create(
     { appId: `schema-marshalling-db-${options.label}` },
-    new RuntimeCoreSource(runtime),
+    new RuntimeSourceAdapter(runtime),
   );
   const query = createQuery(options.schema, tableName);
 

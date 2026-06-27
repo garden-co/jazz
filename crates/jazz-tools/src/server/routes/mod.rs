@@ -2127,41 +2127,39 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind direct ws listener");
-        let addr = listener.local_addr().expect("direct ws local addr");
+            .expect("bind ws listener");
+        let addr = listener.local_addr().expect("ws local addr");
         let server_task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve direct ws app");
+            axum::serve(listener, app).await.expect("serve ws app");
         });
 
         let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
-        let (mut ws, _) = connect_async(&ws_url).await.expect("connect direct ws");
+        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
         ws.send(WsMessage::Binary(
             br#"{"peer_identity":"0102030405060708090a0b0c0d0e0f10","auth":{"admin_secret":"admin-secret"}}"#.to_vec(),
         ))
         .await
-        .expect("send direct ws auth prelude");
+        .expect("send ws auth prelude");
         let hello = WireFrame::Hello(WireHello::current(
             WirePeerRole::Client,
             FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
         ));
         let encoded = vec![encode_frame(&hello).expect("encode hello")];
-        let batch = postcard::to_allocvec(&encoded).expect("encode direct ws batch");
+        let batch = postcard::to_allocvec(&encoded).expect("encode ws batch");
         ws.send(WsMessage::Binary(batch))
             .await
-            .expect("send direct ws hello");
+            .expect("send ws hello");
 
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
-            .expect("wait for direct hello")
-            .expect("direct ws frame")
-            .expect("direct ws result");
+            .expect("wait for ws hello")
+            .expect("ws frame")
+            .expect("ws result");
         let WsMessage::Binary(response) = response else {
-            panic!("expected binary direct hello, got {response:?}");
+            panic!("expected binary ws hello, got {response:?}");
         };
         let frames: Vec<Vec<u8>> =
-            postcard::from_bytes(&response).expect("decode direct ws response batch");
+            postcard::from_bytes(&response).expect("decode ws response batch");
         assert_eq!(frames.len(), 1);
         let WireFrame::Hello(server_hello) = decode_frame(&frames[0]).expect("decode hello") else {
             panic!("expected server hello");

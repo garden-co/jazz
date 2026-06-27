@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JazzClient } from "./client.js";
 import { Db, type DbConfig } from "./db.js";
-import { CoreSource, type CoreClientContext, type CoreTelemetryContext } from "./core-source.js";
+import {
+  RuntimeSource,
+  type RuntimeClientContext,
+  type RuntimeTelemetryContext,
+} from "./runtime-source.js";
 
 const TELEMETRY_ENV_KEYS = [
   "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
@@ -10,9 +14,9 @@ const TELEMETRY_ENV_KEYS = [
   "EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
 ] as const;
 
-class TestCoreSource extends CoreSource<DbConfig> {
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
   readonly installTelemetryMock = vi.fn(
-    (_context: CoreTelemetryContext<DbConfig>) => this.disposeTelemetry,
+    (_context: RuntimeTelemetryContext<DbConfig>) => this.disposeTelemetry,
   );
 
   constructor(private readonly disposeTelemetry?: () => void) {
@@ -23,16 +27,16 @@ class TestCoreSource extends CoreSource<DbConfig> {
     return;
   }
 
-  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
     throw new Error("createClient should not be called by telemetry tests");
   }
 
-  override installTelemetry(context: CoreTelemetryContext<DbConfig>): (() => void) | null {
+  override installTelemetry(context: RuntimeTelemetryContext<DbConfig>): (() => void) | null {
     return this.installTelemetryMock(context) ?? null;
   }
 }
 
-async function createTestDb(config: DbConfig, coreSource: TestCoreSource): Promise<Db> {
+async function createTestDb(config: DbConfig, coreSource: TestRuntimeSource): Promise<Db> {
   await coreSource.load(config);
   return Db.create(config, coreSource);
 }
@@ -46,7 +50,7 @@ afterEach(() => {
 
 describe("Db core telemetry", () => {
   it("does not start main-thread telemetry when telemetry is disabled", async () => {
-    const coreSource = new TestCoreSource();
+    const coreSource = new TestRuntimeSource();
     const db = await createTestDb({ appId: "main-no-telemetry" }, coreSource);
 
     (db as any).installMainThreadCoreTelemetry();
@@ -57,7 +61,7 @@ describe("Db core telemetry", () => {
 
   it("starts main-thread telemetry only when a collector URL exists", async () => {
     const disposeTelemetryMock = vi.fn();
-    const coreSource = new TestCoreSource(disposeTelemetryMock);
+    const coreSource = new TestRuntimeSource(disposeTelemetryMock);
     const config = {
       appId: "main-with-telemetry",
       telemetryCollectorUrl: "http://127.0.0.1:54418",

@@ -17,10 +17,9 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::AppId;
 use crate::websocket_prelude_auth::AuthConfig;
 
-const DIRECT_CLIENT_SUPPORTED_FEATURES: u64 =
-    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
-const DIRECT_CLIENT_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
-const DIRECT_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const WS_CLIENT_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+const WS_CLIENT_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
+const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum WebSocketClientError {
@@ -113,7 +112,7 @@ impl WebSocketTransport {
 
         let hello = WireFrame::Hello(WireHello::current(
             WirePeerRole::Client,
-            DIRECT_CLIENT_SUPPORTED_FEATURES,
+            WS_CLIENT_SUPPORTED_FEATURES,
         ));
         let encoded_hello = encode_frame(&hello).map_err(WebSocketClientError::EncodeHello)?;
         let batch = postcard::to_allocvec(&vec![encoded_hello])
@@ -127,11 +126,10 @@ impl WebSocketTransport {
             &server_hello,
             WIRE_PROTOCOL_VERSION,
             WIRE_PROTOCOL_VERSION,
-            DIRECT_CLIENT_SUPPORTED_FEATURES,
+            WS_CLIENT_SUPPORTED_FEATURES,
         )
         .map_err(WebSocketClientError::Negotiation)?;
-        if negotiated.features & DIRECT_CLIENT_REQUIRED_FEATURES != DIRECT_CLIENT_REQUIRED_FEATURES
-        {
+        if negotiated.features & WS_CLIENT_REQUIRED_FEATURES != WS_CLIENT_REQUIRED_FEATURES {
             return Err(WebSocketClientError::ServerRejected(
                 "server did not negotiate sync message payload frames".to_owned(),
             ));
@@ -195,7 +193,7 @@ async fn receive_server_hello(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) -> Result<WireHello, WebSocketClientError> {
-    let message = tokio::time::timeout(DIRECT_CLIENT_HANDSHAKE_TIMEOUT, ws.next())
+    let message = tokio::time::timeout(WS_CLIENT_HANDSHAKE_TIMEOUT, ws.next())
         .await
         .map_err(|_| WebSocketClientError::HandshakeTimeout)?
         .ok_or(WebSocketClientError::ClosedDuringHandshake)?

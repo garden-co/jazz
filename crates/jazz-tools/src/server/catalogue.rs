@@ -6,9 +6,8 @@ use uuid::Uuid;
 
 use crate::AppId;
 use crate::admin_catalogue_payload_codec::{
-    decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
-    decode_schema, encode_lens_transform, encode_permissions_bundle, encode_permissions_head,
-    encode_schema,
+    decode_lens_transform, decode_permissions_bundle, decode_permissions_head, decode_schema,
+    encode_lens_transform, encode_permissions_bundle, encode_permissions_head, encode_schema,
 };
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::ObjectId;
@@ -523,29 +522,6 @@ impl CatalogueIndex {
                 {
                     self.permissions_head = Some(head);
                 }
-            }
-            Some(kind) if kind == ObjectType::CataloguePermissions.as_str() => {
-                let Some(schema_hash) = entry
-                    .metadata
-                    .get(MetadataKey::SchemaHash.as_str())
-                    .and_then(|raw| SchemaHash::from_hex(raw))
-                else {
-                    return;
-                };
-                let Ok(permissions) = decode_permissions(&entry.content) else {
-                    return;
-                };
-                let head = PermissionsHeadSummary {
-                    schema_hash,
-                    version: 1,
-                    parent_bundle_object_id: None,
-                    bundle_object_id: entry.object_id,
-                };
-                self.permissions_head = Some(head);
-                self.permissions_bundles.insert(
-                    entry.object_id,
-                    CurrentPermissionsSummary { head, permissions },
-                );
             }
             _ => {}
         }

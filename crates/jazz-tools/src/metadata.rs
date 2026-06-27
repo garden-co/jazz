@@ -67,8 +67,6 @@ pub enum ObjectType {
     CatalogueLens,
     CataloguePermissionsBundle,
     CataloguePermissionsHead,
-    /// Legacy single-object permissions catalogue entry.
-    CataloguePermissions,
     Index,
 }
 
@@ -79,7 +77,6 @@ impl ObjectType {
             Self::CatalogueLens => "catalogue_lens",
             Self::CataloguePermissionsBundle => "catalogue_permissions_bundle",
             Self::CataloguePermissionsHead => "catalogue_permissions_head",
-            Self::CataloguePermissions => "catalogue_permissions",
             Self::Index => "index",
         }
     }
@@ -91,7 +88,6 @@ impl ObjectType {
                 | "catalogue_lens"
                 | "catalogue_permissions_bundle"
                 | "catalogue_permissions_head"
-                | "catalogue_permissions"
         )
     }
 }

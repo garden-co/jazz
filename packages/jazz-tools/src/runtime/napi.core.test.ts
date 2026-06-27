@@ -7,8 +7,8 @@ import type { WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { webSocketUrl } from "./core-runtime/websocket.js";
 import { openConfig } from "./core-runtime/core-codec.js";
-import { CoreRuntime } from "./core-runtime/runtime.js";
-import { encodeSchema } from "./core-runtime/runtime.js";
+import { NativeRuntimeAdapter } from "./core-runtime/native-runtime-adapter.js";
+import { encodeSchema } from "./core-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 const TEST_SCHEMA: WasmSchema = {
@@ -67,9 +67,9 @@ const OWNED_TODOS_SCHEMA: WasmSchema = {
   },
 };
 
-describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
+describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () => {
   let server: LocalJazzServerHandle | null = null;
-  const runtimes: CoreRuntime[] = [];
+  const runtimes: NativeRuntimeAdapter[] = [];
   const previousWebSocket = globalThis.WebSocket;
 
   afterEach(async () => {
@@ -110,9 +110,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     db.close?.();
   });
 
-  it("opens, mutates one row, and queries it through the core runtime payload shape", async () => {
+  it("opens, mutates one row, and queries it through the native runtime payload shape", async () => {
     const { NapiDb } = await loadNapiModule();
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-core-runtime:node"),
@@ -159,7 +159,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
 
   it("delivers native NAPI subscription updates through the native handle", async () => {
     const { NapiDb } = await loadNapiModule();
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-core-runtime-subscription:node"),
@@ -223,7 +223,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
 
   it("applies session ownership policy to local native NAPI inserts and reads", async () => {
     const { NapiDb } = await loadNapiModule();
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-core-runtime-policy:node"),
@@ -325,7 +325,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
 
   it("applies session ownership policy to native NAPI subscriptions", async () => {
     const { NapiDb } = await loadNapiModule();
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-core-runtime-policy-subscription:node"),
@@ -401,7 +401,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
 
   it("isolates two session identities sharing one native NAPI runtime for owned deletes", async () => {
     const { NapiDb } = await loadNapiModule();
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-core-runtime-delete-policy:node"),
@@ -471,7 +471,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
       schema: encodeSchema(OWNED_TODOS_SCHEMA),
     });
 
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-core-runtime-edge-delete-policy:node"),
@@ -561,7 +561,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     });
 
     try {
-      const runtime = new CoreRuntime(
+      const runtime = new NativeRuntimeAdapter(
         {
           openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never,
           openPersistent: (path, schema, config) =>
@@ -645,9 +645,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     }
   }, 15_000);
 
-  it("supports core runtime parity writes, mergeable transactions, and upstream transport", async () => {
+  it("supports native runtime parity writes, mergeable transactions, and upstream transport", async () => {
     const { NapiDb } = await loadNapiModule();
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-core-runtime-parity:node"),
@@ -736,7 +736,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     expect(transport.close()).toBe(false);
   });
 
-  it("propagates an edge-tier query over the core runtime/server boundary and returns remote row adds", async () => {
+  it("propagates an edge-tier query over the native runtime/server boundary and returns remote row adds", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
     const { NapiDb } = await loadNapiModule();
@@ -749,7 +749,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     });
 
     const openRuntime = (peer: string, sourceId: number) => {
-      const runtime = new CoreRuntime(
+      const runtime = new NativeRuntimeAdapter(
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
         deterministicBytes(`jazz-napi-core-edge:${peer}:node`),
@@ -813,7 +813,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     });
 
     const openRuntime = (peer: string, sourceId: number, targetServer: LocalJazzServerHandle) => {
-      const runtime = new CoreRuntime(
+      const runtime = new NativeRuntimeAdapter(
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
         deterministicBytes(`jazz-napi-core-persistent-edge:${peer}:node`),
@@ -881,11 +881,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     const dataPath = join(tempDir, "db");
     const node = deterministicBytes("jazz-napi-core-persistent:node");
     const author = deterministicBytes("jazz-napi-core-persistent:author");
-    let firstRuntime: CoreRuntime | null = null;
-    let secondRuntime: CoreRuntime | null = null;
+    let firstRuntime: NativeRuntimeAdapter | null = null;
+    let secondRuntime: NativeRuntimeAdapter | null = null;
 
     try {
-      firstRuntime = new CoreRuntime(
+      firstRuntime = new NativeRuntimeAdapter(
         {
           openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never,
           openPersistent: (path, schema, config) =>
@@ -907,7 +907,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
       firstRuntime.close();
       firstRuntime = null;
 
-      secondRuntime = new CoreRuntime(
+      secondRuntime = new NativeRuntimeAdapter(
         {
           openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never,
           openPersistent: (path, schema, config) =>

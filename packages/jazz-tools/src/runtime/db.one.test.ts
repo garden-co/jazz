@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { Db, type DbConfig } from "./db.js";
 import type { JazzClient, Row } from "./client.js";
-import { CoreSource, type CoreClientContext } from "./core-source.js";
+import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const todoSchema = {
@@ -24,19 +24,19 @@ const todoRow: Row = {
 
 type QuerySpy = ReturnType<typeof vi.fn<(queryJson: string, options?: unknown) => Promise<Row[]>>>;
 
-class TestCoreSource extends CoreSource<DbConfig> {
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(private readonly client: JazzClient) {
     super();
   }
 
-  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
     return this.client;
   }
 }
 
 class TestDb extends Db {
   constructor(client: JazzClient) {
-    super({ appId: "db-one-limit-test" }, new TestCoreSource(client));
+    super({ appId: "db-one-limit-test" }, new TestRuntimeSource(client));
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {

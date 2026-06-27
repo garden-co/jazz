@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import { startLocalJazzServer } from "../testing/index.js";
-import { createNapiCoreRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import {
+  createNapiNativeRuntimeAdapter,
+  loadNapiModule,
+} from "./testing/napi-runtime-test-utils.js";
 import { httpUrlToWs } from "./url.js";
 import type { WasmSchema } from "../drivers/types.js";
 
@@ -27,7 +30,7 @@ describe("NAPI on_auth_failure", () => {
       adminSecret,
     });
 
-    const runtime = await createNapiCoreRuntime(MINIMAL_SCHEMA, {
+    const runtime = await createNapiNativeRuntimeAdapter(MINIMAL_SCHEMA, {
       appId,
       env: "test",
       userBranch: "main",

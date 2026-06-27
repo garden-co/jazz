@@ -1,21 +1,21 @@
 import {
-  type AbiRowBatch,
-  type AbiRelationSubscriptionDelta,
-  type AbiRelationSubscriptionEdge,
-  type AbiRelationSubscriptionSnapshot,
-  type AbiRemovedRow,
-  type AbiSubscriptionDelta,
+  type NativeRowBatch,
+  type NativeRelationSubscriptionDelta,
+  type NativeRelationSubscriptionEdge,
+  type NativeRelationSubscriptionSnapshot,
+  type NativeRemovedRow,
+  type NativeSubscriptionDelta,
   type DescriptorField,
   createRecord,
-  readAbiRowBatch,
-  readAbiRelationSubscriptionDelta,
-  readAbiRelationSubscriptionEdge,
-  readAbiRelationSubscriptionSnapshot,
-  readAbiRemovedRow,
-  readAbiSubscriptionDelta,
+  readNativeRowBatch,
+  readNativeRelationSubscriptionDelta,
+  readNativeRelationSubscriptionEdge,
+  readNativeRelationSubscriptionSnapshot,
+  readNativeRemovedRow,
+  readNativeSubscriptionDelta,
   writeDescriptor,
   writeValueType,
-} from "./row-codec.js";
+} from "./native-row-codec.js";
 
 export {
   createRecord,
@@ -23,38 +23,38 @@ export {
   decodeRecordBytes,
   decodeRecordString,
   fieldIndex,
-  readAbiRowBatch,
-  readAbiRelationSubscriptionDelta,
-  readAbiRelationSubscriptionEdge,
-  readAbiRelationSubscriptionSnapshot,
-  readAbiRemovedRow,
-  readAbiSubscriptionDelta,
+  readNativeRowBatch,
+  readNativeRelationSubscriptionDelta,
+  readNativeRelationSubscriptionEdge,
+  readNativeRelationSubscriptionSnapshot,
+  readNativeRemovedRow,
+  readNativeSubscriptionDelta,
   readDescriptor,
   readValueType,
   writeDescriptor,
   writeValueType,
-} from "./row-codec.js";
+} from "./native-row-codec.js";
 export type {
-  AbiRelationSubscriptionDelta,
-  AbiRelationSubscriptionEdge,
-  AbiRelationSubscriptionSnapshot,
-  AbiRemovedRow,
-  AbiRow,
-  AbiRowBatch,
-  AbiSubscriptionDelta,
+  NativeRelationSubscriptionDelta,
+  NativeRelationSubscriptionEdge,
+  NativeRelationSubscriptionSnapshot,
+  NativeRemovedRow,
+  NativeRow,
+  NativeRowBatch,
+  NativeSubscriptionDelta,
   DescriptorField,
   ValueType,
-} from "./row-codec.js";
+} from "./native-row-codec.js";
 
 export type SubscriptionSnapshotChunk = {
   type: "snapshot";
-  rows: AbiRowBatch[];
+  rows: NativeRowBatch[];
   settled?: boolean;
   tier?: string;
 };
 export type SubscriptionDeltaChunk = {
   type: "delta";
-  delta: AbiSubscriptionDelta;
+  delta: NativeSubscriptionDelta;
   settled?: boolean;
   tier?: string;
 };
@@ -409,7 +409,7 @@ export function encodedCells(descriptor: DescriptorField[], values: Uint8Array[]
   return writer.finish();
 }
 
-export function rowCount(batches: AbiRowBatch[]): number {
+export function rowCount(batches: NativeRowBatch[]): number {
   return batches.reduce((sum, batch) => sum + batch.rows.length, 0);
 }
 

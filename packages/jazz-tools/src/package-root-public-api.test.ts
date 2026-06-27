@@ -6,10 +6,10 @@ import { fileURLToPath } from "node:url";
 import * as packageRoot from "./index.js";
 import * as runtime from "./runtime/index.js";
 
-// @ts-expect-error CoreRuntime is intentionally not part of the public runtime surface.
-import type { CoreRuntime as InternalCoreRuntimeExport } from "./runtime/index.js";
-// @ts-expect-error CoreRuntime is intentionally not part of the package-root surface.
-import type { CoreRuntime as PackageRootCoreRuntime } from "./index.js";
+// @ts-expect-error NativeRuntimeAdapter is intentionally not part of the public runtime surface.
+import type { NativeRuntimeAdapter as InternalNativeRuntimeAdapterExport } from "./runtime/index.js";
+// @ts-expect-error NativeRuntimeAdapter is intentionally not part of the package-root surface.
+import type { NativeRuntimeAdapter as PackageRootNativeRuntimeAdapter } from "./index.js";
 // @ts-expect-error WebSocketCarrier is intentionally not part of the public runtime surface.
 import type { WebSocketCarrier as RuntimeWebSocketCarrier } from "./runtime/index.js";
 // @ts-expect-error WebSocketCarrier is intentionally not part of the package-root surface.
@@ -83,8 +83,8 @@ import type { DynamicTableRow as RuntimeDynamicTableRow } from "./runtime/index.
 // @ts-expect-error DynamicTableRow is not part of the package-root surface.
 import type { DynamicTableRow as PackageRootDynamicTableRow } from "./index.js";
 
-void (null as unknown as InternalCoreRuntimeExport);
-void (null as unknown as PackageRootCoreRuntime);
+void (null as unknown as InternalNativeRuntimeAdapterExport);
+void (null as unknown as PackageRootNativeRuntimeAdapter);
 void (null as unknown as RuntimeWebSocketCarrier);
 void (null as unknown as PackageRootWebSocketCarrier);
 void (null as unknown as RuntimeEncodeSchema);
@@ -137,7 +137,7 @@ void (null as unknown as PackageRootBeginBatch);
 void (null as unknown as PackageRootBatch);
 
 const internalRuntimeExports = [
-  "CoreRuntime",
+  "NativeRuntimeAdapter",
   "WebSocketCarrier",
   "encodeSchema",
   "encodeWebSocketFrameBatch",
@@ -222,11 +222,11 @@ const removedBrowserRuntimeExportPathFragments = [
   "jazz-worker",
 ] as const;
 
-const intendedCoreRuntimeBuildArtifacts = [
+const intendedNativeRuntimeAdapterBuildArtifacts = [
   "runtime/core-runtime/core-codec.js",
   "runtime/core-runtime/core-codec.d.ts",
-  "runtime/core-runtime/row-codec.js",
-  "runtime/core-runtime/row-codec.d.ts",
+  "runtime/core-runtime/native-row-codec.js",
+  "runtime/core-runtime/native-row-codec.d.ts",
   "runtime/core-runtime/schema-codec.js",
   "runtime/core-runtime/schema-codec.d.ts",
   "runtime/core-runtime/websocket.js",
@@ -347,7 +347,7 @@ describe("package root public API", () => {
 
     expect(unexpectedBrowserRuntimeFiles).toEqual([]);
 
-    for (const artifact of intendedCoreRuntimeBuildArtifacts) {
+    for (const artifact of intendedNativeRuntimeAdapterBuildArtifacts) {
       expect(existsSync(join(distDir, artifact)), artifact).toBe(true);
     }
   });

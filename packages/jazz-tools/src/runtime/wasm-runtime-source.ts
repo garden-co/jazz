@@ -6,12 +6,12 @@ import {
 } from "./client.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
 import {
-  CoreSource,
-  type CoreClientContext,
-  type CoreTelemetryContext,
+  RuntimeSource,
+  type RuntimeClientContext,
+  type RuntimeTelemetryContext,
   type RuntimeTokenOptions,
-} from "./core-source.js";
-import { CoreRuntime } from "./core-runtime/runtime.js";
+} from "./runtime-source.js";
+import { NativeRuntimeAdapter } from "./core-runtime/native-runtime-adapter.js";
 import { PersistentBrowserOpfsRuntime } from "./core-runtime/persistent-browser-runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 import { parseJwtPayload } from "./client-session.js";
@@ -71,7 +71,7 @@ function authorBytesForSubject(subject: string, fallbackSeed: string): Uint8Arra
   return uuidBytes(subject) ?? deterministicBytes(`${fallbackSeed}:author`);
 }
 
-export class WasmCoreSource extends CoreSource<DbConfig> {
+export class WasmRuntimeSource extends RuntimeSource<DbConfig> {
   private module: WasmModule | null = null;
 
   private get wasmModule(): WasmModule {
@@ -89,7 +89,7 @@ export class WasmCoreSource extends CoreSource<DbConfig> {
     config,
     schema,
     onAuthFailure,
-  }: CoreClientContext<DbConfig>): JazzClient {
+  }: RuntimeClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
 
     const runtimeOptions: ConnectRuntimeOptions = {
@@ -116,7 +116,7 @@ export class WasmCoreSource extends CoreSource<DbConfig> {
           node,
           author,
         )
-      : new CoreRuntime(this.wasmModule.WasmDb, schema, node, author, 1, true);
+      : new NativeRuntimeAdapter(this.wasmModule.WasmDb, schema, node, author, 1, true);
 
     return JazzClient.connectWithRuntime(
       mainThreadPeerRuntime,
@@ -141,7 +141,7 @@ export class WasmCoreSource extends CoreSource<DbConfig> {
     config,
     collectorUrl,
     runtimeThread,
-  }: CoreTelemetryContext<DbConfig>): (() => void) | null {
+  }: RuntimeTelemetryContext<DbConfig>): (() => void) | null {
     return installWasmTelemetry({
       wasmModule: this.wasmModule,
       collectorUrl,
