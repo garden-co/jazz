@@ -392,7 +392,7 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
 
     /// Optional sync-message tracer used by tests to record outgoing/incoming
     /// payloads under a human-readable participant name. `None` in production.
-    pub(crate) sync_tracer: Option<(crate::sync_manager::sync_tracer::SyncTracer, String)>,
+    pub(crate) sync_tracer: Option<(crate::sync::SyncTracer, String)>,
 
     /// Called when the transport rejects auth during the WS handshake.
     /// The String argument is a human-readable reason (e.g. "Unauthorized").
@@ -520,11 +520,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     /// Attach a sync-message tracer. All outbox entries this runtime sends
     /// and all inbox entries it receives will be recorded under `name`.
-    pub fn set_sync_tracer(
-        &mut self,
-        tracer: crate::sync_manager::sync_tracer::SyncTracer,
-        name: String,
-    ) {
+    pub fn set_sync_tracer(&mut self, tracer: crate::sync::SyncTracer, name: String) {
         self.sync_tracer = Some((tracer, name));
     }
 

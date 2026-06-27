@@ -434,7 +434,7 @@ pub struct ServerState {
     /// Disconnected clients are reaped after this duration.
     pub client_ttl: RwLock<Duration>,
     /// Optional sync message tracer for test observability.
-    pub sync_tracer: Option<crate::sync_manager::sync_tracer::SyncTracer>,
+    pub sync_tracer: Option<crate::sync::SyncTracer>,
     /// Server-side jazz_core peer loop for the direct websocket route.
     pub(crate) core_server: StdRwLock<Option<core_server::CoreServer>>,
     pub(crate) core_server_storage_config: Option<StorageConfig>,
@@ -678,7 +678,13 @@ mod tests {
         )
         .expect("build schema manager");
         Arc::new(ServerState {
-            catalogue_store: DirectCatalogueStore::new(schema_manager, storage),
+            catalogue_store: DirectCatalogueStore::with_test_schema_manager(
+                app_id,
+                Some(shutdown_test_schema()),
+                storage,
+                schema_manager,
+                SyncManager::new(),
+            ),
             catalogue: ServerCatalogue,
             app_id,
             connections: RwLock::new(HashMap::new()),
