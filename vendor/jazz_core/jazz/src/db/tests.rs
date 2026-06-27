@@ -98,6 +98,23 @@ where
     block_on(db.subscribe(&prepared, opts))
 }
 
+#[derive(Default)]
+struct RecordingScheduler {
+    calls: RefCell<Vec<TickUrgency>>,
+}
+
+impl TickScheduler for RecordingScheduler {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        self.calls.borrow_mut().push(urgency);
+    }
+}
+
+impl RecordingScheduler {
+    fn take(&self) -> Vec<TickUrgency> {
+        std::mem::take(&mut self.calls.borrow_mut())
+    }
+}
+
 fn schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
@@ -980,11 +997,14 @@ fn db_facade_subscription_refresh_preserves_read_tier() {
 #[test]
 fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let scheduler = Rc::new(RecordingScheduler::default());
+    db.set_tick_scheduler(Some(scheduler.clone()));
     let query = db.table("todos");
     let prepared_query = prepared(&db, &query);
 
     let mut subscription =
         doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
     let opened = doctest_support::block_on(subscription.next_event()).unwrap();
     assert_eq!(opened_rows(opened), Vec::<CurrentRow>::new());
 
@@ -999,6 +1019,28 @@ fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
     };
     assert_eq!(tier, DurabilityTier::Local);
     assert_eq!(added.len(), 1);
+    assert_eq!(scheduler.take(), vec![TickUrgency::Deferred]);
+}
+
+#[test]
+fn db_facade_schedules_immediate_tick_for_propagated_query_coverage() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let scheduler = Rc::new(RecordingScheduler::default());
+    db.set_tick_scheduler(Some(scheduler.clone()));
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+
+    db.propagate_query_with_opts(
+        &prepared_query,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::Full,
+            include_deleted: false,
+        },
+    );
+
+    assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
 }
 
 #[test]

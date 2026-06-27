@@ -38,6 +38,24 @@ use crate::wire::{
     WireTransport, decode_frame, decode_sync_message, encode_frame, encode_sync_message,
 };
 
+/// How urgently a runtime should service pending peer-connection work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TickUrgency {
+    /// Run as soon as the runtime can do so without re-entering the current
+    /// mutable operation. Used when a query/subscription/transport event needs
+    /// prompt coverage or inbound draining.
+    Immediate,
+    /// Coalesce bursty local work before ticking. Used for uploads created by
+    /// local writes.
+    Deferred,
+}
+
+/// Runtime-neutral wake hook for thread-affine [`Node`] sync work.
+pub trait TickScheduler {
+    /// Schedule a future [`Db::tick`] for pending peer-connection work.
+    fn schedule_tick(&self, urgency: TickUrgency);
+}
+
 /// Poll a ready-immediate thread-affine database future to completion.
 ///
 /// This helper is intentionally tiny: it drives local-lane futures that are
@@ -73,6 +91,7 @@ where
 /// through the same path a local write does.
 type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamSubscriptions = Rc<RefCell<Vec<PendingUpstreamSubscription>>>;
+type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 
 #[derive(Clone)]
 struct PendingUpstreamSubscription {
@@ -460,6 +479,7 @@ where
                 binding: prepared.binding.clone(),
                 opts: RegisterShapeOptions::default(),
             });
+        self.node.schedule_tick(TickUrgency::Immediate);
     }
 
     /// Ask connected upstreams to cover this query shape at `opts`' effective tier.
@@ -474,6 +494,7 @@ where
                     tier: effective_read_tier(opts),
                 },
             });
+        self.node.schedule_tick(TickUrgency::Immediate);
     }
 
     /// Return whether a propagated query has received at least one upstream view update.
@@ -546,6 +567,7 @@ where
                 binding: prepared.binding.clone(),
                 opts: RegisterShapeOptions { tier: read_tier },
             });
+        self.node.schedule_tick(TickUrgency::Immediate);
         Ok(SubscriptionStream {
             receiver,
             _state: state,
@@ -1330,6 +1352,18 @@ where
         self.node.connect_upstream(transport)
     }
 
+    /// Install or clear the scheduler used to wake this database's live peer
+    /// connections when local writes, subscription registrations, or transport
+    /// events create sync work.
+    pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.node.set_scheduler(scheduler);
+    }
+
+    /// Ask the installed scheduler to service pending peer-connection work.
+    pub fn schedule_tick(&self, urgency: TickUrgency) {
+        self.node.schedule_tick(urgency);
+    }
+
     /// Accept a subscriber connection served under `identity`.
     pub fn accept_subscriber(
         &self,
@@ -1411,6 +1445,7 @@ where
     outbox: Outbox,
     upstream_subscriptions: PendingUpstreamSubscriptions,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
+    scheduler: SharedTickScheduler,
 }
 
 impl<S> Node<S>
@@ -1425,6 +1460,7 @@ where
             outbox: Rc::new(RefCell::new(Vec::new())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             connections: RefCell::new(Vec::new()),
+            scheduler: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -1435,6 +1471,17 @@ where
 
     fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
         self.outbox.borrow_mut().push(PendingUpload { tx_id, unit });
+        self.schedule_tick(TickUrgency::Deferred);
+    }
+
+    fn set_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        *self.scheduler.borrow_mut() = scheduler;
+    }
+
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+            scheduler.schedule_tick(urgency);
+        }
     }
 
     fn refresh_subscriptions(&self) -> Result<usize, Error> {
@@ -1470,6 +1517,7 @@ where
             transport,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
+            scheduler: Rc::clone(&self.scheduler),
             link: ConnectionLink::Upstream {
                 pending,
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
@@ -1480,6 +1528,7 @@ where
             last_resume_bytes: None,
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
+        self.schedule_tick(TickUrgency::Immediate);
         connection
     }
 
@@ -1563,6 +1612,7 @@ where
             transport,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
+            scheduler: Rc::clone(&self.scheduler),
             link: ConnectionLink::Subscriber {
                 peer,
                 ingest_context: CommitUnitIngestContext { identity, trust },
@@ -1575,6 +1625,7 @@ where
             last_resume_bytes: None,
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
+        self.schedule_tick(TickUrgency::Immediate);
         connection
     }
 
@@ -1858,6 +1909,7 @@ where
     transport: Box<dyn Transport>,
     node: Rc<RefCell<NodeState<S>>>,
     subscriptions: SubscriptionList,
+    scheduler: SharedTickScheduler,
     link: ConnectionLink,
     last_resume_bytes: Option<usize>,
 }
@@ -2102,6 +2154,9 @@ where
                                             .unwrap_or_default(),
                                     },
                                 );
+                                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                                    scheduler.schedule_tick(TickUrgency::Immediate);
+                                }
                             }
                         }
                         other => {
@@ -2137,6 +2192,9 @@ where
                                         tx_id,
                                         unit: Some(unit),
                                     });
+                                    if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                                        scheduler.schedule_tick(TickUrgency::Deferred);
+                                    }
                                 }
                             }
                         }
