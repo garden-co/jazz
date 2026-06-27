@@ -1536,22 +1536,54 @@ export class Db {
 
     const queryOptions = ordinaryDbQueryOptions(options);
     const context = this.getRuntimeOperationContext();
-    const subId = client.subscribe(
-      wasmQuery,
-      handleDelta,
-      queryOptions,
-      context?.readSession ?? context?.session ?? session,
-    );
+    let subId: number | null = null;
+    let unsubscribed = false;
+    const startNativeSubscription = () => {
+      if (unsubscribed || subId !== null) return;
+      subId = client.subscribe(
+        wasmQuery,
+        handleDelta,
+        queryOptions,
+        context?.readSession ?? context?.session ?? session,
+      );
+      if (unsubscribed) {
+        client.unsubscribe(subId);
+        subId = null;
+      }
+    };
     const traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,
       builtQuery.table,
       queryOptions,
     );
+    if (this.config.serverUrl && queryOptions.propagation !== "local-only") {
+      const subscriptionTier =
+        queryOptions.tier === undefined || queryOptions.tier === "local"
+          ? "edge"
+          : queryOptions.tier;
+      void this.all(query, { ...queryOptions, tier: subscriptionTier })
+        .then((rows) => {
+          if (unsubscribed) return;
+          callback(manager.seed(rows));
+          startNativeSubscription();
+        })
+        .catch((error: unknown) => {
+          startNativeSubscription();
+          setTimeout(() => {
+            throw error;
+          }, 0);
+        });
+    } else {
+      startNativeSubscription();
+    }
 
     // Return unsubscribe function
     return () => {
+      unsubscribed = true;
       this.unregisterActiveQuerySubscriptionTrace(traceId);
-      client.unsubscribe(subId);
+      if (subId !== null) {
+        client.unsubscribe(subId);
+      }
       manager.clear();
     };
   }

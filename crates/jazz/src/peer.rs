@@ -123,6 +123,7 @@ struct CachedPeerQueryPlan {
     shape: ValidatedQuery,
     binding: Binding,
     plan: PreparedQueryPlan,
+    tier: DurabilityTier,
 }
 
 #[derive(Clone, Debug)]
@@ -332,6 +333,7 @@ impl PeerState {
                 shape: prepared_shape,
                 binding: prepared_binding,
                 plan,
+                tier: DurabilityTier::Global,
             };
             let state = self.subscriptions.entry(subscription).or_default();
             state.prepared_query = Some(cached);
@@ -475,6 +477,7 @@ impl PeerState {
             shape: prepared_shape,
             binding: prepared_binding,
             plan,
+            tier: DurabilityTier::Global,
         };
         let state = self.subscriptions.entry(subscription).or_default();
         state.prepared_query = Some(cached);
@@ -552,20 +555,28 @@ impl PeerState {
             ));
         }
         let previous_row_result_set = state.row_result_set();
-        let prepared_plan = state
+        let (prepared_plan, tier) = state
             .prepared_query
             .as_ref()
-            .map(|prepared| (&prepared.shape, &prepared.binding, &prepared.plan));
-        let update = node.view_update_for_query_binding_with_peer_payload_inventory_and_plan(
-            shape,
-            binding,
-            subscription,
-            self.shipped_complete_tx_payloads.iter().cloned(),
-            state.previous_tx_ids(),
-            previous_row_result_set,
-            self.identity(),
-            prepared_plan,
-        )?;
+            .map(|prepared| {
+                (
+                    Some((&prepared.shape, &prepared.binding, &prepared.plan)),
+                    prepared.tier,
+                )
+            })
+            .unwrap_or((None, DurabilityTier::Global));
+        let update = node
+            .view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+                shape,
+                binding,
+                subscription,
+                self.shipped_complete_tx_payloads.iter().cloned(),
+                state.previous_tx_ids(),
+                previous_row_result_set,
+                self.identity(),
+                prepared_plan,
+                tier,
+            )?;
         self.record_outgoing_view_update(&update);
         Ok(update)
     }
@@ -909,6 +920,7 @@ impl PeerState {
             shape: prepared_shape,
             binding: prepared_binding,
             plan,
+            tier: opts.tier,
         };
         let state = self.subscriptions.entry(subscription).or_default();
         state.prepared_query = Some(cached);
