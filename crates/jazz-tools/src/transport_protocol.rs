@@ -128,22 +128,6 @@ pub struct SequencedSyncPayload {
 }
 
 // ============================================================================
-// HTTP Response Types
-// ============================================================================
-
-/// Generic success response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SuccessResponse {
-    pub success: bool,
-}
-
-impl Default for SuccessResponse {
-    fn default() -> Self {
-        Self { success: true }
-    }
-}
-
-// ============================================================================
 // Binary Frame Encoding/Decoding Helpers
 // ============================================================================
 

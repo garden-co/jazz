@@ -188,6 +188,7 @@ pub struct SubscriptionStream {
 #[cfg(feature = "client")]
 impl SubscriptionStream {
     /// Create a new subscription stream.
+    #[allow(dead_code)]
     pub(crate) fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<OrderedRowDelta>) -> Self {
         Self { receiver }
     }
