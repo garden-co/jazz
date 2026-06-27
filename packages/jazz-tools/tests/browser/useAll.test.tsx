@@ -437,7 +437,7 @@ describe("useAll browser integration", () => {
     await waitForCondition(() => getText("rows") === "p2", 5000, "expected p2 in paginated useAll");
   });
 
-  it("accepts QueryOptions for component subscriptions", async () => {
+  it("accepts direct-core-supported QueryOptions for component subscriptions", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("options"),
@@ -449,7 +449,7 @@ describe("useAll browser integration", () => {
       <JazzProvider client={client}>
         <UseAllProbe
           query={makeQuery<Todo>("todos", {})}
-          options={{ localUpdates: "deferred", propagation: "local-only" }}
+          options={{ localUpdates: "deferred", propagation: "full" }}
           pick={(row) => row.title}
         />
       </JazzProvider>,
@@ -468,6 +468,19 @@ describe("useAll browser integration", () => {
       5000,
       "expected useAll with QueryOptions to receive rows",
     );
+  });
+
+  it("documents the direct core gap for local-only read propagation", async () => {
+    const client = track(
+      await createJazzClient({
+        appId: uniqueId("local-only-gap"),
+        driver: { type: "persistent", dbName: uniqueId("local-only-gap") },
+      }),
+    );
+
+    await expect(
+      client.db.all(makeQuery<Todo>("todos", {}), { propagation: "local-only" }),
+    ).rejects.toThrow("Direct core runtime does not support read propagation 'local-only' yet");
   });
 
   it("does not include rows for non-matching text contains", async () => {
