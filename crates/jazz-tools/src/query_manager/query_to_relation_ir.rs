@@ -1,4 +1,4 @@
-use super::graph_nodes::sort::SortDirection;
+use super::query::SortDirection;
 use super::query::{Condition, Conjunction, Query, RecursiveSpec};
 use super::relation_ir::{
     ColumnRef, JoinCondition, JoinKind, KeyRef, OrderByExpr, OrderDirection, PredicateCmpOp,
