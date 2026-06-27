@@ -158,14 +158,6 @@ type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
   filters: RowFilter[];
-  recompute?: {
-    queryJson: string;
-    identity?: Uint8Array;
-    tier?: string | null;
-    optionsJson?: string | null;
-    pending: boolean;
-    dirty: boolean;
-  };
   callback?: Function;
   cancelled: boolean;
 };
@@ -728,51 +720,28 @@ export class CoreRuntime implements Runtime {
       throw new Error("Direct core runtime does not support session-scoped subscriptions");
     }
     const handle = this.nextSubscriptionId++;
-    const recomputeQueryJson = subscriptionRecomputeQueryJson(queryJson);
-    const subscriptionQueryJsons =
-      recomputeQueryJson == null
-        ? [queryJson]
-        : subscriptionTriggerQueryJsons(queryJson, this.schema);
     const opts = readOptions(tier);
     const identity = session ? parseUuid(session.user_id) : undefined;
-    const sources = subscriptionQueryJsons.map((subscriptionQueryJson) => {
-      const query = this.prepareQuery(subscriptionQueryJson);
-      let nativeSubscription: ReadableStream<unknown> | DirectSubscription;
-      try {
-        nativeSubscription = identity
-          ? this.db.subscribeForIdentity!(query, identity, opts)
-          : this.db.subscribe!(query, opts);
-      } catch (error) {
-        throw new Error(
-          `Direct core subscribe failed for ${subscriptionQueryJson}: ${errorMessage(error)}`,
-        );
-      }
-      try {
-        this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
-      } catch (error) {
-        throw new Error(
-          `Direct core subscription propagation failed for ${subscriptionQueryJson}: ${errorMessage(
-            error,
-          )}`,
-        );
-      }
-      return { source: subscriptionSource(nativeSubscription), reading: false };
-    });
+    const query = this.prepareQuery(queryJson);
+    let nativeSubscription: ReadableStream<unknown> | DirectSubscription;
+    try {
+      nativeSubscription = identity
+        ? this.db.subscribeForIdentity!(query, identity, opts)
+        : this.db.subscribe!(query, opts);
+    } catch (error) {
+      throw new Error(`Direct core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
+    }
+    try {
+      this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
+    } catch (error) {
+      throw new Error(
+        `Direct core subscription propagation failed for ${queryJson}: ${errorMessage(error)}`,
+      );
+    }
     this.subscriptions.set(handle, {
-      sources,
+      sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       rows: [],
-      filters: recomputeQueryJson == null ? queryFiltersFromJson(queryJson, this.schema) : [],
-      recompute:
-        recomputeQueryJson == null
-          ? undefined
-          : {
-              queryJson: recomputeQueryJson,
-              identity,
-              tier,
-              optionsJson,
-              pending: false,
-              dirty: false,
-            },
+      filters: queryFiltersFromJson(queryJson, this.schema),
       cancelled: false,
     });
     return handle;
@@ -1073,10 +1042,6 @@ export class CoreRuntime implements Runtime {
       subscription.cancelled = true;
       return;
     }
-    if (subscription.recompute) {
-      await this.recomputeSubscriptionRows(subscription);
-      return;
-    }
     const previousRows = subscription.rows;
     if (chunk.type === "snapshot") {
       subscription.rows = filterRows(
@@ -1089,35 +1054,6 @@ export class CoreRuntime implements Runtime {
       subscription.rows = filterRows(subscription.rows, subscription.filters, this.schema);
     }
     subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
-  }
-
-  private async recomputeSubscriptionRows(subscription: SubscriptionState): Promise<void> {
-    const recompute = subscription.recompute;
-    if (!recompute) return;
-    // Direct core currently subscribes to simple base-table trigger queries for
-    // relation-shaped subscriptions, then recomputes the public relation query
-    // in this adapter. Keep this as scaffolding until native relation
-    // subscriptions can emit hop/gather deltas directly.
-    recompute.dirty = true;
-    if (recompute.pending) return;
-    recompute.pending = true;
-    try {
-      while (recompute.dirty && !subscription.cancelled) {
-        recompute.dirty = false;
-        const previousRows = subscription.rows;
-        const rows = await this.queryRelationShape(
-          recompute.queryJson,
-          recompute.identity ? JSON.stringify({ user_id: formatUuid(recompute.identity) }) : null,
-          recompute.tier,
-          recompute.optionsJson,
-        );
-        if (!rows) throw unsupportedRelationQueryError();
-        subscription.rows = rows;
-        subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
-      }
-    } finally {
-      recompute.pending = false;
-    }
   }
 
   private scheduleServerPump(): void {
@@ -1419,91 +1355,6 @@ function relationKindOf(relation: unknown): string | null {
   if (!relation || typeof relation !== "object") return null;
   const record = relation as Record<string, unknown>;
   return Object.keys(record)[0] ?? null;
-}
-
-function subscriptionRecomputeQueryJson(queryJson: string): string | null {
-  const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
-  if (typeof parsed.table !== "string") return null;
-  const hasArraySubqueries =
-    Array.isArray(parsed.array_subqueries) && parsed.array_subqueries.length > 0;
-  const relationKind = relationKindOf(parsed.relation_ir);
-  if (relationKind === "Project" || relationKind === "Gather") {
-    throw unsupportedRelationQueryError();
-  }
-  return hasArraySubqueries ? queryJson : null;
-}
-
-function subscriptionTriggerQueryJsons(queryJson: string, schema: WasmSchema): string[] {
-  const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
-  if (typeof parsed.table !== "string") throw unsupportedRelationQueryError();
-  const triggers: string[] = [];
-  const relationKind = relationKindOf(parsed.relation_ir);
-  if (relationKind === "Project" || relationKind === "Gather") {
-    for (const relation of subscriptionTriggerRelations(parsed.relation_ir)) {
-      triggers.push(JSON.stringify({ table: tableFromRelation(relation), relation_ir: relation }));
-    }
-  } else {
-    triggers.push(queryJson);
-  }
-  for (const subquery of subscriptionTriggerArraySubqueries(parsed.array_subqueries, schema)) {
-    triggers.push(JSON.stringify(subquery));
-  }
-  return uniqueStrings(triggers);
-}
-
-function subscriptionTriggerRelations(relation: unknown): unknown[] {
-  if (!relation || typeof relation !== "object") throw unsupportedRelationQueryError();
-  const record = relation as Record<string, unknown>;
-  if (record.Project && typeof record.Project === "object") {
-    const chain = readJoinChain((record.Project as { input?: unknown }).input);
-    if (!chain || chain.hops.length === 0) throw unsupportedRelationQueryError();
-    return [
-      ...subscriptionTriggerRelations(chain.seed),
-      ...chain.hops.map((hop) => ({ TableScan: { table: hop.table } })),
-    ];
-  }
-  if (record.Gather && typeof record.Gather === "object") {
-    const gather = record.Gather as { seed?: unknown; step?: unknown };
-    const seed = gather.seed;
-    if (!seed) throw unsupportedRelationQueryError();
-    const stepInput = (gather.step as { Project?: { input?: unknown } })?.Project?.input;
-    const chain = readJoinChain(stepInput);
-    if (!chain || chain.hops.length !== 1) throw unsupportedRelationQueryError();
-    return [
-      ...subscriptionTriggerRelations(seed),
-      { TableScan: { table: tableFromRelation(chain.seed) } },
-      ...chain.hops.map((hop) => ({ TableScan: { table: hop.table } })),
-    ];
-  }
-  return [relation];
-}
-
-function subscriptionTriggerArraySubqueries(
-  subqueries: unknown,
-  schema: WasmSchema,
-): Array<{ table: string; conditions?: Array<{ column: string; op: "isNotNull" }> }> {
-  if (subqueries == null) return [];
-  if (!Array.isArray(subqueries)) throw unsupportedRelationQueryError();
-  const triggers: Array<{
-    table: string;
-    conditions?: Array<{ column: string; op: "isNotNull" }>;
-  }> = [];
-  for (const raw of subqueries) {
-    const subquery = readRuntimeArraySubquery(raw);
-    const column = schema[subquery.table]?.columns.find(
-      (entry) => entry.name === subquery.inner_column,
-    );
-    triggers.push(
-      column?.nullable === true
-        ? {
-            table: subquery.table,
-            conditions: [{ column: subquery.inner_column, op: "isNotNull" as const }],
-          }
-        : { table: subquery.table },
-    );
-    triggers.push(...subscriptionTriggerArraySubqueries(subquery.nested_arrays, schema));
-  }
-  return triggers;
 }
 
 function readRuntimeArraySubquery(raw: unknown): RuntimeArraySubquery {
