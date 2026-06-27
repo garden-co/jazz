@@ -631,18 +631,20 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
-        // If this Db is attached to upstreams, ask them to carry this shape so
-        // the subscription fills from synced rows, not just local writes. The consumer
-        // sees only the handle; the request flows out on the next `tick`.
-        self.node
-            .upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamSubscription {
-                shape: prepared.shape.clone(),
-                binding: prepared.binding.clone(),
-                opts: RegisterShapeOptions { tier: read_tier },
-            });
-        self.node.schedule_tick(TickUrgency::Immediate);
+        if opts.propagation == Propagation::Full {
+            // If this Db is attached to upstreams, ask them to carry this shape so
+            // the subscription fills from synced rows, not just local writes. The consumer
+            // sees only the handle; the request flows out on the next `tick`.
+            self.node
+                .upstream_subscriptions
+                .borrow_mut()
+                .push(PendingUpstreamSubscription {
+                    shape: prepared.shape.clone(),
+                    binding: prepared.binding.clone(),
+                    opts: RegisterShapeOptions { tier: read_tier },
+                });
+            self.node.schedule_tick(TickUrgency::Immediate);
+        }
         Ok(SubscriptionStream {
             receiver,
             _state: state,
