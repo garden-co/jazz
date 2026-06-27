@@ -95,6 +95,7 @@ type CoreDb = {
   delete(table: string, rowId: Uint8Array): DirectWrite;
   deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): DirectWrite;
   mergeableTx(): DirectTx;
+  mergeableTxForIdentity?(author: Uint8Array): DirectTx;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -141,7 +142,8 @@ export type DirectTransport = {
 
 type PendingTx = {
   kind: TransactionKind;
-  tx: DirectTx;
+  tx?: DirectTx;
+  identity?: Uint8Array;
   writes: Array<{ table: string; rowId: Uint8Array }>;
 };
 
@@ -313,10 +315,9 @@ export class CoreRuntime implements Runtime {
     const writeIdentity = identityFromWriteContext(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
-      assertNoSessionWriteInTx(writeIdentity);
-      tx.tx.insertWithIdEncoded(table, rowId, cells);
+      this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells);
       tx.writes.push({ table, rowId });
-      return this.resultForRow(table, rowId, txIdFromContext(_writeContext) ?? "");
+      return this.resultForRow(table, rowId, txIdFromContext(_writeContext) ?? "", writeIdentity);
     }
     const write = directWriteOrThrow("Insert", () =>
       writeIdentity
@@ -337,10 +338,9 @@ export class CoreRuntime implements Runtime {
     const writeIdentity = identityFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Insert");
     if (tx) {
-      assertNoSessionWriteInTx(writeIdentity);
-      tx.tx.restoreEncoded(table, rowId, cells);
+      this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells);
       tx.writes.push({ table, rowId });
-      return this.resultForRow(table, rowId, txIdFromContext(writeContext) ?? "");
+      return this.resultForRow(table, rowId, txIdFromContext(writeContext) ?? "", writeIdentity);
     }
     const write = directWriteOrThrow("Insert", () =>
       writeIdentity
@@ -361,8 +361,7 @@ export class CoreRuntime implements Runtime {
     const writeIdentity = identityFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Insert");
     if (tx) {
-      assertNoSessionWriteInTx(writeIdentity);
-      tx.tx.updateEncoded(table, rowId, patch);
+      this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
@@ -385,8 +384,7 @@ export class CoreRuntime implements Runtime {
     const writeIdentity = identityFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Insert");
     if (tx) {
-      assertNoSessionWriteInTx(writeIdentity);
-      tx.tx.upsertEncoded(table, rowId, cells);
+      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
@@ -404,8 +402,7 @@ export class CoreRuntime implements Runtime {
     const writeIdentity = identityFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
-      assertNoSessionWriteInTx(writeIdentity);
-      tx.tx.delete(table, rowId);
+      this.txForWrite(tx, writeIdentity).delete(table, rowId);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
@@ -424,7 +421,7 @@ export class CoreRuntime implements Runtime {
       throw new Error("Direct core runtime does not support exclusive transactions yet");
     }
     const id = `tx-${this.nextTransactionId++}`;
-    this.pendingTxs.set(id, { kind, tx: this.db.mergeableTx(), writes: [] });
+    this.pendingTxs.set(id, { kind, writes: [] });
     return id;
   }
 
@@ -433,7 +430,7 @@ export class CoreRuntime implements Runtime {
     if (!pending) {
       throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
     }
-    const write = pending.tx.commit();
+    const write = (pending.tx ?? this.db.mergeableTx()).commit();
     this.writes.set(transactionId, write);
     this.pendingTxs.delete(transactionId);
     this.completedTxs.set(transactionId, { kind: pending.kind, state: "committed" });
@@ -475,7 +472,7 @@ export class CoreRuntime implements Runtime {
     if (!pending) {
       throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
     }
-    pending.tx.rollback();
+    pending.tx?.rollback();
     this.pendingTxs.delete(transactionId);
     this.completedTxs.set(transactionId, { kind: pending.kind, state: "rolled_back" });
     return true;
@@ -920,6 +917,30 @@ export class CoreRuntime implements Runtime {
     throw new Error(`${operation} failed: WriteError("${txStateMessage(id, this.completedTxs)}")`);
   }
 
+  private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): DirectTx {
+    if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
+      throw new Error("Direct core runtime mergeable transaction cannot mix write identities");
+    }
+    if (identity && pending.tx && !pending.identity) {
+      throw new Error("Direct core runtime mergeable transaction cannot mix write identities");
+    }
+    if (!pending.tx) {
+      pending.identity = identity;
+      pending.tx = identity ? this.mergeableTxForIdentity(identity) : this.db.mergeableTx();
+    }
+    return pending.tx;
+  }
+
+  private mergeableTxForIdentity(identity: Uint8Array): DirectTx {
+    if (!this.db.mergeableTxForIdentity) {
+      throw new Error(
+        "Direct core runtime cannot perform session-scoped transaction writes: " +
+          "the core runtime mergeable transaction API has no identity-aware staging methods.",
+      );
+    }
+    return this.db.mergeableTxForIdentity(identity);
+  }
+
   private pumpSubscriptions(): void {
     for (const [handle, subscription] of this.subscriptions) {
       this.startSubscriptionReader(handle, subscription);
@@ -1132,14 +1153,6 @@ function identityFromWriteContext(writeContext?: string | null): Uint8Array | un
   } catch {
     return undefined;
   }
-}
-
-function assertNoSessionWriteInTx(writeIdentity: Uint8Array | undefined): void {
-  if (!writeIdentity) return;
-  throw new Error(
-    "Direct core runtime cannot perform session-scoped transaction writes: " +
-      "the core runtime mergeable transaction API has no identity-aware staging methods.",
-  );
 }
 
 function txStateMessage(transactionId: string, completedTxs: Map<string, CompletedTx>): string {
@@ -2510,6 +2523,10 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
 
 function bytesKey(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {

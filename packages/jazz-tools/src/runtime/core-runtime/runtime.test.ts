@@ -400,6 +400,96 @@ describe("CoreRuntime server transport", () => {
     expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
   });
 
+  it("stages session-scoped mergeable transaction writes through identity-aware direct core txs", () => {
+    const authors: string[] = [];
+    const staged: string[] = [];
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            allForIdentity: () => encodeRows([]),
+            mergeableTxForIdentity: (author: Uint8Array) => {
+              authors.push(formatUuidForTest(author));
+              return fakeTx({
+                insertWithIdEncoded: (table: string) => staged.push(table),
+              });
+            },
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const tx = runtime.beginTransaction("mergeable");
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "session tx" } },
+      JSON.stringify({
+        batch_id: tx,
+        session: { user_id: "00000000-0000-0000-0000-0000000000a1" },
+      }),
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
+    expect(staged).toEqual(["todos"]);
+  });
+
+  it("rejects mixed identities within one mergeable transaction", () => {
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            allForIdentity: () => encodeRows([]),
+            mergeableTxForIdentity: () => fakeTx(),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const tx = runtime.beginTransaction("mergeable");
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "one" } },
+      JSON.stringify({
+        batch_id: tx,
+        session: { user_id: "00000000-0000-0000-0000-0000000000a1" },
+      }),
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    expect(() =>
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "two" } },
+        JSON.stringify({
+          batch_id: tx,
+          session: { user_id: "00000000-0000-0000-0000-0000000000b2" },
+        }),
+        "00000000-0000-0000-0000-000000000002",
+      ),
+    ).toThrow("Direct core runtime mergeable transaction cannot mix write identities");
+  });
+
   it("decodes fixed-width array columns from direct row batches", async () => {
     const runtime = new CoreRuntime(
       {
@@ -1257,6 +1347,38 @@ function fakeDb<T extends object>(
     ...db,
   };
 }
+
+function fakeTx(overrides: Partial<DirectTxForTest> = {}): DirectTxForTest {
+  return {
+    commit: () => fakeWrite(),
+    rollback: () => undefined,
+    insertWithIdEncoded: () => undefined,
+    restoreEncoded: () => undefined,
+    updateEncoded: () => undefined,
+    upsertEncoded: () => undefined,
+    delete: () => undefined,
+    ...overrides,
+  };
+}
+
+function fakeWrite() {
+  return {
+    payload: new Uint8Array(0),
+    wait: () => undefined,
+    writeState: () => ({}),
+    nextWriteStateChange: async () => undefined,
+  };
+}
+
+type DirectTxForTest = {
+  commit(): ReturnType<typeof fakeWrite>;
+  rollback(): void;
+  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
+  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void;
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
+  delete(table: string, rowId: Uint8Array): void;
+};
 
 function uuidBytes(value: string): Uint8Array {
   const hex = value.replaceAll("-", "");
