@@ -2,11 +2,11 @@ use serde_json::Value as JsonValue;
 
 use super::query::Query;
 
-pub fn parse_query_json(json: &str) -> Result<Query, String> {
+pub(crate) fn parse_query_json(json: &str) -> Result<Query, String> {
     serde_json::from_str(json).map_err(|e| format!("Parse error: {}", e))
 }
 
-pub fn parse_query_value(value: JsonValue) -> Result<Query, String> {
+fn parse_query_value(value: JsonValue) -> Result<Query, String> {
     serde_json::from_value(value).map_err(|e| format!("Parse error: {}", e))
 }
 

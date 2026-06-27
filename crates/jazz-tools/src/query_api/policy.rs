@@ -34,17 +34,17 @@ pub enum PolicyValue {
 }
 
 /// Reserved session path prefix used to encode outer-row references in correlated EXISTS clauses.
-pub const OUTER_ROW_SESSION_PREFIX: &str = "__jazz_outer_row";
+const OUTER_ROW_SESSION_PREFIX: &str = "__jazz_outer_row";
 
 /// Default recursion depth for recursive permission checks.
-pub const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT: usize = 10;
+const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT: usize = 10;
 /// Hard cap recursion depth for recursive permission checks.
-pub const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP: usize = 64;
+pub(super) const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP: usize = 64;
 
 /// Resolve requested recursion depth for policy recursion.
 ///
 /// Returns `None` when depth is invalid or exceeds hard cap.
-pub fn normalize_recursive_max_depth(requested: Option<usize>) -> Option<usize> {
+pub(super) fn normalize_recursive_max_depth(requested: Option<usize>) -> Option<usize> {
     let depth = requested.unwrap_or(RECURSIVE_POLICY_MAX_DEPTH_DEFAULT);
     if depth == 0 || depth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
         None
@@ -542,7 +542,7 @@ use uuid::Uuid;
 use super::types::{Schema, TableName};
 
 /// Context for policy evaluation with INHERITS support.
-pub struct EvalContext<'a, F>
+struct EvalContext<'a, F>
 where
     F: FnMut(ObjectId) -> Option<Vec<u8>>,
 {
@@ -558,7 +558,7 @@ impl<'a, F> EvalContext<'a, F>
 where
     F: FnMut(ObjectId) -> Option<Vec<u8>>,
 {
-    pub fn new(
+    fn new(
         session: &'a Session,
         schema: &'a Schema,
         table_name: &'a TableName,
@@ -577,7 +577,7 @@ where
 /// Evaluate a policy expression with full INHERITS support.
 ///
 /// This requires a row loader to fetch parent rows for INHERITS evaluation.
-pub fn evaluate_with_context<F>(
+fn evaluate_with_context<F>(
     expr: &PolicyExpr,
     content: &[u8],
     provenance: &RowProvenance,
@@ -790,9 +790,9 @@ where
     )
 }
 
-/// Simple evaluation without INHERITS support (for backwards compatibility).
-/// INHERITS expressions return true (permissive).
-pub fn evaluate_policy_expr(
+/// Scalar policy evaluation used where recursive relation context is unavailable.
+/// INHERITS expressions return true because this path only checks local scalar predicates.
+fn evaluate_policy_expr(
     expr: &PolicyExpr,
     content: &[u8],
     provenance: &RowProvenance,
@@ -885,7 +885,7 @@ fn evaluate_expr_simple_with_row_id(
 }
 
 /// Recursive evaluation with depth tracking. Public for use by PolicyFilterNode.
-pub fn evaluate_expr_recursive(
+fn evaluate_expr_recursive(
     expr: &PolicyExpr,
     content: &[u8],
     provenance: &RowProvenance,
@@ -896,7 +896,7 @@ pub fn evaluate_expr_recursive(
     evaluate_expr_recursive_with_row_id(expr, content, provenance, descriptor, session, None, depth)
 }
 
-pub fn evaluate_expr_recursive_with_row_id(
+fn evaluate_expr_recursive_with_row_id(
     expr: &PolicyExpr,
     content: &[u8],
     provenance: &RowProvenance,
@@ -989,7 +989,7 @@ fn normalize_cmp_value_for_decoded_column(left: &Value, right: Value) -> Value {
     }
 }
 
-pub fn evaluate_cmp(
+fn evaluate_cmp(
     column: &str,
     op: &CmpOp,
     value: &PolicyValue,
@@ -1090,7 +1090,7 @@ fn resolve_outer_col(
 /// `@session.__jazz_outer_row.id` (the row's UUID primary key).
 ///
 /// Returns `None` if a referenced outer column cannot be resolved.
-pub fn bind_outer_row_refs(
+fn bind_outer_row_refs(
     expr: &PolicyExpr,
     outer_content: &[u8],
     outer_descriptor: &RowDescriptor,
@@ -1277,7 +1277,7 @@ fn outer_row_ref_column(path: &[String]) -> Option<&str> {
 /// - `RowId(Outer)` => `Literal(outer_row_id)` when provided
 ///
 /// Returns `None` on any unresolved reference.
-pub fn bind_relation_refs(
+fn bind_relation_refs(
     rel: &RelExpr,
     outer_content: &[u8],
     outer_descriptor: &RowDescriptor,
@@ -1572,7 +1572,7 @@ fn evaluate_in_with_row_id(
     }
 }
 
-pub fn evaluate_in(
+fn evaluate_in(
     column: &str,
     session_path: &[String],
     content: &[u8],
@@ -1622,7 +1622,7 @@ fn evaluate_contains_with_row_id(
     }
 }
 
-pub fn evaluate_contains(
+fn evaluate_contains(
     column: &str,
     value: &PolicyValue,
     content: &[u8],
@@ -1662,7 +1662,7 @@ fn evaluate_in_list_with_row_id(
     })
 }
 
-pub fn evaluate_in_list(
+fn evaluate_in_list(
     column: &str,
     values: &[PolicyValue],
     content: &[u8],
@@ -1687,7 +1687,7 @@ fn evaluate_session_in_list(path: &[String], values: &[Value], session: &Session
 }
 
 /// Resolve a session path to a Value. Public for use by PolicyFilterNode.
-pub fn resolve_session_value(path: &[String], session: &Session) -> Option<Value> {
+fn resolve_session_value(path: &[String], session: &Session) -> Option<Value> {
     if path.is_empty() {
         return None;
     }
@@ -1759,7 +1759,7 @@ fn evaluate_session_contains(path: &[String], value: &Value, session: &Session) 
 
 /// A complex clause that requires graph evaluation (INHERITS or EXISTS).
 #[derive(Debug, Clone)]
-pub enum ComplexClause {
+enum ComplexClause {
     /// INHERITS clause - check parent row's policy.
     Inherits {
         operation: Operation,
@@ -1784,7 +1784,7 @@ pub enum ComplexClause {
 
 /// Result of evaluating simple parts of a policy expression.
 #[derive(Debug)]
-pub struct SimpleEvalResult {
+struct SimpleEvalResult {
     /// True if all simple parts passed.
     pub passed: bool,
     /// Complex clauses that need graph evaluation (only if passed=true).
@@ -1828,7 +1828,7 @@ impl SimpleEvalResult {
 /// - `passed: false` if any simple part fails (immediate rejection)
 /// - `passed: true, complex_clauses: []` if all parts pass and no complex clauses
 /// - `passed: true, complex_clauses: [...]` if simple parts pass but complex clauses need evaluation
-pub fn evaluate_simple_parts(
+fn evaluate_simple_parts(
     expr: &PolicyExpr,
     content: &[u8],
     provenance: &RowProvenance,
@@ -1838,7 +1838,7 @@ pub fn evaluate_simple_parts(
     evaluate_simple_parts_with_row_id(expr, content, provenance, descriptor, session, None)
 }
 
-pub fn evaluate_simple_parts_with_row_id(
+fn evaluate_simple_parts_with_row_id(
     expr: &PolicyExpr,
     content: &[u8],
     provenance: &RowProvenance,
