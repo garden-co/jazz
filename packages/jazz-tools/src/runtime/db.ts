@@ -46,10 +46,6 @@ import {
   WorkerBridge,
   type WorkerBridgeOptions,
 } from "./worker-bridge.js";
-import {
-  isIncompatibleBrowserBrokerConfigurationError,
-  type IncompatibleBrowserBrokerConfigurationHandler,
-} from "./browser-broker-errors.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -133,12 +129,6 @@ export interface DbConfig {
   serverUrl?: string;
   /** Optional runtime source overrides for WASM and worker loading. */
   runtimeSources?: RuntimeSourcesConfig;
-  /**
-   * Called when this tab cannot join the persistent browser broker because
-   * another tab is already connected with an incompatible app/runtime version.
-   * The default browser behavior shows a reload prompt.
-   */
-  onIncompatibleBrowserBrokerConfiguration?: IncompatibleBrowserBrokerConfigurationHandler;
   /** Environment (e.g., "dev", "prod") */
   env?: string;
   /** User branch name (default: "main") */
@@ -2562,16 +2552,16 @@ export class Db {
       throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
     }
 
-    if (!isBrowser()) {
-      console.error(
-        "deleteClientStorage() is only available on browser worker-backed Db instances.",
-      );
+    if (typeof window === "undefined") {
+      console.error("deleteClientStorage() is only available in browser runtimes.");
       return;
     }
 
     const brokerClient = this.brokerClient;
     if (!brokerClient) {
-      throw new Error("deleteClientStorage() requires an initialized browser broker.");
+      throw new Error(
+        "deleteClientStorage() direct-core browser persistence reset is not implemented yet.",
+      );
     }
     const operation = this.workerReconfigure.then(async () => {
       await brokerClient.requestStorageReset(`storage-reset-${Date.now()}`);
@@ -3074,13 +3064,6 @@ class ClientBackedDb extends Db {
 }
 
 /**
- * Check if running in a browser environment with Worker support.
- */
-function isBrowser(): boolean {
-  return typeof Worker !== "undefined" && typeof window !== "undefined";
-}
-
-/**
  * Generate a 32-byte ephemeral seed for anonymous auth.
  *
  * Uses `globalThis.crypto.getRandomValues`, which is available in all
@@ -3101,8 +3084,7 @@ function generateEphemeralSeedBase64Url(): string {
  * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
  * Use the `wait` method when you need a Promise that resolves at a durability tier.
  *
- * In browser environments, automatically uses a dedicated worker for
- * OPFS persistence. In Node.js, uses in-memory storage.
+ * Browser and backend runtimes open directly in-process.
  *
  * @param config Database configuration
  * @returns Promise resolving to Db instance ready for queries and mutations
@@ -3126,32 +3108,6 @@ function createRuntimeTokenOptions(
     ttlSeconds,
     nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
   };
-}
-
-const DEFAULT_BROWSER_BROKER_COMPATIBILITY_MESSAGE =
-  "Another tab is using a different version of this app. Close the other tabs, then reload this page.\n\nReload now?";
-
-function handleIncompatibleBrowserBrokerConfiguration(error: unknown, config: DbConfig): void {
-  if (!isIncompatibleBrowserBrokerConfigurationError(error)) {
-    return;
-  }
-
-  if (config.onIncompatibleBrowserBrokerConfiguration) {
-    config.onIncompatibleBrowserBrokerConfiguration(error);
-    return;
-  }
-
-  showDefaultIncompatibleBrowserBrokerConfigurationPrompt();
-}
-
-function showDefaultIncompatibleBrowserBrokerConfigurationPrompt(): void {
-  if (typeof window === "undefined" || typeof window.confirm !== "function") {
-    return;
-  }
-
-  if (window.confirm(DEFAULT_BROWSER_BROKER_COMPATIBILITY_MESSAGE)) {
-    window.location.reload();
-  }
 }
 
 export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
@@ -3195,21 +3151,7 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     throw new Error("driver.type='memory' requires serverUrl.");
   }
 
-  let db: Db;
-  if (
-    runtimeModule.supportsBrowserWorker !== false &&
-    isBrowser() &&
-    driver.type === "persistent"
-  ) {
-    try {
-      db = await Db.createWithWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
-    } catch (error) {
-      handleIncompatibleBrowserBrokerConfiguration(error, resolvedConfig);
-      throw error;
-    }
-  } else {
-    db = Db.create(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
-  }
+  const db = Db.create(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600);

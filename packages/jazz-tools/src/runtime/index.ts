@@ -46,7 +46,6 @@ export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
   INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE,
   IncompatibleBrowserBrokerConfigurationError,
-  type IncompatibleBrowserBrokerConfigurationHandler,
 } from "./browser-broker-errors.js";
 export {
   fetchStoredPermissions,
