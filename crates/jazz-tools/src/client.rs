@@ -724,7 +724,7 @@ impl ClientEngineInner {
         db.set_tick_scheduler(scheduler.clone());
         if let Some(server_url) = server_url {
             let auth = auth.ok_or_else(|| {
-                JazzError::Connection("core server connection missing auth config".to_string())
+                JazzError::Connection("server connection missing auth config".to_string())
             })?;
             let wake = scheduler.wake_handle();
             let transport = WebSocketTransport::connect_with_wake(

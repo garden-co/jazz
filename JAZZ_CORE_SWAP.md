@@ -192,7 +192,7 @@ Until deleted, treat them as replacement targets only.
 - Delete or gut old alpha engine internals listed under "Replace Or Delete".
   The server no longer has `ServerState::catalogue_runtime`; admin
   schema/permissions/lens HTTP now uses a storage-backed `StoredCatalogue`,
-  while websocket sync stays on the direct `CoreServer` path. The test-only
+  while websocket sync stays on the local engine path. The test-only
   alpha websocket frame injection method has been removed; tests must use direct
   websocket/public-client paths or push catalogue payloads into the catalogue
   store explicitly.
