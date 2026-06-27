@@ -533,6 +533,12 @@ where
             )?;
             (None, rows)
         };
+        let settled = subscription_is_settled(
+            &self.node.node.borrow(),
+            &prepared.shape,
+            &prepared.binding,
+            read_tier,
+        );
         let (sender, receiver) = unbounded();
         let state = Rc::new(RefCell::new(SubscriptionState {
             shape: prepared.shape.clone(),
@@ -540,6 +546,7 @@ where
             author,
             read_tier,
             rows: rows.clone(),
+            settled,
             maintained_subscription,
             sender,
         }));
@@ -548,7 +555,7 @@ where
             .sender
             .unbounded_send(SubscriptionEvent::Opened {
                 current: rows,
-                settled: true,
+                settled,
                 tier: read_tier,
             })
             .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
@@ -1665,11 +1672,12 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (read_tier, previous, shape, binding, author) = {
+        let (read_tier, previous, previous_settled, shape, binding, author) = {
             let state = state.borrow();
             (
                 state.read_tier,
                 state.rows.clone(),
+                state.settled,
                 state.shape.clone(),
                 state.binding.clone(),
                 state.author,
@@ -1678,35 +1686,38 @@ where
         let maybe_rows = {
             let mut state_ref = state.borrow_mut();
             if let Some(maintained) = state_ref.maintained_subscription.as_mut() {
-                let Some(update) = node
+                if let Some(update) = node
                     .borrow_mut()
                     .drain_local_maintained_view_subscription(maintained)?
-                else {
-                    retained.push(Rc::downgrade(&state));
-                    continue;
-                };
-                let mut rows_by_id = previous
-                    .iter()
-                    .cloned()
-                    .map(|row| (subscription_row_key(&row), row))
-                    .collect::<BTreeMap<_, _>>();
-                for (_, row_uuid, _) in update.removes {
-                    rows_by_id.retain(|(_, existing_row_uuid), _| *existing_row_uuid != row_uuid);
+                {
+                    let mut rows_by_id = previous
+                        .iter()
+                        .cloned()
+                        .map(|row| (subscription_row_key(&row), row))
+                        .collect::<BTreeMap<_, _>>();
+                    for (_, row_uuid, _) in update.removes {
+                        rows_by_id
+                            .retain(|(_, existing_row_uuid), _| *existing_row_uuid != row_uuid);
+                    }
+                    for row in update.adds {
+                        rows_by_id.insert(subscription_row_key(&row), row);
+                    }
+                    rows_by_id.into_values().collect::<Vec<_>>()
+                } else {
+                    previous.clone()
                 }
-                for row in update.adds {
-                    rows_by_id.insert(subscription_row_key(&row), row);
-                }
-                rows_by_id.into_values().collect::<Vec<_>>()
             } else {
                 node.borrow_mut()
                     .query_rows_for_link(&shape, &binding, read_tier, author)?
             }
         };
         let rows = maybe_rows;
-        if rows != previous {
+        let settled = subscription_is_settled(&node.borrow(), &shape, &binding, read_tier);
+        if rows != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
-            let event = subscription_delta_event(read_tier, &previous, &rows);
+            let event = subscription_delta_event(read_tier, settled, &previous, &rows);
             state.rows = rows;
+            state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
                 changed += 1;
             }
@@ -3052,6 +3063,7 @@ struct SubscriptionState {
     author: AuthorId,
     read_tier: DurabilityTier,
     rows: Vec<CurrentRow>,
+    settled: bool,
     maintained_subscription: Option<LocalMaintainedViewSubscription>,
     sender: UnboundedSender<SubscriptionEvent>,
 }
@@ -3181,6 +3193,7 @@ fn should_install_prepared_plan(shape: &ValidatedQuery) -> bool {
 
 fn subscription_delta_event(
     tier: DurabilityTier,
+    settled: bool,
     previous: &[CurrentRow],
     current: &[CurrentRow],
 ) -> SubscriptionEvent {
@@ -3219,9 +3232,27 @@ fn subscription_delta_event(
         added,
         updated,
         removed,
-        settled: true,
+        settled,
         tier,
     }
+}
+
+fn subscription_is_settled<S>(
+    node: &NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    tier: DurabilityTier,
+) -> bool
+where
+    S: OrderedKvStorage,
+{
+    if tier <= DurabilityTier::Local {
+        return true;
+    }
+    node.has_settled_result_set(SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+    })
 }
 
 fn subscription_row_key(row: &CurrentRow) -> (String, RowUuid) {
