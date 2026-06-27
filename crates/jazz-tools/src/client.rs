@@ -7,7 +7,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(feature = "direct-core-client")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(test, feature = "direct-core-client", feature = "rocksdb"))]
+#[cfg(any(
+    feature = "direct-core-client",
+    feature = "rocksdb",
+    all(test, feature = "transport-websocket")
+))]
 use std::time::Duration;
 
 use crate::query_manager::query::Query;
@@ -27,7 +31,7 @@ use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalog
 use crate::server::direct_client::DirectCoreWebSocketTransport;
 #[cfg(feature = "direct-core-client")]
 use crate::server::direct_schema::convert_alpha_schema;
-#[cfg(test)]
+#[cfg(all(test, feature = "transport-websocket"))]
 use crate::storage::MemoryStorage;
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
 use crate::storage::SqliteStorage;
@@ -36,7 +40,7 @@ use crate::storage::Storage;
 use crate::storage::{RocksDBStorage, StorageError};
 #[cfg(any(feature = "test-utils", feature = "rocksdb"))]
 use crate::sync_manager::ClientId;
-#[cfg(test)]
+#[cfg(all(test, feature = "transport-websocket"))]
 use crate::sync_manager::OutboxEntry;
 use crate::sync_manager::{DurabilityTier, SyncManager};
 #[cfg(feature = "direct-core-client")]
@@ -67,7 +71,7 @@ use crate::ClientStorage;
 use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
 
 type DynStorage = Box<dyn Storage + Send>;
-#[cfg(test)]
+#[cfg(all(test, feature = "transport-websocket"))]
 type ClientRuntime = crate::runtime_tokio::TokioRuntime<DynStorage>;
 #[cfg(feature = "direct-core-client")]
 type DirectCoreDb = CoreDb<CoreMemoryStorage>;
@@ -739,7 +743,7 @@ fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "transport-websocket"))]
 async fn wait_for_initial_transport_handshake(
     runtime: &ClientRuntime,
     timeout_after: Duration,
@@ -1271,6 +1275,7 @@ mod tests {
     use crate::query_manager::types::{SchemaHash, TableName, TablePolicies};
     #[cfg(feature = "rocksdb")]
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
+    #[cfg(feature = "transport-websocket")]
     use crate::runtime_tokio::TokioRuntime;
     use crate::schema_manager::AppId;
     #[cfg(feature = "rocksdb")]
@@ -1289,6 +1294,7 @@ mod tests {
             .build()
     }
 
+    #[cfg(feature = "rocksdb")]
     fn learned_runtime_todo_schema() -> Schema {
         SchemaBuilder::new()
             .table(
@@ -1506,6 +1512,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "transport-websocket")]
     #[tokio::test]
     async fn initial_transport_handshake_wait_errors_when_transport_is_absent() {
         let app_id = AppId::from_name("client-missing-transport");

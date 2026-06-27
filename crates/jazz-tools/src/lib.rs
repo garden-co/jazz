@@ -38,8 +38,10 @@ pub(crate) mod runtime_tokio;
 
 pub mod transport_auth;
 pub mod transport_error;
+#[cfg(feature = "transport")]
 #[allow(dead_code)]
 pub(crate) mod transport_manager;
+#[cfg(feature = "transport")]
 pub mod transport_protocol;
 #[cfg(feature = "transport-websocket")]
 #[allow(dead_code)]
