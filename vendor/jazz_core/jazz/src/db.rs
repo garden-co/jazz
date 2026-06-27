@@ -1091,6 +1091,18 @@ where
     pub fn mergeable_tx(&self) -> MergeableTx<'_, S> {
         MergeableTx {
             db: self,
+            author: self.identity.author,
+            permission_subject: None,
+            writes: Vec::new(),
+        }
+    }
+
+    /// Build a mergeable transaction authored and permission-checked as `author`.
+    pub fn mergeable_tx_for_identity(&self, author: AuthorId) -> MergeableTx<'_, S> {
+        MergeableTx {
+            db: self,
+            author,
+            permission_subject: Some(author),
             writes: Vec::new(),
         }
     }
@@ -2878,6 +2890,8 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
+    author: AuthorId,
+    permission_subject: Option<AuthorId>,
     writes: Vec<PendingMergeableWrite>,
 }
 
@@ -2957,8 +2971,11 @@ where
             .map(|write| {
                 let mut commit =
                     MergeableCommit::new(write.table, write.row_uuid, self.db.next_now_ms())
-                        .made_by(self.db.identity.author)
+                        .made_by(self.author)
                         .cells(write.cells);
+                if let Some(subject) = self.permission_subject {
+                    commit = commit.permission_subject(subject);
+                }
                 if let Some(deletion) = write.deletion {
                     commit = commit.deletion(deletion);
                 }
