@@ -1521,7 +1521,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_schema_rejects_signed_integer_columns_with_core_server_blocker() {
+    async fn publish_schema_rejects_bigint_columns_with_core_server_blocker() {
         let initial_schema = Schema::new();
         let state = make_state_with_schema(initial_schema).await;
         let app = make_test_router(state);
@@ -1531,10 +1531,10 @@ mod tests {
                     .column(
                         "partSizes",
                         ColumnType::Array {
-                            element: Box::new(ColumnType::Integer),
+                            element: Box::new(ColumnType::BigInt),
                         },
                     )
-                    .column("score", ColumnType::Integer),
+                    .column("score", ColumnType::BigInt),
             )
             .build();
 
@@ -1560,7 +1560,7 @@ mod tests {
         let json: Value = serde_json::from_slice(&body).expect("schema publish json");
         let message = json["error"].as_str().expect("error message");
         assert!(
-            message.contains("$.users.partSizes: INTEGER is signed, but core server fixed schemas only support unsigned integer columns"),
+            message.contains("$.users.partSizes: BIGINT is signed, but core server fixed schemas only support unsigned integer columns"),
             "unexpected error: {message}"
         );
     }

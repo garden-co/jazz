@@ -145,10 +145,10 @@ fn convert_column_type(
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
-        ColumnType::Integer => Err(err(
-            format!("$.{}.{}", table.as_str(), column),
-            "INTEGER is signed, but core server fixed schemas only support unsigned integer columns",
-        )),
+        // Direct core does not currently have signed integer cells. Alpha
+        // public INTEGER columns are therefore represented as U32 and the
+        // direct-core write path rejects negative values.
+        ColumnType::Integer => Ok(GrooveColumnType::U32),
         ColumnType::BigInt => Err(err(
             format!("$.{}.{}", table.as_str(), column),
             "BIGINT is signed, but core server fixed schemas only support unsigned integer columns",
@@ -472,14 +472,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_signed_integer_and_defaults() {
+    fn converts_public_integer_as_direct_core_u32_and_rejects_defaults() {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("todos").column("count", ColumnType::Integer))
             .build();
-        let integer_error = convert_alpha_schema(&integer_schema).unwrap_err();
+        let integer_table = convert_alpha_schema(&integer_schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "todos")
+            .unwrap();
         assert_eq!(
-            integer_error.to_string(),
-            "$.todos.count: INTEGER is signed, but core server fixed schemas only support unsigned integer columns"
+            integer_table
+                .columns
+                .iter()
+                .find(|column| column.name == "count")
+                .unwrap()
+                .column_type,
+            GrooveColumnType::U32
         );
 
         let integer_array_schema = SchemaBuilder::new()
@@ -490,10 +500,20 @@ mod tests {
                 },
             ))
             .build();
-        let integer_array_error = convert_alpha_schema(&integer_array_schema).unwrap_err();
+        let integer_array_table = convert_alpha_schema(&integer_array_schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "todos")
+            .unwrap();
         assert_eq!(
-            integer_array_error.to_string(),
-            "$.todos.partSizes: INTEGER is signed, but core server fixed schemas only support unsigned integer columns"
+            integer_array_table
+                .columns
+                .iter()
+                .find(|column| column.name == "partSizes")
+                .unwrap()
+                .column_type,
+            GrooveColumnType::U32.array_of()
         );
 
         let default_schema = [(

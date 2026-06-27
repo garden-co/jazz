@@ -281,10 +281,94 @@ describe("alpha public package flow", () => {
     ).toBe(true);
   });
 
-  it.skip("TODO(alpha direct core): publish richer public row shapes over websocket once core server accepts public signed INTEGER columns; current schema publish fails with `INTEGER is signed, but core server fixed schemas only support unsigned integer columns`", async () => {
+  it("publishes richer public row shapes over websocket and converges arrays, bytes, nullable refs, and integer predicates", async () => {
     const requestedAppId = uniqueDbName("alpha-public-rich-websocket-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
+
+    const sharedSecret = generateAuthSecret();
+    const dbA = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
+    const dbB = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
+    const richQuery = richApp.todos
+      .where({ tags: { contains: "alpha" }, priority: { gte: 5 } })
+      .orderBy("priority", "desc")
+      .limit(1);
+
+    const snapshots: RichTodo[][] = [];
+    const unsubscribe = ctx.trackSubscription(
+      dbB.subscribeAll(richQuery, (delta) => {
+        snapshots.push([...delta.all]);
+      }),
+    );
+
+    const owner = await withTimeout(
+      dbA.insert(richApp.users, { name: "Alpha Owner" }).wait({ tier: "edge" }),
+      10_000,
+      "rich owner insert was not accepted at the server",
+    );
+    await withTimeout(
+      dbA
+        .insert(richApp.todos, {
+          title: "Ignore low-priority websocket rich row",
+          done: false,
+          list: "launch",
+          priority: 2,
+          tags: ["alpha"],
+          payload: null,
+          ownerId: null,
+        })
+        .wait({ tier: "edge" }),
+      10_000,
+      "low-priority rich row insert was not accepted at the server",
+    );
+    const created = await withTimeout(
+      dbA
+        .insert(richApp.todos, {
+          title: "Adopt alpha websocket rich row",
+          done: false,
+          list: "launch",
+          priority: 7,
+          tags: ["alpha", "direct-core"],
+          payload: new Uint8Array([4, 5, 6, 7]),
+          ownerId: owner.id,
+        })
+        .wait({ tier: "edge" }),
+      10_000,
+      "rich row insert was not accepted at the server",
+    );
+
+    const [rowOnB] = await waitForRichTodos(
+      dbB,
+      richQuery,
+      (todos) => todos.length === 1 && todos[0]?.id === created.id,
+      "richer websocket query convergence",
+    );
+    expect(rowOnB).toMatchObject({
+      id: created.id,
+      title: "Adopt alpha websocket rich row",
+      priority: 7,
+      tags: ["alpha", "direct-core"],
+      ownerId: owner.id,
+    });
+    expect(Array.from(rowOnB.payload ?? [])).toEqual([4, 5, 6, 7]);
+
+    await withTimeout(
+      dbA
+        .update(richApp.todos, created.id, { payload: null, ownerId: null })
+        .wait({ tier: "edge" }),
+      10_000,
+      "rich row nullable update was not accepted at the server",
+    );
+    const [updatedOnB] = await waitForRichTodos(
+      dbB,
+      richQuery,
+      (todos) => todos.length === 1 && todos[0]?.payload === null && todos[0]?.ownerId === null,
+      "richer websocket nullable update convergence",
+    );
+    expect(updatedOnB).toEqual({ ...created, payload: null, ownerId: null });
+
+    unsubscribe();
+    expect(snapshots.some((rows) => rows.some((todo) => todo.id === created.id))).toBe(true);
   });
 
   it("opens public createDb with persistent OPFS and direct websocket server config, then converges todo CRUD", async () => {
@@ -690,6 +774,15 @@ async function waitForSubscribedTodoSummaries(
       }),
     );
   });
+}
+
+async function waitForRichTodos(
+  db: Db,
+  query: Query<"todos">,
+  predicate: (todos: RichTodo[]) => boolean,
+  label: string,
+): Promise<RichTodo[]> {
+  return await waitForQuery(db, query, predicate, label, 15_000, "edge");
 }
 
 function titlesEqual(rows: Todo[], titles: string[]): boolean {
