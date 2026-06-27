@@ -93,6 +93,7 @@ declare module "jazz-wasm" {
       cells: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
+    setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
     tick(): void;
     connectUpstream(): WasmTransport;
     acceptSubscriber(identity: Uint8Array): WasmTransport;

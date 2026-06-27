@@ -6,7 +6,8 @@ use std::rc::Rc;
 use futures_util::{Stream, StreamExt};
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, PeerConnection, PreparedQuery, Propagation, ReadOpts,
-    RowCells, SeededRowIdSource, SubscriptionEvent, WireTransportAdapter, WriteHandle, block_on,
+    RowCells, SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency,
+    WireTransportAdapter, WriteHandle, block_on,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
@@ -232,6 +233,22 @@ struct WasmWireTransport {
     queues: WasmWireQueues,
 }
 
+struct WasmTickScheduler {
+    callback: js_sys::Function,
+}
+
+impl TickScheduler for WasmTickScheduler {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        let urgency = match urgency {
+            TickUrgency::Immediate => "immediate",
+            TickUrgency::Deferred => "deferred",
+        };
+        let _ = self
+            .callback
+            .call1(&JsValue::NULL, &JsValue::from_str(urgency));
+    }
+}
+
 impl WireTransport for WasmWireTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
         self.queues.outbound.borrow_mut().push_back(frame);
@@ -319,6 +336,15 @@ impl WasmDbInner {
             Self::Memory(db) => db.query_is_covered(query),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.query_is_covered(query),
+        }
+    }
+
+    fn set_tick_scheduler(&self, callback: js_sys::Function) {
+        let scheduler = Rc::new(WasmTickScheduler { callback });
+        match self {
+            Self::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.set_tick_scheduler(Some(scheduler)),
         }
     }
 
@@ -677,6 +703,11 @@ impl WasmDb {
     #[wasm_bindgen(js_name = queryIsCovered)]
     pub fn query_is_covered(&self, query: &WasmPreparedQuery) -> bool {
         self.inner.query_is_covered(&query.inner)
+    }
+
+    #[wasm_bindgen(js_name = setTickScheduler)]
+    pub fn set_tick_scheduler(&self, callback: js_sys::Function) {
+        self.inner.set_tick_scheduler(callback);
     }
 
     #[wasm_bindgen(js_name = insertEncoded)]

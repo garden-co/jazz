@@ -330,6 +330,7 @@ type DirectDb = {
   prepareQuery(query: Uint8Array): object;
   all(query: object, opts: unknown): Uint8Array;
   allForIdentity?(query: object, identity: Uint8Array, opts: unknown): Uint8Array;
+  setTickScheduler?(callback: (urgency: "immediate" | "deferred") => void): void;
   tick(): void;
 };
 
@@ -356,6 +357,7 @@ class DirectWorkerHost {
   private pumpScheduled = false;
   private pumpAgain = false;
   private pendingDurabilityTick = false;
+  private coreSchedulerInstalled = false;
 
   private constructor(
     private readonly db: DirectDb,
@@ -386,6 +388,10 @@ class DirectWorkerHost {
       init.directOpen.peerIdentity,
       init.clientId ?? crypto.randomUUID(),
     );
+    if (typeof db.setTickScheduler === "function") {
+      host.coreSchedulerInstalled = true;
+      db.setTickScheduler((urgency) => host.scheduleCoreWake(urgency));
+    }
     self.onmessage = (event: MessageEvent) => host.handle(event.data);
     post({ type: "init-ok", clientId: host.clientId });
     host.schedulePump();
@@ -513,11 +519,21 @@ class DirectWorkerHost {
     });
   }
 
+  private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
+    if (urgency === "immediate") {
+      this.schedulePump();
+      return;
+    }
+    queueMicrotask(() => this.schedulePump());
+  }
+
   private pump(): void {
     for (let round = 0; round < 32; round += 1) {
       const hadPendingDurabilityTick = this.pendingDurabilityTick;
       this.pendingDurabilityTick = false;
-      this.db.tick();
+      if (!this.coreSchedulerInstalled) {
+        this.db.tick();
+      }
       let madeProgress = hadPendingDurabilityTick;
       madeProgress =
         this.pumpTransport(this.mainTransport, (frames) =>
@@ -535,7 +551,7 @@ class DirectWorkerHost {
             port.postMessage({ type: "sync", frames }, frameTransfers(frames));
           }) || madeProgress;
       }
-      if (hadPendingDurabilityTick) {
+      if (hadPendingDurabilityTick && !this.coreSchedulerInstalled) {
         this.db.tick();
       }
       if (!madeProgress) {
