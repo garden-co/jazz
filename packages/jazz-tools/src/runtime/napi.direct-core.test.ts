@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { directWebSocketUrl } from "./core-runtime/direct-websocket.js";
+import { openConfig } from "./core-runtime/direct-codec.js";
 import { CoreRuntime } from "./core-runtime/runtime.js";
 import { encodeDirectSchema } from "./core-runtime/runtime.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
@@ -78,6 +79,35 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
     await server?.stop();
     server = null;
     globalThis.WebSocket = previousWebSocket;
+  });
+
+  it("emits core tick scheduler wakes through the NAPI bridge", async () => {
+    const { NapiDirectDb } = await loadNapiModule();
+    const wakes: string[] = [];
+    const db = NapiDirectDb.openMemory(
+      encodeDirectSchema(TEST_SCHEMA),
+      openConfig(
+        deterministicBytes("jazz-napi-core-runtime:scheduler-node"),
+        deterministicBytes("jazz-napi-core-runtime:scheduler-author"),
+        1,
+        true,
+      ),
+    );
+
+    db.setTickScheduler((error: Error | null, urgency: string) => {
+      if (error) throw error;
+      wakes.push(urgency);
+    });
+    const transport = db.connectUpstream();
+
+    await waitFor(
+      async () => (wakes.length > 0 ? wakes : undefined),
+      "NAPI tick scheduler did not emit a wake",
+    );
+
+    expect(wakes).toContain("immediate");
+    expect(transport.close()).toBe(true);
+    db.close?.();
   });
 
   it("opens, mutates one row, and queries it through the direct WASM adapter shape", async () => {

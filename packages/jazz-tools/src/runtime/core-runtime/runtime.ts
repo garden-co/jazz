@@ -93,6 +93,7 @@ type CoreDb = {
   delete(table: string, rowId: Uint8Array): DirectWrite;
   deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): DirectWrite;
   mergeableTx(): DirectTx;
+  setTickScheduler?(callback: (error: Error | null, urgency: string) => void): void;
   connectUpstream(): DirectTransport;
   tick(): void;
   close?(): void;
@@ -192,6 +193,8 @@ export class CoreRuntime implements Runtime {
   private readonly syncNeededCallbacks = new Set<() => void>();
   private serverPumpScheduled = false;
   private serverPumpAgain = false;
+  private closed = false;
+  private coreSchedulerInstalled = false;
   private nextTransactionId = 1;
   private nextSubscriptionId = 1;
 
@@ -211,6 +214,15 @@ export class CoreRuntime implements Runtime {
     this.db = opts?.persistentPath
       ? openPersistentDirectDb(Runtime, opts.persistentPath, this.schemaBytes, this.configBytes)
       : Runtime.openMemory(this.schemaBytes, this.configBytes);
+    if (this.db.setTickScheduler) {
+      this.coreSchedulerInstalled = true;
+      this.db.setTickScheduler((error, urgency) => {
+        if (error) return;
+        if (urgency === "immediate" || urgency === "deferred") {
+          this.scheduleCoreWake(urgency);
+        }
+      });
+    }
   }
 
   getDirectOpenPayload(): DirectOpenPayload {
@@ -222,6 +234,11 @@ export class CoreRuntime implements Runtime {
   }
 
   close(): void {
+    this.closed = true;
+    this.serverTransport?.close();
+    this.serverTransport = null;
+    this.serverCarrier?.close();
+    this.serverCarrier = null;
     this.db.close?.();
   }
 
@@ -641,10 +658,23 @@ export class CoreRuntime implements Runtime {
   }
 
   private notifySyncNeeded(): void {
+    if (this.closed || this.coreSchedulerInstalled) return;
     for (const callback of this.syncNeededCallbacks) {
       callback();
     }
     this.scheduleServerPump();
+  }
+
+  private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
+    if (this.closed) return;
+    for (const callback of this.syncNeededCallbacks) {
+      callback();
+    }
+    if (urgency === "immediate") {
+      this.scheduleServerPump();
+      return;
+    }
+    queueMicrotask(() => this.scheduleServerPump());
   }
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
@@ -699,10 +729,11 @@ export class CoreRuntime implements Runtime {
   }
 
   private scheduleServerPump(): void {
-    if (!this.serverTransport || this.serverPumpScheduled) return;
+    if (this.closed || !this.serverTransport || this.serverPumpScheduled) return;
     this.serverPumpScheduled = true;
     queueMicrotask(() => {
       this.serverPumpScheduled = false;
+      if (this.closed) return;
       this.pumpServerTransport();
       if (this.serverPumpAgain) {
         this.serverPumpAgain = false;
@@ -713,7 +744,7 @@ export class CoreRuntime implements Runtime {
 
   private pumpServerTransport(): void {
     const transport = this.serverTransport;
-    if (!transport) return;
+    if (this.closed || !transport) return;
     for (let round = 0; round < 32; round += 1) {
       transport.tick();
       this.db.tick();
