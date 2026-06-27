@@ -2,7 +2,7 @@ use std::ops::Bound;
 
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
-use crate::row_histories::BatchId;
+use crate::transaction::BatchId;
 
 use super::{StorageError, encode_value};
 

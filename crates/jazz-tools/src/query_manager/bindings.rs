@@ -4,17 +4,16 @@
 //! and subscription payload shaping in the core crate.
 
 use serde::Deserialize;
-use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
-use crate::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
 use crate::object::ObjectId;
 use crate::query_manager::parse_query_json;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::Schema;
-use crate::row_histories::BatchId;
 use crate::sync::DurabilityTier;
+use crate::transaction::BatchId;
+use crate::transaction::BatchMode;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeSchemaInput {
@@ -89,8 +88,6 @@ struct WriteContextPayloadWire {
     #[serde(default)]
     updated_at: Option<u64>,
     #[serde(default)]
-    batch_mode: Option<String>,
-    #[serde(default)]
     batch_id: Option<String>,
     #[serde(default)]
     target_branch_name: Option<String>,
@@ -100,11 +97,6 @@ impl TryFrom<WriteContextPayloadWire> for WriteContext {
     type Error = String;
 
     fn try_from(value: WriteContextPayloadWire) -> Result<Self, Self::Error> {
-        let batch_mode = value
-            .batch_mode
-            .as_deref()
-            .map(parse_batch_mode_input)
-            .transpose()?;
         let batch_id = value
             .batch_id
             .as_deref()
@@ -115,10 +107,33 @@ impl TryFrom<WriteContextPayloadWire> for WriteContext {
             session: value.session,
             attribution: value.attribution,
             updated_at: value.updated_at,
-            batch_mode,
             batch_id,
             target_branch_name: value.target_branch_name,
         })
+    }
+}
+
+pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
+    batch_id
+        .parse()
+        .map_err(|err: String| format!("Invalid BatchId: {err}"))
+}
+
+pub fn parse_transaction_id_input(transaction_id: &str) -> Result<BatchId, String> {
+    transaction_id
+        .parse()
+        .map_err(|err: String| format!("Invalid transaction id: {err}"))
+}
+
+pub fn parse_transaction_kind_input(transaction_kind: &str) -> Result<BatchMode, String> {
+    match transaction_kind {
+        "mergeable" | "Mergeable" | "direct" | "Direct" => Ok(BatchMode::Direct),
+        "exclusive" | "Exclusive" | "transactional" | "Transactional" => {
+            Ok(BatchMode::Transactional)
+        }
+        other => Err(format!(
+            "Invalid transaction kind '{other}'. Must be 'mergeable' or 'exclusive'."
+        )),
     }
 }
 
@@ -147,108 +162,12 @@ pub fn parse_durability_tier(tier: &str) -> Result<DurabilityTier, String> {
     }
 }
 
-pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
-    batch_id
-        .parse()
-        .map_err(|err: String| format!("Invalid BatchId: {err}"))
-}
-
-pub fn parse_transaction_id_input(transaction_id: &str) -> Result<BatchId, String> {
-    transaction_id
-        .parse()
-        .map_err(|err: String| format!("Invalid transaction id: {err}"))
-}
-
-pub fn parse_batch_mode_input(batch_mode: &str) -> Result<BatchMode, String> {
-    match batch_mode {
-        "direct" | "Direct" => Ok(BatchMode::Direct),
-        "transactional" | "Transactional" => Ok(BatchMode::Transactional),
-        other => Err(format!(
-            "Invalid batch mode '{other}'. Must be 'direct' or 'transactional'."
-        )),
-    }
-}
-
-pub fn parse_transaction_kind_input(transaction_kind: &str) -> Result<BatchMode, String> {
-    match transaction_kind {
-        "mergeable" | "Mergeable" | "direct" | "Direct" => Ok(BatchMode::Direct),
-        "exclusive" | "Exclusive" | "transactional" | "Transactional" => {
-            Ok(BatchMode::Transactional)
-        }
-        other => Err(format!(
-            "Invalid transaction kind '{other}'. Must be 'mergeable' or 'exclusive'."
-        )),
-    }
-}
-
 pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
     match tier {
         DurabilityTier::Local => "local",
         DurabilityTier::EdgeServer => "edge",
         DurabilityTier::GlobalServer => "global",
     }
-}
-
-pub fn serialize_batch_mode(mode: BatchMode) -> &'static str {
-    match mode {
-        BatchMode::Direct => "direct",
-        BatchMode::Transactional => "transactional",
-    }
-}
-
-pub fn serialize_transaction_kind(mode: BatchMode) -> &'static str {
-    match mode {
-        BatchMode::Direct => "mergeable",
-        BatchMode::Transactional => "exclusive",
-    }
-}
-
-pub fn serialize_batch_fate(settlement: &BatchFate) -> JsonValue {
-    match settlement {
-        BatchFate::Rejected {
-            batch_id,
-            code,
-            reason,
-        } => json!({
-            "kind": "rejected",
-            "transactionId": batch_id.to_string(),
-            "code": code,
-            "reason": reason,
-        }),
-        BatchFate::DurableDirect {
-            batch_id,
-            confirmed_tier,
-        } => json!({
-            "kind": "accepted",
-            "transactionId": batch_id.to_string(),
-            "confirmedTier": serialize_durability_tier(*confirmed_tier),
-        }),
-        BatchFate::AcceptedTransaction {
-            batch_id,
-            confirmed_tier,
-        } => json!({
-            "kind": "accepted",
-            "transactionId": batch_id.to_string(),
-            "confirmedTier": serialize_durability_tier(*confirmed_tier),
-        }),
-        BatchFate::Missing { batch_id } => json!({
-            "kind": "missing",
-            "transactionId": batch_id.to_string(),
-        }),
-    }
-}
-
-pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
-    json!({
-        "transactionId": record.batch_id.to_string(),
-        "kind": serialize_transaction_kind(record.mode),
-        "sealed": record.sealed,
-        "latestSettlement": record.latest_fate.as_ref().map(serialize_batch_fate),
-    })
-}
-
-pub fn serialize_local_batch_records(records: &[LocalBatchRecord]) -> JsonValue {
-    JsonValue::Array(records.iter().map(serialize_local_batch_record).collect())
 }
 
 pub fn generate_id() -> String {
@@ -276,7 +195,6 @@ pub fn current_timestamp_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{parse_runtime_schema_input, parse_write_context_input};
-    use crate::batch_fate::BatchMode;
     use crate::query_manager::types::TableName;
 
     #[test]
@@ -352,7 +270,6 @@ mod tests {
                     "claims": {{}},
                     "authMode": "external"
                 }},
-                "batch_mode": "transactional",
                 "batch_id": "{batch_id}",
                 "target_branch_name": "dev-123456789abc-main"
             }}"#
@@ -380,7 +297,6 @@ mod tests {
                 "claims": {},
                 "authMode": "external"
             },
-            "batch_mode": "transactional",
             "batch_id": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
             "target_branch_name": "dev-123456789abc-main"
         }"#;
@@ -391,10 +307,9 @@ mod tests {
     }
 
     #[test]
-    fn write_context_accepts_lowercase_transactional_batch_mode() {
+    fn write_context_accepts_batch_id_for_transaction_correlation() {
         let context = parse_write_context_input(Some(
             r#"{
-                "batch_mode": "transactional",
                 "batch_id": "0196721ac2617f10a4bebbc7f7ffdb3f",
                 "target_branch_name": "dev-111111111111-main"
             }"#,
@@ -402,8 +317,10 @@ mod tests {
         .expect("parse write context")
         .expect("write context present");
 
-        assert_eq!(context.batch_mode(), BatchMode::Transactional);
         assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
-        assert!(context.batch_id().is_some());
+        assert_eq!(
+            context.batch_id().map(|id| id.to_string()).as_deref(),
+            Some("0196721ac2617f10a4bebbc7f7ffdb3f")
+        );
     }
 }

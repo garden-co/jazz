@@ -54,11 +54,12 @@ use crate::query_manager::types::{
 };
 use crate::row_format::{decode_row, encode_row};
 use crate::row_histories::{
-    BatchId, FlatRowCodecs, HistoryScan, QueryRowBatch, RowState, StoredRowBatch, VisibleRowEntry,
+    FlatRowCodecs, HistoryScan, QueryRowBatch, RowState, StoredRowBatch, VisibleRowEntry,
     decode_flat_history_row_with_codecs, decode_flat_visible_row_entry_with_codecs,
     flat_row_codecs,
 };
 use crate::sync::DurabilityTier;
+use crate::transaction::BatchId;
 
 // ============================================================================
 // Storage Types
@@ -2279,7 +2280,7 @@ pub(super) fn scan_visible_region_row_batch_branches_with_storage<H: Storage + ?
 pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
     storage: &mut H,
     table: &str,
-    batch_id: crate::row_histories::BatchId,
+    batch_id: crate::transaction::BatchId,
     state: Option<RowState>,
     confirmed_tier: Option<DurabilityTier>,
 ) -> Result<(), StorageError> {
@@ -2400,7 +2401,7 @@ pub(crate) fn patch_exact_row_batch_with_storage<H: Storage + ?Sized>(
     table: &str,
     branch: &str,
     row_id: ObjectId,
-    batch_id: crate::row_histories::BatchId,
+    batch_id: crate::transaction::BatchId,
     state: Option<RowState>,
     confirmed_tier: Option<DurabilityTier>,
 ) -> Result<bool, StorageError> {

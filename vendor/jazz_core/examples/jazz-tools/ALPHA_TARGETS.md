@@ -390,6 +390,15 @@ API/testability gap, not as covered app persistence.
   message ordering. New sync confidence should come from public
   `createDb`/`JazzClient` outcomes, websocket convergence, durable restart, and
   direct-core telemetry surfaces if those are added.
+  Transaction ids and transaction-kind parsing now live in neutral
+  `jazz_tools::transaction` vocabulary rather than being sourced from
+  `row_histories::BatchId` or `batch_fate::BatchMode`. `WriteContext` keeps the
+  transaction id needed for direct-core staged writes, but it no longer carries
+  `batch_mode`, and the TypeScript write-context payload no longer advertises
+  that dead field. The old `rocksdb_storage_integration` test has been deleted
+  so row-history/batch-fate storage is no longer pinned as an integration
+  contract; future persistence checks should be narrow catalogue-storage gates
+  or direct-core app gates.
 
 ## Next targets
 

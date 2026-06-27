@@ -708,7 +708,7 @@ impl Storage for SqliteStorage {
     fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
-        batch_id: crate::row_histories::BatchId,
+        batch_id: crate::transaction::BatchId,
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
@@ -769,7 +769,7 @@ impl Storage for SqliteStorage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        batch_id: crate::row_histories::BatchId,
+        batch_id: crate::transaction::BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(super::load_history_row_batch_row_bytes_with_storage(
             self, table, branch, row_id, batch_id,

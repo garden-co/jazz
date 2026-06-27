@@ -29,9 +29,10 @@ use crate::query_manager::types::{
 };
 use crate::row_format::{EncodingError, encode_row, encode_value_with_type};
 use crate::sync::DurabilityTier;
+use crate::transaction::BatchId;
 
 use super::codecs::{flat_user_values, malformed, tier_satisfies};
-use super::types::{BatchId, ComputedVisiblePreview, StoredRowBatch, VisibleRowEntry};
+use super::types::{ComputedVisiblePreview, StoredRowBatch, VisibleRowEntry};
 
 pub(super) fn visible_rows_for_tier(
     history_rows: &[StoredRowBatch],

@@ -16,8 +16,9 @@ use crate::row_format::{
     project_row_with_layout,
 };
 use crate::sync::DurabilityTier;
+use crate::transaction::BatchId;
 
-use super::types::{BatchId, RowMetadata, RowState, StoredRowBatch, VisibleRowEntry};
+use super::types::{RowMetadata, RowState, StoredRowBatch, VisibleRowEntry};
 
 pub(super) fn tier_satisfies(
     confirmed_tier: Option<DurabilityTier>,
