@@ -655,7 +655,9 @@ export class CoreRuntime implements Runtime {
   }
 
   private pumpSubscriptions(): void {
-    this.db.tick();
+    if (!this.coreSchedulerInstalled) {
+      this.db.tick();
+    }
     for (const [handle, subscription] of this.subscriptions) {
       this.startSubscriptionReader(handle, subscription);
     }
