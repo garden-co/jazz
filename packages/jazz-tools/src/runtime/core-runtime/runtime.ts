@@ -12,7 +12,6 @@ import { analyzeRelations, type Relation } from "../../codegen/relation-analyzer
 import type {
   DirectInsertResult,
   DirectMutationResult,
-  MutationErrorEvent,
   Runtime,
   TransactionKind,
 } from "../client.js";
@@ -418,8 +417,6 @@ export class CoreRuntime implements Runtime {
     );
     return this.finishMutation(write);
   }
-
-  onMutationError(_callback: (event: MutationErrorEvent) => void): void {}
 
   beginTransaction(kind: TransactionKind): string {
     const id = `tx-${this.nextTransactionId++}`;

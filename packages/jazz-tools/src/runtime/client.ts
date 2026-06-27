@@ -62,7 +62,6 @@ export interface Runtime {
     object_id: string,
     write_context_json?: string | null,
   ): DirectMutationResult;
-  onMutationError(callback: (event: MutationErrorEvent) => void): void;
   waitForTransaction(transactionId: string, tier: string): Promise<void>;
   query(
     query_json: string,
@@ -217,17 +216,6 @@ export interface UpdateOptions extends TimestampOverrideOptions {}
 export interface DeleteOptions extends TimestampOverrideOptions {}
 
 export interface RestoreOptions extends TimestampOverrideOptions {}
-
-/**
- * A mutation error event emitted by {@link JazzClient.onMutationError}.
- * Contains enough information to understand the cause of the error and
- * correlate it with a specific mutation.
- */
-export interface MutationErrorEvent {
-  code: string;
-  reason: string;
-  transaction: LocalTransactionRecord;
-}
 
 /**
  * Query row result.
@@ -603,10 +591,6 @@ export class JazzClient {
         handler(mapAuthReason(reason));
       });
     }
-
-    this.runtime.onMutationError((event) => {
-      console.error("Unhandled Jazz mutation error", event);
-    });
   }
 
   /**
@@ -629,10 +613,6 @@ export class JazzClient {
 
   beginTransaction(kind: TransactionKind): TransactionId {
     return requireTransactionalRuntime(this.runtime).beginTransaction(kind);
-  }
-
-  onMutationError(listener: (event: MutationErrorEvent) => void): void {
-    this.runtime.onMutationError(listener);
   }
 
   commitTransaction(transactionId: TransactionId): WriteHandle {
