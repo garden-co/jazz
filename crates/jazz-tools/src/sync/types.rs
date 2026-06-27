@@ -1,15 +1,11 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::batch_fate::{BatchFate, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
-use crate::row_histories::{BatchId, StoredRowBatch};
 use crate::sync::{ClientId, DurabilityTier, ServerId};
 
 /// Unique identifier for a query subscription.
@@ -23,13 +19,6 @@ pub enum QueryPropagation {
     Full,
     #[serde(rename = "local-only")]
     LocalOnly,
-}
-
-/// Row metadata sent once per destination.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RowMetadata {
-    pub id: ObjectId,
-    pub metadata: HashMap<String, String>,
 }
 
 /// Strongly typed errors for sync operations.
@@ -66,27 +55,6 @@ pub enum SyncPayload {
     /// Semantic update for one catalogue/system entry.
     CatalogueEntryUpdated { entry: CatalogueEntry },
 
-    /// Upstream replication of a newly created or newly learned row batch entry.
-    RowBatchCreated {
-        metadata: Option<RowMetadata>,
-        row: StoredRowBatch,
-    },
-
-    /// Downstream delivery of a row batch entry that is needed for a subscriber's scope.
-    RowBatchNeeded {
-        metadata: Option<RowMetadata>,
-        row: StoredRowBatch,
-    },
-
-    /// Replayable fate for one logical batch.
-    BatchFate { fate: BatchFate },
-
-    /// Request current replayable fate for specific batch ids.
-    BatchFateNeeded { batch_ids: Vec<BatchId> },
-
-    /// Explicitly seal a transactional batch so the authority can validate it.
-    SealBatch { submission: SealedBatchSubmission },
-
     /// Subscribe to a query (client to server).
     /// Server will build QueryGraph and send matching objects.
     QuerySubscription {
@@ -109,7 +77,7 @@ pub enum SyncPayload {
     /// for the settled server result.
     ///
     /// This means the upstream server has reached a complete first frontier for the
-    /// subscription. Per-batch durability and visibility are replayed via `BatchFate`.
+    /// subscription.
     QuerySettled {
         query_id: QueryId,
         tier: DurabilityTier,
@@ -221,14 +189,6 @@ impl SyncPayload {
     pub fn object_id(&self) -> Option<ObjectId> {
         match self {
             SyncPayload::CatalogueEntryUpdated { entry } => Some(entry.object_id),
-            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
-                Some(row.row_id)
-            }
-            SyncPayload::BatchFate { .. } => None,
-            SyncPayload::BatchFateNeeded { .. } => None,
-            SyncPayload::SealBatch { submission } => {
-                submission.members.first().map(|member| member.object_id)
-            }
             SyncPayload::QuerySettled { scope, .. } => {
                 scope.first().map(|(object_id, _)| *object_id)
             }
@@ -239,12 +199,6 @@ impl SyncPayload {
     pub fn branch_name(&self) -> Option<BranchName> {
         match self {
             SyncPayload::CatalogueEntryUpdated { .. } => None,
-            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
-                Some(BranchName::new(&row.branch))
-            }
-            SyncPayload::BatchFate { .. } => None,
-            SyncPayload::BatchFateNeeded { .. } => None,
-            SyncPayload::SealBatch { .. } => None,
             SyncPayload::QuerySettled { scope, .. } => {
                 scope.first().map(|(_, branch_name)| *branch_name)
             }
@@ -254,14 +208,7 @@ impl SyncPayload {
 
     /// True when handling this payload may mutate local storage.
     pub fn writes_storage(&self) -> bool {
-        matches!(
-            self,
-            SyncPayload::CatalogueEntryUpdated { .. }
-                | SyncPayload::RowBatchCreated { .. }
-                | SyncPayload::RowBatchNeeded { .. }
-                | SyncPayload::BatchFate { .. }
-                | SyncPayload::SealBatch { .. }
-        )
+        matches!(self, SyncPayload::CatalogueEntryUpdated { .. })
     }
 
     /// Encode this payload using postcard.
@@ -286,15 +233,6 @@ impl SyncPayload {
     pub fn is_catalogue(&self) -> bool {
         match self {
             SyncPayload::CatalogueEntryUpdated { entry } => entry.is_catalogue(),
-            SyncPayload::RowBatchCreated { metadata, .. }
-            | SyncPayload::RowBatchNeeded { metadata, .. } => metadata
-                .as_ref()
-                .and_then(|metadata| {
-                    metadata
-                        .metadata
-                        .get(crate::metadata::MetadataKey::Type.as_str())
-                })
-                .is_some_and(|kind| crate::metadata::ObjectType::is_catalogue_type_str(kind)),
             _ => false,
         }
     }
@@ -308,11 +246,6 @@ impl SyncPayload {
     pub fn variant_name(&self) -> &'static str {
         match self {
             SyncPayload::CatalogueEntryUpdated { .. } => "CatalogueEntryUpdated",
-            SyncPayload::RowBatchCreated { .. } => "RowBatchCreated",
-            SyncPayload::RowBatchNeeded { .. } => "RowBatchNeeded",
-            SyncPayload::BatchFate { .. } => "BatchFate",
-            SyncPayload::BatchFateNeeded { .. } => "BatchFateNeeded",
-            SyncPayload::SealBatch { .. } => "SealBatch",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
             SyncPayload::QuerySettled { .. } => "QuerySettled",

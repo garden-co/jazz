@@ -11,12 +11,11 @@
 //! // ... attach to server + clients via builders ...
 //!
 //! println!("{}", tracer.dump());
-//! // [001] +  0ms  alice    -> server   ObjectUpdated        obj:a1b2c3d4 branch:main commits:[e5f6a7b8]
-//! // [002] +  3ms  server   -> alice    PersistenceAck       obj:a1b2c3d4 confirmed:[e5f6a7b8] tier:EdgeServer
-//! // [003] +  5ms  server   -> bob      ObjectUpdated        obj:a1b2c3d4 branch:main commits:[e5f6a7b8]
+//! // [001] +  0ms  alice    -> server   QuerySubscription    query:1
+//! // [002] +  3ms  server   -> alice    QuerySettled         query:1 scope:2 through_seq:8
 //!
-//! assert!(tracer.from("alice").iter().any(|m| m.is_object_updated()));
-//! assert!(tracer.to("bob").iter().any(|m| m.is_object_updated()));
+//! assert!(tracer.from("alice").iter().any(|m| m.is_query_subscription()));
+//! assert!(tracer.to("alice").iter().any(|m| m.is_query_settled()));
 //! ```
 
 use std::collections::HashMap;
@@ -24,8 +23,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::object::{BranchName, ObjectId};
-use crate::row_histories::BatchId;
+use crate::object::ObjectId;
 use crate::sync::ClientId;
 use crate::sync::vocabulary::{Destination, QueryId, Source, SyncPayload};
 
@@ -99,19 +97,6 @@ pub struct SyncMessage {
 }
 
 impl SyncMessage {
-    /// True if this is an update payload.
-    pub fn is_object_updated(&self) -> bool {
-        matches!(
-            self.payload,
-            SyncPayload::RowBatchCreated { .. } | SyncPayload::RowBatchNeeded { .. }
-        )
-    }
-
-    /// True if this is a durability-state payload.
-    pub fn is_persistence_ack(&self) -> bool {
-        matches!(self.payload, SyncPayload::BatchFate { .. })
-    }
-
     /// True if this is a `QuerySubscription` payload.
     pub fn is_query_subscription(&self) -> bool {
         matches!(self.payload, SyncPayload::QuerySubscription { .. })
@@ -130,10 +115,8 @@ impl SyncMessage {
     /// Extract object_id from payloads that carry one.
     pub fn object_id(&self) -> Option<ObjectId> {
         match &self.payload {
-            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
-                Some(row.row_id)
-            }
-            SyncPayload::BatchFate { .. } => None,
+            SyncPayload::CatalogueEntryUpdated { entry } => Some(entry.object_id),
+            SyncPayload::QuerySettled { scope, .. } => scope.first().map(|(id, _)| *id),
             _ => None,
         }
     }
@@ -145,17 +128,6 @@ impl SyncMessage {
             SyncPayload::QueryUnsubscription { query_id } => Some(*query_id),
             SyncPayload::QuerySettled { query_id, .. } => Some(*query_id),
             _ => None,
-        }
-    }
-
-    /// Extract batch ids from update or durability payloads.
-    pub fn batch_ids(&self) -> Vec<BatchId> {
-        match &self.payload {
-            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
-                vec![row.batch_id()]
-            }
-            SyncPayload::BatchFate { fate } => vec![fate.batch_id()],
-            _ => vec![],
         }
     }
 }
@@ -172,8 +144,6 @@ struct Inner {
     client_names: HashMap<ClientId, String>,
     /// ObjectId -> human name mapping.
     object_names: HashMap<ObjectId, String>,
-    /// BatchId -> human name mapping.
-    batch_names: HashMap<BatchId, String>,
 }
 
 /// Thread-safe sync message recorder.
@@ -195,7 +165,6 @@ impl SyncTracer {
                 start: Instant::now(),
                 client_names: HashMap::new(),
                 object_names: HashMap::new(),
-                batch_names: HashMap::new(),
             })),
         }
     }
@@ -219,17 +188,6 @@ impl SyncTracer {
     pub fn register_object(&self, object_id: ObjectId, name: impl Into<String>) {
         let mut inner = self.inner.lock().unwrap();
         inner.object_names.insert(object_id, name.into());
-    }
-
-    /// Register a BatchId -> human name mapping.
-    ///
-    /// ```ignore
-    /// tracer.register_batch(batch_id, "B1");
-    /// // Trace now shows "B1" instead of "e5f6a7b8"
-    /// ```
-    pub fn register_batch(&self, batch_id: BatchId, name: impl Into<String>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.batch_names.insert(batch_id, name.into());
     }
 
     // --- Recording ---
@@ -330,7 +288,7 @@ impl SyncTracer {
             .collect()
     }
 
-    /// Messages involving a specific object (ObjectUpdated, PersistenceAck, ObjectTruncated).
+    /// Messages involving a specific object.
     pub fn for_object(&self, object_id: ObjectId) -> Vec<SyncMessage> {
         self.inner
             .lock()
@@ -342,7 +300,7 @@ impl SyncTracer {
             .collect()
     }
 
-    /// Messages of a specific payload variant (e.g. "ObjectUpdated", "PersistenceAck").
+    /// Messages of a specific payload variant (e.g. "QuerySubscription", "QuerySettled").
     pub fn of_type(&self, variant: &str) -> Vec<SyncMessage> {
         self.inner
             .lock()
@@ -408,9 +366,8 @@ impl SyncTracer {
     /// stable across runs regardless of async message interleaving.
     ///
     /// ```text
-    /// alice  -> server : ObjectUpdated (2), QueryUnsubscription (1)
-    /// server -> alice  : PersistenceAck (4)
-    /// server -> bob    : ObjectUpdated (2), QuerySettled (4)
+    /// alice  -> server : QuerySubscription (1), QueryUnsubscription (1)
+    /// server -> alice  : QuerySettled (1)
     /// ```
     pub fn tally(&self) -> String {
         let inner = self.inner.lock().unwrap();
@@ -429,12 +386,11 @@ impl SyncTracer {
         tally_messages(&filtered)
     }
 
-    /// Pretty-print all recorded messages with named objects/commits.
+    /// Pretty-print all recorded messages with named objects.
     pub fn dump(&self) -> String {
         let inner = self.inner.lock().unwrap();
         let names = Names {
             objects: &inner.object_names,
-            batches: &inner.batch_names,
         };
         format_messages(&inner.messages, &names)
     }
@@ -444,7 +400,6 @@ impl SyncTracer {
         let inner = self.inner.lock().unwrap();
         let names = Names {
             objects: &inner.object_names,
-            batches: &inner.batch_names,
         };
         let filtered: Vec<_> = inner
             .messages
@@ -457,30 +412,27 @@ impl SyncTracer {
 
     /// Detailed trace without timing — stable for `insta` inline snapshots.
     ///
-    /// Shows named objects/commits, one line per message:
+    /// Shows named objects, one line per message:
     /// ```text
-    /// alice    -> server   ObjectUpdated        obj:alice-todo branch:main commits:[C1]
-    /// server   -> alice    PersistenceAck       obj:alice-todo confirmed:[C1] tier:EdgeServer
+    /// alice    -> server   QuerySubscription    query:1
+    /// server   -> alice    QuerySettled         query:1 scope:2 through_seq:8
     /// ```
     pub fn trace(&self) -> String {
         let inner = self.inner.lock().unwrap();
         let names = Names {
             objects: &inner.object_names,
-            batches: &inner.batch_names,
         };
         format_trace(&inner.messages, &names)
     }
 
     /// Normalized trace for stable inline snapshots.
     ///
-    /// Like `trace()` but auto-assigns deterministic names to commits and
-    /// branches as they appear: first commit → `C1`, second → `C2`, etc.
-    /// Branch names are stripped of the random client-ID prefix.
+    /// Like `trace()` but auto-assigns deterministic names to objects as they appear.
     /// Registered object names are used; unregistered objects get `obj-1`, `obj-2`.
     ///
     /// ```text
-    /// alice    -> server   ObjectUpdated        obj:my-todo branch:main commits:[C1]
-    /// server   -> alice    PersistenceAck       obj:my-todo confirmed:[C1] tier:EdgeServer
+    /// alice    -> server   QuerySubscription    query:1
+    /// server   -> alice    QuerySettled         query:1 scope:1 through_seq:4
     /// ```
     pub fn trace_normalized(&self) -> String {
         let inner = self.inner.lock().unwrap();
@@ -533,7 +485,6 @@ impl SyncTracer {
         let inner = self.inner.lock().unwrap();
         let names = Names {
             objects: &inner.object_names,
-            batches: &inner.batch_names,
         };
         let filtered: Vec<_> = inner
             .messages
@@ -550,9 +501,8 @@ impl SyncTracer {
     /// `from -> to  MessageType`.
     ///
     /// ```text
-    /// alice  -> server  ObjectUpdated
-    /// server -> alice   PersistenceAck
-    /// server -> bob     ObjectUpdated
+    /// alice  -> server  QuerySubscription
+    /// server -> alice   QuerySettled
     /// ```
     pub fn summary(&self) -> String {
         let inner = self.inner.lock().unwrap();
@@ -575,7 +525,7 @@ impl SyncTracer {
     ///
     /// Each line in `expected` should be `from -> to  MessageType`.
     /// Blank lines and leading/trailing whitespace are ignored.
-    /// Dynamic values (object IDs, commits, etc.) are not compared.
+    /// Dynamic values (object IDs, query IDs, etc.) are not compared.
     ///
     /// # Panics
     ///
@@ -585,9 +535,8 @@ impl SyncTracer {
     ///
     /// ```ignore
     /// tracer.expect("
-    ///     alice  -> server  ObjectUpdated
-    ///     server -> alice   PersistenceAck
-    ///     server -> bob     ObjectUpdated
+    ///     alice  -> server  QuerySubscription
+    ///     server -> alice   QuerySettled
     /// ");
     /// ```
     pub fn expect(&self, expected: &str) {
@@ -624,8 +573,8 @@ impl SyncTracer {
     ///
     /// ```ignore
     /// tracer.expect_contains("
-    ///     alice  -> server  ObjectUpdated
-    ///     server -> bob     ObjectUpdated
+    ///     alice  -> server  QuerySubscription
+    ///     server -> bob     QuerySettled
     /// ");
     /// ```
     pub fn expect_contains(&self, expected: &str) {
@@ -766,7 +715,6 @@ fn normalize_expectation(s: &str) -> Vec<String> {
 /// Name maps for resolving IDs to human-readable names in formatted output.
 struct Names<'a> {
     objects: &'a HashMap<ObjectId, String>,
-    batches: &'a HashMap<BatchId, String>,
 }
 
 impl Names<'_> {
@@ -776,49 +724,23 @@ impl Names<'_> {
             .cloned()
             .unwrap_or_else(|| short_object_id(id))
     }
-
-    fn batch(&self, id: &BatchId) -> String {
-        self.batches
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| short_batch_id(id))
-    }
 }
 
 /// Auto-normalizes dynamic values (commit hashes, branch names, object IDs)
 /// into deterministic labels for stable snapshot testing.
 struct Normalizer<'a> {
     object_names: &'a HashMap<ObjectId, String>,
-    batch_map: HashMap<BatchId, String>,
-    next_batch: usize,
     object_map: HashMap<ObjectId, String>,
     next_object: usize,
-    branch_map: HashMap<String, String>,
-    next_branch: usize,
 }
 
 impl<'a> Normalizer<'a> {
     fn new(object_names: &'a HashMap<ObjectId, String>) -> Self {
         Self {
             object_names,
-            batch_map: HashMap::new(),
-            next_batch: 1,
             object_map: HashMap::new(),
             next_object: 1,
-            branch_map: HashMap::new(),
-            next_branch: 1,
         }
-    }
-
-    fn batch(&mut self, id: &BatchId) -> String {
-        self.batch_map
-            .entry(*id)
-            .or_insert_with(|| {
-                let name = format!("B{}", self.next_batch);
-                self.next_batch += 1;
-                name
-            })
-            .clone()
     }
 
     fn object(&mut self, id: &ObjectId) -> String {
@@ -835,66 +757,8 @@ impl<'a> Normalizer<'a> {
             .clone()
     }
 
-    fn branch(&mut self, name: &crate::object::BranchName) -> String {
-        let raw = name.to_string();
-        self.branch_map
-            .entry(raw.clone())
-            .or_insert_with(|| {
-                // Strip "client-<random>-" prefix if present
-                if let Some(suffix) = raw.strip_prefix("client-")
-                    && let Some((_random, rest)) = suffix.split_once('-')
-                {
-                    return rest.to_string();
-                }
-                let label = format!("branch-{}", self.next_branch);
-                self.next_branch += 1;
-                label
-            })
-            .clone()
-    }
-
     fn format_payload(&mut self, payload: &SyncPayload) -> String {
         match payload {
-            SyncPayload::RowBatchCreated { row, .. } => {
-                format!(
-                    "created row:{} branch:{} batch:{}",
-                    self.object(&row.row_id),
-                    self.branch(&BranchName::new(&row.branch)),
-                    self.batch(&row.batch_id()),
-                )
-            }
-            SyncPayload::RowBatchNeeded { row, .. } => {
-                format!(
-                    "needed row:{} branch:{} batch:{}",
-                    self.object(&row.row_id),
-                    self.branch(&BranchName::new(&row.branch)),
-                    self.batch(&row.batch_id()),
-                )
-            }
-            SyncPayload::BatchFate { fate } => self.format_settlement(fate),
-            SyncPayload::BatchFateNeeded { batch_ids } => {
-                let batches = batch_ids
-                    .iter()
-                    .map(|batch_id| self.batch(batch_id))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("batch_ids:[{batches}]")
-            }
-            SyncPayload::SealBatch { submission } => {
-                let members = submission
-                    .members
-                    .iter()
-                    .map(|member| format!("row:{}", self.object(&member.object_id)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "seal batch:{} target:{} members:[{}] frontier:{}",
-                    self.batch(&submission.batch_id),
-                    self.branch(&submission.target_branch_name),
-                    members,
-                    submission.captured_frontier.len()
-                )
-            }
             SyncPayload::CatalogueEntryUpdated { entry } => {
                 format!(
                     "catalogue obj:{} type:{}",
@@ -929,42 +793,6 @@ impl<'a> Normalizer<'a> {
             }
             SyncPayload::Error(e) => {
                 format!("{:?}", e)
-            }
-        }
-    }
-
-    fn format_settlement(&mut self, settlement: &crate::batch_fate::BatchFate) -> String {
-        match settlement {
-            crate::batch_fate::BatchFate::Missing { batch_id } => {
-                format!("missing batch:{}", self.batch(batch_id))
-            }
-            crate::batch_fate::BatchFate::Rejected {
-                batch_id,
-                code,
-                reason,
-            } => {
-                format!(
-                    "rejected batch:{} code:{code} reason:{reason}",
-                    self.batch(batch_id)
-                )
-            }
-            crate::batch_fate::BatchFate::DurableDirect {
-                batch_id,
-                confirmed_tier,
-            } => {
-                format!(
-                    "durable_direct batch:{} tier:{confirmed_tier:?}",
-                    self.batch(batch_id)
-                )
-            }
-            crate::batch_fate::BatchFate::AcceptedTransaction {
-                batch_id,
-                confirmed_tier,
-            } => {
-                format!(
-                    "accepted_transaction batch:{} tier:{confirmed_tier:?}",
-                    self.batch(batch_id)
-                )
             }
         }
     }
@@ -1011,51 +839,11 @@ fn format_message(msg: &SyncMessage, names: &Names<'_>) -> String {
 
 fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
     match payload {
-        SyncPayload::RowBatchCreated { row, .. } => {
-            format!(
-                "created row:{} branch:{} batch:{}",
-                names.object(&row.row_id),
-                row.branch,
-                names.batch(&row.batch_id()),
-            )
-        }
-        SyncPayload::RowBatchNeeded { row, .. } => {
-            format!(
-                "needed row:{} branch:{} batch:{}",
-                names.object(&row.row_id),
-                row.branch,
-                names.batch(&row.batch_id()),
-            )
-        }
         SyncPayload::CatalogueEntryUpdated { entry } => {
             format!(
                 "catalogue obj:{} type:{}",
                 names.object(&entry.object_id),
                 entry.object_type().unwrap_or("unknown"),
-            )
-        }
-        SyncPayload::BatchFate { fate } => format_settlement_details(fate, names),
-        SyncPayload::BatchFateNeeded { batch_ids } => {
-            let batches = batch_ids
-                .iter()
-                .map(|batch_id| names.batch(batch_id))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("batch_ids:[{batches}]")
-        }
-        SyncPayload::SealBatch { submission } => {
-            let members = submission
-                .members
-                .iter()
-                .map(|member| format!("row:{}", names.object(&member.object_id)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "seal batch:{} target:{} members:[{}] frontier:{}",
-                names.batch(&submission.batch_id),
-                submission.target_branch_name,
-                members,
-                submission.captured_frontier.len()
             )
         }
         SyncPayload::QuerySubscription { query_id, .. } => {
@@ -1089,50 +877,6 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
     }
 }
 
-fn format_settlement_details(
-    settlement: &crate::batch_fate::BatchFate,
-    names: &Names<'_>,
-) -> String {
-    match settlement {
-        crate::batch_fate::BatchFate::Missing { batch_id } => {
-            format!("missing batch:{}", names.batch(batch_id))
-        }
-        crate::batch_fate::BatchFate::Rejected {
-            batch_id,
-            code,
-            reason,
-        } => {
-            format!(
-                "rejected batch:{} code:{code} reason:{reason}",
-                names.batch(batch_id)
-            )
-        }
-        crate::batch_fate::BatchFate::DurableDirect {
-            batch_id,
-            confirmed_tier,
-        } => {
-            format!(
-                "durable_direct batch:{} tier:{confirmed_tier:?}",
-                names.batch(batch_id)
-            )
-        }
-        crate::batch_fate::BatchFate::AcceptedTransaction {
-            batch_id,
-            confirmed_tier,
-        } => {
-            format!(
-                "accepted_transaction batch:{} tier:{confirmed_tier:?}",
-                names.batch(batch_id)
-            )
-        }
-    }
-}
-
-/// First 4 bytes of a BatchId as hex (8 chars).
-fn short_batch_id(id: &BatchId) -> String {
-    hex::encode(&id.as_bytes()[..4])
-}
-
 /// First 8 chars of an ObjectId UUID.
 fn short_object_id(id: &ObjectId) -> String {
     let s = id.to_string();
@@ -1152,22 +896,27 @@ fn short_uuid(uuid: &uuid::Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::RowProvenance;
-    use crate::row_histories::{RowState, StoredRowBatch};
+    use crate::query_manager::query::QueryBuilder;
     use crate::sync::ServerId;
 
-    fn make_row(byte: u8) -> StoredRowBatch {
-        let row_id = ObjectId::new();
-        StoredRowBatch::new(
-            row_id,
-            "main",
-            Vec::new(),
-            vec![byte],
-            RowProvenance::for_insert(row_id.to_string(), 1000),
-            Default::default(),
-            RowState::VisibleDirect,
-            None,
-        )
+    fn query_subscription(query_id: u64) -> SyncPayload {
+        SyncPayload::QuerySubscription {
+            query_id: QueryId(query_id),
+            query: Box::new(QueryBuilder::new("todos").build()),
+            session: None,
+            required_tier: None,
+            propagation: Default::default(),
+            policy_context_tables: Vec::new(),
+        }
+    }
+
+    fn query_settled(query_id: u64) -> SyncPayload {
+        SyncPayload::QuerySettled {
+            query_id: QueryId(query_id),
+            tier: crate::sync::DurabilityTier::EdgeServer,
+            scope: Vec::new(),
+            through_seq: 1,
+        }
     }
 
     #[test]
@@ -1175,10 +924,7 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::RowBatchCreated {
-            metadata: None,
-            row: make_row(1),
-        };
+        let payload = query_subscription(1);
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &payload);
         tracer.record_outgoing(
@@ -1190,7 +936,7 @@ mod tests {
         assert_eq!(tracer.count(), 2);
         assert_eq!(tracer.from("alice").len(), 1);
         assert_eq!(tracer.from("server").len(), 1);
-        assert_eq!(tracer.of_type("RowBatchCreated").len(), 2);
+        assert_eq!(tracer.of_type("QuerySubscription").len(), 2);
     }
 
     #[test]
@@ -1198,25 +944,16 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let row = make_row(1);
-        let outgoing = SyncPayload::RowBatchCreated {
-            metadata: None,
-            row: row.clone(),
-        };
-        let incoming = SyncPayload::BatchFate {
-            fate: crate::batch_fate::BatchFate::DurableDirect {
-                batch_id: row.batch_id,
-                confirmed_tier: crate::sync::DurabilityTier::EdgeServer,
-            },
-        };
+        let outgoing = query_subscription(1);
+        let incoming = query_settled(1);
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &outgoing);
         tracer.record_incoming(&Source::Server(server_id), "alice", &incoming);
 
         let msgs = tracer.between("alice", "server");
         assert_eq!(msgs.len(), 2);
-        assert!(msgs[0].is_object_updated());
-        assert!(msgs[1].is_persistence_ack());
+        assert!(msgs[0].is_query_subscription());
+        assert!(msgs[1].is_query_settled());
     }
 
     #[test]
@@ -1224,18 +961,15 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::RowBatchCreated {
-            metadata: None,
-            row: make_row(1),
-        };
+        let payload = query_subscription(1);
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &payload);
 
         let dump = tracer.dump();
         assert!(dump.contains("alice"));
         assert!(dump.contains("server"));
-        assert!(dump.contains("RowBatchCreated"));
-        assert!(dump.contains("branch:main"));
+        assert!(dump.contains("QuerySubscription"));
+        assert!(dump.contains("query:1"));
     }
 
     #[test]

@@ -6,6 +6,12 @@ bindings. The purpose is to pin app-shaped flows that alpha users and
 maintainers can recognize while deleting the old parallel engine paths, not to
 host a separate compatibility facade beside the real package.
 
+Operational rule for this branch: direct core is the product runtime. The
+remaining work should be expressed as public `jazz-tools` API gates, direct
+core/Groove correctness gaps, or missing storage/server/auth surfaces. Do not
+add a second row-batch/sync-manager compatibility implementation to make old
+tests pass.
+
 ## Alpha targets surveyed
 
 - Upstream targets surveyed for this slice:
@@ -102,6 +108,13 @@ the alpha API yet:
     listener with the same data directory, hydrate that message into a fresh
     authorized member client through the relation-backed read policy, write one
     accepted post-restart message, and assert both messages are visible.
+20. add a public predicate-movement browser canary in
+    `packages/jazz-tools/tests/browser/alpha-public-flow-gate.test.ts`: a
+    persistent direct-core `createDb` client subscribes to
+    `app.todos.where({ done: false }).orderBy("title")`, then local updates move
+    one row out of the predicate and another row into it. This is the minimum
+    public subscription movement gate; broader ordered/windowed and websocket
+    predicate movement remain separate direct-core/Groove gates.
 
 Rows remain descriptor/raw encoded at the ABI boundary. This package may add
 small app-facing helpers when they express real app semantics, but it should not
@@ -127,7 +140,8 @@ over the websocket path. It now also covers includeDeleted reads after
 edge-confirmed deletes and binary-large-value file/blob persistence plus
 websocket convergence. Delete/restore over websocket is unskipped: the writer
 can edge-accept the restore, and a fresh websocket client can query the
-restored row.
+restored row. The same gate is now also the public predicate-movement canary for
+filtered local subscriptions.
 
 The alpha docs React todo app now also has a direct-core browser websocket
 canary in
@@ -170,9 +184,10 @@ API/testability gap, not as covered app persistence.
   `examples/browser-wasm` still has older OPFS reload coverage for the vendored
   example path, but the package gate is the integration source of truth.
 - Public TypeScript API compatibility is intentionally thin. Since this repo is
-  separate from the alpha repo, the replacement package is named `jazz-tools`
-  and currently routes simple public-flow/todo-shaped examples through
-  `jazz-tools.ts`; the old todo-only alpha facade has been deleted. It now
+  separate from the alpha repo, the replacement package is named `jazz-tools`;
+  new integration coverage should enter through that public package surface
+  first, then force direct-core gaps to close underneath it. The old todo-only
+  alpha facade has been deleted. It now
   includes `allForIdentity(tableOrQuery, identity)` for deterministic
   identity-scoped one-shot reads, object-style `where({ ... })`, object-style
   `include({ relation: true })`, `db.one(...)`, callback-first
@@ -186,8 +201,11 @@ API/testability gap, not as covered app persistence.
   `isDeleted(row)`. The package root is now library-only and browser-import
   gated; Node-only executable demo code lives in `demo.ts`, and the Node runtime
   loader is only used lazily when callers do not inject a runtime. Subscriptions
-  still remain live-row only. It does not implement the full upstream query
-  builder.
+  still remain live-row only. Missing API surfaces should be named directly:
+  full upstream query-builder vocabulary, selected include projection
+  subscriptions, app-level durability wait hooks for React todo remount tests,
+  auth-loss refresh/failure callbacks with browser coverage, and durable
+  upload/streaming file helpers are not complete.
 - Public `jazz-tools` one-shot query coverage now includes boolean, text, and
   integer equality, scalar boolean/text/integer `in`, integer/text
   `gt`/`gte`/`lt`/`lte`, nullable UUID `isNull`/`isNotNull`, nullable literal
@@ -295,9 +313,11 @@ API/testability gap, not as covered app persistence.
   `?identity`, using the same auth envelope shape as the todo WebSocket smoke.
   Full chat features such as invites, routing, profiles, durable delivery, and
   richer auth/session refresh remain future targets.
-- `subscribeAll` is not exported from this replacement package. The current TS
-  surface uses `db.subscribe(query, callback)` directly over `WasmDb.subscribe`
-  snapshot and delta chunks.
+- `subscribeAll` is now part of the public package path used by the browser
+  alpha-flow gates, while lower-level direct-runtime coverage still exercises
+  `db.subscribe(query, callback)` directly over `WasmDb.subscribe` snapshot and
+  delta chunks. Keep new public integration checks on `createDb`/table/query
+  objects unless the gap is specifically in the internal runtime adapter.
 - Shared-todo related-table reads and identity-scoped update dry-runs are
   covered in memory only. The schema encodes `can_edit` on share rows and uses
   it in the todo update policy; the example reads `todo_shares` through an
@@ -309,8 +329,10 @@ API/testability gap, not as covered app persistence.
   `mime_type` and native binary-large-value `data`. The public package runtime
   now uses that model for `createFileFromBlob`/`createFileFromStream` and
   `loadFileAsBlob`/`loadFileAsStream`, with NAPI persistence coverage for
-  `files.data`. This is still not upload routing, bounded streaming, durable
-  object storage, resumable transfer, or full public file API compatibility.
+  `files.data`. Treat this as the alpha convention for this graft unless a
+  product decision reverses it; do not rebuild `file_parts` chunk tables as a
+  compatibility layer. This is still not upload routing, bounded streaming,
+  durable object storage, resumable transfer, or full public file API coverage.
 - The old browser worker/broker package path has been deleted from the graft.
   Browser memory clients still use the in-process direct `CoreRuntime` path, but
   persistent browser clients now use one dedicated OPFS-owner worker through
@@ -361,10 +383,13 @@ API/testability gap, not as covered app persistence.
   `JazzServer::block_messages_to(...)` or buffered `SyncPayload::BatchFate`
   assertions; tests should assert public query/subscription/write outcomes
   instead of pinning old semantic sync frames.
-  Stable sync vocabulary (`SyncPayload`, query ids/propagation, endpoint
-  roles, diagnostics, and tracer-facing payload names) now lives under
-  `jazz_tools::sync` / `jazz_tools::sync::vocabulary`; the old `sync_manager`
-  module has been deleted instead of retained as a hollow compatibility shim.
+  The remaining `SyncPayload` / `SyncTracer` vocabulary is transitional
+  catalogue/admin/test observability scaffolding. The old row/batch/fate tracer
+  path is being removed, not relocated: do not add new tests that assert
+  buffered `SyncPayload` row batches, per-row batch fates, or old sync-manager
+  message ordering. New sync confidence should come from public
+  `createDb`/`JazzClient` outcomes, websocket convergence, durable restart, and
+  direct-core telemetry surfaces if those are added.
 
 ## Next targets
 
@@ -385,11 +410,11 @@ API/testability gap, not as covered app persistence.
    durable WebSocket restart gates, and admin schema publish/list/fetch that
    converts accepted schemas into the live runtime catalogue. The loopback HTTP
    listener reloads active admin schemas on durable startup. The old
-   `SyncPayload`-backed subscription introspection shim has been deleted; next,
-   compose the admin surface with the app-scoped WebSocket command, add
-   direct-core subscription telemetry if the product still needs that endpoint,
-   and broaden lifecycle coverage before treating the Rust server as a drop-in
-   replacement.
+   `SyncPayload`-backed subscription introspection shim is not a target; next,
+   compose the admin surface with the app-scoped WebSocket command, add a
+   direct-core subscription telemetry API only if the product still needs that
+   endpoint, and broaden lifecycle coverage before treating the Rust server as
+   the default public server.
 4. **Complete alpha-shaped auth/session admission.** Server-side signed
    local-first JWT admission, TS-side signed local-first proof generation, and
    WebSocket routing are covered for the current slice. Next, add audience/app-id
@@ -399,7 +424,10 @@ API/testability gap, not as covered app persistence.
    gaps should be handled as Groove/Jazz correctness work first, then surfaced
    through `jazz-tools`. TypeScript callback APIs should be driven by runtime
    subscription stream chunks; facade-side local-write refresh hooks are not an
-   acceptable compatibility layer.
+   acceptable compatibility layer. The public filtered-subscription movement
+   canary exists for local OPFS; add concrete failing examples for remaining
+   movement gaps, such as ordered websocket predicate moves, offset/window
+   reshuffles, selected include projection changes, or identity-scope changes.
 6. **Close include/hop/gather semantics.** Add app-shaped checks for related
    record reads/subscriptions and unreadable/missing include targets. Keep
    alpha `requireIncludes()` compatibility focused on required include match
@@ -416,7 +444,8 @@ API/testability gap, not as covered app persistence.
    binary-large-value `data`. The package runtime no longer exports chunk-size
    constants or `ConventionalFile*` types. Grow public upload/download/file
    helpers around this model and update remaining examples/docs that still
-   teach `file_parts`.
+   teach `file_parts`. Any missing work should be phrased as a public helper or
+   storage guarantee, not as `file_parts` compatibility.
 8. **Polish WebSocket protocol details later.** Current batched raw
    `WireFrame` bytes are good enough unless they block another target; full
    handshake/resume/control envelope design can wait.
