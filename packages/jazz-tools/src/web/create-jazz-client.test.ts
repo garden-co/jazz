@@ -173,7 +173,50 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(mocks.createDb).toHaveBeenCalledWith(config);
   });
 
-  it("AGC-05: exposes window.__jazz.clearStorage for the only live namespace", async () => {
+  it("AGC-05: collapses same-identity clients onto one runtime", async () => {
+    const config: DbConfig = {
+      appId: "web-client-dedup-shared",
+      serverUrl: "https://jazz.example.com",
+    };
+    mocks.createDb.mockResolvedValue(createMockDb(config.appId, null, config));
+
+    const first = await createJazzClient(config);
+    const second = await createJazzClient({ ...config });
+
+    expect(mocks.createDb).toHaveBeenCalledTimes(1);
+    expect(first.db).toBe(second.db);
+    expect(first.manager).toBe(second.manager);
+
+    await first.shutdown();
+    expect(mocks.orchestratorInstances[0]!.shutdown).not.toHaveBeenCalled();
+
+    await second.shutdown();
+    expect(mocks.orchestratorInstances[0]!.shutdown).toHaveBeenCalledTimes(1);
+    expect(first.db.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("AGC-06: keeps distinct identities on separate runtimes", async () => {
+    mocks.createDb.mockImplementation(async (config: DbConfig) =>
+      createMockDb(config.appId, null, config),
+    );
+
+    const first = await createJazzClient({
+      appId: "web-client-dedup-multi",
+      secret: "principal-A",
+    } as DbConfig);
+    const second = await createJazzClient({
+      appId: "web-client-dedup-multi",
+      secret: "principal-B",
+    } as DbConfig);
+
+    expect(mocks.createDb).toHaveBeenCalledTimes(2);
+    expect(first.db).not.toBe(second.db);
+
+    await first.shutdown();
+    await second.shutdown();
+  });
+
+  it("AGC-07: exposes window.__jazz.clearStorage for the only live namespace", async () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
     const config: DbConfig = {
@@ -204,7 +247,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(api?.listLiveStorageNamespaces()).toEqual([]);
   });
 
-  it("AGC-06: requires a namespace when multiple live contexts exist", async () => {
+  it("AGC-08: requires a namespace when multiple live contexts exist", async () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
     const aliceConfig: DbConfig = {
