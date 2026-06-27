@@ -213,6 +213,45 @@ describe("WorkerBridge", () => {
     expect(transport.close).toHaveBeenCalledTimes(1);
   });
 
+  it("delivers worker sync frames into the main-thread runtime transport", async () => {
+    const { runtime, transport } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const initPromise = bridge.init(workerBridgeOptions({ appId: "worker-to-main-sync-app" }));
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+    await initPromise;
+
+    const frame = new Uint8Array([11, 12, 13]);
+    worker.emit({ type: "sync", frames: [frame] });
+    await flushMicrotasks();
+
+    expect(transport.sendWireFrame).toHaveBeenCalledWith(frame);
+  });
+
+  it("posts main-thread runtime transport frames to the worker", async () => {
+    const { runtime, transport } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const initPromise = bridge.init(workerBridgeOptions({ appId: "main-to-worker-sync-app" }));
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+    await initPromise;
+    await flushMicrotasks();
+    worker.sent.splice(0);
+    vi.mocked(transport.recvWireFrames as () => unknown[]).mockReturnValueOnce([
+      new Uint8Array([21, 22, 23]),
+    ]);
+
+    worker.emit({ type: "sync", frames: [new Uint8Array([31])] });
+    await flushMicrotasks();
+
+    expect(worker.sent).toContainEqual({
+      type: "sync",
+      frames: [new Uint8Array([21, 22, 23])],
+    });
+  });
+
   it("queues server frames until the page-owned carrier is ready", async () => {
     directWebSocketCarrierMock.autoReady.current = false;
     const { runtime } = testDirectRuntime();
