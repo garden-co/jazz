@@ -41,6 +41,7 @@ import {
 } from "./direct-schema-codec.js";
 import { DirectWebSocketCarrier, directWireAuthFailureReason } from "./direct-websocket.js";
 import { createRecord, decodeRecordValue } from "./direct-row-codec.js";
+import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
 
 export { encodeDirectSchema } from "./direct-schema-codec.js";
 
@@ -163,6 +164,7 @@ type SubscriptionState = {
     tier?: string | null;
     optionsJson?: string | null;
     pending: boolean;
+    dirty: boolean;
   };
   callback?: Function;
   cancelled: boolean;
@@ -179,6 +181,7 @@ type RowState = {
   table: string;
   id: string;
   values: Value[];
+  valuesByColumn?: Map<string, Value>;
 };
 
 type RuntimeQueryJson = {
@@ -192,6 +195,7 @@ type RuntimeArraySubquery = {
   table: string;
   inner_column: string;
   outer_column: string;
+  select_columns?: string[] | null;
   nested_arrays?: unknown;
 };
 
@@ -651,6 +655,7 @@ export class CoreRuntime implements Runtime {
       const next: RowState[] = [];
       for (const row of result) {
         const values = relationValues(row, outerColumn, this.schema);
+        const select = directSelectForArraySubquery(subquery);
         let included =
           values.length === 0
             ? []
@@ -658,11 +663,15 @@ export class CoreRuntime implements Runtime {
                 JSON.stringify({
                   table: subquery.table,
                   conditions: [{ column: subquery.inner_column, op: "in", value: values }],
+                  select: select?.columns,
                 }),
                 identity,
                 tier,
                 optionsJson,
               );
+        if (select) {
+          included = projectRowsForDirectSelect(included, select.columns, select.publicColumns);
+        }
         included = await this.attachArraySubqueries(
           included,
           subquery.nested_arrays,
@@ -762,6 +771,7 @@ export class CoreRuntime implements Runtime {
               tier,
               optionsJson,
               pending: false,
+              dirty: false,
             },
       cancelled: false,
     });
@@ -1083,19 +1093,28 @@ export class CoreRuntime implements Runtime {
 
   private async recomputeSubscriptionRows(subscription: SubscriptionState): Promise<void> {
     const recompute = subscription.recompute;
-    if (!recompute || recompute.pending) return;
+    if (!recompute) return;
+    // Direct core currently subscribes to simple base-table trigger queries for
+    // relation-shaped subscriptions, then recomputes the public relation query
+    // in this adapter. Keep this as scaffolding until native relation
+    // subscriptions can emit hop/gather deltas directly.
+    recompute.dirty = true;
+    if (recompute.pending) return;
     recompute.pending = true;
     try {
-      const previousRows = subscription.rows;
-      const rows = await this.queryRelationShape(
-        recompute.queryJson,
-        recompute.identity ? JSON.stringify({ user_id: formatUuid(recompute.identity) }) : null,
-        recompute.tier,
-        recompute.optionsJson,
-      );
-      if (!rows) throw unsupportedRelationQueryError();
-      subscription.rows = rows;
-      subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
+      while (recompute.dirty && !subscription.cancelled) {
+        recompute.dirty = false;
+        const previousRows = subscription.rows;
+        const rows = await this.queryRelationShape(
+          recompute.queryJson,
+          recompute.identity ? JSON.stringify({ user_id: formatUuid(recompute.identity) }) : null,
+          recompute.tier,
+          recompute.optionsJson,
+        );
+        if (!rows) throw unsupportedRelationQueryError();
+        subscription.rows = rows;
+        subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
+      }
     } finally {
       recompute.pending = false;
     }
@@ -1370,6 +1389,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     conditions?: unknown;
     offset?: unknown;
     orderBy?: unknown;
+    select?: unknown;
   };
   if (typeof parsed.table !== "string") {
     throw new Error("Direct core runtime only supports table queries in this slice");
@@ -1384,6 +1404,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
           limit: readLimitIfPresent(parsed.limit ?? encoded.limit),
           offset: encoded.offset,
           orderBy: encoded.orderBy,
+          select: readSelectColumns(parsed.select),
         },
   );
 }
@@ -1491,6 +1512,7 @@ function readRuntimeArraySubquery(raw: unknown): RuntimeArraySubquery {
     table?: unknown;
     inner_column?: unknown;
     outer_column?: unknown;
+    select_columns?: unknown;
     nested_arrays?: unknown;
   };
   if (
@@ -1506,8 +1528,55 @@ function readRuntimeArraySubquery(raw: unknown): RuntimeArraySubquery {
     table: subquery.table,
     inner_column: subquery.inner_column,
     outer_column: subquery.outer_column,
+    select_columns: readRuntimeArraySubquerySelect(subquery.select_columns),
     nested_arrays: subquery.nested_arrays,
   };
+}
+
+function readRuntimeArraySubquerySelect(selectColumns: unknown): string[] | null | undefined {
+  if (selectColumns == null) return selectColumns;
+  if (!Array.isArray(selectColumns)) throw unsupportedRelationQueryError();
+  if (!selectColumns.every((column): column is string => typeof column === "string")) {
+    throw unsupportedRelationQueryError();
+  }
+  return selectColumns;
+}
+
+function directSelectForArraySubquery(
+  subquery: RuntimeArraySubquery,
+): { columns: string[]; publicColumns: string[] } | undefined {
+  if (subquery.select_columns == null) return undefined;
+  const nestedArrays = Array.isArray(subquery.nested_arrays) ? subquery.nested_arrays : [];
+  const columns: string[] = [];
+  const publicColumns: string[] = [];
+
+  if (subquery.inner_column !== "id") {
+    columns.push(subquery.inner_column);
+  }
+
+  for (const column of subquery.select_columns) {
+    if (!isHiddenIncludeColumn(column)) {
+      if (!columns.includes(column)) columns.push(column);
+      publicColumns.push(column);
+      continue;
+    }
+    const nested = nestedArrays
+      .map((raw) => {
+        try {
+          return readRuntimeArraySubquery(raw);
+        } catch {
+          return null;
+        }
+      })
+      .find((candidate) => candidate?.column_name === column);
+    const carrierColumn = nested?.outer_column.split(".").at(-1);
+    if (!carrierColumn || carrierColumn === "id" || columns.includes(carrierColumn)) {
+      continue;
+    }
+    columns.push(carrierColumn);
+  }
+
+  return { columns, publicColumns };
 }
 
 function tableFromRelation(relation: unknown): string {
@@ -1574,7 +1643,7 @@ function relationForTables(
 
 function relationValues(row: RowState, column: string, schema: WasmSchema): string[] {
   if (column === "id") return [row.id];
-  const value = rowValue(row, column, schema);
+  const value = row.valuesByColumn?.get(column) ?? rowValue(row, column, schema);
   if (!value || value.type === "Null") return [];
   if (value.type === "Uuid" || value.type === "Text") return [value.value];
   if (value.type === "Array") {
@@ -1583,6 +1652,29 @@ function relationValues(row: RowState, column: string, schema: WasmSchema): stri
     );
   }
   return [];
+}
+
+function projectRowsForDirectSelect(
+  rows: RowState[],
+  columns: readonly string[],
+  publicColumns: readonly string[],
+): RowState[] {
+  const publicSet = new Set(publicColumns);
+  return rows.map((row) => {
+    const valuesByColumn =
+      row.valuesByColumn ?? new Map(columns.map((column, index) => [column, row.values[index]!]));
+    return withValuesByColumn(
+      {
+        ...row,
+        values: columns.flatMap((column) => {
+          if (!publicSet.has(column)) return [];
+          const value = valuesByColumn.get(column);
+          return value === undefined ? [] : [value];
+        }),
+      },
+      valuesByColumn,
+    );
+  });
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -1788,6 +1880,15 @@ function readLegacyOrderBy(value: unknown): DirectQueryOrder[] | null {
     terms.push({ column: entry[0], direction: entry[1] === "asc" ? "Asc" : "Desc" });
   }
   return terms;
+}
+
+function readSelectColumns(value: unknown): string[] | undefined {
+  if (value == null) return undefined;
+  if (!Array.isArray(value)) throw unsupportedRelationQueryError();
+  if (!value.every((column): column is string => typeof column === "string")) {
+    throw unsupportedRelationQueryError();
+  }
+  return value;
 }
 
 function readLegacyPredicateOp(value: string): DirectQueryPredicateOp | null {
@@ -2326,17 +2427,36 @@ function readRowBatches(payload: Uint8Array): AbiRowBatch[] {
 
 function rowsFromBatches(batches: AbiRowBatch[], schema: WasmSchema): RowState[] {
   return batches.flatMap((batch) =>
-    batch.rows.map((row) => ({
-      table: batch.table,
-      id: formatUuid(row.rowId),
-      values: batch.descriptor
-        .map((field, index) => ({ field, index }))
+    batch.rows.map((row) => {
+      const decoded = batch.descriptor
+        .map((field, index) => ({ field, index, name: publicFieldName(field.name ?? "") }))
         .filter(({ field }) => field.name && !isInternalField(field.name))
-        .map(({ field, index }) =>
-          decodeField(batch.table, field, batch.descriptor, row.raw, index, schema),
-        ),
-    })),
+        .map(({ field, index, name }) => ({
+          name,
+          value: decodeField(batch.table, field, batch.descriptor, row.raw, index, schema),
+        }));
+      const valuesByColumn = new Map(decoded.map(({ name, value }) => [name, value]));
+      return withValuesByColumn(
+        {
+          table: batch.table,
+          id: formatUuid(row.rowId),
+          values: decoded
+            .filter(({ name }) => !isHiddenIncludeColumn(name))
+            .map(({ value }) => value),
+        },
+        valuesByColumn,
+      );
+    }),
   );
+}
+
+function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): RowState {
+  Object.defineProperty(row, "valuesByColumn", {
+    value: valuesByColumn,
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
 }
 
 function applySubscriptionDelta(
@@ -2613,6 +2733,10 @@ function publicFieldName(name: string): string {
 
 function isInternalField(name?: string): boolean {
   return name === "row_uuid" || name === "tx_node_id" || name === "tx_time";
+}
+
+function isHiddenIncludeColumn(name: string): boolean {
+  return name.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX);
 }
 
 function assertBytes(value: unknown, label: string): Uint8Array {
