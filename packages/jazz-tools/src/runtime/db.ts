@@ -17,7 +17,7 @@ import type {
   WasmRow,
   StorageDriver,
 } from "../drivers/types.js";
-import { getRuntimeSchemaCacheKey, normalizeRuntimeSchema } from "../drivers/schema-wire.js";
+import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   ExclusiveWriteHandle,
@@ -193,6 +193,9 @@ type DbRuntimeOperationContext = {
 };
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
+  // The direct core path still lacks parity for several public query shapes when
+  // reads run with immediate local updates. Keep the high-level Db default
+  // deferred until those shapes can execute without changing public behavior.
   return { localUpdates: "deferred", ...options };
 }
 
@@ -352,16 +355,12 @@ function resolveBuiltQueryOutputTable(
     : builtQuery.table;
 }
 
-function resolveSchemaWithTable(
-  preferredSchema: WasmSchema,
-  fallbackSchema: WasmSchema | (() => WasmSchema),
-  tableName: string,
-): WasmSchema {
+function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string): WasmSchema {
   if (preferredSchema[tableName]) {
     return preferredSchema;
   }
 
-  return typeof fallbackSchema === "function" ? fallbackSchema() : fallbackSchema;
+  throw new Error(`Query schema is missing table "${tableName}".`);
 }
 
 function resolveOutputColumnDescriptor(
@@ -423,21 +422,6 @@ function resolveNativeSubscriptionColumns(
   }
 
   return columns;
-}
-
-function createRuntimeSchemaResolver(getRuntimeSchema: () => WasmSchema): {
-  get: () => WasmSchema;
-} {
-  let cachedRuntimeSchema: WasmSchema | undefined;
-
-  return {
-    get: () => {
-      if (!cachedRuntimeSchema) {
-        cachedRuntimeSchema = getRuntimeSchema();
-      }
-      return cachedRuntimeSchema;
-    },
-  };
 }
 
 function assertTableBelongsToClient<T, Init>(
@@ -827,12 +811,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const { client, transactionId, session } = this.bindQuery(query);
-    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
+    const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const rows = await client.query(
       translateQuery(builderJson, planningSchema),
       {
@@ -1399,18 +1382,11 @@ export class Db {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(client.getSchema()),
-    );
     const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(
-      query._schema,
-      runtimeSchema.get,
-      builtQuery.table,
-    );
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
+    const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
+    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
@@ -1535,18 +1511,11 @@ export class Db {
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(client.getSchema()),
-    );
     const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(
-      query._schema,
-      runtimeSchema.get,
-      builtQuery.table,
-    );
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
+    const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
+    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const nativeOutputColumns = resolveNativeSubscriptionColumns(
       outputTable,
@@ -1641,7 +1610,7 @@ export class Db {
 
   private registerActiveQuerySubscriptionTrace(
     queryJson: string,
-    fallbackTable: string,
+    _queryTable: string,
     options?: QueryOptions,
   ): string | null {
     if (!this.config.devMode) {
@@ -1649,7 +1618,7 @@ export class Db {
     }
 
     const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
-    const payload = this.parseRuntimeQueryTracePayload(queryJson, fallbackTable);
+    const payload = this.parseRuntimeQueryTracePayload(queryJson);
     const traceId = `sub-${this.nextActiveQuerySubscriptionTraceId++}`;
 
     this.activeQuerySubscriptionTraces.set(traceId, {
@@ -1686,13 +1655,10 @@ export class Db {
     this.notifyActiveQuerySubscriptionTraceListeners();
   }
 
-  private parseRuntimeQueryTracePayload(
-    queryJson: string,
-    fallbackTable: string,
-  ): RuntimeQueryTracePayload {
+  private parseRuntimeQueryTracePayload(queryJson: string): RuntimeQueryTracePayload {
     try {
       const parsed = JSON.parse(queryJson) as { table?: unknown; branches?: unknown };
-      const table = typeof parsed.table === "string" ? parsed.table : fallbackTable;
+      const table = typeof parsed.table === "string" ? parsed.table : "unknown";
       const branches = Array.isArray(parsed.branches)
         ? parsed.branches.filter((branch): branch is string => typeof branch === "string")
         : [];
@@ -1703,7 +1669,7 @@ export class Db {
       };
     } catch {
       return {
-        table: fallbackTable,
+        table: "unknown",
         branches: [this.config.userBranch ?? "main"],
       };
     }

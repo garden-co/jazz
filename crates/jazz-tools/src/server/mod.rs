@@ -68,7 +68,7 @@ impl ServerTopology {
 pub struct ServerState {
     /// Direct, storage-backed admin catalogue store. Production websocket sync,
     /// row storage, query execution, and client lifecycle are owned by
-    /// `CoreServer`.
+    /// the local-owner core server handle.
     pub(crate) catalogue_store: DirectCatalogueStore,
     pub(crate) catalogue: ServerCatalogue,
     #[allow(dead_code)]
@@ -93,8 +93,8 @@ pub struct ServerState {
     /// Optional legacy sync message tracer for test observability.
     #[cfg(any(test, feature = "test-utils"))]
     pub sync_tracer: Option<crate::sync::SyncTracer>,
-    /// Server-side jazz_core peer loop for the direct websocket route.
-    pub(crate) core_server: StdRwLock<Option<core_server::CoreServer>>,
+    /// Sendable handle to the local-owner jazz_core peer loop for the direct websocket route.
+    pub(crate) core_server: StdRwLock<Option<core_server::LocalCoreServerHandle>>,
     pub(crate) core_server_storage_config: Option<StorageConfig>,
     pub shutdown: ShutdownController,
 }
@@ -105,14 +105,14 @@ pub struct ConnectionState {
 }
 
 impl ServerState {
-    pub(crate) fn core_server(&self) -> Option<core_server::CoreServer> {
+    pub(crate) fn core_server(&self) -> Option<core_server::LocalCoreServerHandle> {
         self.core_server.read().unwrap().clone()
     }
 
     pub(crate) fn start_core_server(
         &self,
         schema: jazz::schema::JazzSchema,
-    ) -> Result<core_server::CoreServer, String> {
+    ) -> Result<core_server::LocalCoreServerHandle, String> {
         if let Some(core_server) = self.core_server() {
             return Ok(core_server);
         }
@@ -125,7 +125,8 @@ impl ServerState {
         if let Some(existing) = core_server.clone() {
             return Ok(existing);
         }
-        let started = core_server::CoreServer::start_with_storage(schema, storage_config)?;
+        let started =
+            core_server::LocalCoreServerHandle::start_with_storage(schema, storage_config)?;
         *core_server = Some(started.clone());
         Ok(started)
     }

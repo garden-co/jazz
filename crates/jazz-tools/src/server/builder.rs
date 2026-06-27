@@ -35,7 +35,7 @@ const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
 #[cfg(feature = "rocksdb")]
 const CORE_SERVER_ROCKSDB_DIR: &str = "core-server.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-const EDGE_UPSTREAM_UNSUPPORTED_MESSAGE: &str = "edge upstream sync is temporarily unsupported while server-to-server sync is migrated to the core engine; refusing to start the legacy alpha transport";
+const EDGE_UPSTREAM_UNSUPPORTED_MESSAGE: &str = "edge upstream sync is temporarily unsupported while server-to-server sync is migrated to the core engine; refusing to start the retired alpha transport";
 
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -263,11 +263,11 @@ impl ServerBuilder {
         &self,
         latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
-    ) -> Result<Option<crate::server::core_server::CoreServer>, String> {
+    ) -> Result<Option<crate::server::core_server::LocalCoreServerHandle>, String> {
         if let Some(schema) = &self.core_server_schema {
             let storage_config = storage_config?;
             return Ok(Some(
-                crate::server::core_server::CoreServer::start_with_storage(
+                crate::server::core_server::LocalCoreServerHandle::start_with_storage(
                     schema.clone(),
                     storage_config,
                 )?,
@@ -282,10 +282,13 @@ impl ServerBuilder {
             return Ok(None);
         };
         let storage_config = storage_config?;
-        let schema = crate::server::direct_schema::convert_alpha_schema(&schema)
+        let schema = crate::server::direct_schema::convert_public_schema_to_direct_core(&schema)
             .map_err(|error| format!("failed to build core server schema: {error}"))?;
         Ok(Some(
-            crate::server::core_server::CoreServer::start_with_storage(schema, storage_config)?,
+            crate::server::core_server::LocalCoreServerHandle::start_with_storage(
+                schema,
+                storage_config,
+            )?,
         ))
     }
 

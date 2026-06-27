@@ -22,7 +22,7 @@ use crate::schema_api::{Query, Session, Value, WriteContext};
 #[cfg(feature = "direct-core-client")]
 use crate::server::direct_client::DirectCoreWebSocketTransport;
 #[cfg(feature = "direct-core-client")]
-use crate::server::direct_schema::convert_alpha_schema;
+use crate::server::direct_schema::convert_public_schema_to_direct_core;
 #[cfg(feature = "test-utils")]
 use crate::sync::ClientId;
 #[cfg(feature = "direct-core-client")]
@@ -91,9 +91,9 @@ pub struct JazzClient {
     /// Direct core engine backing the public client facade.
     #[cfg(feature = "direct-core-client")]
     engine: Rc<DirectCoreEngine>,
-    /// Alpha schema retained for the current public API surface.
+    /// Public schema retained for the current public API surface.
     #[cfg(feature = "direct-core-client")]
-    alpha_schema: Schema,
+    public_schema: Schema,
     /// Whether a server URL was provided at construction time.
     has_server: bool,
     /// Active subscriptions (metadata).
@@ -110,7 +110,7 @@ impl Clone for JazzClient {
             #[cfg(feature = "direct-core-client")]
             engine: self.engine.clone(),
             #[cfg(feature = "direct-core-client")]
-            alpha_schema: self.alpha_schema.clone(),
+            public_schema: self.public_schema.clone(),
             has_server: self.has_server,
             subscriptions: Arc::clone(&self.subscriptions),
             next_handle: Arc::clone(&self.next_handle),
@@ -1074,7 +1074,7 @@ fn direct_core_storage(
 }
 
 #[cfg(feature = "direct-core-client")]
-fn alpha_to_core_value(value: Value) -> Result<CoreValue> {
+fn public_to_direct_core_value(value: Value) -> Result<CoreValue> {
     match value {
         Value::Boolean(value) => Ok(CoreValue::Bool(value)),
         Value::Text(value) => Ok(CoreValue::String(value)),
@@ -1094,17 +1094,17 @@ fn alpha_to_core_value(value: Value) -> Result<CoreValue> {
         Value::Null => Ok(CoreValue::Nullable(None)),
         Value::Array(values) => values
             .into_iter()
-            .map(alpha_to_core_value)
+            .map(public_to_direct_core_value)
             .collect::<Result<Vec<_>>>()
             .map(CoreValue::Array),
         other => Err(JazzError::Write(format!(
-            "direct core client does not support alpha value {other:?}"
+            "direct core client does not support public value {other:?}"
         ))),
     }
 }
 
 #[cfg(feature = "direct-core-client")]
-fn core_to_alpha_value(value: CoreValue) -> Result<Value> {
+fn direct_core_to_public_value(value: CoreValue) -> Result<Value> {
     match value {
         CoreValue::Bool(value) => Ok(Value::Boolean(value)),
         CoreValue::String(value) => Ok(Value::Text(value)),
@@ -1116,10 +1116,10 @@ fn core_to_alpha_value(value: CoreValue) -> Result<Value> {
         CoreValue::Uuid(value) => Ok(Value::Uuid(ObjectId::from_uuid(value))),
         CoreValue::Bytes(value) => Ok(Value::Bytea(value)),
         CoreValue::Nullable(None) => Ok(Value::Null),
-        CoreValue::Nullable(Some(value)) => core_to_alpha_value(*value),
+        CoreValue::Nullable(Some(value)) => direct_core_to_public_value(*value),
         CoreValue::Array(values) => values
             .into_iter()
-            .map(core_to_alpha_value)
+            .map(direct_core_to_public_value)
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
         other => Err(JazzError::Query(format!(
@@ -1194,7 +1194,7 @@ impl JazzClient {
     }
 
     #[cfg(feature = "direct-core-client")]
-    fn direct_rows_to_alpha(
+    fn direct_rows_to_public(
         &self,
         query: &Query,
         rows: Vec<jazz::node::CurrentRow>,
@@ -1229,7 +1229,7 @@ impl JazzClient {
                             .ok_or_else(|| {
                                 JazzError::Query(format!("direct core row missing column {column}"))
                             })
-                            .and_then(core_to_alpha_value)
+                            .and_then(direct_core_to_public_value)
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok((row_id, values))
@@ -1242,7 +1242,7 @@ impl JazzClient {
     fn direct_cells(values: HashMap<String, Value>) -> Result<jazz::db::RowCells> {
         values
             .into_iter()
-            .map(|(name, value)| Ok((name, alpha_to_core_value(value)?)))
+            .map(|(name, value)| Ok((name, public_to_direct_core_value(value)?)))
             .collect()
     }
 
@@ -1311,7 +1311,7 @@ impl JazzClient {
 
             for (column, value) in &write.cells {
                 if let Some(position) = columns.iter().position(|candidate| candidate == column) {
-                    values[position] = core_to_alpha_value(value.clone())?;
+                    values[position] = direct_core_to_public_value(value.clone())?;
                 }
             }
 
@@ -1342,7 +1342,7 @@ impl JazzClient {
 
         #[cfg(feature = "direct-core-client")]
         {
-            let core_schema = convert_alpha_schema(&context.schema)
+            let core_schema = convert_public_schema_to_direct_core(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
             let identity = direct_core_identity(&context, default_session.as_ref());
             let storage = direct_core_storage(&core_schema, &context)?;
@@ -1370,7 +1370,7 @@ impl JazzClient {
                 default_session,
                 write_context: None,
                 engine: direct_engine,
-                alpha_schema: context.schema.clone(),
+                public_schema: context.schema.clone(),
                 has_server,
                 subscriptions: Arc::new(RwLock::new(HashMap::new())),
                 next_handle: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -1431,7 +1431,7 @@ impl JazzClient {
                     durability_tier.is_some(),
                 )
                 .await?;
-            let mut rows = self.direct_rows_to_alpha(&query, rows)?;
+            let mut rows = self.direct_rows_to_public(&query, rows)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.apply_direct_transaction_overlay(&query, batch_id, &mut rows)?;
             }
@@ -1577,7 +1577,7 @@ impl JazzClient {
     pub fn schema(&self) -> Result<Schema> {
         #[cfg(feature = "direct-core-client")]
         {
-            Ok(self.alpha_schema.clone())
+            Ok(self.public_schema.clone())
         }
     }
 
@@ -1594,7 +1594,7 @@ impl JazzClient {
             #[cfg(feature = "direct-core-client")]
             engine: self.engine.clone(),
             #[cfg(feature = "direct-core-client")]
-            alpha_schema: self.alpha_schema.clone(),
+            public_schema: self.public_schema.clone(),
             has_server: self.has_server,
             subscriptions: Arc::clone(&self.subscriptions),
             next_handle: Arc::clone(&self.next_handle),
@@ -1754,14 +1754,15 @@ mod tests {
     #[cfg(feature = "direct-core-client")]
     #[tokio::test]
     async fn direct_core_engine_transaction_stages_and_commits() {
-        let alpha_schema = declared_todo_schema();
-        let core_schema = convert_alpha_schema(&alpha_schema).expect("convert schema");
+        let public_schema = declared_todo_schema();
+        let core_schema =
+            convert_public_schema_to_direct_core(&public_schema).expect("convert schema");
         let storage = direct_core_storage(
             &core_schema,
             &make_offline_context(
                 AppId::from_name("direct-core-transaction-test"),
                 TempDir::new().expect("tempdir").keep(),
-                alpha_schema.clone(),
+                public_schema.clone(),
             ),
         )
         .expect("open direct core storage");

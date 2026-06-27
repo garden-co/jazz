@@ -563,4 +563,69 @@ describe("Db runtime schema order", () => {
       },
     ]);
   });
+
+  it("rejects queries whose public schema is missing the built table", async () => {
+    const runtimeSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const query = vi.fn<(...args: [string, object?]) => Promise<WasmRow[]>>(async () => []);
+    const client = {
+      getSchema: () => new Map(Object.entries(runtimeSchema)),
+      query,
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const builder = {
+      _table: "todos",
+      _schema: {},
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _build: () =>
+        JSON.stringify({
+          table: "todos",
+          conditions: [],
+          includes: {},
+          orderBy: [],
+        }),
+    } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
+
+    await expect(db.all(builder)).rejects.toThrow('Query schema is missing table "todos".');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("rejects queries whose built public shape omits the table", async () => {
+    const generatedSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const query = vi.fn<(...args: [string, object?]) => Promise<WasmRow[]>>(async () => []);
+    const client = {
+      getSchema: () => new Map(Object.entries(generatedSchema)),
+      query,
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const builder = {
+      _table: "todos",
+      _schema: generatedSchema,
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _build: () =>
+        JSON.stringify({
+          conditions: [],
+          includes: {},
+          orderBy: [],
+        }),
+    } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
+
+    await expect(db.all(builder)).rejects.toThrow(
+      "QueryBuilder._build() must include a non-empty table.",
+    );
+    expect(query).not.toHaveBeenCalled();
+  });
 });

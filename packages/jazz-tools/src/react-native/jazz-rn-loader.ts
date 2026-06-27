@@ -1,11 +1,11 @@
-import { createReactNativeDirectCoreAlphaUnsupportedError } from "./runtime-module.js";
+import { createReactNativeDirectCoreUnsupportedError } from "./runtime-module.js";
 
 type JazzRnDefault = never;
 
 export async function loadJazzRn(): Promise<JazzRnDefault> {
-  throw createReactNativeDirectCoreAlphaUnsupportedError();
+  throw createReactNativeDirectCoreUnsupportedError();
 }
 
 export function getJazzRnSync(): JazzRnDefault {
-  throw createReactNativeDirectCoreAlphaUnsupportedError();
+  throw createReactNativeDirectCoreUnsupportedError();
 }
