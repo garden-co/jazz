@@ -1,22 +1,26 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { schema as s } from "../index.js";
 import { JazzClient, WriteResult, type InsertResult, type Runtime } from "./client.js";
-import { createDbWithCoreSource, Db, type DbConfig } from "./db.js";
-import { CoreSource, type CoreClientContext, type RuntimeTokenOptions } from "./core-source.js";
+import { createDbWithRuntimeSource, Db, type DbConfig } from "./db.js";
+import {
+  RuntimeSource,
+  type RuntimeClientContext,
+  type RuntimeTokenOptions,
+} from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 class TestDb extends Db {
   static readonly runtime = { TestRuntime: class {} };
 
-  constructor(config: DbConfig, coreSource: CoreSource<DbConfig> = new TestCoreSource()) {
-    super(config, coreSource);
+  constructor(config: DbConfig, runtimeSource: RuntimeSource<DbConfig> = new TestRuntimeSource()) {
+    super(config, runtimeSource);
   }
   public exposeGetClient(schema: WasmSchema): JazzClient {
     return this.getClient(schema);
   }
 }
 
-class TestCoreSource extends CoreSource<DbConfig> {
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
   protected override async loadCore(): Promise<typeof TestDb.runtime> {
     return TestDb.runtime;
   }
@@ -25,7 +29,7 @@ class TestCoreSource extends CoreSource<DbConfig> {
     config,
     schema,
     onAuthFailure,
-  }: CoreClientContext<DbConfig>): JazzClient {
+  }: RuntimeClientContext<DbConfig>): JazzClient {
     return JazzClient.connectWithRuntime(
       makeRuntimeStub(),
       {
@@ -109,7 +113,7 @@ function makeRuntimeStub(): Runtime {
   } as unknown as Runtime;
 }
 
-describe("runtime/Db core runtime path upstream wiring", () => {
+describe("runtime/Db native runtime path upstream wiring", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -207,7 +211,7 @@ describe("runtime/Db core runtime path upstream wiring", () => {
     const connectWithRuntimeSpy = vi
       .spyOn(JazzClient, "connectWithRuntime")
       .mockReturnValue(client);
-    class PolicyEvaluatingCoreSource extends TestCoreSource {
+    class PolicyEvaluatingRuntimeSource extends TestRuntimeSource {
       override readonly supportsPolicyBypass = false;
     }
     const schema: WasmSchema = {
@@ -230,7 +234,7 @@ describe("runtime/Db core runtime path upstream wiring", () => {
         adminSecret: "admin-y",
         driver: { type: "memory" },
       },
-      new PolicyEvaluatingCoreSource(),
+      new PolicyEvaluatingRuntimeSource(),
     );
     db.exposeGetClient(schema);
 
@@ -265,9 +269,9 @@ describe("runtime/Db core runtime path upstream wiring", () => {
       shutdown: ReturnType<typeof vi.fn>;
       updateAuthToken: ReturnType<typeof vi.fn>;
     };
-    class TestCoreSource extends CoreSource<DbConfig> {
+    class TestRuntimeSource extends RuntimeSource<DbConfig> {
       readonly loadCoreMock = vi.fn(async (_config: DbConfig) => loadedCore);
-      override readonly createClient = vi.fn((_context: CoreClientContext<DbConfig>) => client);
+      override readonly createClient = vi.fn((_context: RuntimeClientContext<DbConfig>) => client);
       override readonly mintLocalFirstToken = vi.fn(
         (options: RuntimeTokenOptions) =>
           `jwt:${options.secret}:${options.audience}:${options.ttlSeconds}`,
@@ -277,15 +281,15 @@ describe("runtime/Db core runtime path upstream wiring", () => {
         return await this.loadCoreMock(config);
       }
     }
-    const coreSource = new TestCoreSource();
+    const runtimeSource = new TestRuntimeSource();
 
-    const db = await createDbWithCoreSource(
+    const db = await createDbWithRuntimeSource(
       {
         appId: "facade-app",
         secret: "alice-secret",
         serverUrl: "https://example.test",
       },
-      coreSource,
+      runtimeSource,
     );
 
     const inserted = db.insert(app.todos, { title: "Buy milk" });
@@ -297,15 +301,15 @@ describe("runtime/Db core runtime path upstream wiring", () => {
     await db.shutdown();
 
     expect(inserted.value).toEqual({ id: "todo-1", title: "Buy milk" });
-    expect(coreSource.loadCoreMock).toHaveBeenCalledTimes(1);
-    expect(coreSource.mintLocalFirstToken).toHaveBeenCalledWith(
+    expect(runtimeSource.loadCoreMock).toHaveBeenCalledTimes(1);
+    expect(runtimeSource.mintLocalFirstToken).toHaveBeenCalledWith(
       expect.objectContaining({
         secret: "alice-secret",
         audience: "facade-app",
         ttlSeconds: 3600,
       }),
     );
-    expect(coreSource.createClient).toHaveBeenCalledWith(
+    expect(runtimeSource.createClient).toHaveBeenCalledWith(
       expect.objectContaining({
         schema,
         config: expect.objectContaining({
@@ -316,7 +320,7 @@ describe("runtime/Db core runtime path upstream wiring", () => {
         onAuthFailure: expect.any(Function),
       }),
     );
-    const createClientContext = coreSource.createClient.mock.calls[0]?.[0];
+    const createClientContext = runtimeSource.createClient.mock.calls[0]?.[0];
     expect(createClientContext).toBeDefined();
     expect("loadedCore" in createClientContext!).toBe(false);
     expect(client.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
@@ -324,24 +328,24 @@ describe("runtime/Db core runtime path upstream wiring", () => {
     expect(client.shutdown).toHaveBeenCalledTimes(1);
   });
 
-  it("uses the core runtime path", () => {
+  it("uses the native runtime path", () => {
     const client = makeClientStub();
-    class RecordingCoreSource extends CoreSource<DbConfig> {
-      readonly createClientMock = vi.fn((_context: CoreClientContext<DbConfig>) => client);
+    class RecordingRuntimeSource extends RuntimeSource<DbConfig> {
+      readonly createClientMock = vi.fn((_context: RuntimeClientContext<DbConfig>) => client);
 
       protected override async loadCore(): Promise<typeof TestDb.runtime> {
         return TestDb.runtime;
       }
 
-      override createClient(context: CoreClientContext<DbConfig>): JazzClient {
+      override createClient(context: RuntimeClientContext<DbConfig>): JazzClient {
         return this.createClientMock(context);
       }
     }
 
-    const coreSource = new RecordingCoreSource();
-    new TestDb({ appId: "direct" }, coreSource).exposeGetClient(makeSchema());
+    const runtimeSource = new RecordingRuntimeSource();
+    new TestDb({ appId: "direct" }, runtimeSource).exposeGetClient(makeSchema());
 
-    expect(coreSource.createClientMock.mock.calls[0]?.[0]).toEqual(
+    expect(runtimeSource.createClientMock.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
         config: expect.objectContaining({ appId: "direct" }),
         schema: makeSchema(),

@@ -13,7 +13,7 @@ import {
 } from "../index.js";
 import { InsertResult, MutationResult } from "../runtime/client.js";
 import { Db, DbConfig } from "../runtime/db.js";
-import { CoreSource, type CoreClientContext } from "../runtime/core-source.js";
+import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
   DEVTOOLS_COMMANDS,
@@ -46,8 +46,8 @@ type ActiveQuerySubscriptionsListener = (
   subscriptions: readonly ActiveQuerySubscriptionTrace[],
 ) => void;
 
-class DevToolsCoreSource extends CoreSource<DbConfig> {
-  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
+class DevToolsRuntimeSource extends RuntimeSource<DbConfig> {
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
     throw new Error("DevToolsDb supplies a proxy JazzClient directly");
   }
 }
@@ -472,7 +472,7 @@ export function onActiveQuerySubscriptionsChange(
 
 class DevToolsDb extends Db {
   constructor(config: DbConfig) {
-    super(config, new DevToolsCoreSource());
+    super(config, new DevToolsRuntimeSource());
   }
 
   async connectProxyRuntime(): Promise<DevToolsBootstrap> {

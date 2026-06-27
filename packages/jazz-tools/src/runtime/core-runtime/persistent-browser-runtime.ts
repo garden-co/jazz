@@ -1,7 +1,12 @@
 import type { InsertResult, MutationResult, Runtime } from "../client.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
-import { encodeCellsForPatch, encodeCellsForRow, formatUuid, parseUuid } from "./runtime.js";
+import {
+  encodeCellsForPatch,
+  encodeCellsForRow,
+  formatUuid,
+  parseUuid,
+} from "./native-runtime-adapter.js";
 
 type PendingCall = {
   resolve: (value: unknown) => void;
@@ -28,7 +33,7 @@ type OpenRequest = {
 
 // This protocol exists because OPFS-backed browser storage must be opened and
 // used from a dedicated worker. The main thread keeps the Runtime shape and
-// proxies calls to the worker that owns the real CoreRuntime instance.
+// proxies calls to the worker that owns the real NativeRuntimeAdapter instance.
 type WriteRequest =
   | {
       id: number;
@@ -120,7 +125,7 @@ export type { OpfsOwnerRequest as PersistentBrowserOpfsOwnerRequest };
 export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly worker: Worker;
   private readonly pending = new Map<number, PendingCall>();
-  // Runtime writes are synchronous, but the worker owns the CoreRuntime that can
+  // Runtime writes are synchronous, but the worker owns the NativeRuntimeAdapter that can
   // produce the real core transaction id. These ids are pending handles
   // that are only valid for waitForTransaction translation below.
   private readonly writes = new Map<string, Promise<string>>();
@@ -151,7 +156,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       if (
         this.closing ||
         this.closed ||
-        event.message.includes("Persistent browser core runtime closed")
+        event.message.includes("Persistent browser native runtime closed")
       ) {
         this.resolveAll();
         return;
@@ -338,7 +343,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
 
   private send(method: WorkerMethod, args: readonly unknown[]): Promise<unknown> {
     if (this.closed) {
-      return Promise.reject(new Error("Persistent browser core runtime is closed"));
+      return Promise.reject(new Error("Persistent browser native runtime is closed"));
     }
     const id = this.nextCallId++;
     return new Promise((resolve, reject) => {
@@ -364,7 +369,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     method: Method,
     ...args: RequestArgs<Method>
   ): void {
-    // The worker owns the real CoreRuntime, so durability waits must use the
+    // The worker owns the real NativeRuntimeAdapter, so durability waits must use the
     // worker's transaction id. The public Runtime API is synchronous, so the
     // result returned from insert/update/etc. is only a pending handle.
     const write = this.opened.then(async () => {
@@ -431,7 +436,7 @@ function ignoreExpectedShutdown(error: unknown): void {
 }
 
 function isExpectedShutdownError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("Persistent browser core runtime");
+  return error instanceof Error && error.message.includes("Persistent browser native runtime");
 }
 
 function valuesForRow(schema: WasmSchema, table: string, values: InsertValues): Value[] {

@@ -3,15 +3,15 @@ import { Db, type DbConfig } from "./db.js";
 import type { AuthState } from "./auth-state.js";
 import type { Session } from "./context.js";
 import type { JazzClient } from "./client.js";
-import { CoreSource, type CoreClientContext } from "./core-source.js";
+import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
 
-class TestCoreSource extends CoreSource<DbConfig> {
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(private readonly client: JazzClient) {
     super();
   }
 
-  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
     return this.client;
   }
 }
@@ -24,7 +24,7 @@ class TestDb extends Db {
   ) {
     super(
       config,
-      new TestCoreSource(client),
+      new TestRuntimeSource(client),
       scopedAuthState
         ? {
             initialState: scopedAuthState,

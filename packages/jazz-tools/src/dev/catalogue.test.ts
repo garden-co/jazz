@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import { createNapiCoreRuntime } from "../runtime/testing/napi-runtime-test-utils.js";
+import { createNapiNativeRuntimeAdapter } from "../runtime/testing/napi-runtime-test-utils.js";
 
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
@@ -71,7 +71,7 @@ describe("dev catalogue API exports", () => {
 });
 
 describe("dev catalogue runtime schema identity", () => {
-  it("opens a CoreRuntime for representative public schema shapes", async () => {
+  it("opens a NativeRuntimeAdapter for representative public schema shapes", async () => {
     const schema = {
       users: s.table({
         name: s.string(),
@@ -93,7 +93,7 @@ describe("dev catalogue runtime schema identity", () => {
         .indexOnly(["fileId", "status"]),
     };
     const app = s.defineApp(schema);
-    await createNapiCoreRuntime(app.wasmSchema);
+    await createNapiNativeRuntimeAdapter(app.wasmSchema);
 
     expect(serializeRuntimeSchema(app.wasmSchema)).toContain("__jazzRuntimeSchema");
   });

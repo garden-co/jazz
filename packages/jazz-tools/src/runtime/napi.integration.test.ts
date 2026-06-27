@@ -11,7 +11,7 @@ import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import {
-  createPersistentNapiCoreRuntime,
+  createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
 } from "./testing/napi-runtime-test-utils.js";
 
@@ -321,7 +321,7 @@ describe("NAPI integration", () => {
   it("supports oversized indexed persistent mutations from JS callers", async () => {
     const dataDir = await createTempDir("jazz-napi-large-index-");
     const dataPath = join(dataDir, "jazz.db");
-    const runtime = (await createPersistentNapiCoreRuntime(TEST_SCHEMA, dataPath, {
+    const runtime = (await createPersistentNapiNativeRuntimeAdapter(TEST_SCHEMA, dataPath, {
       appId: `napi-large-index-${randomUUID()}`,
       env: "test",
       userBranch: "main",
@@ -901,7 +901,7 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      seedRuntime = (await createPersistentNapiCoreRuntime(BYTEA_SCHEMA, dataPath, {
+      seedRuntime = (await createPersistentNapiNativeRuntimeAdapter(BYTEA_SCHEMA, dataPath, {
         appId,
         env: "dev",
         userBranch: "main",

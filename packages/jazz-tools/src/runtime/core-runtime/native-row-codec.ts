@@ -1,33 +1,33 @@
 export type ValueType = { tag: number; inner?: ValueType; members?: ValueType[] };
 export type DescriptorField = { name?: string; valueType: ValueType };
-export type AbiRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
-export type AbiRowBatch = { table: string; descriptor: DescriptorField[]; rows: AbiRow[] };
-export type AbiRemovedRow = { table: string; rowId: Uint8Array };
-export type AbiSubscriptionDelta = {
-  added: AbiRowBatch[];
-  updated: AbiRowBatch[];
-  removed: AbiRemovedRow[];
+export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
+export type NativeRowBatch = { table: string; descriptor: DescriptorField[]; rows: NativeRow[] };
+export type NativeRemovedRow = { table: string; rowId: Uint8Array };
+export type NativeSubscriptionDelta = {
+  added: NativeRowBatch[];
+  updated: NativeRowBatch[];
+  removed: NativeRemovedRow[];
 };
-export type AbiRelationSubscriptionEdge = {
+export type NativeRelationSubscriptionEdge = {
   sourceTable: string;
   sourceRowId: Uint8Array;
   relation: string;
   targetTable: string;
   targetRowId: Uint8Array;
 };
-export type AbiRelationSubscriptionSnapshot = {
+export type NativeRelationSubscriptionSnapshot = {
   cursor: number;
-  rows: AbiRowBatch[];
-  edges: AbiRelationSubscriptionEdge[];
+  rows: NativeRowBatch[];
+  edges: NativeRelationSubscriptionEdge[];
 };
-export type AbiRelationSubscriptionDelta = {
+export type NativeRelationSubscriptionDelta = {
   baseCursor?: number;
   cursor: number;
-  added: AbiRowBatch[];
-  updated: AbiRowBatch[];
-  removed: AbiRemovedRow[];
-  addedEdges: AbiRelationSubscriptionEdge[];
-  removedEdges: AbiRelationSubscriptionEdge[];
+  added: NativeRowBatch[];
+  updated: NativeRowBatch[];
+  removed: NativeRemovedRow[];
+  addedEdges: NativeRelationSubscriptionEdge[];
+  removedEdges: NativeRelationSubscriptionEdge[];
 };
 
 type PostcardReaderLike = {
@@ -49,7 +49,7 @@ type PostcardWriterLike = {
   finish(): Uint8Array;
 };
 
-export function readAbiRowBatch(reader: PostcardReaderLike): AbiRowBatch {
+export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
   return {
     table: reader.string(),
     descriptor: readDescriptor(reader),
@@ -61,48 +61,48 @@ export function readAbiRowBatch(reader: PostcardReaderLike): AbiRowBatch {
   };
 }
 
-export function readAbiSubscriptionDelta(reader: PostcardReaderLike): AbiSubscriptionDelta {
+export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeSubscriptionDelta {
   return {
-    added: reader.readVec(readAbiRowBatch),
-    updated: reader.readVec(readAbiRowBatch),
-    removed: reader.readVec(readAbiRemovedRow),
+    added: reader.readVec(readNativeRowBatch),
+    updated: reader.readVec(readNativeRowBatch),
+    removed: reader.readVec(readNativeRemovedRow),
   };
 }
 
-export function readAbiRelationSubscriptionSnapshot(
+export function readNativeRelationSubscriptionSnapshot(
   reader: PostcardReaderLike,
-): AbiRelationSubscriptionSnapshot {
+): NativeRelationSubscriptionSnapshot {
   return {
     cursor: reader.u64(),
-    rows: reader.readVec(readAbiRowBatch),
-    edges: reader.readVec(readAbiRelationSubscriptionEdge),
+    rows: reader.readVec(readNativeRowBatch),
+    edges: reader.readVec(readNativeRelationSubscriptionEdge),
   };
 }
 
-export function readAbiRelationSubscriptionDelta(
+export function readNativeRelationSubscriptionDelta(
   reader: PostcardReaderLike,
-): AbiRelationSubscriptionDelta {
+): NativeRelationSubscriptionDelta {
   return {
     baseCursor: reader.option((value) => value.u64()),
     cursor: reader.u64(),
-    added: reader.readVec(readAbiRowBatch),
-    updated: reader.readVec(readAbiRowBatch),
-    removed: reader.readVec(readAbiRemovedRow),
-    addedEdges: reader.readVec(readAbiRelationSubscriptionEdge),
-    removedEdges: reader.readVec(readAbiRelationSubscriptionEdge),
+    added: reader.readVec(readNativeRowBatch),
+    updated: reader.readVec(readNativeRowBatch),
+    removed: reader.readVec(readNativeRemovedRow),
+    addedEdges: reader.readVec(readNativeRelationSubscriptionEdge),
+    removedEdges: reader.readVec(readNativeRelationSubscriptionEdge),
   };
 }
 
-export function readAbiRemovedRow(reader: PostcardReaderLike): AbiRemovedRow {
+export function readNativeRemovedRow(reader: PostcardReaderLike): NativeRemovedRow {
   return {
     table: reader.string(),
     rowId: reader.bytes(),
   };
 }
 
-export function readAbiRelationSubscriptionEdge(
+export function readNativeRelationSubscriptionEdge(
   reader: PostcardReaderLike,
-): AbiRelationSubscriptionEdge {
+): NativeRelationSubscriptionEdge {
   return {
     sourceTable: reader.string(),
     sourceRowId: reader.bytes(),

@@ -3,14 +3,14 @@ import { Db, type DbConfig, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
 import { WriteResult, JazzClient, type InsertResult, WriteHandle } from "./client.js";
 import type { Session } from "./context.js";
-import { CoreSource, type CoreClientContext } from "./core-source.js";
+import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 
-class TestCoreSource extends CoreSource<DbConfig> {
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(private readonly client: JazzClient) {
     super();
   }
 
-  override createClient(_context: CoreClientContext<DbConfig>): JazzClient {
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
     return this.client;
   }
 }
@@ -20,7 +20,7 @@ class TestDb extends Db {
     private readonly testClient: JazzClient,
     private readonly testContext: { session?: Session } | null = null,
   ) {
-    super({ appId: "schema-order-test" }, new TestCoreSource(testClient));
+    super({ appId: "schema-order-test" }, new TestRuntimeSource(testClient));
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {

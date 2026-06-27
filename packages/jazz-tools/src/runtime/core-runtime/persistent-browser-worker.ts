@@ -1,7 +1,7 @@
 import { loadWasmModule, type Runtime } from "../client.js";
 import { openConfig } from "./core-codec.js";
 import { encodeSchema } from "./schema-codec.js";
-import { CoreRuntime } from "./runtime.js";
+import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-runtime.js";
 
 type OpenMessage = Extract<PersistentBrowserOpfsOwnerRequest, { method: "open" }>;
@@ -142,7 +142,7 @@ async function openRuntime(message: OpenMessage): Promise<void> {
     openConfig(node, author, 1, true),
   );
 
-  runtime = CoreRuntime.fromDb(db as never, schema as never, node, author, 1, true);
+  runtime = NativeRuntimeAdapter.fromDb(db as never, schema as never, node, author, 1, true);
   runtime.onAuthFailure((reason: string) => {
     workerScope.postMessage({ event: "authFailure", reason });
   });
@@ -151,10 +151,10 @@ async function openRuntime(message: OpenMessage): Promise<void> {
 async function clearClientStorage(): Promise<void> {
   const namespace = runtimeNamespace;
   if (!namespace) {
-    throw new Error("Persistent browser core runtime has no storage namespace");
+    throw new Error("Persistent browser native runtime has no storage namespace");
   }
   if (!runtimeWasmModule) {
-    throw new Error("Persistent browser core runtime has no WASM module");
+    throw new Error("Persistent browser native runtime has no WASM module");
   }
 
   await settlePendingWrites();
@@ -176,7 +176,7 @@ async function settlePendingWrites(): Promise<void> {
 
 function getRuntime(): Runtime {
   if (!runtime) {
-    throw new Error("Persistent browser core runtime is not open");
+    throw new Error("Persistent browser native runtime is not open");
   }
   return runtime;
 }

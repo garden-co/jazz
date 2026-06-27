@@ -5,9 +5,9 @@ import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import { JazzClient, type RequestLike, type Runtime } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
-import { CoreSource, type CoreClientContext } from "../runtime/core-source.js";
+import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
-import { CoreRuntime } from "../runtime/core-runtime/runtime.js";
+import { NativeRuntimeAdapter } from "../runtime/core-runtime/native-runtime-adapter.js";
 import { SYSTEM_AUTHOR_ID } from "../runtime/system-identity.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
@@ -65,7 +65,7 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
 
 type FlushableRuntime = Runtime & { flush?: () => void };
 
-class BackendCoreSource extends CoreSource<DbConfig> {
+class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private initializedSchemaJson?: string;
   private runtime?: FlushableRuntime;
   private client?: JazzClient;
@@ -85,7 +85,7 @@ class BackendCoreSource extends CoreSource<DbConfig> {
     config,
     schema,
     onAuthFailure,
-  }: CoreClientContext<DbConfig>): JazzClient {
+  }: RuntimeClientContext<DbConfig>): JazzClient {
     const schemaJson = serializeRuntimeSchema(schema, {
       loadedPolicyBundle: this.config.permissions !== undefined,
     });
@@ -103,7 +103,7 @@ class BackendCoreSource extends CoreSource<DbConfig> {
     const nodeTier = this.config.tier ?? "edge";
     const env = this.config.env ?? "dev";
     const userBranch = this.config.userBranch ?? "main";
-    this.runtime = new CoreRuntime(
+    this.runtime = new NativeRuntimeAdapter(
       NapiDb,
       schema,
       deterministicBytes(
@@ -151,7 +151,7 @@ class BackendCoreSource extends CoreSource<DbConfig> {
 class BackendDb extends Db {
   constructor(
     config: DbConfig,
-    coreSource: CoreSource<DbConfig>,
+    coreSource: RuntimeSource<DbConfig>,
     private readonly operationContext: { session?: Session; attribution?: string } | null,
     scopedAuthState?: AuthState,
   ) {
@@ -214,7 +214,7 @@ export class JazzContext {
   private readonly config: ResolvedBackendContextConfig;
   private readonly defaultSchemaInput?: BackendSchemaInput;
   private readonly nodeIdentityScope: string;
-  private readonly coreSource: BackendCoreSource;
+  private readonly coreSource: BackendRuntimeSource;
 
   constructor(config: BackendContextConfig) {
     assertValidBackendConfig(config);
@@ -227,7 +227,7 @@ export class JazzContext {
       config.driver.type === "persistent"
         ? config.driver.dataPath
         : `memory:${Date.now()}:${Math.random()}`;
-    this.coreSource = new BackendCoreSource(this.config, this.nodeIdentityScope);
+    this.coreSource = new BackendRuntimeSource(this.config, this.nodeIdentityScope);
   }
 
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {

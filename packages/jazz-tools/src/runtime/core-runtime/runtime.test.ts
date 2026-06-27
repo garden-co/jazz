@@ -7,11 +7,11 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
 } from "./websocket.js";
-import { CoreRuntime, type Transport } from "./runtime.js";
+import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
-describe("CoreRuntime server transport", () => {
+describe("NativeRuntimeAdapter server transport", () => {
   afterEach(() => {
     globalThis.WebSocket = previousWebSocket;
   });
@@ -25,7 +25,7 @@ describe("CoreRuntime server transport", () => {
       }
     } as unknown as typeof WebSocket;
     const transport = new FakeTransport([Uint8Array.from([1, 2, 3])]);
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -88,7 +88,7 @@ describe("CoreRuntime server transport", () => {
     const transport = new FakeTransport([Uint8Array.from([7])]);
     let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
     let dbTicks = 0;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () => ({
           connectUpstream: () => transport,
@@ -129,7 +129,7 @@ describe("CoreRuntime server transport", () => {
   it("requires native db bindings to expose a tick scheduler", () => {
     expect(
       () =>
-        new CoreRuntime(
+        new NativeRuntimeAdapter(
           {
             openMemory: () => ({
               connectUpstream: () => new FakeTransport([]),
@@ -145,7 +145,7 @@ describe("CoreRuntime server transport", () => {
           1,
           true,
         ),
-    ).toThrow("Core runtime requires db.setTickScheduler");
+    ).toThrow("Native runtime requires db.setTickScheduler");
   });
 
   it("reports websocket auth failures through the auth failure callback", async () => {
@@ -157,7 +157,7 @@ describe("CoreRuntime server transport", () => {
       }
     } as unknown as typeof WebSocket;
     const transport = new FakeTransport([]);
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -196,7 +196,7 @@ describe("CoreRuntime server transport", () => {
       }
     } as unknown as typeof WebSocket;
     const transport = new FakeTransport([]);
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -235,7 +235,7 @@ describe("CoreRuntime server transport", () => {
       wait: () => undefined,
       writeState: () => ({}),
     };
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -287,7 +287,7 @@ describe("CoreRuntime server transport", () => {
       wait: () => undefined,
       writeState: () => ({}),
     };
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -345,7 +345,7 @@ describe("CoreRuntime server transport", () => {
 
   it("routes session-scoped queries through allForIdentity", async () => {
     const authors: string[] = [];
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -399,7 +399,7 @@ describe("CoreRuntime server transport", () => {
   it("stages session-scoped mergeable transaction writes through identity-aware core txs", () => {
     const authors: string[] = [];
     const staged: string[] = [];
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -441,7 +441,7 @@ describe("CoreRuntime server transport", () => {
   });
 
   it("rejects mixed identities within one mergeable transaction", () => {
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -483,11 +483,11 @@ describe("CoreRuntime server transport", () => {
         }),
         "00000000-0000-0000-0000-000000000002",
       ),
-    ).toThrow("Core runtime mergeable transaction cannot mix write identities");
+    ).toThrow("Native runtime mergeable transaction cannot mix write identities");
   });
 
   it("decodes fixed-width array columns from native row batches", async () => {
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -532,7 +532,7 @@ describe("CoreRuntime server transport", () => {
 
   it("lowers scalar comparison relation IR into the prepared native query", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -585,7 +585,7 @@ describe("CoreRuntime server transport", () => {
 
   it("trusts native prepared queries for simple equality relation filters", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -662,7 +662,7 @@ describe("CoreRuntime server transport", () => {
   it("trusts native subscription snapshots for simple equality relation filters", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -761,7 +761,7 @@ describe("CoreRuntime server transport", () => {
 
   it("rejects Join relation IR before preparing or reading", async () => {
     const calls: string[] = [];
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -802,7 +802,7 @@ describe("CoreRuntime server transport", () => {
 
   it("rejects Project relation IR while preparing the original subscription query", () => {
     const calls: string[] = [];
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -840,7 +840,7 @@ describe("CoreRuntime server transport", () => {
   it("subscribes to supported root relation IR as one prepared native query", () => {
     const calls: string[] = [];
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -921,7 +921,7 @@ describe("CoreRuntime server transport", () => {
 
   it("encodes negative integer query literals as signed i32 bits for core", () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -979,7 +979,7 @@ describe("CoreRuntime server transport", () => {
   it("uses native subscription chunks for array subquery subscriptions", async () => {
     const calls: string[] = [];
     let controller: ReadableStreamDefaultController<unknown> | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1059,7 +1059,7 @@ describe("CoreRuntime server transport", () => {
 
   it("rejects Gather subscriptions while preparing the original query", () => {
     const calls: string[] = [];
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1116,7 +1116,7 @@ describe("CoreRuntime server transport", () => {
   it("passes supported read tiers and propagation through native read options", async () => {
     const readOptions: unknown[] = [];
     const propagated: unknown[] = [];
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1155,7 +1155,7 @@ describe("CoreRuntime server transport", () => {
   });
 
   it("passes supported read tiers through and fails fast for unsupported read options", async () => {
-    const runtime = directRuntimeWithEmptyDb();
+    const runtime = emptyNativeRuntime();
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
       [],
@@ -1175,7 +1175,7 @@ describe("CoreRuntime server transport", () => {
 
   it("passes include_deleted query intent through native read options", async () => {
     const readOptions: unknown[] = [];
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1206,7 +1206,7 @@ describe("CoreRuntime server transport", () => {
   });
 
   it("passes supported subscription read tiers through", () => {
-    const runtime = directRuntimeWithEmptyDb();
+    const runtime = emptyNativeRuntime();
 
     expect(() =>
       runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge"),
@@ -1219,7 +1219,7 @@ describe("CoreRuntime server transport", () => {
   it("passes local-only subscription propagation through native read options", () => {
     const readOptions: unknown[] = [];
     const propagated: unknown[] = [];
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1258,7 +1258,7 @@ describe("CoreRuntime server transport", () => {
   });
 
   it("accepts well-formed subscription sessions and rejects malformed sessions", () => {
-    const runtime = directRuntimeWithEmptyDb();
+    const runtime = emptyNativeRuntime();
 
     expect(() =>
       runtime.createSubscription(
@@ -1276,7 +1276,7 @@ describe("CoreRuntime server transport", () => {
 
   it("applies subscription deltas to the full keyed snapshot", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1400,7 +1400,7 @@ describe("CoreRuntime server transport", () => {
 
   it("encodes public id equality relation filters into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1478,7 +1478,7 @@ describe("CoreRuntime server transport", () => {
 
   it("encodes public id in conditions into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1523,7 +1523,7 @@ describe("CoreRuntime server transport", () => {
   it("does not filter native subscription snapshots by public id in JS", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1602,7 +1602,7 @@ describe("CoreRuntime server transport", () => {
 
   it("encodes range id comparisons into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1679,7 +1679,7 @@ describe("CoreRuntime server transport", () => {
 
   it("pushes limits with native id predicates", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1731,7 +1731,7 @@ describe("CoreRuntime server transport", () => {
 
   it("lowers root order and pagination into the prepared core query", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new CoreRuntime(
+    const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
@@ -1815,8 +1815,8 @@ const testSchema = {
   },
 } satisfies WasmSchema;
 
-function directRuntimeWithEmptyDb(): CoreRuntime {
-  return new CoreRuntime(
+function emptyNativeRuntime(): NativeRuntimeAdapter {
+  return new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
