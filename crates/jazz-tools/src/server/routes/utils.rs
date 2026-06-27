@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::object::ObjectId;
-use crate::query_manager::types::{SchemaHash, TableName, TablePolicies};
+use crate::schema_api::{SchemaHash, TableName, TablePolicies};
 use crate::schema_manager::AppId;
 
 use super::http::PermissionsHeadView;

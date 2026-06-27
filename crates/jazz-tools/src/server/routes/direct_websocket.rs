@@ -234,7 +234,7 @@ async fn direct_ws_admission(
 }
 
 fn session_claims(
-    session: crate::query_manager::session::Session,
+    session: crate::schema_api::Session,
 ) -> Result<BTreeMap<String, CoreValue>, String> {
     let mut json = match session.claims {
         serde_json::Value::Object(map) => map,
@@ -793,7 +793,7 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     use crate::middleware::AuthConfig;
-    use crate::query_manager::types::Schema;
+    use crate::schema_api::Schema;
     use crate::schema_manager::AppId;
     use crate::server::direct_client::DirectCoreWebSocketTransport;
     use crate::server::{ServerBuilder, StorageBackend};

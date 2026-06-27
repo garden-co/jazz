@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::AppContext;
 use crate::middleware::AuthConfig;
-use crate::query_manager::types::Schema;
+use crate::schema_api::Schema;
 use crate::schema_manager::AppId;
 
 use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
