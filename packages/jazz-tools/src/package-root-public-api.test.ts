@@ -27,6 +27,14 @@ import type { directWebSocketUrl as PackageRootDirectWebSocketUrl } from "./inde
 import type { DirectOpenPayload as RuntimeDirectOpenPayload } from "./runtime/index.js";
 // @ts-expect-error DirectOpenPayload is intentionally not part of the package-root surface.
 import type { DirectOpenPayload as PackageRootDirectOpenPayload } from "./index.js";
+// @ts-expect-error DbDirectBatch was removed from the public runtime surface.
+import type { DbDirectBatch as RuntimeDbDirectBatch } from "./runtime/index.js";
+// @ts-expect-error DbDirectBatch was removed from the package-root surface.
+import type { DbDirectBatch as PackageRootDbDirectBatch } from "./index.js";
+// @ts-expect-error BatchScope was removed from the public runtime surface.
+import type { BatchScope as RuntimeBatchScope } from "./runtime/index.js";
+// @ts-expect-error BatchScope was removed from the package-root surface.
+import type { BatchScope as PackageRootBatchScope } from "./index.js";
 
 void (null as unknown as RuntimeCoreRuntime);
 void (null as unknown as PackageRootCoreRuntime);
@@ -40,6 +48,24 @@ void (null as unknown as RuntimeDirectWebSocketUrl);
 void (null as unknown as PackageRootDirectWebSocketUrl);
 void (null as unknown as RuntimeDirectOpenPayload);
 void (null as unknown as PackageRootDirectOpenPayload);
+void (null as unknown as RuntimeDbDirectBatch);
+void (null as unknown as PackageRootDbDirectBatch);
+void (null as unknown as RuntimeBatchScope);
+void (null as unknown as PackageRootBatchScope);
+
+// @ts-expect-error Db.beginBatch was removed from the public runtime surface.
+type RuntimeBeginBatch = InstanceType<typeof runtime.Db>["beginBatch"];
+// @ts-expect-error Db.batch was removed from the public runtime surface.
+type RuntimeBatch = InstanceType<typeof runtime.Db>["batch"];
+// @ts-expect-error Db.beginBatch was removed from the package-root surface.
+type PackageRootBeginBatch = InstanceType<typeof packageRoot.Db>["beginBatch"];
+// @ts-expect-error Db.batch was removed from the package-root surface.
+type PackageRootBatch = InstanceType<typeof packageRoot.Db>["batch"];
+
+void (null as unknown as RuntimeBeginBatch);
+void (null as unknown as RuntimeBatch);
+void (null as unknown as PackageRootBeginBatch);
+void (null as unknown as PackageRootBatch);
 
 const internalRuntimeExports = [
   "CoreRuntime",
@@ -50,12 +76,13 @@ const internalRuntimeExports = [
   "DirectOpenPayload",
 ] as const;
 
+const removedBatchRuntimeExports = ["DbDirectBatch"] as const;
+
 describe("package root public API", () => {
   it("exposes intended runtime APIs without direct-core internals", () => {
     for (const publicRuntimeExport of [
       "BrowserAuthSecretStore",
       "Db",
-      "DbDirectBatch",
       "FileNotFoundError",
       "IncompleteFileDataError",
       "JazzClient",
@@ -93,6 +120,15 @@ describe("package root public API", () => {
         packageRoot,
         `package root internal export ${internalRuntimeExport}`,
       ).not.toHaveProperty(internalRuntimeExport);
+    }
+
+    for (const removedRuntimeExport of removedBatchRuntimeExports) {
+      expect(runtime, `runtime removed export ${removedRuntimeExport}`).not.toHaveProperty(
+        removedRuntimeExport,
+      );
+      expect(packageRoot, `package root removed export ${removedRuntimeExport}`).not.toHaveProperty(
+        removedRuntimeExport,
+      );
     }
   });
 });
