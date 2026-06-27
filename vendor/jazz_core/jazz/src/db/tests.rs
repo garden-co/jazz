@@ -2101,6 +2101,39 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
 }
 
 #[test]
+fn write_state_waiter_resolves_on_remote_fate_update() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let write = client
+        .insert("todos", cells("wait for fate", false, owner))
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    assert_eq!(
+        client.write_state(tx_id).unwrap().durability,
+        DurabilityTier::Local
+    );
+
+    let changed = client.next_write_state_change(tx_id);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    block_on(changed);
+
+    let state = client.write_state(tx_id).unwrap();
+    assert_eq!(state.fate, Fate::Accepted);
+    assert_eq!(state.durability, DurabilityTier::Global);
+}
+
+#[test]
 fn db_sync_surface_round_trips_blob_large_value_to_reader() {
     let schema =
         JazzSchema::new([
