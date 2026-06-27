@@ -70,9 +70,6 @@ pub struct ServerState {
     pub http_client: reqwest::Client,
     /// Configured verifier for external JWTs.
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
-    /// Optional legacy sync message tracer for test observability.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub sync_tracer: Option<crate::sync::SyncTracer>,
     /// Sendable handle to the local-owner jazz_core peer loop for the direct websocket route.
     pub(crate) core_server: StdRwLock<Option<core_server::LocalCoreServerHandle>>,
     pub(crate) core_server_storage_config: Option<StorageConfig>,
@@ -246,8 +243,6 @@ mod tests {
                 .build()
                 .expect("build HTTP client"),
             jwt_verifier: None,
-            #[cfg(any(test, feature = "test-utils"))]
-            sync_tracer: None,
             core_server: StdRwLock::new(None),
             core_server_storage_config: None,
             shutdown: ShutdownController::new(timeout),

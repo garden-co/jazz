@@ -41,8 +41,6 @@ pub use schema_api::{
     SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext,
 };
 pub use schema_manager::AppId;
-#[cfg(all(feature = "client", feature = "test-utils"))]
-pub use sync::SyncTracer;
 
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
@@ -82,11 +80,6 @@ pub struct AppContext {
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
-
-    /// Optional legacy sync message tracer for test observability.
-    /// Production sync uses direct websocket/core events instead.
-    #[cfg(feature = "test-utils")]
-    pub sync_tracer: Option<(SyncTracer, String)>,
 }
 
 #[cfg(feature = "test-utils")]
@@ -102,8 +95,6 @@ impl AppContext {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
-            #[cfg(feature = "test-utils")]
-            sync_tracer: None,
         }
     }
 }

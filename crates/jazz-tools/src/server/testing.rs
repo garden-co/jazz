@@ -36,8 +36,6 @@ pub struct JazzServerBuilder {
     upstream_url: Option<String>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
-    /// Legacy alpha sync tracer kept only for integration-test observability.
-    sync_tracer: Option<crate::sync::SyncTracer>,
 }
 
 impl std::fmt::Debug for JazzServerBuilder {
@@ -46,7 +44,6 @@ impl std::fmt::Debug for JazzServerBuilder {
             .field("port", &self.port)
             .field("app_id", &self.app_id)
             .field("persistent_storage", &self.persistent_storage)
-            .field("has_tracer", &self.sync_tracer.is_some())
             .finish()
     }
 }
@@ -113,12 +110,6 @@ impl JazzServerBuilder {
 
     pub fn with_auth_clock(mut self, clock: crate::middleware::auth::TestClock) -> Self {
         self.auth_clock = Some(clock.into());
-        self
-    }
-
-    /// Attach the legacy alpha sync tracer for test observability.
-    pub fn with_tracer(mut self, tracer: crate::sync::SyncTracer) -> Self {
-        self.sync_tracer = Some(tracer);
         self
     }
 
@@ -267,7 +258,6 @@ impl JazzServer {
             upstream_url,
             jwks_url,
             auth_clock,
-            sync_tracer,
         } = builder;
 
         let app_id = app_id.unwrap_or_else(Self::default_app_id);
@@ -312,9 +302,6 @@ impl JazzServer {
 
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
-        }
-        if let Some(tracer) = sync_tracer {
-            server_builder = server_builder.with_sync_tracer(tracer);
         }
         let built = server_builder.build().await.expect("build test server");
 
@@ -446,7 +433,6 @@ impl JazzServer {
             jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
-            sync_tracer: None,
         }
     }
 

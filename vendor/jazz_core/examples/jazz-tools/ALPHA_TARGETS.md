@@ -400,13 +400,11 @@ shuts down and remounts the app.
   `JazzServer::block_messages_to(...)` or buffered `SyncPayload::BatchFate`
   assertions; tests should assert public query/subscription/write outcomes
   instead of pinning old semantic sync frames.
-  The remaining `SyncPayload` / `SyncTracer` vocabulary is transitional
-  catalogue/admin/test observability scaffolding. The old row/batch/fate tracer
-  path is being removed, not relocated: do not add new tests that assert
-  buffered `SyncPayload` row batches, per-row batch fates, or old sync-manager
-  message ordering. New sync confidence should come from public
-  `createDb`/`JazzClient` outcomes, websocket convergence, durable restart, and
-  direct-core telemetry surfaces if those are added.
+  The legacy test-only `SyncPayload` and `SyncTracer` plumbing has now been
+  deleted from the active graft; do not reintroduce it for edge/server
+  observability. If product observability needs this shape again, define it in
+  direct-core wire/subscription terms instead of reviving the alpha fanout
+  vocabulary.
   Transaction ids and transaction-kind parsing now live in neutral
   `jazz_tools::transaction` vocabulary rather than being sourced from
   `row_histories::BatchId` or `batch_fate::BatchMode`. `WriteContext` keeps the
@@ -423,11 +421,9 @@ shuts down and remounts the app.
   catalogue abstraction to extend.
   The live server-side `SyncPayload` fanout hub
   (`ConnectionEventHub`/`SequencedSyncUpdate`/registration dispatch) has also
-  been deleted. `SyncPayload` remains only as transitional tracer/test
-  vocabulary until that observability API is migrated to direct-core event
-  terms. `SyncTracer`, server tracer hooks, and the legacy `SyncPayload`
-  vocabulary are now gated behind tests/test-utils rather than exported as
-  product sync APIs.
+  been deleted. New sync confidence should come from public
+  `createDb`/`JazzClient` outcomes, websocket convergence, durable restart, and
+  direct-core telemetry surfaces if those are added.
   Persistent browser OPFS writes now expose their main-thread transaction ids
   as pending worker writes and `.wait(...)` resolves through the worker-owned
   direct-core transaction id only. Fully removing pending write semantics
@@ -457,6 +453,12 @@ shuts down and remounts the app.
   local-update default remains documented in `Db` because immediate local
   updates still fail several public query shapes; close that as direct-core
   read/subscription completeness work, not as a facade fallback.
+- The direct-core runtime no longer re-runs JS post-filters for predicates that
+  are encoded into the prepared direct query. The remaining JS post-filter path
+  is intentionally named as a post-filter and is currently limited to public
+  `id` predicates, which are not yet encoded into the native prepared query
+  shape. The next cleanup step is to teach the native query boundary public
+  `id`/row-uuid predicates, then delete that post-filter too.
 - The retired alpha disconnect-marker/sweep lifecycle has been deleted from
   server state and tests. Direct websocket lifecycle is accounted for through
   shutdown admission/drain tracking and explicit direct-core session close, not

@@ -94,7 +94,6 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
-        sync_tracer: None,
     };
 
     let client = TodoClient::connect(context).await.unwrap();
@@ -461,7 +460,6 @@ async fn test_local_persistence() {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
-            sync_tracer: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
 
@@ -492,7 +490,6 @@ async fn test_local_persistence() {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
-            sync_tracer: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
 
@@ -775,7 +772,6 @@ async fn test_server_resync() {
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
             admin_secret: None,
-            sync_tracer: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
         let permissions_schema = test_schema();
@@ -823,7 +819,6 @@ async fn test_server_resync() {
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,
             admin_secret: None, // Intentionally no admin - server already has schema
-            sync_tracer: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
 
