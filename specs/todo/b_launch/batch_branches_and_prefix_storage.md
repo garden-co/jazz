@@ -6,9 +6,9 @@ This is a precursor to opt-in globally consistent transactions and a storage red
 
 Related:
 
-- [Row Histories](../../status-quo/row_histories.md)
-- [Storage](../../status-quo/storage.md)
-- [HTTP/WebSocket Transport Protocol](../../status-quo/http_transport.md)
+- [Row Histories](../../legacy-alpha-status-quo/row_histories.md)
+- [Storage](../../legacy-alpha-status-quo/storage.md)
+- [HTTP/WebSocket Transport Protocol](../../legacy-alpha-status-quo/http_transport.md)
 - [Globally Consistent Transactions](./globally_consistent_transactions.md)
 - [Storage Compression Strategy](./storage_compression_strategy.md)
 

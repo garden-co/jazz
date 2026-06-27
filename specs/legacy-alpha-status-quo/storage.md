@@ -1,4 +1,6 @@
-# Storage — Status Quo
+# Storage — Legacy Alpha Status Quo
+
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
 
 Storage is the synchronous substrate underneath the Jazz runtime.
 
@@ -109,7 +111,7 @@ lives in the raw table header's `storage_format_version`, not inside every row p
 
 Schemas and lenses live in a separate `catalogue` table. They do not reuse the user-row history path, but they do reuse the same underlying storage and row encoding machinery.
 
-## The Current Table-First Layout
+## The Legacy Alpha Table-First Layout
 
 At a high level, the durable model looks like this:
 

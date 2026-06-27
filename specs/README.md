@@ -11,52 +11,52 @@ The easiest way to picture the runtime is:
 - history, replay, sync, and durability all speak the same row-batch language
 
 These docs are being migrated with the alpha graft. The authoritative engine
-now lives in the first-class Rust crates under `crates/`; older `jazz-tools`
-RuntimeCore, QueryManager, SyncManager, and storage docs are retained as
-legacy/status-quo notes for API shape, tests, and integration scaffolding while
-their behavior is ported or deleted.
+now lives in the first-class Rust crates under `crates/`. The
+[`legacy-alpha-status-quo/`](legacy-alpha-status-quo/) directory is a historical
+archive of deleted or legacy `jazz-tools` alpha internals. Treat those notes as
+migration context only, not active architecture.
 
 ## Reading Order
 
-### 1. Table-First Foundation
+### 1. Historical Alpha Table-First Notes
 
-**[Row Histories](status-quo/row_histories.md)** — The core mental model. Explains logical rows, row batch entries, visible entries, reserved `_jazz_*` columns, and why ordinary reads are "visible-region first".
+**[Row Histories](legacy-alpha-status-quo/row_histories.md)** — Historical alpha notes on logical rows, row batch entries, visible entries, and reserved `_jazz_*` columns.
 
-**[Batches](status-quo/batches.md)** — The current direct/transactional batch model. Covers `BatchId`, physical storage keys, in-memory runtime types, replayable settlements, explicit seal flow, and the Rust/TS batch APIs.
+**[Batches](legacy-alpha-status-quo/batches.md)** — Historical alpha notes on direct/transactional batches, `BatchId`, storage keys, replayable settlements, seal flow, and old Rust/TS batch APIs.
 
-**[Storage](status-quo/storage.md)** — The synchronous storage boundary beneath the runtime. Covers raw tables, indices, row locators, catalogue rows, row-history persistence, and the current durable backends.
+**[Storage](legacy-alpha-status-quo/storage.md)** — Historical alpha notes on the old synchronous storage boundary, raw tables, indices, catalogue rows, row-history persistence, and durable backends.
 
-### 2. Querying Current State
+### 2. Historical Alpha Querying Notes
 
-**[Query Manager](status-quo/query_manager.md)** — Legacy alpha reactive query graphs over current relational state. Use this for public query/API vocabulary and migration context; core/Groove should own new execution semantics.
+**[Query Manager](legacy-alpha-status-quo/query_manager.md)** — Legacy alpha reactive query graphs over relational state. Use this for public query/API vocabulary and migration context; core/Groove should own new execution semantics.
 
-**[Subgraph Sharing](status-quo/subgraph_sharing.md)** — Deeper dive on nested array subqueries and how the current graph engine reuses compiled subgraph templates.
+**[Subgraph Sharing](legacy-alpha-status-quo/subgraph_sharing.md)** — Historical alpha notes on nested array subqueries and old graph-engine subgraph templates.
 
 ### 3. Schema and Metadata
 
-**[Schema Manager](status-quo/schema_manager.md)** — Multi-version schema handling. Covers schema hashes, lenses, live schema sets, copy-on-write updates, and the catalogue lane.
+**[Schema Manager](legacy-alpha-status-quo/schema_manager.md)** — Historical alpha notes on multi-version schema handling, schema hashes, lenses, live schema sets, copy-on-write updates, and the catalogue lane.
 
-**[Schema Files](status-quo/schema_files.md)** — The developer-facing schema workflow: `schema.ts`, `permissions.ts`, migrations, and CLI commands.
+**[Schema Files](legacy-alpha-status-quo/schema_files.md)** — Historical alpha notes on the developer-facing schema workflow: `schema.ts`, `permissions.ts`, migrations, and CLI commands.
 
 ### 4. Sync and Runtime Orchestration
 
-**[Sync Manager](status-quo/sync_manager.md)** — Legacy alpha query-scoped sync and row-batch replication. New network sync should stay on core wire frames.
+**[Sync Manager](legacy-alpha-status-quo/sync_manager.md)** — Legacy alpha query-scoped sync and row-batch replication. New network sync should stay on core wire frames.
 
-**[Query/Sync Integration](status-quo/query_sync_integration.md)** — How query subscriptions become sync scopes, how initial snapshots are replayed, and how live row changes flow back into subscription updates.
+**[Query/Sync Integration](legacy-alpha-status-quo/query_sync_integration.md)** — Historical alpha notes on how query subscriptions became sync scopes, how initial snapshots were replayed, and how live row changes flowed back into subscription updates.
 
-**[Batched Tick Orchestration](status-quo/batched_tick_orchestration.md)** — Historical notes for the deleted legacy alpha runtime scheduler.
+**[Batched Tick Orchestration](legacy-alpha-status-quo/batched_tick_orchestration.md)** — Historical notes for the deleted legacy alpha runtime scheduler.
 
 ### 5. Transport and Adapters
 
-**[HTTP Transport](status-quo/http_transport.md)** — The app-scoped HTTP/admin routes and core WebSocket route. The old alpha websocket transport has been deleted.
+**[HTTP Transport](legacy-alpha-status-quo/http_transport.md)** — Historical alpha notes on app-scoped HTTP/admin routes and the old WebSocket transport. The old alpha websocket transport has been deleted.
 
-**[Browser Adapters](status-quo/browser_adapters.md)** — How browser apps are split between an in-memory main-thread runtime and a persistent worker runtime backed by OPFS.
+**[Browser Adapters](legacy-alpha-status-quo/browser_adapters.md)** — Historical alpha notes on the old browser split between an in-memory main-thread runtime and a persistent OPFS-backed worker runtime.
 
-**[Life of a Subscription](status-quo/life_of_a_subscription.md)** — A walkthrough of what actually happens when a browser app calls `db.all(...)` or `db.subscribeAll(...)`.
+**[Life of a Subscription](legacy-alpha-status-quo/life_of_a_subscription.md)** — Historical alpha walkthrough for old `db.all(...)` and `db.subscribeAll(...)` subscription plumbing.
 
 ### 6. App-Facing Surface
 
-**[App Surface](status-quo/ts_client.md)** — The TypeScript view of the system: `schema.ts`, typed `app` handles, `createDb(...)`, and reactive query APIs.
+**[App Surface](legacy-alpha-status-quo/ts_client.md)** — Historical alpha TypeScript API notes for `schema.ts`, typed `app` handles, `createDb(...)`, and reactive query APIs.
 
 ## Architecture Sketch
 

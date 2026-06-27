@@ -18,9 +18,6 @@ on:
       napi_artifact:
         description: Artifact name for the assembled jazz-napi package (loader + npm/ platform packages).
         value: pkg-jazz-napi
-      rn_artifact:
-        description: Artifact name for the assembled jazz-rn package (with iOS xcframework + Android jniLibs).
-        value: pkg-jazz-rn
       create_jazz_artifact:
         description: Artifact name for the assembled create-jazz package.
         value: pkg-create-jazz
@@ -203,96 +200,6 @@ jobs:
             crates/jazz-napi/index.d.ts
           if-no-files-found: error
 
-  build-rn-ios:
-    name: Build jazz-rn iOS payload
-    runs-on: blacksmith-6vcpu-macos-15
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: 1
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref }}
-
-      - uses: ./.github/actions/setup-build
-        with:
-          rust-targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
-
-      - name: Install/build React Native iOS prerequisites
-        env:
-          JAZZ_RN_PLATFORM: ios
-        run: pnpm run ensure:rust-toolchain
-
-      - name: Build jazz-rn iOS native payload
-        run: pnpm --filter jazz-rn build:rn:ios
-
-      - name: Verify built jazz-rn iOS native payload
-        run: |
-          test -d crates/jazz-rn/JazzRnFramework.xcframework
-          test -f crates/jazz-rn/JazzRnFramework.xcframework/Info.plist
-
-      - name: Stage jazz-rn iOS payload artifact
-        run: |
-          mkdir -p dist/rn-ios
-          cp -R crates/jazz-rn/JazzRnFramework.xcframework dist/rn-ios/
-          cp -R crates/jazz-rn/cpp/generated dist/rn-ios/cpp-generated
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: jazz-rn-ios-payload
-          path: dist/rn-ios
-          if-no-files-found: error
-
-  build-rn-android:
-    name: Build jazz-rn Android payload (${{ matrix.abi }})
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-linux-android
-            abi: arm64-v8a
-          - target: armv7-linux-androideabi
-            abi: armeabi-v7a
-          - target: i686-linux-android
-            abi: x86
-          - target: x86_64-linux-android
-            abi: x86_64
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref }}
-
-      - uses: ./.github/actions/setup-build
-
-      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
-        with:
-          tool: cargo-ndk
-
-      - name: Install/build React Native Android prerequisites
-        env:
-          JAZZ_RN_PLATFORM: android
-          JAZZ_RN_ANDROID_TARGETS: ${{ matrix.target }}
-        run: pnpm run ensure:rust-toolchain
-
-      - name: Build jazz-rn Android native payload
-        run: pnpm --filter jazz-rn exec ubrn build android --targets ${{ matrix.target }} --and-generate --release
-
-      - name: Verify built jazz-rn Android native payload
-        run: test -f crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }}/libjazz_rn.a
-
-      - name: Stage jazz-rn Android payload artifact
-        run: |
-          mkdir -p dist/rn-android/jniLibs
-          cp -R crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }} dist/rn-android/jniLibs/
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: jazz-rn-android-payload-${{ matrix.abi }}
-          path: dist/rn-android
-          if-no-files-found: error
-
   assemble-packages:
     name: Assemble npm packages
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -301,8 +208,6 @@ jobs:
       - build-macos
       - build-wasm
       - build-napi
-      - build-rn-ios
-      - build-rn-android
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -334,28 +239,6 @@ jobs:
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
           merge-multiple: true
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-rn-ios-payload
-          path: dist/rn-ios
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          pattern: jazz-rn-android-payload-*
-          path: dist/rn-android
-          merge-multiple: true
-
-      - name: Stage jazz-rn native payload into npm package sources
-        run: |
-          rm -rf crates/jazz-rn/JazzRnFramework.xcframework
-          rm -rf crates/jazz-rn/android/src/main/jniLibs
-          rm -rf crates/jazz-rn/cpp/generated
-          mkdir -p crates/jazz-rn/android/src/main
-          mkdir -p crates/jazz-rn/cpp
-          cp -R dist/rn-ios/JazzRnFramework.xcframework crates/jazz-rn/
-          cp -R dist/rn-ios/cpp-generated crates/jazz-rn/cpp/generated
-          cp -R dist/rn-android/jniLibs crates/jazz-rn/android/src/main/
 
       - name: Stage jazz-napi platform package artifacts
         run: |
@@ -435,16 +318,6 @@ jobs:
             !crates/jazz-napi/node_modules
             !crates/jazz-napi/target
             !crates/jazz-napi/artifacts
-          include-hidden-files: true
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: pkg-jazz-rn
-          path: |
-            crates/jazz-rn
-            !crates/jazz-rn/node_modules
-            !crates/jazz-rn/target
           include-hidden-files: true
           if-no-files-found: error
 

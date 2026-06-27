@@ -1,10 +1,12 @@
-# Subgraph Sharing (Array Subqueries) — Status Quo
+# Subgraph Sharing (Array Subqueries) — Legacy Alpha Status Quo
+
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
 
 This handles nested data loading — the SQL equivalent of "for each user, fetch their posts." In the TypeScript API, this is what powers `.include({ posts: true })`. Internally, it's a correlated subquery: for each row in the outer query, evaluate a sub-query with the outer row's ID as a filter.
 
 This is architecturally separate from joins (which produce flat rows). Array subqueries produce nested arrays — each outer row gets an array of related inner rows attached to it.
 
-## Current Approach: Recompile Per Binding
+## Legacy Alpha Approach: Recompile Per Binding
 
 The straightforward approach: each outer row gets its own compiled query graph. This is simple and correct, though not optimal for large result sets (see [optimization TODOs](../todo/c_later/subgraph_sharing.md)).
 
@@ -16,7 +18,7 @@ For each unique outer row:
 4. Settle graph to get results
 5. Store array result
 
-Current implementation lives under:
+The deleted alpha implementation lived under:
 
 - `crates/jazz-tools/src/query_manager/graph_nodes/subgraph.rs`
 - `crates/jazz-tools/src/query_manager/graph_nodes/array_subquery.rs`
@@ -30,7 +32,7 @@ Array subquery nodes are chained into the graph pipeline after materialization:
 - On inner table change: `mark_inner_dirty()` → `reevaluate_all()` re-settles all instances
 - On outer delta: `process_with_context()` evaluates subgraph for new/updated outer rows
 
-The relevant compilation and settle plumbing now lives in:
+The relevant deleted alpha compilation and settle plumbing lived in:
 
 - `crates/jazz-tools/src/query_manager/graph.rs`
 
@@ -71,7 +73,7 @@ Nested:
 })
 ```
 
-Current builder implementation: `crates/jazz-tools/src/query_manager/query.rs`
+Deleted alpha builder implementation: `crates/jazz-tools/src/query_manager/query.rs`
 
 ## Performance Observations
 

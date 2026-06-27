@@ -1,4 +1,6 @@
-# Life of a Query Subscription (Browser Main Thread -> Worker) — Status Quo
+# Life of a Query Subscription (Browser Main Thread -> Worker) — Legacy Alpha Status Quo
+
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
 
 This walkthrough follows the most common browser setup:
 

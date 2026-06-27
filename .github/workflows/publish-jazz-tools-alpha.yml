@@ -351,7 +351,6 @@ jobs:
                     "pkg-jazz-tools",
                     "pkg-jazz-wasm",
                     "pkg-jazz-napi",
-                    "pkg-jazz-rn",
                     "pkg-create-jazz",
                   ];
 
@@ -466,12 +465,6 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
-          name: pkg-jazz-rn
-          path: crates/jazz-rn
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
-        with:
           name: pkg-create-jazz
           path: packages/create-jazz
 
@@ -501,15 +494,6 @@ jobs:
           run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
           name: pkg-jazz-napi
           path: crates/jazz-napi
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
-          name: pkg-jazz-rn
-          path: crates/jazz-rn
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
@@ -581,14 +565,12 @@ jobs:
               set_pkg_version_if_needed packages/jazz-tools
               set_pkg_version_if_needed crates/jazz-wasm
               set_pkg_version_if_needed crates/jazz-napi
-              set_pkg_version_if_needed crates/jazz-rn
               set_pkg_version_if_needed packages/create-jazz
             else
               pnpm release:version
               VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
               set_pkg_version_if_needed crates/jazz-wasm
               set_pkg_version_if_needed crates/jazz-napi
-              set_pkg_version_if_needed crates/jazz-rn
               set_pkg_version_if_needed packages/create-jazz
             fi
           else
@@ -605,7 +587,7 @@ jobs:
 
       - name: Guard alpha-only lock-stepped publish versions
         run: |
-          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const rn=JSON.parse(fs.readFileSync("crates/jazz-rn/package.json","utf8"));const createJazz=JSON.parse(fs.readFileSync("packages/create-jazz/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,rn,createJazz]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="alpha"&&pkg.name!=="create-jazz"){throw new Error(`${pkg.name} publishConfig.tag must be alpha, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&napi.version===rn.version&&rn.version===createJazz.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} rn=${rn.version} create-jazz=${createJazz.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
+          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const createJazz=JSON.parse(fs.readFileSync("packages/create-jazz/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,createJazz]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="alpha"&&pkg.name!=="create-jazz"){throw new Error(`${pkg.name} publishConfig.tag must be alpha, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&napi.version===createJazz.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} create-jazz=${createJazz.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
 
       - name: Verify packed jazz-wasm payload
         run: |
@@ -669,44 +651,6 @@ jobs:
 
           node packages/jazz-tools/scripts/verify-packed-runtime-bootstrap.mjs "${EXTRACT_DIR}/package"
 
-      - name: Verify packed jazz-rn manifest
-        run: |
-          TMP_DIR=$(mktemp -d)
-          npm_config_ignore_scripts=true pnpm --filter jazz-rn pack --pack-destination "${TMP_DIR}"
-          TARBALL=$(ls "${TMP_DIR}"/jazz-rn-*.tgz | head -n 1)
-          LISTING=$(mktemp)
-          tar -tf "${TARBALL}" > "${LISTING}"
-
-          # Ensure iOS payload is present for CocoaPods (Expo/RN iOS consumers).
-          grep -q '^package/JazzRnFramework.xcframework/' "${LISTING}" || {
-            echo "Missing JazzRnFramework.xcframework in packed jazz-rn tarball."
-            exit 1
-          }
-          grep -q '^package/JazzRnFramework.xcframework/Info.plist$' "${LISTING}" || {
-            echo "Missing JazzRnFramework.xcframework/Info.plist in packed jazz-rn tarball."
-            exit 1
-          }
-
-          # Ensure generated C++ bindings are present (required by the podspec at compile time).
-          grep -q '^package/cpp/generated/jazz_rn\.hpp$' "${LISTING}" || {
-            echo "Missing cpp/generated/jazz_rn.hpp in packed jazz-rn tarball."
-            exit 1
-          }
-          grep -q '^package/cpp/generated/jazz_rn\.cpp$' "${LISTING}" || {
-            echo "Missing cpp/generated/jazz_rn.cpp in packed jazz-rn tarball."
-            exit 1
-          }
-
-          # Ensure Android native slices are present for Expo/RN Android consumers.
-          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-            grep -q "^package/android/src/main/jniLibs/${abi}/libjazz_rn\\.a$" "${LISTING}" || {
-              echo "Missing Android native library for ABI ${abi} in packed jazz-rn tarball."
-              exit 1
-            }
-          done
-
-          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}if(!(p.publishConfig&&p.publishConfig.tag==="alpha")){throw new Error(`Expected publishConfig.tag=alpha for ${p.name}, got ${(p.publishConfig||{}).tag}`);}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
-
       - name: Publish jazz-wasm (alpha tag)
         if: env.RELEASE_MODE == 'publish'
         run: |
@@ -734,16 +678,6 @@ jobs:
             echo "jazz-napi@${NAPI_VERSION} already exists on npm; skipping publish."
           else
             pnpm --filter jazz-napi publish --tag alpha --access public --no-git-checks
-          fi
-
-      - name: Publish jazz-rn (alpha tag)
-        if: env.RELEASE_MODE == 'publish'
-        run: |
-          RN_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-rn/package.json","utf8")).version')
-          if npm view "jazz-rn@${RN_VERSION}" version >/dev/null 2>&1; then
-            echo "jazz-rn@${RN_VERSION} already exists on npm; skipping publish."
-          else
-            npm_config_ignore_scripts=true pnpm --filter jazz-rn publish --tag alpha --access public --no-git-checks
           fi
 
       - name: Publish jazz-tools (alpha tag)

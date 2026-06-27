@@ -3,6 +3,6 @@
   "private": true,
   "scripts": {
     "build:crates": "cargo build -p jazz-tools --bin jazz-tools --features cli",
-    "test": "cargo test --workspace --lib --bins --tests --exclude jazz-rn --features test"
+    "test": "cargo test --workspace --lib --bins --tests --features test"
   }
 }

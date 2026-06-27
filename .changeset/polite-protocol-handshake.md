@@ -2,7 +2,6 @@
 "jazz-tools": patch
 "jazz-wasm": patch
 "jazz-napi": patch
-"jazz-rn": patch
 "create-jazz": patch
 ---
 

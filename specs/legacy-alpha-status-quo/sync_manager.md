@@ -1,4 +1,6 @@
-# Sync Manager — Status Quo
+# Sync Manager — Legacy Alpha Status Quo
+
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
 
 The Sync Manager is the runtime's traffic controller.
 
@@ -29,7 +31,7 @@ received by an edge validate the admin secret locally and proxy upstream.
 
 Jazz sends only the data that matches the client's active query subscriptions.
 
-That is the heart of the current design:
+That was the heart of the legacy alpha design:
 
 - servers need enough data to do their job
 - clients only receive the rows their active subscriptions are entitled to see
@@ -221,4 +223,4 @@ This is what makes reconnect feel reliable without every app having to remember 
 | `crates/jazz-tools/src/sync_manager/types.rs`           | Payloads, ids, roles, and durability tiers |
 | `crates/jazz-tools/src/sync_manager/permissions.rs`     | Permission-check routing                   |
 | `crates/jazz-tools/src/query_manager/server_queries.rs` | Server-side query subscription handling    |
-| `specs/status-quo/batches.md`                           | Batch lifecycle and settlement model       |
+| `specs/legacy-alpha-status-quo/batches.md`              | Batch lifecycle and settlement model       |

@@ -1,7 +1,6 @@
 ---
 "jazz-tools": patch
 "jazz-wasm": patch
-"jazz-rn": patch
 "jazz-napi": patch
 ---
 

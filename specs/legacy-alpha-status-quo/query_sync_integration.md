@@ -1,4 +1,6 @@
-# Query/Sync Integration — Status Quo
+# Query/Sync Integration — Legacy Alpha Status Quo
+
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
 
 This is the seam where "live relational query" turns into "scoped sync stream".
 

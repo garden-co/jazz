@@ -1,6 +1,9 @@
-# Batches — Status Quo
+# Batches — Legacy Alpha Status Quo
 
-This doc is the current end-to-end description of Jazz's batch model.
+> Historical alpha note: this document describes deleted or legacy `jazz-tools` alpha internals. It is retained for migration context only; do not treat module paths or implementation details here as active architecture.
+
+This doc is a historical alpha description of Jazz's batch model before the
+core graft.
 
 If [Row Histories](row_histories.md) explains what a stored row batch entry is, this doc explains:
 
@@ -12,7 +15,7 @@ If [Row Histories](row_histories.md) explains what a stored row batch entry is, 
 
 ## One Identity, Two Modes
 
-The current runtime has one shared row identity rule:
+The alpha runtime had one shared row identity rule:
 
 - one concrete row batch entry is identified by `(row_id, branch_name, batch_id)`
 - `batch_id` is a 16-byte UUIDv7-backed `BatchId`
@@ -546,7 +549,7 @@ storage compatibility boundary.
 
 ### TypeScript
 
-The batch-aware TS surface lives in:
+The deleted alpha batch-aware TS surface lived in:
 
 - `JazzClient`
 - `Db`
