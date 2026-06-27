@@ -196,11 +196,11 @@ This is why the browser runtime is split in two:
 
 ### SqliteStorage
 
-Used by the native bindings that want a simple embedded durable store, including the current NAPI and React Native runtimes.
+Used by native/client runtimes that want a simple embedded durable store. It is not a supported direct-core `jazz-tools server` catalogue or sync backend; durable server storage is RocksDB-only for now.
 
 ### RocksDBStorage
 
-Used by the cloud/server side where high write volume and durable restart behavior matter most.
+Used by the cloud/server side where high write volume and durable restart behavior matter most. The direct-core `jazz-tools server` uses RocksDB for both sync state and catalogue persistence when it is not running in ephemeral in-memory mode.
 
 ## Browser Topology
 
