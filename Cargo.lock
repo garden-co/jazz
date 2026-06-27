@@ -1876,7 +1876,6 @@ dependencies = [
 name = "jazz-server"
 version = "0.1.0"
 dependencies = [
- "form_urlencoded",
  "futures-util",
  "hex",
  "jazz",

@@ -4,7 +4,6 @@
 //! loopback experiments. Each binary WebSocket message is a postcard-encoded
 //! batch of encoded Jazz ABI wire frames, unchanged end to end inside the batch.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, TcpListener};
@@ -19,7 +18,6 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use jazz::db::DbIdentity;
-use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::schema::JazzSchema;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
@@ -328,7 +326,6 @@ impl From<ShellError> for LoopbackWebSocketError {
 }
 
 struct UpgradeAdmission {
-    identity: Option<AuthorId>,
     bearer: Option<String>,
 }
 
@@ -380,7 +377,6 @@ async fn handle_connection(
 ) {
     let accepted_admission = Arc::new(Mutex::new(None));
     let callback_admission = Arc::clone(&accepted_admission);
-    let callback_auth = auth_admission.clone();
     let expected_path = websocket_path;
     let accepted = accept_hdr_async(stream, move |request: &Request, response: Response| {
         if !websocket_path_matches(request.uri().path(), &expected_path) {
@@ -388,17 +384,15 @@ async fn handle_connection(
                 "not found".to_owned(),
             )));
         }
-        let identity = match author_from_query(
-            request.uri().query(),
-            callback_auth.allow_legacy_query_identity,
-        ) {
-            Ok(identity) => identity,
-            Err(error) => {
-                return Err(tungstenite::handshake::server::ErrorResponse::new(Some(
-                    error,
-                )));
-            }
-        };
+        if request
+            .uri()
+            .query()
+            .is_some_and(query_has_identity_parameter)
+        {
+            return Err(tungstenite::handshake::server::ErrorResponse::new(Some(
+                "URL identity auth is not supported".to_owned(),
+            )));
+        }
         let bearer = request
             .headers()
             .get("Authorization")
@@ -406,7 +400,7 @@ async fn handle_connection(
             .and_then(bearer_from_authorization)
             .map(str::to_owned);
         if let Ok(mut slot) = callback_admission.lock() {
-            *slot = Some(UpgradeAdmission { identity, bearer });
+            *slot = Some(UpgradeAdmission { bearer });
         }
         Ok(response)
     })
@@ -419,10 +413,7 @@ async fn handle_connection(
         .lock()
         .ok()
         .and_then(|mut slot| slot.take())
-        .unwrap_or(UpgradeAdmission {
-            identity: None,
-            bearer: None,
-        });
+        .unwrap_or(UpgradeAdmission { bearer: None });
     let admitted = match admit_socket(&mut socket, &auth_admission, admission).await {
         Ok(admitted) => admitted,
         Err(_) => {
@@ -456,15 +447,6 @@ async fn admit_socket(
     auth_admission: &AuthAdmissionConfig,
     admission: UpgradeAdmission,
 ) -> std::result::Result<AdmittedSession, AuthAdmissionError> {
-    if let Some(identity) = admission.identity {
-        return Ok(AdmittedSession {
-            subject: "legacy-query-identity".to_owned(),
-            author: identity,
-            claims: BTreeMap::<String, Value>::new(),
-            source: AdmissionSource::Anonymous,
-        });
-    }
-
     if admission.bearer.is_some() && auth_admission.jwt_verifier.is_some() {
         if is_local_first_bearer(auth_admission, admission.bearer.as_deref()) {
             return admit_local_first_jwt(auth_admission, admission.bearer.as_deref());
@@ -523,6 +505,13 @@ async fn admit_socket(
     )
 }
 
+fn query_has_identity_parameter(query: &str) -> bool {
+    query
+        .split('&')
+        .filter_map(|part| part.split_once('=').map(|(name, _)| name))
+        .any(|name| name == "identity")
+}
+
 fn is_local_first_bearer(config: &AuthAdmissionConfig, bearer: Option<&str>) -> bool {
     if !config.allow_local_first_auth {
         return false;
@@ -555,36 +544,6 @@ fn validate_auth_handshake(
         ));
     }
     Ok(())
-}
-
-fn author_from_query(
-    query: Option<&str>,
-    allow_legacy_query_identity: bool,
-) -> std::result::Result<Option<AuthorId>, String> {
-    let Some(query) = query else {
-        return Ok(None);
-    };
-    for (name, value) in form_urlencoded::parse(query.as_bytes()) {
-        if name == "identity" {
-            if !allow_legacy_query_identity {
-                return Err(AuthAdmissionError::LegacyQueryIdentityDisabled.to_string());
-            }
-            let bytes = decode_hex_16(&value)?;
-            return Ok(Some(AuthorId::from_bytes(bytes)));
-        }
-    }
-    Ok(None)
-}
-
-fn decode_hex_16(text: &str) -> std::result::Result<[u8; 16], String> {
-    if text.len() != 32 {
-        return Err("identity must be 32 hex characters".to_owned());
-    }
-    let bytes: [u8; 16] = hex::decode(text)
-        .map_err(|_| "identity contains non-hex digit".to_owned())?
-        .try_into()
-        .map_err(|_| "identity must be 32 hex characters".to_owned())?;
-    Ok(bytes)
 }
 
 async fn service_connection(

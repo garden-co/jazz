@@ -272,7 +272,7 @@ fn run_loopback_websocket_schema(
 
 fn print_usage(program: &str) {
     println!(
-        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-legacy-query-identity <bool>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
     print_server_usage(program);
     print_serve_usage(program, "serve");
@@ -280,13 +280,13 @@ fn print_usage(program: &str) {
     print_serve_usage(program, "serve-loopback-websocket-schema");
     print_serve_data_dir_usage(program);
     println!(
-        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_ADMIN_SECRET,JAZZ_BACKEND_SECRET,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_ALLOW_LEGACY_QUERY_IDENTITY,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
+        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_ADMIN_SECRET,JAZZ_BACKEND_SECRET,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
     );
 }
 
 fn print_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-legacy-query-identity <bool>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
     print_server_usage_stderr(program);
     print_serve_usage_stderr(program, "serve");
@@ -294,43 +294,43 @@ fn print_usage_stderr(program: &str) {
     print_serve_usage_stderr(program, "serve-loopback-websocket-schema");
     print_serve_data_dir_usage_stderr(program);
     eprintln!(
-        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_ADMIN_SECRET,JAZZ_BACKEND_SECRET,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_ALLOW_LEGACY_QUERY_IDENTITY,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
+        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_ADMIN_SECRET,JAZZ_BACKEND_SECRET,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
     );
 }
 
 fn print_server_usage(program: &str) {
     println!(
-        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-legacy-query-identity <bool>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_server_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-legacy-query-identity <bool>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_usage(program: &str, command: &str) {
     println!(
-        "usage={program} {command} <schema-postcard-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-legacy-query-identity <bool>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} {command} <schema-postcard-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_usage_stderr(program: &str, command: &str) {
     eprintln!(
-        "usage={program} {command} <schema-postcard-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-legacy-query-identity <bool>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} {command} <schema-postcard-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_data_dir_usage(program: &str) {
     println!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-postcard-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-legacy-query-identity <bool>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-postcard-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_data_dir_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-postcard-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-legacy-query-identity <bool>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-postcard-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
@@ -431,10 +431,6 @@ fn print_auth_report(auth_admission: &AuthAdmissionConfig) {
         } else {
             "anonymous"
         }
-    );
-    println!(
-        "auth.legacy_query_identity={}",
-        auth_admission.allow_legacy_query_identity
     );
     println!(
         "auth.allow_local_first_auth={}",
@@ -590,10 +586,6 @@ impl CliOptions {
                         JwtVerifierConfig::ed_public_key_pem(next_value(&mut args, &arg)?),
                     );
                 }
-                "--allow-legacy-query-identity" => {
-                    options.auth_admission.allow_legacy_query_identity =
-                        parse_bool(&next_value(&mut args, &arg)?, &arg)?;
-                }
                 "--allow-local-first-auth" => {
                     options.auth_admission.allow_local_first_auth =
                         parse_bool(&next_value(&mut args, &arg)?, &arg)?;
@@ -634,10 +626,6 @@ impl CliOptions {
                     options.auth_admission = AuthAdmissionConfig::jwt(
                         JwtVerifierConfig::ed_public_key_pem(value_after_equals(&arg)?),
                     );
-                }
-                _ if arg.starts_with("--allow-legacy-query-identity=") => {
-                    options.auth_admission.allow_legacy_query_identity =
-                        parse_bool(value_after_equals(&arg)?, "--allow-legacy-query-identity")?;
                 }
                 _ if arg.starts_with("--allow-local-first-auth=") => {
                     options.auth_admission.allow_local_first_auth =
@@ -689,10 +677,6 @@ impl CliOptions {
         if let Ok(value) = env::var("JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM") {
             options.auth_admission =
                 AuthAdmissionConfig::jwt(JwtVerifierConfig::ed_public_key_pem(value));
-        }
-        if let Ok(value) = env::var("JAZZ_ALLOW_LEGACY_QUERY_IDENTITY") {
-            options.auth_admission.allow_legacy_query_identity =
-                parse_bool(&value, "JAZZ_ALLOW_LEGACY_QUERY_IDENTITY")?;
         }
         if let Ok(value) = env::var("JAZZ_ALLOW_LOCAL_FIRST_AUTH") {
             options.auth_admission.allow_local_first_auth =
