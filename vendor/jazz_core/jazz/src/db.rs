@@ -1192,12 +1192,26 @@ where
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
         self.table_schema(table)?;
+        let (content_parents, deletion_parents) = {
+            let mut node = self.node.node.borrow_mut();
+            let content_parents = node
+                .local_content_winner_tx_id(table, row)?
+                .into_iter()
+                .collect::<Vec<_>>();
+            let deletion_parents = node
+                .local_deletion_winner_tx_id(table, row)?
+                .into_iter()
+                .collect::<Vec<_>>();
+            (content_parents, deletion_parents)
+        };
         let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
             MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(self.identity.author)
+                .parents(content_parents)
                 .cells(cells),
             MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(self.identity.author)
+                .parents(deletion_parents)
                 .cells(BTreeMap::<String, Value>::new())
                 .deletion(DeletionEvent::Restored),
         ])?;
@@ -1223,14 +1237,28 @@ where
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
         self.table_schema(table)?;
+        let (content_parents, deletion_parents) = {
+            let mut node = self.node.node.borrow_mut();
+            let content_parents = node
+                .local_content_winner_tx_id(table, row)?
+                .into_iter()
+                .collect::<Vec<_>>();
+            let deletion_parents = node
+                .local_deletion_winner_tx_id(table, row)?
+                .into_iter()
+                .collect::<Vec<_>>();
+            (content_parents, deletion_parents)
+        };
         let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
             MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(identity)
                 .permission_subject(identity)
+                .parents(content_parents)
                 .cells(cells),
             MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(identity)
                 .permission_subject(identity)
+                .parents(deletion_parents)
                 .cells(BTreeMap::<String, Value>::new())
                 .deletion(DeletionEvent::Restored),
         ])?;
@@ -2882,6 +2910,7 @@ struct PendingMergeableWrite {
     row_uuid: RowUuid,
     cells: RowCells,
     deletion: Option<DeletionEvent>,
+    parents: Vec<TxId>,
 }
 
 /// Builder for a group of mergeable writes committed as one transaction.
@@ -2919,6 +2948,7 @@ where
             row_uuid: row,
             cells,
             deletion: None,
+            parents: Vec::new(),
         });
         Ok(())
     }
@@ -2938,6 +2968,7 @@ where
             row_uuid: row,
             cells: BTreeMap::new(),
             deletion: Some(DeletionEvent::Deleted),
+            parents: Vec::new(),
         });
         Ok(())
     }
@@ -2948,17 +2979,31 @@ where
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
         self.db.table_schema(table)?;
+        let (content_parents, deletion_parents) = {
+            let mut node = self.db.node.node.borrow_mut();
+            let content_parents = node
+                .local_content_winner_tx_id(table, row)?
+                .into_iter()
+                .collect::<Vec<_>>();
+            let deletion_parents = node
+                .local_deletion_winner_tx_id(table, row)?
+                .into_iter()
+                .collect::<Vec<_>>();
+            (content_parents, deletion_parents)
+        };
         self.stage_value_write(PendingMergeableWrite {
             table: table.to_owned(),
             row_uuid: row,
             cells,
             deletion: None,
+            parents: content_parents,
         });
         self.stage_deletion_write(PendingMergeableWrite {
             table: table.to_owned(),
             row_uuid: row,
             cells: BTreeMap::new(),
             deletion: Some(DeletionEvent::Restored),
+            parents: deletion_parents,
         });
         Ok(())
     }
@@ -2972,6 +3017,7 @@ where
                 let mut commit =
                     MergeableCommit::new(write.table, write.row_uuid, self.db.next_now_ms())
                         .made_by(self.author)
+                        .parents(write.parents)
                         .cells(write.cells);
                 if let Some(subject) = self.permission_subject {
                     commit = commit.permission_subject(subject);

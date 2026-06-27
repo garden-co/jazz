@@ -2255,6 +2255,11 @@ mod tests {
         .unwrap();
     }
 
+    fn accept_edge(core: &mut NodeState<RocksDbStorage>, tx_id: TxId) {
+        core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
+            .unwrap();
+    }
+
     fn title_shape_binding(title: &str) -> (ValidatedQuery, Binding) {
         let shape = Query::from("todos")
             .filter(eq(col("title"), param("title")))
@@ -2631,6 +2636,182 @@ mod tests {
                 "todos".to_owned().into(),
                 row_uuid,
                 restored_content_tx
+            )]))
+        );
+    }
+
+    #[test]
+    fn local_rehydrate_after_edge_restore_ships_restored_row() {
+        let (_core_dir, mut core) = open_node_with_uuid(node(0x94));
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(0x95));
+        let row_uuid = row_from_u64(10);
+        let original_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
+            )
+            .unwrap();
+        accept_edge(&mut core, original_tx);
+        let delete_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_001)
+                    .parents(vec![original_tx])
+                    .deletion(DeletionEvent::Deleted),
+            )
+            .unwrap();
+        accept_edge(&mut core, delete_tx);
+        let restored_content_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_002)
+                    .parents(vec![delete_tx])
+                    .cells(title_cells("restored")),
+            )
+            .unwrap();
+        accept_edge(&mut core, restored_content_tx);
+        let restore_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_003)
+                    .parents(vec![restored_content_tx])
+                    .deletion(DeletionEvent::Restored),
+            )
+            .unwrap();
+        accept_edge(&mut core, restore_tx);
+        let (shape, binding) = title_shape_binding("restored");
+        let subscription = subscription_key(&shape, &binding);
+        let mut peer = PeerState::new();
+
+        let update = peer
+            .rehydrate_query_with_opts(
+                &mut core,
+                &shape,
+                &binding,
+                RegisterShapeOptions {
+                    tier: DurabilityTier::Local,
+                    ..RegisterShapeOptions::default()
+                },
+            )
+            .unwrap();
+
+        let SyncMessage::ViewUpdate {
+            result_row_adds,
+            version_bundles,
+            ..
+        } = &update
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(
+            result_row_adds,
+            &vec![("todos".to_owned().into(), row_uuid, restored_content_tx)]
+        );
+        assert!(version_bundles.iter().any(|bundle| {
+            bundle.tx.tx_id == restore_tx
+                && bundle
+                    .versions
+                    .iter()
+                    .any(|version| version.deletion() == Some(DeletionEvent::Restored))
+        }));
+        reader.apply_sync_message(update).unwrap();
+        assert_eq!(
+            reader
+                .subscription_current_rows("todos", DurabilityTier::Local)
+                .unwrap()
+                .into_iter()
+                .map(current_row_pair)
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([(row_uuid, title_cells("restored"))])
+        );
+        assert_eq!(
+            row_result_set(&peer, subscription),
+            Some(BTreeSet::from([(
+                "todos".to_owned().into(),
+                row_uuid,
+                restored_content_tx
+            )]))
+        );
+    }
+
+    #[test]
+    fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
+        let (_core_dir, mut core) = open_node_with_uuid(node(0x96));
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(0x97));
+        let row_uuid = row_from_u64(10);
+        let original_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
+            )
+            .unwrap();
+        accept_edge(&mut core, original_tx);
+        let delete_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_uuid, 1_001)
+                    .parents(vec![original_tx])
+                    .deletion(DeletionEvent::Deleted),
+            )
+            .unwrap();
+        accept_edge(&mut core, delete_tx);
+        let restore_tx = core
+            .commit_mergeable_many(vec![
+                MergeableCommit::new("todos", row_uuid, 1_002).cells(title_cells("restored")),
+                MergeableCommit::new("todos", row_uuid, 1_003)
+                    .deletion(DeletionEvent::Restored),
+            ])
+            .unwrap();
+        accept_edge(&mut core, restore_tx);
+        let (shape, binding) = title_shape_binding("restored");
+        let subscription = subscription_key(&shape, &binding);
+        let mut peer = PeerState::new();
+
+        let update = peer
+            .rehydrate_query_with_opts(
+                &mut core,
+                &shape,
+                &binding,
+                RegisterShapeOptions {
+                    tier: DurabilityTier::Local,
+                    ..RegisterShapeOptions::default()
+                },
+            )
+            .unwrap();
+
+        let SyncMessage::ViewUpdate {
+            result_row_adds,
+            version_bundles,
+            ..
+        } = &update
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(
+            result_row_adds,
+            &vec![("todos".to_owned().into(), row_uuid, restore_tx)]
+        );
+        assert!(version_bundles.iter().any(|bundle| {
+            bundle.tx.tx_id == restore_tx
+                && bundle
+                    .versions
+                    .iter()
+                    .any(|version| version.deletion() == Some(DeletionEvent::Restored))
+                && bundle
+                    .versions
+                    .iter()
+                    .any(|version| version.deletion().is_none())
+        }));
+        reader.apply_sync_message(update).unwrap();
+        assert_eq!(
+            reader
+                .subscription_current_rows("todos", DurabilityTier::Local)
+                .unwrap()
+                .into_iter()
+                .map(current_row_pair)
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([(row_uuid, title_cells("restored"))])
+        );
+        assert_eq!(
+            row_result_set(&peer, subscription),
+            Some(BTreeSet::from([(
+                "todos".to_owned().into(),
+                row_uuid,
+                restore_tx
             )]))
         );
     }

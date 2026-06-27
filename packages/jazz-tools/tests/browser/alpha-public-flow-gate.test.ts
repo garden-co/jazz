@@ -471,7 +471,7 @@ describe("alpha public package flow", () => {
     expect((await dbB.all(app.todos)).some((todo) => todo.id === secondRow.id)).toBe(false);
   });
 
-  it.skip("TODO(alpha direct core): keeps deleted rows hidden by default and restores them over websocket; blocked because a fresh websocket client cannot query the edge-accepted restore", async () => {
+  it("keeps deleted rows hidden by default and restores them over websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-delete-restore");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
