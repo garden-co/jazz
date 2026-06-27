@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::query_api::magic_columns::is_magic_column_name;
-use crate::query_api::types::{ColumnType, RowDescriptor, TableName, Value};
-use crate::row_format::encode_value_with_type;
+use crate::admin_catalogue_row_format::encode_value_with_type;
+use crate::public_api::magic_columns::is_magic_column_name;
+use crate::public_api::types::{ColumnType, RowDescriptor, TableName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryBuildError {
@@ -1360,7 +1360,7 @@ impl Default for RecursiveBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_api::types::{ColumnDescriptor, ColumnType};
+    use crate::public_api::types::{ColumnDescriptor, ColumnType};
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![

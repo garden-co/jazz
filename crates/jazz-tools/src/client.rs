@@ -8,18 +8,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[cfg(feature = "test-utils")]
-use crate::query_api::types::RowPolicyMode;
-use crate::schema_api::OrderedRowDelta;
-use crate::schema_api::Schema;
-use crate::schema_api::TableName;
-use crate::schema_api::{Query, Session, Value, WriteContext};
-use crate::server::schema_convert::convert_public_schema;
-use crate::server::websocket_client::WebSocketTransport;
+use crate::public_api::types::RowPolicyMode;
+use crate::public_schema::OrderedRowDelta;
+use crate::public_schema::Schema;
+use crate::public_schema::TableName;
+use crate::public_schema::{Query, Session, Value, WriteContext};
+use crate::server::core_websocket_transport::WebSocketTransport;
+use crate::server::public_schema_convert::convert_public_schema;
 #[cfg(feature = "test-utils")]
 use crate::sync::ClientId;
 use crate::sync::DurabilityTier;
 use crate::transaction::BatchId;
-use crate::transport_auth::AuthConfig as WsAuthConfig;
+use crate::websocket_prelude_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;
 use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
@@ -1243,10 +1243,10 @@ impl JazzClient {
         let default_session = default_session_from_context(&context);
         let has_server = !context.server_url.is_empty();
         {
-            let schema_convert = convert_public_schema(&context.schema)
+            let public_schema_convert = convert_public_schema(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
             let identity = core_identity(&context, default_session.as_ref());
-            let storage = core_storage(&schema_convert, &context)?;
+            let storage = core_storage(&public_schema_convert, &context)?;
             let auth = has_server.then(|| WsAuthConfig {
                 jwt_token: if context.backend_secret.is_some() {
                     None
@@ -1258,7 +1258,7 @@ impl JazzClient {
                 backend_session: None,
             });
             let db = ClientDb::open(
-                schema_convert,
+                public_schema_convert,
                 storage,
                 identity,
                 has_server.then(|| context.server_url.clone()),
@@ -1511,7 +1511,7 @@ impl Drop for JazzClient {
 mod tests {
     use super::*;
     use crate::AppId;
-    use crate::schema_api::Schema;
+    use crate::public_schema::Schema;
     use crate::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;

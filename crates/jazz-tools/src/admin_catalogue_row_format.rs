@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::object::ObjectId;
-use crate::query_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use crate::public_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 use uuid::Uuid;
 
 /// Maximum payload size allowed for a single BYTEA value (1 MiB).

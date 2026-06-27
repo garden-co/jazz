@@ -615,7 +615,7 @@ pub type Schema = HashMap<TableName, TableSchema>;
 ///
 /// Returns Ok(()) if no cycles found, Err with a description of the cycle otherwise.
 pub fn validate_no_inherits_cycles(schema: &Schema) -> Result<(), String> {
-    use crate::query_api::policy::Operation;
+    use crate::public_api::policy::Operation;
 
     for (table_name, table_schema) in schema {
         // Check all policies that might have INHERITS
@@ -662,7 +662,7 @@ pub fn validate_policy_no_cycles(
     schema: &Schema,
     visited: &mut HashSet<TableName>,
 ) -> Result<(), String> {
-    use crate::query_api::policy::PolicyExpr;
+    use crate::public_api::policy::PolicyExpr;
 
     match policy {
         PolicyExpr::Inherits {
@@ -671,13 +671,13 @@ pub fn validate_policy_no_cycles(
             max_depth,
         } => {
             if let Some(requested_depth) = max_depth
-                && crate::query_api::policy::normalize_recursive_max_depth(Some(*requested_depth))
+                && crate::public_api::policy::normalize_recursive_max_depth(Some(*requested_depth))
                     .is_none()
             {
                 return Err(format!(
                     "INHERITS max_depth {} exceeds hard cap {} for table '{}'",
                     requested_depth,
-                    crate::query_api::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP,
+                    crate::public_api::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP,
                     current_table.0
                 ));
             }
@@ -725,16 +725,16 @@ pub fn validate_policy_no_cycles(
             // Recurse into target table's policy
             if let Some(target_schema) = schema.get(target_table) {
                 let target_policy = match operation {
-                    crate::query_api::policy::Operation::Select => {
+                    crate::public_api::policy::Operation::Select => {
                         target_schema.policies.select.using.as_ref()
                     }
-                    crate::query_api::policy::Operation::Update => {
+                    crate::public_api::policy::Operation::Update => {
                         target_schema.policies.update.using.as_ref()
                     }
-                    crate::query_api::policy::Operation::Delete => {
+                    crate::public_api::policy::Operation::Delete => {
                         target_schema.policies.effective_delete_using()
                     }
-                    crate::query_api::policy::Operation::Insert => {
+                    crate::public_api::policy::Operation::Insert => {
                         target_schema.policies.insert.with_check.as_ref()
                     }
                 };
@@ -758,13 +758,13 @@ pub fn validate_policy_no_cycles(
             max_depth,
         } => {
             if let Some(requested_depth) = max_depth
-                && crate::query_api::policy::normalize_recursive_max_depth(Some(*requested_depth))
+                && crate::public_api::policy::normalize_recursive_max_depth(Some(*requested_depth))
                     .is_none()
             {
                 return Err(format!(
                     "INHERITS REFERENCING max_depth {} exceeds hard cap {} for table '{}'",
                     requested_depth,
-                    crate::query_api::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP,
+                    crate::public_api::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP,
                     current_table.0
                 ));
             }
@@ -824,16 +824,16 @@ pub fn validate_policy_no_cycles(
             }
 
             let source_policy = match operation {
-                crate::query_api::policy::Operation::Select => {
+                crate::public_api::policy::Operation::Select => {
                     source_schema.policies.select.using.as_ref()
                 }
-                crate::query_api::policy::Operation::Update => {
+                crate::public_api::policy::Operation::Update => {
                     source_schema.policies.update.using.as_ref()
                 }
-                crate::query_api::policy::Operation::Delete => {
+                crate::public_api::policy::Operation::Delete => {
                     source_schema.policies.effective_delete_using()
                 }
-                crate::query_api::policy::Operation::Insert => {
+                crate::public_api::policy::Operation::Insert => {
                     source_schema.policies.insert.with_check.as_ref()
                 }
             };

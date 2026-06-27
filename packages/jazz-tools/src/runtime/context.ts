@@ -28,7 +28,7 @@ export interface RuntimeSourcesConfig {
 }
 
 /**
- * Mirrors the Rust `AuthMode` enum in `crates/jazz-tools/src/schema_api.rs`.
+ * Mirrors the Rust `AuthMode` enum in `crates/jazz-tools/src/public_schema.rs`.
  */
 export type AuthMode = "external" | "local-first" | "anonymous";
 

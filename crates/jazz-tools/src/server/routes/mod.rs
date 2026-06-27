@@ -126,11 +126,11 @@ mod tests {
     use axum::response::Json;
 
     use crate::AppId;
-    use crate::query_api::types::{SchemaHash, TableName};
+    use crate::public_api::types::{SchemaHash, TableName};
     use crate::schema_lens::LensOp;
     use std::time::Duration;
 
-    use crate::query_api::types::{
+    use crate::public_api::types::{
         ColumnType, Schema, SchemaBuilder, TableSchema, Value as QueryValue,
     };
     use crate::server::catalogue::ConnectionSchemaDiagnostics;
@@ -180,7 +180,7 @@ mod tests {
             .state
     }
 
-    async fn make_state_with_schema(schema: crate::query_api::types::Schema) -> Arc<ServerState> {
+    async fn make_state_with_schema(schema: crate::public_api::types::Schema) -> Arc<ServerState> {
         ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(test_auth_config())
             .with_storage(StorageBackend::InMemory)
@@ -192,7 +192,7 @@ mod tests {
     }
 
     async fn make_edge_state_with_schema(
-        schema: crate::query_api::types::Schema,
+        schema: crate::public_api::types::Schema,
         upstream_url: String,
     ) -> Arc<ServerState> {
         ServerBuilder::new(AppId::from_name("test-app"))
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_schema_rejects_shapes_unsupported_by_server_shell() {
+    async fn publish_schema_rejects_shapes_unsupported_by_core_server_shell() {
         let initial_schema = Schema::new();
         let state = make_state_with_schema(initial_schema).await;
         let app = make_test_router(state);
@@ -1516,7 +1516,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_schema_rejects_bigint_columns_with_server_shell_blocker() {
+    async fn publish_schema_rejects_bigint_columns_with_core_server_shell_blocker() {
         let initial_schema = Schema::new();
         let state = make_state_with_schema(initial_schema).await;
         let app = make_test_router(state);

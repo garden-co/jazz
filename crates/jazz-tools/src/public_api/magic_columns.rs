@@ -1,4 +1,4 @@
-use crate::query_api::types::{ColumnDescriptor, ColumnType};
+use crate::public_api::types::{ColumnDescriptor, ColumnType};
 
 pub(super) const RESERVED_MAGIC_COLUMN_PREFIX: char = '$';
 

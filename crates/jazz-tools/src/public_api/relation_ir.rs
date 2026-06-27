@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::query_api::types::{TableName, Value};
+use crate::public_api::types::{TableName, Value};
 
 pub const RELATION_GATHER_MAX_DEPTH_DEFAULT: usize = 10;
 pub const RELATION_GATHER_MAX_DEPTH_HARD_CAP: usize = 64;

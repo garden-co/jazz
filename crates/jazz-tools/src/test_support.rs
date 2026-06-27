@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use crate::object::ObjectId;
 #[cfg(feature = "test-utils")]
-use crate::query_api::query::Query;
+use crate::public_api::query::Query;
 #[cfg(feature = "test-utils")]
-use crate::query_api::types::Value;
+use crate::public_api::types::Value;
 #[cfg(feature = "test-utils")]
 use crate::{DurabilityTier, JazzClient};
 

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::AppId;
 use crate::object::ObjectId;
-use crate::schema_api::{SchemaHash, TableName, TablePolicies};
+use crate::public_schema::{SchemaHash, TableName, TablePolicies};
 
 use super::http::PermissionsHeadView;
 

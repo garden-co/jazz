@@ -15,7 +15,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::AppId;
-use crate::transport_auth::AuthConfig;
+use crate::websocket_prelude_auth::AuthConfig;
 
 const DIRECT_CLIENT_SUPPORTED_FEATURES: u64 =
     FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
