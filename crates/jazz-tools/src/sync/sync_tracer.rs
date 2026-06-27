@@ -26,7 +26,8 @@ use std::time::Instant;
 
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::BatchId;
-use crate::sync_manager::{ClientId, Destination, QueryId, Source, SyncPayload};
+use crate::sync::ClientId;
+use crate::sync_manager::{Destination, QueryId, Source, SyncPayload};
 
 // ============================================================================
 // Types
@@ -1153,7 +1154,7 @@ mod tests {
     use super::*;
     use crate::metadata::RowProvenance;
     use crate::row_histories::{RowState, StoredRowBatch};
-    use crate::sync_manager::ServerId;
+    use crate::sync::ServerId;
 
     fn make_row(byte: u8) -> StoredRowBatch {
         let row_id = ObjectId::new();
@@ -1205,7 +1206,7 @@ mod tests {
         let incoming = SyncPayload::BatchFate {
             fate: crate::batch_fate::BatchFate::DurableDirect {
                 batch_id: row.batch_id,
-                confirmed_tier: crate::sync_manager::DurabilityTier::EdgeServer,
+                confirmed_tier: crate::sync::DurabilityTier::EdgeServer,
             },
         };
 
