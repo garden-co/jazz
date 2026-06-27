@@ -1,13 +1,6 @@
-import type {
-  ActiveQuerySubscriptionTrace,
-  DurabilityTier,
-  InsertValues,
-  QueryExecutionOptions,
-  Row,
-  Value,
-  WasmSchema,
-} from "../index.js";
-import type { DbConfig } from "../runtime/db.js";
+import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
+import type { DurabilityTier, QueryExecutionOptions, Row } from "../runtime/client.js";
+import type { ActiveQuerySubscriptionTrace, DbConfig } from "../runtime/db.js";
 
 export const DEVTOOLS_BRIDGE_CHANNEL = "jazz-devtools-v1" as const;
 export const DEVTOOLS_PORT_NAME = "jazz-inspector-devtools" as const;

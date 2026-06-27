@@ -1,6 +1,5 @@
 export {
   type CreateOptions,
-  JazzClient,
   type AuthConfig,
   type LocalTransactionRecord,
   type TransactionFate,
@@ -11,9 +10,7 @@ export {
   type QueryExecutionOptions,
   type QueryPropagation,
   type QueryVisibility,
-  type RequestLike,
   type Row,
-  type Runtime,
   type RestoreOptions,
   type SubscriptionCallback,
   type UpdateOptions,
