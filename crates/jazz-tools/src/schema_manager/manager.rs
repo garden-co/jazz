@@ -4,7 +4,6 @@
 //! - SchemaContext for tracking current/live schema versions
 //! - Lens management for migrations
 //! - Schema-aware branch naming
-//! - Integrated QueryManager for query/insert/update/delete operations
 //! - Catalogue persistence for schema/lens discovery via sync
 
 use std::{
@@ -16,15 +15,10 @@ use blake3::Hasher;
 
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
-use crate::query_manager::query::QueryBuilder;
-use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
     Value,
 };
-use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
-use crate::row_format::decode_row;
 use crate::schema_manager::rehydrate::latest_catalogue_content;
 use crate::storage::Storage;
 use crate::sync_manager::{ConnectionSchemaDiagnostics, SyncManager};
@@ -70,27 +64,13 @@ pub struct CurrentPermissionsSummary {
     pub permissions: HashMap<TableName, TablePolicies>,
 }
 
-#[derive(Clone, Debug)]
-struct InsertAlignmentColumn {
-    name: String,
-    nullable: bool,
-    default: Option<Value>,
-}
-
-#[derive(Clone, Debug)]
-struct InsertAlignmentPlan {
-    columns: Vec<InsertAlignmentColumn>,
-    positions_by_name: HashMap<String, usize>,
-}
-
-/// SchemaManager coordinates schema evolution with query execution.
+/// SchemaManager coordinates schema evolution with catalogue state.
 ///
 /// It manages:
 /// - Current schema and environment
 /// - Live schema versions reachable via lenses
 /// - Lens registration and auto-generation
 /// - Schema-aware branch naming
-/// - Query execution with automatic lens transforms
 /// - Catalogue persistence for schema/lens discovery via sync
 ///
 /// # Example
@@ -112,27 +92,11 @@ struct InsertAlignmentPlan {
 /// manager.persist_schema();
 /// manager.persist_lens(&lens);
 ///
-/// // Insert data
-/// let handle = manager.insert(
-///     &mut storage,
-///     "users",
-///     std::collections::HashMap::from([
-///         ("id".to_string(), id),
-///         ("name".to_string(), name),
-///     ]),
-///     None,
-///     None,
-/// )?;
-///
-/// // Query across all schema versions via subscription
-/// let sub_id = manager.query_manager_mut().subscribe(manager.query("users").build())?;
-/// manager.process();
-/// let results = manager.query_manager_mut().get_subscription_results(sub_id);
-/// manager.query_manager_mut().unsubscribe_with_sync(sub_id);
+/// // Direct-core runtimes consume the schema/catalogue state exposed here.
 /// ```
 pub struct SchemaManager {
     context: SchemaContext,
-    query_manager: QueryManager,
+    sync_manager: SyncManager,
     app_id: AppId,
     catalogue_publish_timestamps: HashMap<ObjectId, u64>,
     current_permissions_head: Option<PermissionsHeadState>,
@@ -144,11 +108,10 @@ pub struct SchemaManager {
     known_schemas: Arc<HashMap<SchemaHash, Schema>>,
     known_schemas_dirty: bool,
     persisted_current_schema_in_storage: HashSet<(usize, SchemaHash)>,
-    insert_alignment_cache: HashMap<(SchemaHash, TableName), Arc<InsertAlignmentPlan>>,
 }
 
 impl SchemaManager {
-    /// Create a new SchemaManager with integrated QueryManager.
+    /// Create a new SchemaManager.
     ///
     /// # Arguments
     ///
@@ -164,7 +127,7 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
-        let row_policy_mode = if QueryManager::schema_has_any_explicit_policies(&schema) {
+        let row_policy_mode = if schema_has_any_explicit_policies(&schema) {
             RowPolicyMode::Enforcing
         } else {
             RowPolicyMode::PermissiveLocal
@@ -187,20 +150,11 @@ impl SchemaManager {
         user_branch: &str,
         row_policy_mode: RowPolicyMode,
     ) -> Result<Self, SchemaError> {
+        let _ = row_policy_mode;
         let structural_schema = strip_schema_policies(&schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
         let current_hash = SchemaHash::compute(&schema);
-
-        // Create QueryManager with empty context, then set current schema
-        let mut query_manager = QueryManager::new(sync_manager);
-        query_manager.set_catalogue_app_id(app_id.uuid().to_string());
-        query_manager.set_current_schema_with_policy_mode(
-            schema.clone(),
-            env,
-            user_branch,
-            row_policy_mode,
-        );
 
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();
@@ -208,7 +162,7 @@ impl SchemaManager {
 
         Ok(Self {
             context,
-            query_manager,
+            sync_manager,
             app_id,
             catalogue_publish_timestamps: HashMap::new(),
             current_permissions_head: None,
@@ -217,7 +171,6 @@ impl SchemaManager {
             known_schemas: Arc::new(known_schemas),
             known_schemas_dirty: true,
             persisted_current_schema_in_storage: HashSet::new(),
-            insert_alignment_cache: HashMap::new(),
         })
     }
 
@@ -240,11 +193,9 @@ impl SchemaManager {
     /// Queries are executed with explicit `QuerySchemaContext` rather than
     /// using implicit current schema context.
     pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
-        let mut query_manager = QueryManager::new(sync_manager);
-        query_manager.set_catalogue_app_id(app_id.uuid().to_string());
         Self {
             context: SchemaContext::empty(),
-            query_manager,
+            sync_manager,
             app_id,
             catalogue_publish_timestamps: HashMap::new(),
             current_permissions_head: None,
@@ -253,7 +204,6 @@ impl SchemaManager {
             known_schemas: Arc::new(HashMap::new()),
             known_schemas_dirty: false,
             persisted_current_schema_in_storage: HashSet::new(),
-            insert_alignment_cache: HashMap::new(),
         }
     }
 
@@ -285,7 +235,7 @@ impl SchemaManager {
         // If we have a current schema context, also try the lens-path activation
         if self.context.is_initialized() {
             self.context.add_pending_schema(schema.clone());
-            self.activate_pending_and_sync_to_query_manager();
+            self.activate_pending_schemas();
         }
 
         self.try_apply_pending_permissions_head();
@@ -336,182 +286,11 @@ impl SchemaManager {
         &self.context.user_branch
     }
 
-    fn schema_for_hash(&self, schema_hash: SchemaHash) -> Option<&Schema> {
-        Self::schema_for_hash_in_context(&self.context, schema_hash)
-    }
-
-    fn schema_for_hash_in_context(
-        context: &SchemaContext,
-        schema_hash: SchemaHash,
-    ) -> Option<&Schema> {
-        if schema_hash == context.current_hash {
-            return Some(&context.current_schema);
-        }
-        context.live_schemas.get(&schema_hash)
-    }
-
-    fn resolve_target_branch(
-        &self,
-        write_context: Option<&WriteContext>,
-    ) -> Result<(String, SchemaHash), QueryError> {
-        let current_branch = self.context.branch_name().as_str().to_string();
-        let current_hash = self.context.current_hash;
-        let Some(target_branch_name) = write_context.and_then(WriteContext::target_branch_name)
-        else {
-            return Ok((current_branch, current_hash));
-        };
-
-        let parsed =
-            ComposedBranchName::parse(&BranchName::new(target_branch_name)).ok_or_else(|| {
-                QueryError::EncodingError(format!(
-                    "invalid target_branch_name `{target_branch_name}`"
-                ))
-            })?;
-
-        if !parsed.matches_env_and_branch(&self.context.env, &self.context.user_branch) {
-            return Err(QueryError::EncodingError(format!(
-                "target_branch_name `{target_branch_name}` is outside the current schema family {}/*/{}",
-                self.context.env, self.context.user_branch
-            )));
-        }
-
-        if parsed.schema_hash.short() == current_hash.short() {
-            return Ok((current_branch, current_hash));
-        }
-
-        if let Some(hash) = self
-            .context
-            .live_schemas
-            .keys()
-            .copied()
-            .find(|hash| hash.short() == parsed.schema_hash.short())
-        {
-            let canonical =
-                ComposedBranchName::new(&self.context.env, hash, &self.context.user_branch)
-                    .to_branch_name();
-            return Ok((canonical.as_str().to_string(), hash));
-        }
-
-        Err(QueryError::UnknownSchema(parsed.schema_hash))
-    }
-
-    fn schema_context_for_hash(
-        &self,
-        schema_hash: SchemaHash,
-    ) -> Result<SchemaContext, QueryError> {
-        let target_schema = self
-            .schema_for_hash(schema_hash)
-            .ok_or(QueryError::UnknownSchema(schema_hash))?
-            .clone();
-        let mut temp_context = SchemaContext::new(
-            target_schema.clone(),
-            &self.context.env,
-            &self.context.user_branch,
-        );
-
-        for lens in self.context.lenses.values() {
-            temp_context.register_lens(lens.clone());
-        }
-
-        if self.context.current_hash != schema_hash {
-            temp_context.add_pending_schema(self.context.current_schema.clone());
-        }
-
-        for (hash, schema) in &self.context.live_schemas {
-            if *hash != schema_hash {
-                temp_context.add_pending_schema(schema.clone());
-            }
-        }
-
-        temp_context.try_activate_pending();
-        Ok(temp_context)
-    }
-
-    fn insert_alignment_plan_for_schema(
-        cache: &mut HashMap<(SchemaHash, TableName), Arc<InsertAlignmentPlan>>,
-        schema_hash: SchemaHash,
-        table_name: TableName,
-        schema: &Schema,
-    ) -> Result<Arc<InsertAlignmentPlan>, QueryError> {
-        let cache_key = (schema_hash, table_name);
-        if let Some(plan) = cache.get(&cache_key) {
-            return Ok(plan.clone());
-        }
-
-        let table_schema = schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let mut positions_by_name = HashMap::with_capacity(table_schema.columns.columns.len());
-        let columns = table_schema
-            .columns
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| {
-                let name = column.name.as_str().to_string();
-                positions_by_name.insert(name.clone(), index);
-                InsertAlignmentColumn {
-                    name,
-                    nullable: column.nullable,
-                    default: column.default.clone(),
-                }
-            })
-            .collect();
-        let plan = Arc::new(InsertAlignmentPlan {
-            columns,
-            positions_by_name,
-        });
-        cache.insert(cache_key, plan.clone());
-        Ok(plan)
-    }
-
-    fn align_insert_values_with_plan(
-        table: &str,
-        plan: &InsertAlignmentPlan,
-        mut values_by_column: HashMap<String, Value>,
-    ) -> Result<Vec<Value>, QueryError> {
-        for column in values_by_column.keys() {
-            if !plan.positions_by_name.contains_key(column.as_str()) {
-                return Err(QueryError::EncodingError(format!(
-                    "unknown column `{column}` on table `{table}`"
-                )));
-            }
-        }
-
-        let mut aligned_values = Vec::with_capacity(plan.columns.len());
-        for column in &plan.columns {
-            if let Some(value) = values_by_column.remove(column.name.as_str()) {
-                if value == Value::Null && !column.nullable {
-                    return Err(QueryError::EncodingError(format!(
-                        "cannot set required field `{}` to null",
-                        column.name
-                    )));
-                }
-                aligned_values.push(value);
-                continue;
-            }
-
-            if let Some(default) = &column.default {
-                aligned_values.push(default.clone());
-            } else if column.nullable {
-                aligned_values.push(Value::Null);
-            } else {
-                return Err(QueryError::EncodingError(format!(
-                    "missing required field `{}` on table `{table}`",
-                    column.name
-                )));
-            }
-        }
-
-        Ok(aligned_values)
-    }
-
     /// Add a live schema version with auto-generated lens.
     ///
     /// The lens is automatically generated from the schema diff.
     /// Returns error if the generated lens is a draft (needs manual review).
     ///
-    /// Automatically updates QueryManager indices and marks subscriptions for recompile.
     pub fn add_live_schema(&mut self, old_schema: Schema) -> Result<&Lens, SchemaError> {
         let old_schema = strip_schema_policies(&old_schema);
         let lens = generate_lens(&old_schema, &self.context.current_schema);
@@ -529,10 +308,6 @@ impl SchemaManager {
         self.context
             .add_live_schema(old_schema.clone(), lens.clone());
 
-        // Update QueryManager (indices, branch map, subscriptions)
-        self.query_manager.add_live_schema(old_schema);
-        self.query_manager.register_lens(lens);
-
         // Return reference to the registered lens
         self.context
             .get_lens(&source_hash, &self.context.current_hash)
@@ -547,7 +322,6 @@ impl SchemaManager {
     /// Use this when auto-generated lens needs customization or
     /// when adding a schema with a manual migration.
     ///
-    /// Automatically updates QueryManager indices and marks subscriptions for recompile.
     pub fn add_live_schema_with_lens(
         &mut self,
         old_schema: Schema,
@@ -565,16 +339,12 @@ impl SchemaManager {
         self.context
             .add_live_schema(old_schema.clone(), lens.clone());
 
-        // Update QueryManager
-        self.query_manager.add_live_schema(old_schema);
-        self.query_manager.register_lens(lens);
-
         Ok(())
     }
 
     /// Register a lens between two schemas.
     ///
-    /// Also registers the lens in QueryManager and tries to activate pending schemas.
+    /// Also tries to activate pending schemas.
     pub fn register_lens(&mut self, lens: Lens) -> Result<(), SchemaError> {
         if lens.is_draft() {
             return Err(SchemaError::DraftLensInPath {
@@ -585,9 +355,6 @@ impl SchemaManager {
 
         // Update context
         self.context.register_lens(lens.clone());
-
-        // Update QueryManager
-        self.query_manager.register_lens(lens);
 
         Ok(())
     }
@@ -707,16 +474,6 @@ impl SchemaManager {
         &mut self.context
     }
 
-    /// Get reference to the internal QueryManager.
-    pub fn query_manager(&self) -> &QueryManager {
-        &self.query_manager
-    }
-
-    /// Get mutable reference to the internal QueryManager.
-    pub fn query_manager_mut(&mut self) -> &mut QueryManager {
-        &mut self.query_manager
-    }
-
     pub fn current_permissions_head(&self) -> Option<PermissionsHeadSummary> {
         self.current_permissions_head
             .map(|head| PermissionsHeadSummary {
@@ -807,7 +564,7 @@ impl SchemaManager {
     // Multi-Schema Query Support
     // =========================================================================
 
-    /// Get branch names as strings for use with QueryBuilder.
+    /// Get branch names as strings for direct-core query planning.
     pub fn all_branch_strings(&self) -> Vec<String> {
         self.context
             .all_branch_names()
@@ -886,7 +643,7 @@ impl SchemaManager {
             return false;
         }
 
-        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        let timestamp = self.sync_manager.reserve_timestamp();
         let mut metadata = metadata;
         metadata.insert(
             crate::metadata::MetadataKey::PublishedAt.to_string(),
@@ -894,16 +651,14 @@ impl SchemaManager {
         );
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
-        self.query_manager
-            .sync_manager_mut()
-            .upsert_catalogue_entry(
-                storage,
-                CatalogueEntry {
-                    object_id,
-                    metadata,
-                    content,
-                },
-            );
+        self.sync_manager.upsert_catalogue_entry(
+            storage,
+            CatalogueEntry {
+                object_id,
+                metadata,
+                content,
+            },
+        );
         true
     }
 
@@ -941,20 +696,18 @@ impl SchemaManager {
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
 
-        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        let timestamp = self.sync_manager.reserve_timestamp();
         let metadata = self.schema_metadata_with_published_at(&schema_hash, timestamp);
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
-        self.query_manager
-            .sync_manager_mut()
-            .upsert_catalogue_entry(
-                storage,
-                CatalogueEntry {
-                    object_id,
-                    metadata,
-                    content,
-                },
-            );
+        self.sync_manager.upsert_catalogue_entry(
+            storage,
+            CatalogueEntry {
+                object_id,
+                metadata,
+                content,
+            },
+        );
 
         object_id
     }
@@ -972,20 +725,18 @@ impl SchemaManager {
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(&schema);
 
-        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        let timestamp = self.sync_manager.reserve_timestamp();
         let metadata = self.schema_metadata_with_published_at(&schema_hash, timestamp);
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
-        self.query_manager
-            .sync_manager_mut()
-            .upsert_catalogue_entry(
-                storage,
-                CatalogueEntry {
-                    object_id,
-                    metadata,
-                    content,
-                },
-            );
+        self.sync_manager.upsert_catalogue_entry(
+            storage,
+            CatalogueEntry {
+                object_id,
+                metadata,
+                content,
+            },
+        );
 
         object_id
     }
@@ -1002,19 +753,17 @@ impl SchemaManager {
         let content = encode_lens_transform(&lens.forward);
 
         let metadata = self.lens_metadata(lens);
-        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        let timestamp = self.sync_manager.reserve_timestamp();
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
-        self.query_manager
-            .sync_manager_mut()
-            .upsert_catalogue_entry(
-                storage,
-                CatalogueEntry {
-                    object_id,
-                    metadata,
-                    content,
-                },
-            );
+        self.sync_manager.upsert_catalogue_entry(
+            storage,
+            CatalogueEntry {
+                object_id,
+                metadata,
+                content,
+            },
+        );
 
         object_id
     }
@@ -1032,19 +781,17 @@ impl SchemaManager {
             bundle.parent_bundle_object_id,
             &bundle.permissions,
         );
-        let bundle_timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        let bundle_timestamp = self.sync_manager.reserve_timestamp();
         self.catalogue_publish_timestamps
             .insert(head.bundle_object_id, bundle_timestamp);
-        self.query_manager
-            .sync_manager_mut()
-            .upsert_catalogue_entry(
-                storage,
-                CatalogueEntry {
-                    object_id: head.bundle_object_id,
-                    metadata: bundle_metadata,
-                    content: bundle_content,
-                },
-            );
+        self.sync_manager.upsert_catalogue_entry(
+            storage,
+            CatalogueEntry {
+                object_id: head.bundle_object_id,
+                metadata: bundle_metadata,
+                content: bundle_content,
+            },
+        );
 
         let head_content = encode_permissions_head(
             head.schema_hash,
@@ -1123,7 +870,7 @@ impl SchemaManager {
         lens: &Lens,
     ) -> Result<ObjectId, SchemaError> {
         self.register_lens(lens.clone())?;
-        self.activate_pending_and_sync_to_query_manager();
+        self.activate_pending_schemas();
         Ok(self.persist_lens(storage, lens))
     }
 
@@ -1248,8 +995,7 @@ impl SchemaManager {
 
     /// Process a catalogue update received via sync.
     ///
-    /// Called when QueryManager receives an object with catalogue metadata
-    /// matching this app_id.
+    /// Called when SyncManager receives an object with catalogue metadata matching this app_id.
     ///
     /// For schemas: stored as pending until a lens path exists.
     /// For lenses: registered immediately, then pending schemas are checked.
@@ -1331,7 +1077,7 @@ impl SchemaManager {
             self.context.add_pending_schema(schema);
 
             // Try to activate in case we already have the lens path
-            self.activate_pending_and_sync_to_query_manager();
+            self.activate_pending_schemas();
         }
 
         self.try_apply_pending_permissions_head();
@@ -1447,7 +1193,6 @@ impl SchemaManager {
             parent_bundle_object_id: None,
             bundle_object_id: object_id,
         };
-        self.query_manager.require_authorization_schema();
         self.current_permissions_head = Some(head);
         if self.apply_permissions_head(head) {
             self.pending_permissions_head = None;
@@ -1513,12 +1258,10 @@ impl SchemaManager {
             // Draft lens received via catalogue - storing but not activating schemas through it
         }
 
-        // Register the lens in both context and QueryManager
-        self.context.register_lens(lens.clone());
-        self.query_manager.register_lens(lens);
+        self.context.register_lens(lens);
 
         // Try to activate pending schemas that may now be reachable
-        self.activate_pending_and_sync_to_query_manager();
+        self.activate_pending_schemas();
         self.try_apply_pending_permissions_head();
 
         Ok(())
@@ -1552,9 +1295,7 @@ impl SchemaManager {
             return false;
         };
 
-        let authorization_schema = merge_permissions_into_schema(&schema, &bundle.permissions);
-        self.query_manager
-            .set_authorization_schema(authorization_schema);
+        let _authorization_schema = merge_permissions_into_schema(&schema, &bundle.permissions);
         true
     }
 
@@ -1575,396 +1316,28 @@ impl SchemaManager {
         self.context.try_activate_pending()
     }
 
-    /// Activate pending schemas and sync them to QueryManager.
-    ///
-    /// This is the incremental replacement for sync_context().
-    fn activate_pending_and_sync_to_query_manager(&mut self) {
-        let activated = self.context.try_activate_pending();
-        if activated.is_empty() {
-            return;
-        }
-
-        // For each newly activated schema, add it to QueryManager
-        for hash in &activated {
-            if let Some(schema) = self.context.live_schemas.get(hash).cloned() {
-                self.query_manager.add_live_schema(schema);
-            }
-        }
-
-        // Pending row updates will be retried in the next process() call,
-        // which has access to Storage needed for index updates.
+    fn activate_pending_schemas(&mut self) {
+        let _ = self.context.try_activate_pending();
     }
 
-    // =========================================================================
-    // Query/Write Operations (delegated to QueryManager)
-    // =========================================================================
-
-    /// Create a query builder for a table.
-    pub fn query(&self, table: &str) -> QueryBuilder {
-        QueryBuilder::new(table)
-    }
-
-    /// Insert a row into the current schema's branch.
-    /// Omitted fields are filled from schema defaults or nullable nulls.
-    pub fn insert<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        values: HashMap<String, Value>,
-        object_id: Option<ObjectId>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<InsertResult, QueryError> {
-        let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
-        let table_name = TableName::new(table);
-
-        let context = &self.context;
-        let insert_alignment_cache = &mut self.insert_alignment_cache;
-        let query_manager = &mut self.query_manager;
-        let target_schema = Self::schema_for_hash_in_context(context, target_hash)
-            .ok_or(QueryError::UnknownSchema(target_hash))?;
-        let plan = Self::insert_alignment_plan_for_schema(
-            insert_alignment_cache,
-            target_hash,
-            table_name,
-            target_schema,
-        )?;
-        let aligned_values = Self::align_insert_values_with_plan(table, &plan, values)?;
-        query_manager.insert_on_branch_with_schema_and_write_context_and_id(
-            storage,
-            table,
-            &target_branch,
-            &aligned_values,
-            object_id,
-            target_schema,
-            write_context,
-            false,
-        )
-    }
-
-    /// Create or update a row with a caller-supplied UUID.
-    ///
-    /// If a visible row already exists for `object_id`, only the supplied
-    /// columns are updated. Otherwise a new row is inserted with that id.
-    pub fn upsert<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        object_id: ObjectId,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<crate::row_histories::BatchId, QueryError> {
-        let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
-        let target_context = self.schema_context_for_hash(target_hash)?;
-        let branches = target_context
-            .all_branch_names()
-            .into_iter()
-            .map(|branch_name| branch_name.as_str().to_string())
-            .collect::<Vec<_>>();
-
-        if let Some(existing_table) = write_context
-            .and_then(WriteContext::batch_id)
-            .and_then(|batch_id| {
-                self.query_manager
-                    .load_latest_transactional_staged_row_on_branch(
-                        storage,
-                        object_id,
-                        &target_branch,
-                        batch_id,
-                    )
-                    .map(|(table, _row)| table)
-            })
-            .or_else(|| {
-                self.query_manager
-                    .load_row_for_schema_update_in_context(
-                        storage,
-                        object_id,
-                        &branches,
-                        &target_context,
-                    )
-                    .map(|(table, ..)| table)
-            })
-        {
-            if existing_table != table {
-                return Err(QueryError::EncodingError(format!(
-                    "object {object_id} already exists in table {existing_table}, cannot upsert into {table}"
-                )));
-            }
-
-            let updates = values.into_iter().collect::<Vec<_>>();
-            return self.update(storage, object_id, &updates, write_context);
-        }
-
-        let inserted = self.insert(storage, table, values, Some(object_id), write_context)?;
-        Ok(inserted.batch_id)
-    }
-
-    /// Update a row using current-schema column names, performing copy-on-write
-    /// when the latest visible row batch entry still lives on an older schema branch.
-    pub fn update<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        object_id: ObjectId,
-        values: &[(String, Value)],
-        write_context: Option<&WriteContext>,
-    ) -> Result<crate::row_histories::BatchId, QueryError> {
-        let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
-        let target_schema = self
-            .schema_for_hash(target_hash)
-            .ok_or(QueryError::UnknownSchema(target_hash))?
-            .clone();
-        let target_context = self.schema_context_for_hash(target_hash)?;
-        let branches = target_context
-            .all_branch_names()
-            .into_iter()
-            .map(|branch_name| branch_name.as_str().to_string())
-            .collect::<Vec<_>>();
-        let (
-            table,
-            source_branch,
-            old_current_data,
-            _source_commit_id,
-            old_current_provenance,
-            current_row_is_deleted,
-        ) = write_context
-            .and_then(WriteContext::batch_id)
-            .and_then(|batch_id| {
-                self.query_manager
-                    .load_latest_transactional_staged_row_on_branch(
-                        storage,
-                        object_id,
-                        &target_branch,
-                        batch_id,
-                    )
-                    .map(|(table, row)| {
-                        (
-                            table,
-                            target_branch.clone(),
-                            row.data.to_vec(),
-                            row.batch_id(),
-                            row.row_provenance(),
-                            row.is_soft_deleted() || row.is_hard_deleted(),
-                        )
-                    })
-            })
-            .or_else(|| {
-                self.query_manager
-                    .load_row_for_schema_update_in_context(
-                        storage,
-                        object_id,
-                        &branches,
-                        &target_context,
-                    )
-                    .map(|(table, source_branch, data, batch_id, provenance)| {
-                        (table, source_branch, data, batch_id, provenance, false)
-                    })
-            })
-            .ok_or(QueryError::ObjectNotFound(object_id))?;
-
-        if current_row_is_deleted
-            || self.query_manager().row_is_deleted_on_branch(
-                storage,
-                &table,
-                &source_branch,
-                object_id,
-            )
-        {
-            return Err(QueryError::RowAlreadyDeleted(object_id));
-        }
-
-        let table_name = TableName::new(&table);
-        let descriptor = target_schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?
-            .columns
-            .clone();
-
-        let mut current_values = decode_row(&descriptor, &old_current_data)
-            .map_err(|err| QueryError::EncodingError(format!("{err:?}")))?;
-
-        for (column_name, new_value) in values {
-            let Some(index) = descriptor.column_index(column_name) else {
-                return Err(QueryError::EncodingError(format!(
-                    "column '{column_name}' not found"
-                )));
-            };
-            current_values[index] = new_value.clone();
-        }
-
-        let _ = source_branch;
-        let batch_id = self
-            .query_manager
-            .write_existing_row_on_branch_with_schema_and_write_context(
-                storage,
-                RowBranchWrite {
-                    table: &table,
-                    branch: &target_branch,
-                    id: object_id,
-                    values: &current_values,
-                    old_data_for_policy: &old_current_data,
-                    old_provenance_for_policy: &old_current_provenance,
-                },
-                &target_schema,
-                write_context,
-                false,
-            )?;
-
-        Ok(batch_id)
-    }
-
-    /// Delete a row (soft delete), performing copy-on-write when the latest
-    /// visible row batch entry still lives on an older schema branch.
-    pub fn delete<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        object_id: ObjectId,
-        write_context: Option<&WriteContext>,
-    ) -> Result<DeleteHandle, QueryError> {
-        let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
-        let target_schema = self
-            .schema_for_hash(target_hash)
-            .ok_or(QueryError::UnknownSchema(target_hash))?
-            .clone();
-        let target_context = self.schema_context_for_hash(target_hash)?;
-        let branches = target_context
-            .all_branch_names()
-            .into_iter()
-            .map(|branch_name| branch_name.as_str().to_string())
-            .collect::<Vec<_>>();
-        let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
-            write_context
-                .and_then(WriteContext::batch_id)
-                .and_then(|batch_id| {
-                    self.query_manager
-                        .load_latest_transactional_staged_row_on_branch(
-                            storage,
-                            object_id,
-                            &target_branch,
-                            batch_id,
-                        )
-                        .map(|(table, row)| {
-                            (
-                                table,
-                                target_branch.clone(),
-                                row.data.to_vec(),
-                                row.batch_id(),
-                                row.row_provenance(),
-                            )
-                        })
-                })
-                .or_else(|| {
-                    self.query_manager.load_row_for_schema_update_in_context(
-                        storage,
-                        object_id,
-                        &branches,
-                        &target_context,
-                    )
-                })
-                .ok_or(QueryError::ObjectNotFound(object_id))?;
-
-        let _span = tracing::debug_span!("SM::delete", table, %object_id, schema_hash = %self.context.current_hash).entered();
-        let _ = source_branch;
-        self.query_manager
-            .delete_existing_row_on_branch_with_schema_and_write_context(
-                storage,
-                RowBranchDelete {
-                    table: &table,
-                    branch: &target_branch,
-                    id: object_id,
-                    old_data_for_policy: &old_current_data,
-                    old_provenance_for_policy: &old_current_provenance,
-                },
-                &target_schema,
-                write_context,
-                false,
-            )
-    }
-
-    /// Restore a soft-deleted row, performing copy-on-write when targeting a
-    /// specific schema branch.
-    pub fn restore<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        object_id: ObjectId,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<InsertResult, QueryError> {
-        let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
-        let actual_table = self
-            .query_manager
-            .load_row_table_name(storage, object_id)
-            .ok_or(QueryError::ObjectNotFound(object_id))?;
-
-        if actual_table != table {
-            return Err(QueryError::EncodingError(format!(
-                "object {object_id} belongs to table {actual_table}, cannot restore into {table}"
-            )));
-        }
-
-        let table_name = TableName::new(table);
-        let context = &self.context;
-        let insert_alignment_cache = &mut self.insert_alignment_cache;
-        let query_manager = &mut self.query_manager;
-        let target_schema = Self::schema_for_hash_in_context(context, target_hash)
-            .ok_or(QueryError::UnknownSchema(target_hash))?;
-        let plan = Self::insert_alignment_plan_for_schema(
-            insert_alignment_cache,
-            target_hash,
-            table_name,
-            target_schema,
-        )?;
-        let aligned_values = Self::align_insert_values_with_plan(table, &plan, values)?;
-
-        query_manager.restore_on_branch_with_schema_and_write_context(
-            storage,
-            table,
-            &target_branch,
-            object_id,
-            &aligned_values,
-            target_schema,
-            write_context,
-        )
-    }
-
-    /// Process pending operations (drives SyncManager).
-    ///
-    /// This also processes any pending catalogue updates (schemas/lenses) that
-    /// were received via sync. Catalogue schemas are stored as pending until
-    /// a lens path exists, then activated.
-    ///
-    /// When schemas activate, QueryManager is updated incrementally and
-    /// buffered row updates are retried.
+    /// Process pending catalogue operations from SyncManager.
     pub fn process<H: Storage>(&mut self, storage: &mut H) {
         let _span = tracing::debug_span!("SM::process").entered();
-        self.query_manager.process(storage);
+        self.sync_manager.process_inbox(storage);
 
-        // Process any catalogue updates queued by QueryManager
-        let updates = self.query_manager.take_pending_catalogue_updates();
+        let updates = self.sync_manager.take_pending_catalogue_updates();
         for update in updates {
             // Ignore errors from individual catalogue updates - they're non-critical
             let _ =
                 self.process_catalogue_update(update.object_id, &update.metadata, &update.content);
         }
 
-        // Sync known schemas to QueryManager for server-mode lazy activation
-        // This enables QueryManager to activate branches when rows arrive
         if self.known_schemas_dirty {
-            self.query_manager
-                .set_known_schemas(Arc::clone(&self.known_schemas));
             self.known_schemas_dirty = false;
         }
 
         // Final attempt to activate any remaining pending schemas
-        self.activate_pending_and_sync_to_query_manager();
-
-        // Retry any pending row updates that might now be processable
-        self.query_manager
-            .retry_pending_row_visibility_changes(storage);
+        self.activate_pending_schemas();
     }
 }
 
@@ -2034,6 +1407,13 @@ fn strip_schema_policies(schema: &Schema) -> Schema {
         })
         .collect()
 }
+
+fn schema_has_any_explicit_policies(schema: &Schema) -> bool {
+    schema
+        .values()
+        .any(|table_schema| table_schema.policies != TablePolicies::default())
+}
+
 fn hash_len_prefixed(hasher: &mut Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
@@ -2056,8 +1436,7 @@ mod tests {
     use super::*;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableName,
-        TablePolicies, TableSchema,
+        ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
     };
 
     fn test_app_id() -> AppId {
@@ -2083,21 +1462,6 @@ mod tests {
                     .nullable_column("email", ColumnType::Text),
             )
             .build()
-    }
-
-    fn make_schema_with_insert_defaults() -> Schema {
-        let mut schema = Schema::new();
-        schema.insert(
-            TableName::new("todos"),
-            TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("title", ColumnType::Text),
-                ColumnDescriptor::new("done", ColumnType::Boolean).default(Value::Boolean(false)),
-                ColumnDescriptor::new("note", ColumnType::Text)
-                    .nullable()
-                    .default(Value::Text("from default".into())),
-            ])),
-        );
-        schema
     }
 
     #[test]
@@ -2652,111 +2016,6 @@ mod tests {
     }
 
     #[test]
-    fn permissions_head_without_bundle_does_not_deny_local_writes() {
-        use crate::query_manager::session::{Session, WriteContext};
-        use crate::storage::MemoryStorage;
-
-        let schema = make_schema_v2();
-        let schema_hash = SchemaHash::compute(&schema);
-        let mut storage = MemoryStorage::new();
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
-
-        // `users` has a select policy but no insert policy. Pre-bundle the gap
-        // is permissive so the insert below succeeds; post-bundle the missing
-        // insert policy must deny it under Enforcing mode.
-        let permissions = HashMap::from([(
-            TableName::new("users"),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        )]);
-        let bundle = PermissionsBundleState {
-            schema_hash,
-            version: 1,
-            parent_bundle_object_id: None,
-            permissions: permissions.clone(),
-        };
-        let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
-
-        manager
-            .process_catalogue_update(
-                manager.permissions_head_object_id(),
-                &manager.permissions_head_metadata(),
-                &encode_permissions_head(
-                    schema_hash,
-                    bundle.version,
-                    bundle.parent_bundle_object_id,
-                    bundle_object_id,
-                ),
-            )
-            .expect("head should process");
-
-        assert!(
-            manager.pending_permissions_head.is_some(),
-            "bundle should be pending while only the head has arrived",
-        );
-
-        let write_context = WriteContext::from_session(Session::new("test-user"));
-        let pre_bundle_values = HashMap::from([
-            ("id".to_string(), Value::Uuid(ObjectId::new())),
-            ("name".to_string(), Value::Text("Alice".into())),
-            ("email".to_string(), Value::Text("alice@example.com".into())),
-        ]);
-
-        manager
-            .insert(
-                &mut storage,
-                "users",
-                pre_bundle_values,
-                None,
-                Some(&write_context),
-            )
-            .expect(
-                "writes in the head-before-bundle gap should not be denied by a missing policy",
-            );
-
-        manager
-            .process_catalogue_update(
-                bundle_object_id,
-                &manager.permissions_bundle_metadata(),
-                &encode_permissions_bundle(
-                    schema_hash,
-                    bundle.version,
-                    bundle.parent_bundle_object_id,
-                    &permissions,
-                ),
-            )
-            .expect("bundle should process");
-
-        assert!(
-            manager.pending_permissions_head.is_none(),
-            "pending head should clear once the bundle has been applied",
-        );
-
-        let post_bundle_values = HashMap::from([
-            ("id".to_string(), Value::Uuid(ObjectId::new())),
-            ("name".to_string(), Value::Text("Bob".into())),
-            ("email".to_string(), Value::Text("bob@example.com".into())),
-        ]);
-
-        let post_bundle_result = manager.insert(
-            &mut storage,
-            "users",
-            post_bundle_values,
-            None,
-            Some(&write_context),
-        );
-
-        assert!(
-            matches!(
-                post_bundle_result,
-                Err(crate::query_manager::manager::QueryError::PolicyDenied { .. }),
-            ),
-            "after bundle applies, Enforcing mode must deny a write that lacks an explicit \
-             insert policy; got {post_bundle_result:?}",
-        );
-    }
-
-    #[test]
     fn repersisting_rehydrated_permissions_keeps_unchanged_entries_stable() {
         let app_id = test_app_id();
         let schema = make_schema_v2();
@@ -3099,217 +2358,5 @@ mod tests {
             .translate_column_for_schema("users", "email_address", &v2_hash)
             .unwrap();
         assert_eq!(current, "email_address");
-    }
-
-    #[test]
-    fn schema_manager_insert_and_query() {
-        use crate::object::ObjectId;
-        use crate::storage::MemoryStorage;
-
-        let schema = make_schema_v2();
-        let mut storage = MemoryStorage::new();
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
-
-        // Insert a row
-        let id = ObjectId::new();
-        let id_val = Value::Uuid(id);
-        let name = Value::Text("Alice".into());
-        let email = Value::Text("alice@example.com".into());
-
-        let descriptor = manager
-            .current_schema()
-            .get(&"users".into())
-            .unwrap()
-            .columns
-            .clone();
-        let values = HashMap::from([
-            ("id".to_string(), id_val.clone()),
-            ("name".to_string(), name.clone()),
-            ("email".to_string(), email.clone()),
-        ]);
-
-        let _handle = manager
-            .insert(&mut storage, "users", values, None, None)
-            .unwrap();
-        manager.process(&mut storage);
-
-        // Query via subscribe/process/unsubscribe pattern
-        let query = manager.query("users").build();
-        let qm = manager.query_manager_mut();
-        let sub_id = qm.subscribe(query).unwrap();
-        qm.process(&mut storage);
-        let results = qm.get_subscription_results(sub_id);
-        qm.unsubscribe_with_sync(sub_id);
-
-        assert_eq!(results.len(), 1);
-        let id_idx = descriptor.column_index("id").unwrap();
-        assert_eq!(results[0].1[id_idx], id_val);
-    }
-
-    #[test]
-    fn schema_manager_insert_materializes_schema_defaults() {
-        use crate::storage::MemoryStorage;
-
-        let schema = make_schema_with_insert_defaults();
-        let mut storage = MemoryStorage::new();
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
-
-        let handle = manager
-            .insert(
-                &mut storage,
-                "todos",
-                HashMap::from([("title".to_string(), Value::Text("ship default".into()))]),
-                None,
-                None,
-            )
-            .unwrap();
-
-        manager.process(&mut storage);
-        let stored = manager
-            .query_manager_mut()
-            .get_row(&storage, handle.row_id)
-            .expect("inserted row should be readable")
-            .1;
-
-        let descriptor = &manager.current_schema()[&TableName::new("todos")].columns;
-        let done_idx = descriptor.column_index("done").unwrap();
-        let note_idx = descriptor.column_index("note").unwrap();
-        let title_idx = descriptor.column_index("title").unwrap();
-
-        assert_eq!(stored[title_idx], Value::Text("ship default".into()));
-        assert_eq!(stored[done_idx], Value::Boolean(false));
-        assert_eq!(stored[note_idx], Value::Text("from default".into()));
-    }
-
-    #[test]
-    fn schema_manager_insert_reuses_prepared_alignment_for_same_table() {
-        use crate::storage::MemoryStorage;
-
-        let schema = make_schema_with_insert_defaults();
-        let mut storage = MemoryStorage::new();
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
-
-        manager
-            .insert(
-                &mut storage,
-                "todos",
-                HashMap::from([("title".to_string(), Value::Text("first".into()))]),
-                None,
-                None,
-            )
-            .unwrap();
-        manager
-            .insert(
-                &mut storage,
-                "todos",
-                HashMap::from([("title".to_string(), Value::Text("second".into()))]),
-                None,
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(manager.insert_alignment_cache.len(), 1);
-    }
-
-    #[test]
-    fn schema_manager_insert_explicit_null_bypasses_default_for_nullable_column() {
-        use crate::storage::MemoryStorage;
-
-        let schema = make_schema_with_insert_defaults();
-        let mut storage = MemoryStorage::new();
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
-
-        let handle = manager
-            .insert(
-                &mut storage,
-                "todos",
-                HashMap::from([
-                    ("title".to_string(), Value::Text("keep null".into())),
-                    ("note".to_string(), Value::Null),
-                ]),
-                None,
-                None,
-            )
-            .unwrap();
-
-        let descriptor = &manager.current_schema()[&TableName::new("todos")].columns;
-        let note_idx = descriptor.column_index("note").unwrap();
-        let done_idx = descriptor.column_index("done").unwrap();
-
-        assert_eq!(handle.row_values[note_idx], Value::Null);
-        assert_eq!(handle.row_values[done_idx], Value::Boolean(false));
-    }
-
-    #[test]
-    fn schema_manager_insert_missing_required_non_defaulted_field_errors() {
-        use crate::storage::MemoryStorage;
-
-        let schema = make_schema_with_insert_defaults();
-        let mut storage = MemoryStorage::new();
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
-
-        let err = manager
-            .insert(&mut storage, "todos", HashMap::new(), None, None)
-            .unwrap_err();
-        assert!(
-            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("missing required field `title`")),
-            "expected missing required field error, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn schema_manager_insert_explicit_null_for_required_column_errors() {
-        use crate::storage::MemoryStorage;
-
-        let schema = make_schema_with_insert_defaults();
-        let mut storage = MemoryStorage::new();
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
-
-        let err = manager
-            .insert(
-                &mut storage,
-                "todos",
-                HashMap::from([("title".to_string(), Value::Null)]),
-                None,
-                None,
-            )
-            .unwrap_err();
-        assert!(
-            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("cannot set required field `title` to null")),
-            "expected nullability error, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn schema_manager_insert_unknown_column_errors() {
-        use crate::storage::MemoryStorage;
-
-        let schema = make_schema_with_insert_defaults();
-        let mut storage = MemoryStorage::new();
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
-
-        let err = manager
-            .insert(
-                &mut storage,
-                "todos",
-                HashMap::from([
-                    ("title".to_string(), Value::Text("first".into())),
-                    ("bogus".to_string(), Value::Text("second".into())),
-                ]),
-                None,
-                None,
-            )
-            .unwrap_err();
-        assert!(
-            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("unknown column `bogus`")),
-            "expected unknown column error, got {err:?}"
-        );
     }
 }

@@ -322,12 +322,19 @@ auth/admission integration gap, not a row encoding or React subscription gap.
   The legacy `onMutationError` callback/event path has also been removed from
   the TypeScript runtime surface; direct-core writes report policy/durability
   rejection through retained write handles and `.wait(...)`. Old
-  QueryManager/SyncManager/SchemaManager integration test modules are unwired
-  from active Rust test compilation so they no longer act as the semantic oracle
-  for the replacement engine.
-  Remaining old `query_manager`/`sync_manager`/storage/schema-manager code
-  should be treated as public schema/query facade or catalogue scaffolding until
-  it is ported to core-native types, not as a second engine to extend. The
+  SyncManager integration test modules are unwired from active Rust test
+  compilation so they no longer act as the semantic oracle for the replacement
+  engine.
+  The old `query_manager` execution engine (`manager`, graph/graph_nodes,
+  subscriptions, writes, old indexes, old policy graph/IR/counters, server
+  query helpers, and their manager/rebac tests) has been deleted from the
+  active source. The remaining `query_manager` modules are vocabulary and
+  codecs only: schema/query/policy/session/value types, relation IR, magic
+  columns, and row/query encoding. `SchemaManager` now owns catalogue, schema,
+  lens, and permissions-head state; it is no longer a query/write bridge. Any
+  remaining old `sync_manager`/storage/schema-manager code should be treated as
+  public schema/query vocabulary or catalogue scaffolding until it is ported to
+  core-native types, not as a second engine to extend. The
   server admin catalogue now depends on dedicated catalogue-only memory/RocksDB
   storage instead of `Box<dyn Storage>` or old storage backend adapters. SQLite
   remains a native/client storage implementation, but direct-core
