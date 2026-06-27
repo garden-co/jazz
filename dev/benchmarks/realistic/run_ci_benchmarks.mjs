@@ -529,7 +529,7 @@ export function buildJazzSimCommand(benchmark) {
     "cargo",
     "bench",
     "--manifest-path",
-    "vendor/jazz_core/Cargo.toml",
+    "Cargo.toml",
     "-p",
     "jazz-sim",
     "--bench",

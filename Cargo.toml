@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/groove",
+  "crates/jazz",
+  "crates/jazz-server",
+  "crates/jazz-sim",
+  "crates/jazz-core-wasm",
+  "crates/opfs-btree",
   "crates/jazz-tools",
   "crates/jazz-wasm",
   "crates/jazz-napi",
@@ -16,19 +22,12 @@ members = [
   # "examples/docs/todo-server-rs",
   "dev/benchmarks/storage/bench-core",
 ]
-exclude = [
-  "examples/todo-server-rs",
-  "examples/docs/todo-server-rs",
-  "vendor/jazz_core/groove",
-  "vendor/jazz_core/jazz",
-  "vendor/jazz_core/jazz-wasm",
-  "vendor/jazz_core/opfs-btree",
-]
+exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]
 
 [workspace.dependencies]
-groove = { path = "vendor/jazz_core/groove", default-features = false }
-jazz = { path = "vendor/jazz_core/jazz", default-features = false }
-jazz-server = { path = "vendor/jazz_core/jazz-server", default-features = false }
+groove = { path = "crates/groove", default-features = false }
+jazz = { path = "crates/jazz", default-features = false }
+jazz-server = { path = "crates/jazz-server", default-features = false }
 
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }

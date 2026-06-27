@@ -9,42 +9,34 @@ The alpha code that remains should be treated as integration target material:
 tests, examples, public TypeScript API shape, and thin binding/worker/server
 entrypoints.
 
-## Copied Core
+## Core Location
 
-The current `jazz_core` repo was copied into:
+The imported `jazz_core` Rust crates now live in first-class workspace
+locations:
 
 ```text
-vendor/jazz_core
+crates/groove
+crates/jazz
+crates/jazz-server
+crates/jazz-sim
+crates/jazz-core-wasm
+crates/opfs-btree
 ```
 
-Generated and local-only artifacts were excluded from the copy:
+`vendor` is no longer an active source location for the engine swap. The
+remaining copied repository shell was removed instead of being kept as a second
+workspace root.
 
-- `.git`
-- `target`
-- `.DS_Store`
-- `node_modules`
-- `.pnpm-store`
-- `dist`
-- `build`
+Deleted vendor-only material included:
 
-The copied source includes:
+- copied root Cargo metadata and GitHub workflow files
+- benchmark result snapshots and one-off benchmark helper scripts
+- copied browser/TypeScript prototype fixtures that depended on a conflicting
+  local `jazz-tools` package name
+- local build/install artifacts such as `target`, `node_modules`, and `dist`
 
-- `vendor/jazz_core/groove`
-- `vendor/jazz_core/jazz`
-- `vendor/jazz_core/jazz-server`
-- `vendor/jazz_core/jazz-sim`
-- `vendor/jazz_core/jazz-wasm`
-- `vendor/jazz_core/opfs-btree`
-- `vendor/jazz_core/benchmarks`
-- `vendor/jazz_core/examples`
-- `vendor/jazz_core/docs`
-
-The copied core is intentionally not yet added to the alpha root Cargo or pnpm
-workspaces. That wiring is not purely mechanical because the copied repo has
-its own workspace root and includes package/crate names that collide with alpha
-wrappers (`jazz-wasm`, `opfs-btree`). The next integration pass should delete or
-replace the old alpha internals first, then wire the surviving wrapper package
-names to the new core.
+Active benchmark, workflow, docs, and example work should use the root repo's
+first-class `dev`, `.github`, `docs`, `examples`, and `crates` trees.
 
 ## Keep
 
@@ -120,9 +112,9 @@ Until deleted, treat them as replacement targets only.
   - Old storage abstraction and backends: `memory`, `sqlite`, `rocksdb`,
     `opfs_btree`, key codecs, conformance harness.
 
-- `crates/opfs-btree`
-  - Engine-specific OPFS B-tree storage backend; replace with the copied
-    `jazz_core` storage integration path.
+- old alpha OPFS B-tree integration paths
+  - Replace with the first-class `crates/opfs-btree` core storage integration
+    path.
 
 - `crates/jazz-tools/src/sync_manager`
   - Deleted old sync internals, inbox, forwarding, settlement, transaction
@@ -279,7 +271,7 @@ Until deleted, treat them as replacement targets only.
 - Rust `JazzClient` no longer has a legacy/core engine split:
   core clients are the only live construction path. Server-backed
   clients still connect over the core WebSocket route; offline persistent
-  clients now use vendored core RocksDB storage at `jazz-core.rocksdb` and have
+  clients now use core RocksDB storage at `jazz-core.rocksdb` and have
   first public row rehydrate coverage. Legacy catalogue rehydrate is
   intentionally not revived as a parallel engine.
 - Rust `JazzClient` mergeable transactions now stage writes on the core

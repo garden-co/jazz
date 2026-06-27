@@ -5,7 +5,7 @@
 //!
 //! # Architecture
 //!
-//! - `NapiDb` exposes the vendored Jazz core DB directly over an
+//! - `NapiDb` exposes the Jazz database directly over an
 //!   encoded-row boundary for the TypeScript client packages.
 //! - `JazzServer` exposes the Rust server process used by integration tests
 //!   and Node deployments.
@@ -548,7 +548,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
             NapiDbInnerStorage::Persistent(db) => db.set_tick_scheduler(Some(scheduler)),
@@ -563,7 +563,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => db.prepare_query(&query),
             NapiDbInnerStorage::Persistent(db) => db.prepare_query(&query),
@@ -585,7 +585,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let rows = match db {
             NapiDbInnerStorage::Memory(db) => core_block_on(db.all(&query.inner, opts)),
             NapiDbInnerStorage::Persistent(db) => core_block_on(db.all(&query.inner, opts)),
@@ -611,7 +611,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let rows = match db {
             NapiDbInnerStorage::Memory(db) => {
                 core_set_identity_claims(db, author);
@@ -638,7 +638,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => db.propagate_query_with_opts(&query.inner, opts),
             NapiDbInnerStorage::Persistent(db) => db.propagate_query_with_opts(&query.inner, opts),
@@ -651,7 +651,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         Ok(match db {
             NapiDbInnerStorage::Memory(db) => db.query_is_covered(&query.inner),
             NapiDbInnerStorage::Persistent(db) => db.query_is_covered(&query.inner),
@@ -671,7 +671,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
                 core_block_on(db.subscribe(&query.inner, opts))
@@ -700,7 +700,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => {
                 core_set_identity_claims(db, author);
@@ -732,7 +732,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
@@ -761,7 +761,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => {
                 core_set_identity_claims(db, author);
@@ -794,7 +794,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
@@ -823,7 +823,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => {
                 core_set_identity_claims(db, author);
@@ -856,7 +856,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
@@ -885,7 +885,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => {
                 core_set_identity_claims(db, author);
@@ -912,7 +912,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
@@ -939,7 +939,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => {
                 core_set_identity_claims(db, author);
@@ -972,7 +972,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
@@ -1001,7 +1001,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => {
                 core_set_identity_claims(db, author);
@@ -1027,7 +1027,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => db.tick(),
             NapiDbInnerStorage::Persistent(db) => db.tick(),
@@ -1040,7 +1040,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let queues = WireQueues::default();
         let transport = Box::new(CoreWireTransportAdapter::current(NapiWireTransport {
             queues: queues.clone(),
@@ -1063,7 +1063,7 @@ impl NapiDb {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         Ok(Tx {
             db: match db {
                 NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
@@ -1649,7 +1649,7 @@ impl JazzServer {
             .take()
             .map(|schema_bytes| {
                 postcard::from_bytes::<JazzSchema>(&schema_bytes).map_err(|error| {
-                    napi::Error::from_reason(format!("Invalid direct Jazz schema bytes: {error}"))
+                    napi::Error::from_reason(format!("Invalid Jazz schema bytes: {error}"))
                 })
             })
             .transpose()?;
@@ -1920,7 +1920,7 @@ mod tests {
     #[test]
     fn core_read_opts_accept_public_local_only_spelling() {
         let opts = core_read_opts_from_json(Some(json!({ "propagation": "local-only" })))
-            .expect("parse direct read opts");
+            .expect("parse read opts");
 
         assert_eq!(opts.propagation, CorePropagation::LocalOnly);
     }

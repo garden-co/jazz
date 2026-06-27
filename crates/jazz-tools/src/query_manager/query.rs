@@ -3,11 +3,8 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::query_manager::magic_columns::is_magic_column_name;
-use crate::query_manager::types::{ColumnType, RowDescriptor, TableName, TupleDescriptor, Value};
+use crate::query_manager::types::{ColumnType, RowDescriptor, TableName, Value};
 use crate::row_format::encode_value_with_type;
-
-use super::query_to_relation_ir::normalize_query_to_rel_expr;
-use super::relation_ir::ColumnRef;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryBuildError {
@@ -177,22 +174,6 @@ fn parse_condition_column(column: &str) -> Option<(Option<&str>, &str)> {
     Some((None, trimmed))
 }
 
-fn condition_column_ref(column: &str) -> Option<ColumnRef> {
-    let (scope, name) = parse_condition_column(column)?;
-    Some(match scope {
-        Some(scope) => ColumnRef::scoped(scope, name),
-        None => ColumnRef::unscoped(name),
-    })
-}
-
-fn tuple_condition_column_index(tuple_descriptor: &TupleDescriptor, column: &str) -> Option<usize> {
-    let (scope, name) = parse_condition_column(column)?;
-    match scope {
-        Some(scope) => tuple_descriptor.qualified_column_index(scope, name),
-        None => tuple_descriptor.column_index(name),
-    }
-}
-
 fn is_row_id_condition_column(column: &str) -> bool {
     matches!(column, "id" | "_id")
 }
@@ -206,34 +187,6 @@ fn row_condition_row_id_element(descriptor: &RowDescriptor, column: &str) -> Opt
         return None;
     }
     Some(0)
-}
-
-fn tuple_condition_row_id_element(
-    tuple_descriptor: &TupleDescriptor,
-    column: &str,
-) -> Option<usize> {
-    let (scope, name) = parse_condition_column(column)?;
-    if !is_row_id_condition_column(name)
-        || tuple_condition_column_index(tuple_descriptor, column).is_some()
-    {
-        return None;
-    }
-
-    match scope {
-        Some(scope) => {
-            let mut matches = tuple_descriptor
-                .iter()
-                .enumerate()
-                .filter_map(|(index, element)| (element.table == scope).then_some(index));
-            let index = matches.next()?;
-            if matches.next().is_some() {
-                return None;
-            }
-            Some(index)
-        }
-        None if tuple_descriptor.element_count() == 1 => Some(0),
-        None => None,
-    }
 }
 
 /// A join specification.
@@ -381,10 +334,6 @@ impl Condition {
         parse_condition_column(self.raw_column()).and_then(|(scope, _)| scope)
     }
 
-    pub(crate) fn column_ref(&self) -> Option<ColumnRef> {
-        condition_column_ref(self.raw_column())
-    }
-
     /// Check if this condition can be used for an index scan.
     pub fn is_index_scannable(&self) -> bool {
         if is_magic_column_name(self.column()) {
@@ -458,63 +407,6 @@ impl Condition {
             .map(|element_index| self.to_row_id_predicate(element_index))
     }
 
-    /// Convert to a Predicate using a TupleDescriptor so scoped join refs can resolve.
-    pub fn to_tuple_predicate(&self, tuple_descriptor: &TupleDescriptor) -> Option<Predicate> {
-        if let Some(col_index) = tuple_condition_column_index(tuple_descriptor, self.raw_column()) {
-            let combined_descriptor = tuple_descriptor.combined_descriptor();
-            let col_type = &combined_descriptor.columns[col_index].column_type;
-            if let Some(predicate) = self.null_literal_predicate(col_index) {
-                return Some(predicate);
-            }
-
-            return Some(match self {
-                Condition::Eq { value, .. } => Predicate::Eq {
-                    col_index,
-                    value: encode_value_with_type(value, col_type),
-                },
-                Condition::Ne { value, .. } => Predicate::Ne {
-                    col_index,
-                    value: encode_value_with_type(value, col_type),
-                },
-                Condition::Lt { value, .. } => Predicate::Lt {
-                    col_index,
-                    value: encode_value_with_type(value, col_type),
-                },
-                Condition::Le { value, .. } => Predicate::Le {
-                    col_index,
-                    value: encode_value_with_type(value, col_type),
-                },
-                Condition::Gt { value, .. } => Predicate::Gt {
-                    col_index,
-                    value: encode_value_with_type(value, col_type),
-                },
-                Condition::Ge { value, .. } => Predicate::Ge {
-                    col_index,
-                    value: encode_value_with_type(value, col_type),
-                },
-                Condition::Between { min, max, .. } => Predicate::And(vec![
-                    Predicate::Ge {
-                        col_index,
-                        value: encode_value_with_type(min, col_type),
-                    },
-                    Predicate::Le {
-                        col_index,
-                        value: encode_value_with_type(max, col_type),
-                    },
-                ]),
-                Condition::Contains { value, .. } => Predicate::Contains {
-                    col_index,
-                    value: value.clone(),
-                },
-                Condition::IsNull { .. } => Predicate::IsNull { col_index },
-                Condition::IsNotNull { .. } => Predicate::IsNotNull { col_index },
-            });
-        }
-
-        tuple_condition_row_id_element(tuple_descriptor, self.raw_column())
-            .map(|element_index| self.to_row_id_predicate(element_index))
-    }
-
     fn null_literal_predicate(&self, col_index: usize) -> Option<Predicate> {
         match self {
             Condition::Eq { value, .. } if value.is_null() => Some(Predicate::IsNull { col_index }),
@@ -557,25 +449,6 @@ impl Conjunction {
             .conditions
             .iter()
             .filter_map(|c| c.to_predicate(descriptor))
-            .collect();
-
-        if predicates.len() == 1 {
-            predicates.into_iter().next().unwrap()
-        } else {
-            Predicate::And(predicates)
-        }
-    }
-
-    /// Convert to a Predicate using a TupleDescriptor for scoped join refs.
-    pub fn to_tuple_predicate(&self, tuple_descriptor: &TupleDescriptor) -> Predicate {
-        if self.conditions.is_empty() {
-            return Predicate::True;
-        }
-
-        let predicates: Vec<_> = self
-            .conditions
-            .iter()
-            .filter_map(|c| c.to_tuple_predicate(tuple_descriptor))
             .collect();
 
         if predicates.len() == 1 {
@@ -728,11 +601,6 @@ pub struct Query {
     /// instead of returning flattened combined rows.
     #[serde(default)]
     pub result_element_index: Option<usize>,
-    /// Relation IR payload used for query/policy planning.
-    ///
-    /// Query compilation executes through this IR. The builder DSL fields are
-    /// retained as construction syntax and normalized into relation IR.
-    pub relation_ir: crate::query_manager::relation_ir::RelExpr,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -776,9 +644,8 @@ impl Query {
 
     /// Create a new query for a table (internal use - branches not set).
     fn new_internal(table: impl Into<TableName>) -> Self {
-        let table = table.into();
         Self {
-            table,
+            table: table.into(),
             alias: None,
             branches: Vec::new(),
             joins: Vec::new(),
@@ -791,7 +658,6 @@ impl Query {
             array_subqueries: Vec::new(),
             recursive: None,
             result_element_index: None,
-            relation_ir: crate::query_manager::relation_ir::RelExpr::TableScan { table },
         }
     }
 
@@ -817,12 +683,9 @@ impl Query {
         self.recursive.is_some()
     }
 
-    /// Rebuild relation IR from the query DSL fields.
-    pub fn refresh_relation_ir(&mut self) -> Result<(), QueryBuildError> {
-        self.validate()?;
-        self.relation_ir =
-            normalize_query_to_rel_expr(self).ok_or(QueryBuildError::UnsupportedShape)?;
-        Ok(())
+    /// Validate the public query vocabulary before it crosses into the engine.
+    pub fn validate_for_engine(&mut self) -> Result<(), QueryBuildError> {
+        self.validate()
     }
 
     /// Check if this is a join query.
@@ -1188,7 +1051,7 @@ impl QueryBuilder {
     /// - Without SchemaManager: QueryManager returns an error
     pub fn try_build(self) -> Result<Query, QueryBuildError> {
         let mut query = self.query;
-        query.refresh_relation_ir()?;
+        query.validate_for_engine()?;
         Ok(query)
     }
 
@@ -2209,36 +2072,6 @@ mod tests {
             })
             .branch("main")
             .build();
-
-        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
-        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
-
-        assert_eq!(query, decoded);
-    }
-
-    #[test]
-    fn query_with_relation_ir_json_serialization() {
-        let mut query = QueryBuilder::new("users").branch("main").build();
-        query.relation_ir = crate::query_manager::relation_ir::RelExpr::TableScan {
-            table: TableName::new("users"),
-        };
-
-        let json = serde_json::to_string(&query).expect("serialize");
-        let decoded: Query = serde_json::from_str(&json).expect("deserialize");
-
-        assert!(matches!(
-            decoded.relation_ir,
-            crate::query_manager::relation_ir::RelExpr::TableScan { .. }
-        ));
-        assert_eq!(query, decoded);
-    }
-
-    #[test]
-    fn query_with_relation_ir_postcard_serialization() {
-        let mut query = QueryBuilder::new("users").branch("main").build();
-        query.relation_ir = crate::query_manager::relation_ir::RelExpr::TableScan {
-            table: TableName::new("users"),
-        };
 
         let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
         let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");

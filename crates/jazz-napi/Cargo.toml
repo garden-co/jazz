@@ -15,8 +15,8 @@ jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-
   "test-utils",
   "otel-core",
 ] }
-jazz = { path = "../../vendor/jazz_core/jazz", default-features = false }
-jazz-server = { path = "../../vendor/jazz_core/jazz-server", default-features = false }
+jazz = { path = "../jazz", default-features = false }
+jazz-server = { path = "../jazz-server", default-features = false }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 base64 = "0.22"
 napi = { version = "3", features = ["napi5", "serde-json", "async"] }

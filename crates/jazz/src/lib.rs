@@ -1,4 +1,16 @@
 #![warn(missing_docs)]
+#![allow(
+    clippy::clone_on_copy,
+    clippy::collapsible_if,
+    clippy::enum_variant_names,
+    clippy::for_kv_map,
+    clippy::large_enum_variant,
+    clippy::manual_unwrap_or,
+    clippy::manual_unwrap_or_default,
+    clippy::needless_borrow,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 
 //! Jazz is the local-first database layer above groove storage and IVM. The
 //! public reading order is `Db` facade -> [`node`] storage-backed core ->

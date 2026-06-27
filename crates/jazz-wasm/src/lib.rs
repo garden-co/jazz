@@ -1,10 +1,10 @@
 //! Published `jazz-wasm` package shell.
 //!
-//! The implementation now comes from the vendored `jazz_core` wasm bindings.
-//! Keep this crate as the publishable alpha package name, but do not keep the
-//! old alpha `WasmRuntime` engine alive in parallel.
+//! The implementation comes from the workspace `jazz-core-wasm` crate. Keep
+//! this crate as the publishable package name without preserving the old alpha
+//! `WasmRuntime` engine in parallel.
 
-pub use vendored_core_wasm::*;
+pub use engine_wasm::*;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
