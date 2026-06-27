@@ -10,31 +10,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(test, feature = "direct-core-client", feature = "rocksdb"))]
 use std::time::Duration;
 
-use crate::batch_fate::BatchMode;
-use crate::query_manager::manager::LocalUpdates as AlphaLocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
+#[cfg(feature = "direct-core-client")]
+use crate::query_manager::types::OrderedRowDelta;
 #[cfg(feature = "test-utils")]
 use crate::query_manager::types::RowPolicyMode;
 #[cfg(any(feature = "direct-core-client", feature = "test-utils"))]
 use crate::query_manager::types::Schema;
 #[cfg(feature = "direct-core-client")]
 use crate::query_manager::types::TableName;
-use crate::query_manager::types::{OrderedRowDelta, Value};
+use crate::query_manager::types::Value;
 use crate::row_histories::BatchId;
-use crate::runtime_core::ReadDurabilityOptions;
-use crate::runtime_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(feature = "direct-core-client")]
 use crate::server::direct_client::DirectCoreWebSocketTransport;
 #[cfg(feature = "direct-core-client")]
 use crate::server::direct_schema::convert_alpha_schema;
+#[cfg(test)]
+use crate::storage::MemoryStorage;
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
 use crate::storage::SqliteStorage;
-use crate::storage::{MemoryStorage, Storage};
+use crate::storage::Storage;
 #[cfg(feature = "rocksdb")]
 use crate::storage::{RocksDBStorage, StorageError};
-use crate::sync_manager::{ClientId, DurabilityTier, OutboxEntry, SyncManager};
+#[cfg(any(feature = "test-utils", feature = "rocksdb"))]
+use crate::sync_manager::ClientId;
+#[cfg(test)]
+use crate::sync_manager::OutboxEntry;
+use crate::sync_manager::{DurabilityTier, SyncManager};
 #[cfg(feature = "direct-core-client")]
 use crate::transport_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;
@@ -53,15 +57,18 @@ use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as C
 #[cfg(feature = "direct-core-client")]
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId as CoreTxId};
 use serde::Deserialize;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
+#[cfg(feature = "direct-core-client")]
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::{
-    AppContext, ClientStorage, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream,
-};
+#[cfg(feature = "direct-core-client")]
+use crate::ClientStorage;
+use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
 
 type DynStorage = Box<dyn Storage + Send>;
-type ClientRuntime = TokioRuntime<DynStorage>;
+#[cfg(test)]
+type ClientRuntime = crate::runtime_tokio::TokioRuntime<DynStorage>;
 #[cfg(feature = "direct-core-client")]
 type DirectCoreDb = CoreDb<CoreMemoryStorage>;
 
@@ -80,8 +87,12 @@ pub struct JazzClient {
     default_session: Option<Session>,
     /// Write metadata applied to mutations issued through this client.
     write_context: Option<WriteContext>,
-    /// Private engine backing the public client facade.
-    engine: ClientEngine,
+    /// Direct core engine backing the public client facade.
+    #[cfg(feature = "direct-core-client")]
+    engine: Rc<DirectCoreEngine>,
+    /// Alpha schema retained for the current public API surface.
+    #[cfg(feature = "direct-core-client")]
+    alpha_schema: Schema,
     /// Whether a server URL was provided at construction time.
     has_server: bool,
     /// Active subscriptions (metadata).
@@ -95,39 +106,13 @@ impl Clone for JazzClient {
         Self {
             default_session: self.default_session.clone(),
             write_context: self.write_context.clone(),
+            #[cfg(feature = "direct-core-client")]
             engine: self.engine.clone(),
+            #[cfg(feature = "direct-core-client")]
+            alpha_schema: self.alpha_schema.clone(),
             has_server: self.has_server,
             subscriptions: Arc::clone(&self.subscriptions),
             next_handle: Arc::clone(&self.next_handle),
-        }
-    }
-}
-
-enum ClientEngine {
-    Legacy {
-        runtime: ClientRuntime,
-    },
-    #[cfg(feature = "direct-core-client")]
-    DirectCore {
-        engine: Rc<DirectCoreEngine>,
-        alpha_schema: Schema,
-    },
-}
-
-impl Clone for ClientEngine {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Legacy { runtime } => Self::Legacy {
-                runtime: runtime.clone(),
-            },
-            #[cfg(feature = "direct-core-client")]
-            Self::DirectCore {
-                engine,
-                alpha_schema,
-            } => Self::DirectCore {
-                engine: Rc::clone(engine),
-                alpha_schema: alpha_schema.clone(),
-            },
         }
     }
 }
@@ -590,9 +575,7 @@ impl Deref for JazzTransaction {
 }
 
 /// State for an active subscription.
-struct SubscriptionState {
-    runtime_handle: RuntimeSubHandle,
-}
+struct SubscriptionState;
 
 fn build_client_schema_manager<S: Storage + ?Sized>(
     storage: &S,
@@ -782,12 +765,11 @@ async fn wait_for_initial_transport_handshake(
 }
 
 impl JazzClient {
-    fn legacy_runtime(&self) -> &ClientRuntime {
-        match &self.engine {
-            ClientEngine::Legacy { runtime } => runtime,
-            #[cfg(feature = "direct-core-client")]
-            ClientEngine::DirectCore { .. } => unreachable!("direct core handled above"),
-        }
+    fn legacy_client_error() -> JazzError {
+        JazzError::Connection(
+            "JazzClient legacy runtime construction is disabled; use a server-backed direct core client"
+                .to_string(),
+        )
     }
 
     #[cfg(feature = "direct-core-client")]
@@ -917,21 +899,6 @@ impl JazzClient {
             .collect()
     }
 
-    fn read_session(&self) -> Option<Session> {
-        self.write_context
-            .as_ref()
-            .and_then(|context| context.session.clone())
-            .or_else(|| self.default_session.clone())
-    }
-
-    fn write_context_for_batch(&self, batch_id: BatchId, batch_mode: BatchMode) -> WriteContext {
-        self.write_context
-            .clone()
-            .unwrap_or_default()
-            .with_batch_mode(batch_mode)
-            .with_batch_id(batch_id)
-    }
-
     /// Connect to Jazz with the given configuration.
     ///
     /// This will:
@@ -945,47 +912,21 @@ impl JazzClient {
 
     async fn connect_with_schema_manager(
         context: AppContext,
-        build_schema_manager: impl FnOnce(&DynStorage, &AppContext) -> Result<SchemaManager>,
+        _build_schema_manager: impl FnOnce(&DynStorage, &AppContext) -> Result<SchemaManager>,
         use_direct_core_local_driver: bool,
     ) -> Result<Self> {
-        #[cfg(not(feature = "direct-core-client"))]
         let _ = use_direct_core_local_driver;
 
         let default_session = default_session_from_context(&context);
-        // Loaded for its side effect of persisting the client-id file on disk;
-        // the wire ClientId is assigned by `TransportManager::create` at connect
-        // time and is exposed via `runtime.transport_client_id()`.
-        let _client_id = match context.storage {
-            ClientStorage::Persistent => load_or_create_persistent_client_id(&context)?,
-            ClientStorage::Memory => context.client_id.unwrap_or_default(),
-        };
-
-        let storage: DynStorage = match context.storage {
-            ClientStorage::Persistent => open_persistent_storage(&context.data_dir).await?,
-            ClientStorage::Memory => Box::new(MemoryStorage::new()),
-        };
-
-        let schema_manager = build_schema_manager(&storage, &context)?;
-
-        // Create runtime. The sync callback is a no-op — the WS TransportManager
-        // drives the outbox directly via its own channel.
-        let runtime = TokioRuntime::new(schema_manager, storage, move |_entry: OutboxEntry| {});
-
-        // Attach the tracer to the runtime so all outbox/inbox traffic is
-        // recorded under the participant name.
-        if let Some((ref tracer, ref name)) = context.sync_tracer {
-            runtime.set_sync_tracer(tracer.clone(), name.clone());
+        #[cfg(not(feature = "direct-core-client"))]
+        let _ = &default_session;
+        let has_server = !context.server_url.is_empty();
+        if !has_server {
+            return Err(Self::legacy_client_error());
         }
 
-        // Persist schema to catalogue for server sync
-        runtime
-            .persist_schema()
-            .map_err(|e| JazzError::Storage(e.to_string()))?;
-
-        let has_server = !context.server_url.is_empty();
-
         #[cfg(feature = "direct-core-client")]
-        if has_server && use_direct_core_local_driver {
+        {
             if !matches!(context.storage, ClientStorage::Memory) {
                 return Err(JazzError::Connection(
                     "direct core JazzClient currently supports server-backed memory clients only"
@@ -1014,14 +955,11 @@ impl JazzClient {
             )
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;
-            let engine = ClientEngine::DirectCore {
-                engine: direct_engine,
-                alpha_schema: context.schema.clone(),
-            };
             let client = Self {
                 default_session,
                 write_context: None,
-                engine,
+                engine: direct_engine,
+                alpha_schema: context.schema.clone(),
                 has_server,
                 subscriptions: Arc::new(RwLock::new(HashMap::new())),
                 next_handle: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -1029,14 +967,8 @@ impl JazzClient {
             return Ok(client);
         }
 
-        Ok(Self {
-            default_session,
-            write_context: None,
-            engine: ClientEngine::Legacy { runtime },
-            has_server,
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            next_handle: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-        })
+        #[cfg(not(feature = "direct-core-client"))]
+        Err(Self::legacy_client_error())
     }
 
     #[cfg(feature = "test-utils")]
@@ -1058,21 +990,15 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        let handle = SubscriptionHandle(
-            self.next_handle
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-        );
-
-        // Create channel for this subscription's deltas.
-        // tx is moved directly into the callback so the delta is never dropped due
-        // to the race where immediate_tick fires the callback before we can insert
-        // tx into a shared map.
-        let (tx, rx) = mpsc::unbounded_channel::<OrderedRowDelta>();
-
         #[cfg(feature = "direct-core-client")]
-        if let ClientEngine::DirectCore { engine, .. } = &self.engine {
+        {
+            let _handle = SubscriptionHandle(
+                self.next_handle
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            );
+            let (tx, rx) = mpsc::unbounded_channel::<OrderedRowDelta>();
             let core_query = self.direct_core_query(&query)?;
-            engine
+            self.engine
                 .subscribe(
                     core_query,
                     Self::direct_read_opts(Some(DurabilityTier::EdgeServer)),
@@ -1083,31 +1009,11 @@ impl JazzClient {
             return Ok(SubscriptionStream::new(rx));
         }
 
-        let runtime = self.legacy_runtime();
-        // Register with runtime using callback pattern
-        // The callback bridges runtime updates to the channel
-        let runtime_handle = runtime
-            .subscribe(
-                query.clone(),
-                move |delta| {
-                    // Route delta to the subscription stream without dropping
-                    // updates when the consumer falls briefly behind.
-                    let _ = tx.send(delta.ordered_delta);
-                },
-                self.write_context
-                    .as_ref()
-                    .and_then(|context| context.session.clone())
-                    .or_else(|| self.default_session.clone()),
-            )
-            .map_err(|e| JazzError::Query(e.to_string()))?;
-
-        // Track subscription metadata
+        #[cfg(not(feature = "direct-core-client"))]
         {
-            let mut subs = self.subscriptions.write().await;
-            subs.insert(handle, SubscriptionState { runtime_handle });
+            let _ = query;
+            Err(Self::legacy_client_error())
         }
-
-        Ok(SubscriptionStream::new(rx))
     }
 
     /// One-shot query, optionally waiting for a durability tier.
@@ -1119,9 +1025,10 @@ impl JazzClient {
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         #[cfg(feature = "direct-core-client")]
-        if let ClientEngine::DirectCore { engine, .. } = &self.engine {
+        {
             let opts = Self::direct_read_opts(durability_tier);
-            let rows = engine
+            let rows = self
+                .engine
                 .query_rows(
                     self.direct_core_query(&query)?,
                     opts,
@@ -1132,21 +1039,11 @@ impl JazzClient {
             return self.direct_rows_to_alpha(&query, rows);
         }
 
-        let runtime = self.legacy_runtime();
-        let future = runtime
-            .query(
-                query,
-                self.read_session(),
-                ReadDurabilityOptions {
-                    tier: durability_tier,
-                    local_updates: AlphaLocalUpdates::Immediate,
-                },
-                self.write_context.as_ref().and_then(WriteContext::batch_id),
-            )
-            .map_err(|e| JazzError::Query(e.to_string()))?;
-        future
-            .await
-            .map_err(|e| JazzError::Query(format!("{:?}", e)))
+        #[cfg(not(feature = "direct-core-client"))]
+        {
+            let _ = (query, durability_tier);
+            Err(Self::legacy_client_error())
+        }
     }
 
     /// Create a new row in a table.
@@ -1166,24 +1063,21 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         #[cfg(feature = "direct-core-client")]
-        if let ClientEngine::DirectCore { engine, .. } = &self.engine {
+        {
             let row_values = self.direct_ordered_values(table, &values)?;
             let cells = Self::direct_cells(values)?;
-            let (row_id, tx_id) = engine.insert(table.to_string(), object_id.into(), cells)?;
+            let (row_id, tx_id) = self
+                .engine
+                .insert(table.to_string(), object_id.into(), cells)?;
             let batch_id = direct_batch_id(tx_id);
             return Ok((row_id, row_values, batch_id));
         }
 
-        let runtime = self.legacy_runtime();
-        let (object_id, row_values, batch_id) = runtime
-            .insert_with_id(
-                table,
-                values,
-                object_id.into().map(ObjectId::from_uuid),
-                self.write_context.as_ref(),
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        Ok((object_id, row_values, batch_id))
+        #[cfg(not(feature = "direct-core-client"))]
+        {
+            let _ = (table, object_id.into(), values);
+            Err(Self::legacy_client_error())
+        }
     }
 
     /// Create or update a row using a caller-supplied UUID.
@@ -1194,47 +1088,45 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<BatchId> {
         #[cfg(feature = "direct-core-client")]
-        if let ClientEngine::DirectCore { engine, .. } = &self.engine {
+        {
             let cells = Self::direct_cells(values)?;
-            let tx_id = engine.upsert(table.to_string(), object_id, cells)?;
+            let tx_id = self.engine.upsert(table.to_string(), object_id, cells)?;
             return Ok(direct_batch_id(tx_id));
         }
-        let runtime = self.legacy_runtime();
-        runtime
-            .upsert(
-                table,
-                ObjectId::from_uuid(object_id),
-                values,
-                self.write_context.as_ref(),
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))
+        #[cfg(not(feature = "direct-core-client"))]
+        {
+            let _ = (table, object_id, values);
+            Err(Self::legacy_client_error())
+        }
     }
 
     /// Update a row.
     pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
         #[cfg(feature = "direct-core-client")]
-        if let ClientEngine::DirectCore { engine, .. } = &self.engine {
+        {
             let cells = Self::direct_cells(updates.into_iter().collect())?;
-            let tx_id = engine.update(object_id, cells)?;
+            let tx_id = self.engine.update(object_id, cells)?;
             return Ok(direct_batch_id(tx_id));
         }
-        let runtime = self.legacy_runtime();
-        runtime
-            .update(object_id, updates, self.write_context.as_ref())
-            .map_err(|e| JazzError::Write(e.to_string()))
+        #[cfg(not(feature = "direct-core-client"))]
+        {
+            let _ = (object_id, updates);
+            Err(Self::legacy_client_error())
+        }
     }
 
     /// Delete a row.
     pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
         #[cfg(feature = "direct-core-client")]
-        if let ClientEngine::DirectCore { engine, .. } = &self.engine {
-            let tx_id = engine.delete(object_id)?;
+        {
+            let tx_id = self.engine.delete(object_id)?;
             return Ok(direct_batch_id(tx_id));
         }
-        let runtime = self.legacy_runtime();
-        runtime
-            .delete(object_id, self.write_context.as_ref())
-            .map_err(|e| JazzError::Write(e.to_string()))
+        #[cfg(not(feature = "direct-core-client"))]
+        {
+            let _ = object_id;
+            Err(Self::legacy_client_error())
+        }
     }
 
     /// Begin a transaction and return a transaction-scoped client handle.
@@ -1243,93 +1135,61 @@ impl JazzClient {
     /// not visible to ordinary reads until the transaction is committed and
     /// accepted by the authority.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        #[cfg(feature = "direct-core-client")]
-        if matches!(self.engine, ClientEngine::DirectCore { .. }) {
-            return Err(JazzError::Write(
-                "direct core JazzClient transactions are not implemented yet".to_string(),
-            ));
-        }
-        let runtime = self.legacy_runtime();
-        let batch_id = runtime
-            .begin_batch(BatchMode::Transactional)
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let client = self
-            .with_write_context(self.write_context_for_batch(batch_id, BatchMode::Transactional));
-        Ok(JazzTransaction { batch_id, client })
+        Err(JazzError::Write(
+            "direct core JazzClient transactions are not implemented yet".to_string(),
+        ))
     }
 
     /// Commit an open transaction by batch id.
     pub fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
-        #[cfg(feature = "direct-core-client")]
-        if matches!(self.engine, ClientEngine::DirectCore { .. }) {
-            return Err(JazzError::Write(
-                "direct core JazzClient transactions are not implemented yet".to_string(),
-            ));
-        }
-        let runtime = self.legacy_runtime();
-        runtime
-            .commit_batch(batch_id)
-            .map_err(|e| JazzError::Write(e.to_string()))
+        let _ = batch_id;
+        Err(JazzError::Write(
+            "direct core JazzClient transactions are not implemented yet".to_string(),
+        ))
     }
 
     /// Roll back an open transaction by batch id.
     ///
     /// Returns whether a local batch record existed for the transaction.
     pub fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
-        #[cfg(feature = "direct-core-client")]
-        if matches!(self.engine, ClientEngine::DirectCore { .. }) {
-            return Err(JazzError::Write(
-                "direct core JazzClient transactions are not implemented yet".to_string(),
-            ));
-        }
-        let runtime = self.legacy_runtime();
-        runtime
-            .rollback_batch(batch_id)
-            .map_err(|e| JazzError::Write(e.to_string()))
+        let _ = batch_id;
+        Err(JazzError::Write(
+            "direct core JazzClient transactions are not implemented yet".to_string(),
+        ))
     }
 
     pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
         #[cfg(feature = "direct-core-client")]
-        if let ClientEngine::DirectCore { engine, .. } = &self.engine {
-            return engine.wait_for_batch(batch_id, tier).await;
+        {
+            return self.engine.wait_for_batch(batch_id, tier).await;
         }
-        let runtime = self.legacy_runtime();
-        let receiver = runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, tier).await
+        #[cfg(not(feature = "direct-core-client"))]
+        {
+            let _ = (batch_id, tier);
+            Err(Self::legacy_client_error())
+        }
     }
 
     /// Unsubscribe from a subscription.
     pub async fn unsubscribe(&self, handle: SubscriptionHandle) -> Result<()> {
         let mut subs = self.subscriptions.write().await;
-        if let Some(state) = subs.remove(&handle) {
-            let runtime = self.legacy_runtime();
-            let _ = runtime.unsubscribe(state.runtime_handle);
-        }
+        let _ = subs.remove(&handle);
         Ok(())
     }
 
     /// Get the current schema.
     pub fn schema(&self) -> Result<crate::query_manager::types::Schema> {
-        match &self.engine {
-            ClientEngine::Legacy { runtime } => runtime
-                .current_schema()
-                .map_err(|e| JazzError::Query(e.to_string())),
-            #[cfg(feature = "direct-core-client")]
-            ClientEngine::DirectCore { alpha_schema, .. } => Ok(alpha_schema.clone()),
+        #[cfg(feature = "direct-core-client")]
+        {
+            return Ok(self.alpha_schema.clone());
         }
+        #[cfg(not(feature = "direct-core-client"))]
+        Err(Self::legacy_client_error())
     }
 
     /// Check if connected to server.
     pub fn is_connected(&self) -> bool {
-        match &self.engine {
-            ClientEngine::Legacy { runtime } => {
-                self.has_server && runtime.transport_ever_connected()
-            }
-            #[cfg(feature = "direct-core-client")]
-            ClientEngine::DirectCore { .. } => false,
-        }
+        false
     }
 
     /// Create a client that uses the given write context for mutations.
@@ -1337,7 +1197,10 @@ impl JazzClient {
         JazzClient {
             default_session: self.default_session.clone(),
             write_context: Some(write_context),
+            #[cfg(feature = "direct-core-client")]
             engine: self.engine.clone(),
+            #[cfg(feature = "direct-core-client")]
+            alpha_schema: self.alpha_schema.clone(),
             has_server: self.has_server,
             subscriptions: Arc::clone(&self.subscriptions),
             next_handle: Arc::clone(&self.next_handle),
@@ -1351,39 +1214,6 @@ impl JazzClient {
 
     /// Shutdown the client and release resources.
     pub async fn shutdown(self) -> Result<()> {
-        #[cfg(feature = "direct-core-client")]
-        if matches!(self.engine, ClientEngine::DirectCore { .. }) {
-            return Ok(());
-        }
-        let runtime = self.legacy_runtime();
-        // Disconnect from server (drops the TransportHandle; manager task exits cleanly)
-        if self.has_server {
-            runtime.disconnect();
-        }
-
-        // Flush pending operations
-        let runtime_flush_result = runtime
-            .flush()
-            .await
-            .map_err(|e| JazzError::Connection(e.to_string()));
-
-        // Flush storage state to disk for persistence
-        let storage_result = runtime
-            .with_storage(|storage| {
-                let flush_result = storage.flush();
-                let flush_wal_result = storage.flush_wal();
-                let close_result = storage.close();
-
-                flush_result?;
-                flush_wal_result?;
-                close_result
-            })
-            .map_err(|e| JazzError::Storage(e.to_string()))
-            .and_then(|result| result.map_err(|e| JazzError::Storage(e.to_string())));
-
-        runtime_flush_result?;
-        storage_result?;
-
         Ok(())
     }
 }
@@ -1391,19 +1221,12 @@ impl JazzClient {
 #[cfg(feature = "test-utils")]
 impl JazzClient {
     pub fn client_id(&self) -> Option<ClientId> {
-        match &self.engine {
-            ClientEngine::Legacy { runtime } => runtime.transport_client_id(),
-            #[cfg(feature = "direct-core-client")]
-            ClientEngine::DirectCore { .. } => None,
-        }
+        None
     }
 
     #[cfg(feature = "direct-core-client")]
     pub fn direct_core_local_driver_active(&self) -> bool {
-        match &self.engine {
-            ClientEngine::Legacy { .. } => false,
-            ClientEngine::DirectCore { .. } => true,
-        }
+        true
     }
 
     pub async fn test_client(schema: Schema) -> crate::JazzClient {
@@ -1434,46 +1257,8 @@ impl Drop for JazzClient {
     /// that is good-enough for tests (so that we don't require an explicit
     /// `JazzClient.shutdown` at the end of each test case)
     fn drop(&mut self) {
-        if Arc::strong_count(&self.next_handle) > 1 {
-            return;
-        }
-
-        match &self.engine {
-            ClientEngine::Legacy { runtime } => {
-                if self.has_server {
-                    runtime.disconnect();
-                }
-
-                let _ = runtime.with_storage(|storage| {
-                    let _ = storage.flush();
-                    let _ = storage.flush_wal();
-                    let _ = storage.close();
-                });
-            }
-            #[cfg(feature = "direct-core-client")]
-            ClientEngine::DirectCore { .. } => {}
-        }
+        let _ = self;
     }
-}
-
-async fn wait_for_batch_write(
-    receiver: futures::channel::oneshot::Receiver<crate::runtime_core::PersistedWriteAck>,
-    tier: DurabilityTier,
-) -> Result<()> {
-    receiver
-        .await
-        .map_err(|_| {
-            JazzError::Sync(format!(
-                "batch was cancelled before reaching {tier:?} durability"
-            ))
-        })?
-        .map_err(|rejection| {
-            JazzError::Sync(format!(
-                "batch was rejected before reaching {tier:?} durability ({}): {}",
-                rejection.code, rejection.reason
-            ))
-        })?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1742,85 +1527,42 @@ mod tests {
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn client_rehydrates_learned_lens_from_local_catalogue_on_restart() {
+    async fn offline_persistent_client_fails_closed_until_direct_storage_lands() {
         let data_dir = TempDir::new().expect("temp client dir");
         let app_id = AppId::from_name("client-rehydrate-lens");
-        let (_bundled_hash, learned_hash) =
-            seed_rehydrated_client_storage(data_dir.path(), app_id, false);
+        let _ = seed_rehydrated_client_storage(data_dir.path(), app_id, false);
         let context = make_offline_context(
             app_id,
             data_dir.path().to_path_buf(),
             declared_todo_schema(),
         );
 
-        let client = JazzClient::connect(context).await.expect("connect client");
-
-        #[allow(irrefutable_let_patterns)]
-        let ClientEngine::Legacy { runtime } = &client.engine else {
-            panic!(
-                "offline persistent client should use legacy runtime until direct storage lands"
-            );
-        };
-        let has_learned_schema = runtime
-            .known_schema_hashes()
-            .expect("read known schema hashes")
-            .contains(&learned_hash);
+        let error = JazzClient::connect(context)
+            .await
+            .expect_err("offline persistent legacy runtime must not be constructed");
         assert!(
-            has_learned_schema,
-            "client should restore newer learned schema"
+            matches!(error, JazzError::Connection(message) if message.contains("legacy runtime construction is disabled"))
         );
-
-        let lens_path_len = runtime
-            .with_schema_manager(|manager| manager.lens_path(&learned_hash).map(|path| path.len()))
-            .expect("read client schema manager")
-            .expect("lens path to bundled schema");
-        assert_eq!(
-            lens_path_len, 1,
-            "client should restore learned migration lens"
-        );
-
-        client.shutdown().await.expect("shutdown client");
     }
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn client_rehydrates_permissions_head_and_bundle_from_local_catalogue_on_restart() {
+    async fn offline_persistent_permissions_rehydrate_fails_closed_until_direct_storage_lands() {
         let data_dir = TempDir::new().expect("temp client dir");
         let app_id = AppId::from_name("client-rehydrate-permissions");
-        let (_bundled_hash, learned_hash) =
-            seed_rehydrated_client_storage(data_dir.path(), app_id, true);
+        let _ = seed_rehydrated_client_storage(data_dir.path(), app_id, true);
         let context = make_offline_context(
             app_id,
             data_dir.path().to_path_buf(),
             declared_todo_schema(),
         );
-        let expected_catalogue_hash = expected_client_catalogue_hash(&context);
 
-        let client = JazzClient::connect(context).await.expect("connect client");
-
-        #[allow(irrefutable_let_patterns)]
-        let ClientEngine::Legacy { runtime } = &client.engine else {
-            panic!(
-                "offline persistent client should use legacy runtime until direct storage lands"
-            );
-        };
-        let actual_catalogue_hash = runtime
-            .catalogue_state_hash()
-            .expect("read client catalogue hash");
-        assert_eq!(
-            actual_catalogue_hash, expected_catalogue_hash,
-            "client should restore learned permissions head and bundle before any network sync"
-        );
-
-        let lens_path_exists = runtime
-            .with_schema_manager(|manager| manager.lens_path(&learned_hash).is_ok())
-            .expect("read client schema manager");
+        let error = JazzClient::connect(context)
+            .await
+            .expect_err("offline persistent legacy runtime must not be constructed");
         assert!(
-            lens_path_exists,
-            "permissions rehydrate should preserve the target schema's learned lens context"
+            matches!(error, JazzError::Connection(message) if message.contains("legacy runtime construction is disabled"))
         );
-
-        client.shutdown().await.expect("shutdown client");
     }
 
     #[cfg(feature = "rocksdb")]
@@ -1872,29 +1614,8 @@ mod tests {
     }
 }
 
-fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId> {
-    std::fs::create_dir_all(&context.data_dir)?;
-
-    let client_id_path = context.data_dir.join("client_id");
-    let client_id = if client_id_path.exists() {
-        let id_str = std::fs::read_to_string(&client_id_path)?;
-        ClientId::parse(id_str.trim()).unwrap_or_else(|| {
-            let id = context.client_id.unwrap_or_default();
-            let _ = std::fs::write(&client_id_path, id.to_string());
-            id
-        })
-    } else if let Some(id) = context.client_id {
-        std::fs::write(&client_id_path, id.to_string())?;
-        id
-    } else {
-        let id = ClientId::new();
-        std::fs::write(&client_id_path, id.to_string())?;
-        id
-    };
-
-    Ok(client_id)
-}
-
+#[cfg(any(feature = "rocksdb", feature = "sqlite"))]
+#[allow(dead_code)]
 async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorage> {
     #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
     let _ = data_dir;
