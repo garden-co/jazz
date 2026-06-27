@@ -14,7 +14,7 @@ use crate::schema_api::{
     TableSchema, Value,
 };
 
-const ALPHA_USER_ID_SESSION_PATH: &str = "user_id";
+const PUBLIC_USER_ID_SESSION_PATH: &str = "user_id";
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,7 @@ impl fmt::Display for DirectSchemaConversionError {
 
 impl std::error::Error for DirectSchemaConversionError {}
 
-pub(crate) fn convert_alpha_schema(
+pub(crate) fn convert_public_schema_to_direct_core(
     schema: &Schema,
 ) -> Result<JazzSchema, DirectSchemaConversionError> {
     let mut tables = schema.iter().collect::<Vec<_>>();
@@ -146,8 +146,8 @@ fn convert_column_type(
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
-        // Direct core does not currently have signed integer cells. Alpha
-        // public INTEGER columns are therefore represented as U32 and the
+        // Direct core does not currently have signed integer cells. Public
+        // INTEGER columns are therefore represented as U32 and the
         // direct-core write path rejects negative values.
         ColumnType::Integer => Ok(GrooveColumnType::U32),
         ColumnType::BigInt => Err(err(
@@ -384,7 +384,7 @@ fn convert_policy_operand(
 ) -> Result<Operand, DirectSchemaConversionError> {
     match value {
         PolicyValue::SessionRef(path_segments)
-            if path_segments.as_slice() == [String::from(ALPHA_USER_ID_SESSION_PATH)] =>
+            if path_segments.as_slice() == [String::from(PUBLIC_USER_ID_SESSION_PATH)] =>
         {
             Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()))
         }
@@ -451,7 +451,7 @@ mod tests {
             )
             .build();
 
-        let converted = convert_alpha_schema(&schema).unwrap();
+        let converted = convert_public_schema_to_direct_core(&schema).unwrap();
         let todos = converted
             .tables
             .iter()
@@ -478,7 +478,7 @@ mod tests {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::Integer))
             .build();
-        let integer_table = convert_alpha_schema(&integer_schema)
+        let integer_table = convert_public_schema_to_direct_core(&integer_schema)
             .unwrap()
             .tables
             .into_iter()
@@ -502,7 +502,7 @@ mod tests {
                 },
             ))
             .build();
-        let integer_array_table = convert_alpha_schema(&integer_array_schema)
+        let integer_array_table = convert_public_schema_to_direct_core(&integer_array_schema)
             .unwrap()
             .tables
             .into_iter()
@@ -527,7 +527,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        assert!(convert_alpha_schema(&default_schema).is_err());
+        assert!(convert_public_schema_to_direct_core(&default_schema).is_err());
     }
 
     #[test]
@@ -572,7 +572,7 @@ mod tests {
             )
             .build();
 
-        let converted = convert_alpha_schema(&schema).unwrap();
+        let converted = convert_public_schema_to_direct_core(&schema).unwrap();
         let todos = converted
             .tables
             .iter()
@@ -624,7 +624,7 @@ mod tests {
             )
             .build();
 
-        let error = convert_alpha_schema(&schema).unwrap_err();
+        let error = convert_public_schema_to_direct_core(&schema).unwrap_err();
         assert!(error.to_string().starts_with(
             "$.todos.policies.select.using: direct fixed-schema policies do not support SessionContains"
         ));
@@ -657,7 +657,7 @@ mod tests {
             )
             .build();
 
-        let converted = convert_alpha_schema(&schema).unwrap();
+        let converted = convert_public_schema_to_direct_core(&schema).unwrap();
         let documents = converted
             .tables
             .iter()

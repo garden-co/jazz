@@ -587,7 +587,9 @@ pub(super) async fn publish_schema_handler(
 
     let direct_schema =
         match state.core_server().is_some() || state.core_server_storage_config.is_some() {
-            true => match crate::server::direct_schema::convert_alpha_schema(&request.schema) {
+            true => match crate::server::direct_schema::convert_public_schema_to_direct_core(
+                &request.schema,
+            ) {
                 Ok(schema) => Some(schema),
                 Err(err) => {
                     return (
@@ -875,7 +877,9 @@ pub(super) async fn publish_permissions_handler(
     let direct_schema =
         match state.core_server().is_some() || state.core_server_storage_config.is_some() {
             true => {
-                match crate::server::direct_schema::convert_alpha_schema(&schema_with_permissions) {
+                match crate::server::direct_schema::convert_public_schema_to_direct_core(
+                    &schema_with_permissions,
+                ) {
                     Ok(schema) => Some(schema),
                     Err(err) => {
                         return (

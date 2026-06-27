@@ -695,7 +695,7 @@ async fn handle_direct_ws_connection(
 
 async fn drain_direct_ws_outbound(
     socket: &mut WebSocket,
-    core_server: &crate::server::core_server::CoreServer,
+    core_server: &crate::server::core_server::LocalCoreServerHandle,
     session: jazz_server::ServerSession,
 ) -> Result<(), ()> {
     let outbound = core_server.tick_take(session).await.map_err(|_| ())?;
@@ -1000,7 +1000,7 @@ mod tests {
     // Internal admission-boundary test: core server policy reads are not yet
     // observable through a public direct websocket client helper, so this pins
     // the security invariant at the route admission point that feeds
-    // CoreServer::open(identity, claims, trust).
+    // LocalCoreServerHandle::open(identity, claims, trust).
     #[tokio::test]
     async fn direct_ws_backend_session_admits_session_claims_for_policy_reads() {
         let state = make_direct_ws_test_state().await;
