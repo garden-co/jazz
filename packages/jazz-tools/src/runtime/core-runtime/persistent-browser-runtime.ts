@@ -21,6 +21,115 @@ type WorkerResponse =
   | { event: "mutationError"; payload: MutationErrorEvent }
   | { event: "authFailure"; reason: string };
 
+type OpenRequest = {
+  id: number;
+  method: "open";
+  args: [
+    runtimeSources: RuntimeSourcesConfig | undefined,
+    dbName: string,
+    schema: WasmSchema,
+    node: Uint8Array,
+    author: Uint8Array,
+  ];
+};
+
+type WriteRequest =
+  | {
+      id: number;
+      method: "insert";
+      args: [
+        table: string,
+        values: InsertValues,
+        writeContext: string | null | undefined,
+        objectId: string,
+        transactionId: string,
+      ];
+    }
+  | {
+      id: number;
+      method: "restore";
+      args: [
+        table: string,
+        objectId: string,
+        values: InsertValues,
+        writeContext: string | null | undefined,
+        transactionId: string,
+      ];
+    }
+  | {
+      id: number;
+      method: "update";
+      args: [
+        table: string,
+        objectId: string,
+        values: Record<string, Value>,
+        writeContext: string | null | undefined,
+        transactionId: string,
+      ];
+    }
+  | {
+      id: number;
+      method: "upsert";
+      args: [
+        table: string,
+        objectId: string,
+        values: InsertValues,
+        writeContext: string | null | undefined,
+        transactionId: string,
+      ];
+    }
+  | {
+      id: number;
+      method: "delete";
+      args: [
+        table: string,
+        objectId: string,
+        writeContext: string | null | undefined,
+        transactionId: string,
+      ];
+    };
+
+type WorkerRequest =
+  | OpenRequest
+  | WriteRequest
+  | {
+      id: number;
+      method: "waitForTransaction";
+      args: [transactionId: string, tier: string];
+    }
+  | {
+      id: number;
+      method: "query";
+      args: [
+        queryJson: string,
+        sessionJson: string | null | undefined,
+        tier: string | null | undefined,
+        optionsJson: string | null | undefined,
+      ];
+    }
+  | {
+      id: number;
+      method: "createSubscription";
+      args: [
+        queryJson: string,
+        sessionJson: string | null | undefined,
+        tier: string | null | undefined,
+        optionsJson: string | null | undefined,
+      ];
+    }
+  | { id: number; method: "executeSubscription"; args: [handle: number] }
+  | { id: number; method: "unsubscribe"; args: [handle: number] }
+  | { id: number; method: "close"; args: [] }
+  | { id: number; method: "connect"; args: [url: string, authJson: string] }
+  | { id: number; method: "disconnect"; args: [] }
+  | { id: number; method: "updateAuth"; args: [authJson: string] };
+
+type WorkerMethod = WorkerRequest["method"];
+type RequestForMethod<Method extends WorkerMethod> = Extract<WorkerRequest, { method: Method }>;
+type RequestArgs<Method extends WorkerMethod> = RequestForMethod<Method>["args"];
+
+export type { WorkerRequest as PersistentBrowserWorkerRequest };
+
 export class PersistentBrowserRuntime implements Runtime {
   private readonly worker: Worker;
   private readonly pending = new Map<number, PendingCall>();
@@ -227,30 +336,44 @@ export class PersistentBrowserRuntime implements Runtime {
     return `worker-write-${this.nextCallId++}`;
   }
 
-  private call(method: string, ...args: unknown[]): Promise<unknown> {
+  private call<Method extends WorkerMethod>(
+    method: Method,
+    ...args: RequestArgs<Method>
+  ): Promise<unknown> {
+    return this.send(method, args);
+  }
+
+  private send(method: WorkerMethod, args: readonly unknown[]): Promise<unknown> {
     if (this.closed && method !== "close") {
       return Promise.reject(new Error("Persistent browser core runtime is closed"));
     }
     const id = this.nextCallId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method, args });
+      this.worker.postMessage({ id, method, args } as WorkerRequest);
     });
   }
 
-  private fireAndForget(method: string, ...args: unknown[]): void {
+  private fireAndForget<Method extends WorkerMethod>(
+    method: Method,
+    ...args: RequestArgs<Method>
+  ): void {
     if (this.closed) return;
     void this.opened
       .then(() => {
-        if (!this.closed) return this.call(method, ...args);
+        if (!this.closed) return this.send(method, args);
       })
       .catch(() => undefined);
   }
 
-  private queueWrite(transactionId: string, method: string, ...args: unknown[]): void {
+  private queueWrite<Method extends WriteRequest["method"]>(
+    transactionId: string,
+    method: Method,
+    ...args: RequestArgs<Method>
+  ): void {
     // Public writes stay synchronous for React/local state ergonomics; the
     // worker owns OPFS durability and settles the returned write handle.
-    const write = this.opened.then(() => this.call(method, ...args));
+    const write = this.opened.then(() => this.send(method, args));
     this.writes.set(transactionId, write);
     void write.catch(() => undefined);
   }
