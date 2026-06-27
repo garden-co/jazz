@@ -1641,6 +1641,10 @@ pub trait Storage {
     }
 }
 
+pub trait SchemaCatalogueStorage: Storage {}
+
+impl<T: Storage + ?Sized> SchemaCatalogueStorage for T {}
+
 // Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
 impl<T: Storage + ?Sized> Storage for Box<T> {
     fn storage_cache_namespace(&self) -> usize {

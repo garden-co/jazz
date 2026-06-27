@@ -15,6 +15,7 @@
 //!   `RowVisibilityChange`.
 
 mod codecs;
+#[cfg(any(test, feature = "test-utils"))]
 mod mutations;
 mod resolution;
 mod types;
@@ -28,7 +29,9 @@ pub use codecs::{
     encode_flat_history_row, encode_flat_visible_row_entry, history_row_physical_descriptor,
     visible_row_physical_descriptor,
 };
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) use mutations::{ApplyRowBatchWithContext, apply_row_batch_with_context};
+#[cfg(any(test, feature = "test-utils"))]
 pub use mutations::{apply_row_batch, patch_row_batch_state};
 pub(crate) use resolution::visible_row_preview_from_history_rows;
 pub use types::{

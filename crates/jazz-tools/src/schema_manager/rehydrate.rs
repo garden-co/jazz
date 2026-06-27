@@ -2,7 +2,7 @@ use tracing::{info, warn};
 
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::ObjectId;
-use crate::storage::Storage;
+use crate::storage::SchemaCatalogueStorage;
 
 use super::encoding::decode_permissions_head;
 use super::{AppId, SchemaManager};
@@ -11,7 +11,7 @@ fn entry_matches_app(entry: &crate::catalogue::CatalogueEntry, app_id: AppId) ->
     entry.metadata.get(MetadataKey::AppId.as_str()) == Some(&app_id.uuid().to_string())
 }
 
-pub fn latest_catalogue_content<S: Storage + ?Sized>(
+pub fn latest_catalogue_content<S: SchemaCatalogueStorage + ?Sized>(
     storage: &S,
     object_id: ObjectId,
 ) -> Result<Option<Vec<u8>>, String> {
@@ -22,7 +22,7 @@ pub fn latest_catalogue_content<S: Storage + ?Sized>(
 }
 
 /// Rehydrate server schema state from persisted catalogue rows.
-pub fn rehydrate_schema_manager_from_catalogue<S: Storage + ?Sized>(
+pub fn rehydrate_schema_manager_from_catalogue<S: SchemaCatalogueStorage + ?Sized>(
     schema_manager: &mut SchemaManager,
     storage: &S,
     app_id: AppId,

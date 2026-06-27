@@ -448,6 +448,75 @@ describe("alpha public package flow", () => {
     expect(Array.from(reopenedRow.payload ?? [])).toEqual([9, 8, 7, 6, 5]);
   });
 
+  it("reopens a public persistent websocket client and catches up writes made while offline", async () => {
+    const requestedAppId = uniqueDbName("alpha-public-reconnect-canary");
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+
+    const sharedSecret = generateAuthSecret();
+    const readerDbName = uniqueDbName("alpha-public-reconnect-reader-opfs");
+    const writer = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
+    let reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
+      uniqueLabel: false,
+    });
+
+    const initial = await withTimeout(
+      writer
+        .insert(app.todos, {
+          title: "Online before alpha reconnect",
+          done: false,
+          list: "reconnect",
+        })
+        .wait({ tier: "edge" }),
+      10_000,
+      "online insert before reconnect was not accepted at the server",
+    );
+    expect(
+      await waitForSubscribedTodoSummaries(reader, ["Online before alpha reconnect:open"]),
+    ).toEqual([initial]);
+
+    await reader.shutdown();
+    ctx.untrack(reader);
+
+    const offlineWrite = await withTimeout(
+      writer
+        .insert(app.todos, {
+          title: "Written while alpha client offline",
+          done: true,
+          list: "reconnect",
+        })
+        .wait({ tier: "edge" }),
+      10_000,
+      "offline-window insert was not accepted at the server",
+    );
+
+    reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
+      uniqueLabel: false,
+    });
+
+    const summaries = [
+      "Online before alpha reconnect:open",
+      "Written while alpha client offline:done",
+    ];
+    const subscribedRows = await waitForSubscribedTodoSummaries(reader, summaries);
+    expect(subscribedRows.map((todo) => todo.id).sort()).toEqual(
+      [initial.id, offlineWrite.id].sort(),
+    );
+
+    const allRows = await waitForQuery(
+      reader,
+      app.todos.orderBy("title"),
+      (todos) => summariesEqual(todos, summaries),
+      "reopened public websocket client catches up via all",
+      15_000,
+      "local",
+    );
+    expect(allRows).toEqual([initial, offlineWrite]);
+    expect(await reader.one(app.todos.where({ id: offlineWrite.id }), { tier: "local" })).toEqual(
+      offlineWrite,
+    );
+  });
+
   it("opens public createDb with persistent OPFS and direct websocket server config, then converges todo CRUD", async () => {
     const requestedAppId = uniqueDbName("alpha-public-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
