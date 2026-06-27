@@ -1116,6 +1116,9 @@ fn planner_column_type<'a>(
     table: &'a TableSchema,
     column: &str,
 ) -> Result<&'a ColumnType, QueryError> {
+    if column == "id" {
+        return Ok(&ColumnType::Uuid);
+    }
     let column = column_schema(table, column)?;
     if column.large_value.is_some() {
         return Err(QueryError::LargeValueColumnInQuery {
@@ -1313,6 +1316,7 @@ fn is_orderable(column_type: &ColumnType) -> bool {
             | ColumnType::U32
             | ColumnType::U64
             | ColumnType::F64
+            | ColumnType::Uuid
             | ColumnType::String
     )
 }

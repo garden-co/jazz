@@ -156,7 +156,6 @@ type CompletedTx = {
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
-  postFilters: RowFilter[];
   relationQuery?: {
     queryJson: string;
     identity?: Uint8Array;
@@ -171,8 +170,6 @@ type SubscriptionSourceState = {
   source: ReadableStreamDefaultReader<unknown> | DirectSubscription;
   reading: boolean;
 };
-
-type RowFilter = DirectQueryPredicate;
 
 type RowState = {
   table: string;
@@ -500,11 +497,7 @@ export class CoreRuntime implements Runtime {
     const rows = session
       ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
       : this.db.all(query, opts);
-    return filterRows(
-      rowsFromBatches(readRowBatches(rows), this.schema),
-      queryPostFiltersFromJson(queryJson, this.schema),
-      this.schema,
-    );
+    return rowsFromBatches(readRowBatches(rows), this.schema);
   }
 
   private async queryRelationShape(
@@ -706,11 +699,7 @@ export class CoreRuntime implements Runtime {
           readOptions(tier, queryIncludesDeleted(queryJson), optionsJson),
         )
       : this.db.all(query, readOptions(tier, queryIncludesDeleted(queryJson), optionsJson));
-    return filterRows(
-      rowsFromBatches(readRowBatches(rows), this.schema),
-      queryPostFiltersFromJson(queryJson, this.schema),
-      this.schema,
-    );
+    return rowsFromBatches(readRowBatches(rows), this.schema);
   }
 
   createSubscription(
@@ -737,7 +726,6 @@ export class CoreRuntime implements Runtime {
       this.subscriptions.set(handle, {
         sources: [{ source: relationRefreshSource(), reading: false }],
         rows: [],
-        postFilters: [],
         relationQuery: { queryJson, identity, tier, optionsJson },
         cancelled: false,
       });
@@ -762,7 +750,6 @@ export class CoreRuntime implements Runtime {
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       rows: [],
-      postFilters: queryPostFiltersFromJson(queryJson, this.schema),
       cancelled: false,
     });
     return handle;
@@ -1108,14 +1095,9 @@ export class CoreRuntime implements Runtime {
     }
     const previousRows = subscription.rows;
     if (chunk.type === "snapshot") {
-      subscription.rows = filterRows(
-        rowsFromBatches(chunk.rows, this.schema),
-        subscription.postFilters,
-        this.schema,
-      );
+      subscription.rows = rowsFromBatches(chunk.rows, this.schema);
     } else {
       subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
-      subscription.rows = filterRows(subscription.rows, subscription.postFilters, this.schema);
     }
     subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
   }
@@ -1637,15 +1619,12 @@ function encodeSimpleRelationQuery(
 } {
   const unwrapped = unwrapSimpleQuery(table, query);
   if (!unwrapped) throw unsupportedRelationQueryError();
-  const hasPostFilter = unwrapped.predicates.some((filter) => filter.column === "id");
   return {
-    hasPostFilter,
+    hasPostFilter: false,
     limit: unwrapped.limit,
     offset: unwrapped.offset,
     orderBy: unwrapped.orderBy,
-    predicates: unwrapped.predicates
-      .filter((filter) => filter.column !== "id")
-      .map((filter) => coerceQueryPredicate(table, filter, schema)),
+    predicates: unwrapped.predicates.map((filter) => coerceQueryPredicate(table, filter, schema)),
   };
 }
 
@@ -1665,21 +1644,6 @@ function coerceQueryPredicate(
     ...filter,
     value: coerceQueryLiteral(table, filter.column, filter.value, schema),
   };
-}
-
-function unwrapSimpleRelationOrThrow(
-  table: string,
-  query: {
-    relation_ir?: unknown;
-    conditions?: unknown;
-    limit?: unknown;
-    offset?: unknown;
-    orderBy?: unknown;
-  },
-): { predicates: DirectQueryPredicate[]; offset: number; orderBy: DirectQueryOrder[] } {
-  const unwrapped = unwrapSimpleQuery(table, query);
-  if (!unwrapped) throw unsupportedRelationQueryError();
-  return unwrapped;
 }
 
 function unwrapSimpleQuery(
@@ -2070,116 +2034,9 @@ function readOffset(value: unknown): number {
   return value;
 }
 
-function queryPostFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[] {
-  const parsed = JSON.parse(queryJson) as {
-    table?: unknown;
-    relation_ir?: unknown;
-    conditions?: unknown;
-    limit?: unknown;
-    offset?: unknown;
-    orderBy?: unknown;
-  };
-  if (typeof parsed.table !== "string") return [];
-  return unwrapSimpleRelationOrThrow(parsed.table, parsed)
-    .predicates.filter((filter) => filter.column === "id")
-    .map((filter) => coerceQueryPredicate(parsed.table as string, filter, schema));
-}
-
-function filterRows(rows: RowState[], filters: RowFilter[], schema: WasmSchema): RowState[] {
-  if (filters.length === 0) return rows;
-  return rows.filter((row) => filters.every((filter) => rowMatchesFilter(row, filter, schema)));
-}
-
-function rowMatchesFilter(row: RowState, filter: RowFilter, schema: WasmSchema): boolean {
-  const value =
-    filter.column === "id"
-      ? { type: "Uuid" as const, value: row.id }
-      : rowValue(row, filter.column, schema);
-  switch (filter.op) {
-    case "Eq":
-      return compareValueToLiteral(value, filter.value) === 0;
-    case "Ne":
-      return compareValueToLiteral(value, filter.value) !== 0;
-    case "Gt":
-      return compareValueToLiteral(value, filter.value) > 0;
-    case "Gte":
-      return compareValueToLiteral(value, filter.value) >= 0;
-    case "Lt":
-      return compareValueToLiteral(value, filter.value) < 0;
-    case "Lte":
-      return compareValueToLiteral(value, filter.value) <= 0;
-    case "In":
-      return filter.values.some((literal) =>
-        value?.type === "Array" && literal.type !== "Array"
-          ? valueContainsLiteral(value, literal)
-          : compareValueToLiteral(value, literal) === 0,
-      );
-    case "Contains":
-      return valueContainsLiteral(value, filter.value);
-    case "IsNull":
-      return !value || value.type === "Null";
-    case "IsNotNull":
-      return !!value && value.type !== "Null";
-  }
-}
-
 function rowValue(row: RowState, column: string, schema: WasmSchema): Value | undefined {
   const index = schema[row.table]?.columns.findIndex((entry) => entry.name === column) ?? -1;
   return index < 0 ? undefined : row.values[index];
-}
-
-function compareValueToLiteral(value: Value | undefined, literal: DirectQueryLiteral): number {
-  if (literal.type === "Nullable") {
-    if (literal.value == null) return !value || value.type === "Null" ? 0 : 1;
-    return compareValueToLiteral(value, literal.value);
-  }
-  if (!value || value.type === "Null") return -1;
-  if (literal.type === "Boolean" && value.type === "Boolean") {
-    return value.value === literal.value ? 0 : value.value ? 1 : -1;
-  }
-  if (literal.type === "Integer" && isNumericValue(value)) {
-    return value.value === literal.value ? 0 : value.value > literal.value ? 1 : -1;
-  }
-  if (literal.type === "Bytea" && value.type === "Bytea") {
-    return bytesEqual(value.value, literal.value) ? 0 : -1;
-  }
-  if (literal.type === "Array" && value.type === "Array") {
-    return value.value.length === literal.value.length &&
-      value.value.every((entry, index) => compareValueToLiteral(entry, literal.value[index]!) === 0)
-      ? 0
-      : -1;
-  }
-  const actual = value.type === "Text" || value.type === "Uuid" ? value.value : undefined;
-  const expected = literalString(literal);
-  if (actual == null || expected == null) return -1;
-  return actual === expected ? 0 : actual > expected ? 1 : -1;
-}
-
-function isNumericValue(value: Value): value is Extract<Value, { value: number }> {
-  return (
-    value.type === "Integer" ||
-    value.type === "BigInt" ||
-    value.type === "Double" ||
-    value.type === "Timestamp"
-  );
-}
-
-function valueContainsLiteral(value: Value | undefined, literal: DirectQueryLiteral): boolean {
-  if (!value || value.type === "Null") return false;
-  if (value.type === "Text") {
-    const expected = literalString(literal);
-    return expected != null && value.value.includes(expected);
-  }
-  if (value.type === "Array") {
-    return value.value.some((entry) => compareValueToLiteral(entry, literal) === 0);
-  }
-  return false;
-}
-
-function literalString(literal: DirectQueryLiteral): string | null {
-  if (literal.type === "Nullable") return literal.value ? literalString(literal.value) : null;
-  if (literal.type === "Text" || literal.type === "Uuid") return literal.value;
-  return null;
 }
 
 function isUuidString(value: string): boolean {
