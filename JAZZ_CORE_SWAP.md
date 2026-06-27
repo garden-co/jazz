@@ -276,16 +276,14 @@ Until deleted, treat them as replacement targets only.
   server-backed direct-core memory clients are the only live construction path,
   and offline/persistent client construction fails closed until direct-core
   storage is wired in.
-- Rust `JazzClient` transactions currently fail closed on the direct-core path
-  instead of falling back to the old alpha batch runtime.
-- The current sharp correctness gap is restore replay through the direct
-  websocket server. The copied core now has unit coverage for cold maintained
-  view rehydrate after restore, but
-  `packages/jazz-tools/src/runtime/core-runtime/server-convergence.test.ts`
-  still contains a skipped end-to-end regression: after insert -> delete ->
-  restore, a fresh websocket subscriber does not replay the restored row. The
-  browser public alpha gate has the same gap in
-  `packages/jazz-tools/tests/browser/alpha-public-flow-gate.test.ts`.
+- Rust `JazzClient` mergeable transactions now stage writes on the direct-core
+  path, expose open transaction writes through transaction-scoped reads, and
+  commit to a direct mergeable transaction instead of falling back to the old
+  alpha batch runtime.
+- Restore replay through the direct websocket server is covered by core
+  regressions plus the unskipped TS server convergence and browser public alpha
+  gates. Restore writes parent the current content/deletion winners, and view
+  replay ships deletion-register witnesses for restored result rows.
 - Public shell APIs (`Db`, `JazzClient`, schema DSL, framework adapters, tests,
   examples) should remain; duplicate execution/query/sync/storage internals
   should be hollowed or deleted once direct-core gates cover the behavior.

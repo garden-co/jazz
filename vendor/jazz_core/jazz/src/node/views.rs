@@ -296,6 +296,39 @@ where
                 )?);
             }
         }
+        for (entry_table, row_uuid, content_tx_id) in &current_row_result_set {
+            let Some(version) = self.current_layer_winner_for_view_tier(
+                entry_table,
+                *row_uuid,
+                VersionLayer::Deletion,
+                tier,
+            )?
+            else {
+                continue;
+            };
+            let tx_id = self.version_tx_id(&version)?;
+            if tx_id == *content_tx_id || !emitted_versions.insert(tx_id) {
+                continue;
+            }
+            let table_schema = self.table(entry_table.as_str())?.clone();
+            if self.read_policy_allows_deletion_version_memo(
+                &table_schema,
+                &version,
+                identity,
+                &mut context,
+            )? {
+                if peer_complete_tx_payloads.contains(&tx_id) {
+                    peer_payload_inventory_refs.push(tx_id);
+                } else {
+                    version_bundles.push(self.version_bundle_for_view_memo(
+                        &table_schema,
+                        &version,
+                        identity,
+                        &mut context,
+                    )?);
+                }
+            }
+        }
         if degenerate_whole_table {
             let table_schema = self.table(&table_name)?.clone();
             for version in self.current_deletion_register_versions_for_view(&table_name)? {
@@ -1209,18 +1242,6 @@ where
     }
 
     fn ingest_view_bundle(&mut self, bundle: VersionBundle) -> Result<(), Error> {
-        if bundle.tx.kind == TxKind::Mergeable
-            && matches!(bundle.fate, Fate::Accepted)
-            && bundle.global_seq.is_none()
-            && bundle.durability < DurabilityTier::Global
-        {
-            self.finalize_edge_accepted_mergeable_commit_unit_once(
-                bundle.tx,
-                bundle.versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )?;
-            return Ok(());
-        }
         if bundle.tx.kind != TxKind::Exclusive {
             return self.ingest_known_transaction(
                 bundle.tx,
@@ -1679,6 +1700,27 @@ where
             }
         }
         Ok(versions)
+    }
+
+    fn current_layer_winner_for_view_tier(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        tier: DurabilityTier,
+    ) -> Result<Option<VersionRow>, Error> {
+        match tier {
+            DurabilityTier::Global => self.query_global_layer_winner(table, row_uuid, layer),
+            DurabilityTier::Edge => self.current_layer_winner_for_ahead_row(
+                table,
+                row_uuid,
+                layer,
+                Some(DurabilityTier::Edge),
+            ),
+            DurabilityTier::None | DurabilityTier::Local => {
+                self.current_layer_winner_for_ahead_row(table, row_uuid, layer, None)
+            }
+        }
     }
 
     pub(super) fn version_bundle_for_view_memo(
