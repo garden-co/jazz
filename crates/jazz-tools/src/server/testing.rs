@@ -413,7 +413,7 @@ impl JazzServer {
     }
 
     /// Returns a clone of the shared `Arc<ServerState>` for in-process tests
-    /// that need to call internal server methods (e.g. `process_ws_client_frame`).
+    /// that need to inspect or drive internal server state.
     pub fn server_state(&self) -> std::sync::Arc<super::ServerState> {
         self.state.clone()
     }

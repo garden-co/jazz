@@ -51,7 +51,7 @@ pub mod transport_error;
 #[allow(dead_code)]
 pub(crate) mod transport_manager;
 #[cfg(feature = "transport")]
-pub mod transport_protocol;
+pub(crate) mod transport_protocol;
 #[cfg(feature = "transport-websocket")]
 #[allow(dead_code)]
 pub(crate) mod ws_stream;
