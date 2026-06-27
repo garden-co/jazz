@@ -1,5 +1,5 @@
 /**
- * Translate QueryBuilder JSON to WASM Query format.
+ * Translate public QueryBuilder JSON into the runtime query payload.
  *
  * QueryBuilder produces a compact JSON structure:
  * { table, conditions, includes, orderBy, limit, offset, hops?, gather? }
@@ -108,9 +108,9 @@ function toRuntimeTimestampValue(value: unknown, columnName?: string): number {
 }
 
 /**
- * Translate a JavaScript value to WasmValue format.
+ * Translate a JavaScript value to the runtime value format.
  */
-function toWasmValue(value: unknown, columnType: ColumnType, columnName?: string): object {
+function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: string): object {
   if (value === null || value === undefined) {
     return { type: "Null" };
   }
@@ -142,7 +142,7 @@ function toWasmValue(value: unknown, columnType: ColumnType, columnName?: string
     }
     return {
       type: "Array",
-      value: value.map((item) => toWasmValue(item, columnType.element)),
+      value: value.map((item) => toRuntimeValue(item, columnType.element)),
     };
   }
   if (typeof value === "boolean") {
@@ -240,7 +240,7 @@ function conditionToArraySubqueryFilter(
 
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
-  const literalValue = toWasmValue(cond.value, valueTypeForCondition, column);
+  const literalValue = toRuntimeValue(cond.value, valueTypeForCondition, column);
   const isNullValue = cond.value === undefined ? true : cond.value;
 
   switch (cond.op) {
@@ -374,7 +374,7 @@ function conditionToRelPredicate(
       In: {
         left: columnRef,
         values: cond.value.map((value) => ({
-          Literal: toWasmValue(value, columnType, column),
+          Literal: toRuntimeValue(value, columnType, column),
         })),
       },
     };
@@ -385,7 +385,7 @@ function conditionToRelPredicate(
     isFrontierRowIdToken(cond.value) && cond.op === "eq"
       ? { RowId: "Frontier" as const }
       : {
-          Literal: toWasmValue(cond.value, valueTypeForCondition, column),
+          Literal: toRuntimeValue(cond.value, valueTypeForCondition, column),
         };
   const isNullValue = cond.value === undefined ? true : cond.value;
   if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
@@ -791,11 +791,11 @@ function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): 
 }
 
 /**
- * Translate QueryBuilder JSON to WASM Query JSON.
+ * Translate QueryBuilder JSON to runtime query JSON.
  *
  * @param builderJson JSON string from QueryBuilder._build()
  * @param schema WasmSchema for relation analysis
- * @returns JSON string for WASM runtime query()
+ * @returns JSON string for runtime query()
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
   const builder = normalizeBuiltQuery(JSON.parse(builderJson));

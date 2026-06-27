@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use super::support::{connect_ready_client, connect_ready_user, wait_for_rows};
 use super::{pe, permissions};
-use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
+use jazz_tools::schema_api::{Session, WriteContext};
+use jazz_tools::schema_api::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
 use jazz_tools::{

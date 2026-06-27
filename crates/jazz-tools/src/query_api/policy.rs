@@ -157,7 +157,7 @@ pub enum PolicyExpr {
         via_column: String,
         /// Optional recursion depth override for recursive INHERITS evaluation.
         ///
-        /// If omitted, runtime uses [`RECURSIVE_POLICY_MAX_DEPTH_DEFAULT`].
+        /// If omitted, policy checks use [`RECURSIVE_POLICY_MAX_DEPTH_DEFAULT`].
         max_depth: Option<usize>,
     },
 
@@ -172,7 +172,7 @@ pub enum PolicyExpr {
         via_column: String,
         /// Optional recursion depth override for recursive INHERITS evaluation.
         ///
-        /// If omitted, runtime uses [`RECURSIVE_POLICY_MAX_DEPTH_DEFAULT`].
+        /// If omitted, policy checks use [`RECURSIVE_POLICY_MAX_DEPTH_DEFAULT`].
         max_depth: Option<usize>,
     },
 

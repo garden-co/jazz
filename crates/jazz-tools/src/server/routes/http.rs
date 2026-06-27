@@ -12,9 +12,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::middleware::auth::validate_admin_secret;
-use crate::query_manager::types::{
-    ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
-};
+use crate::query_api::types::{ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value};
 use crate::schema_manager::{Lens, LensOp, LensTransform};
 use crate::server::{ServerState, ShutdownPhase};
 use crate::transport_error::ErrorResponse;

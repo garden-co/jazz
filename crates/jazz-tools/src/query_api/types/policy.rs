@@ -70,8 +70,8 @@ pub struct TablePolicies {
 impl TablePolicies {
     /// Create empty policies.
     ///
-    /// Runtimes without a loaded policy bundle stay permissive locally; runtimes
-    /// with a loaded bundle treat missing clauses as deny-by-default.
+    /// Permissive-local mode accepts missing clauses; enforcing mode treats
+    /// missing clauses as deny-by-default.
     pub fn new() -> Self {
         Self::default()
     }

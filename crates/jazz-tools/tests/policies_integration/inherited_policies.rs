@@ -7,9 +7,9 @@ use super::support::{
     wait_for_subscription_update,
 };
 use super::{assert_client_policy_denied, pe, permissions};
-use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
-use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{
+use jazz_tools::schema_api::{Operation, PolicyExpr};
+use jazz_tools::schema_api::Session;
+use jazz_tools::schema_api::{
     ColumnDescriptor, RowDescriptor, Schema, TableName, TablePolicies, TableSchemaBuilder,
 };
 use jazz_tools::server::JazzServer;

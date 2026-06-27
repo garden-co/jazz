@@ -7,7 +7,7 @@ use super::support::{
     wait_for_subscription_update,
 };
 use super::{pe, permissions};
-use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
+use jazz_tools::schema_api::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, SchemaBuilder, TableSchema,

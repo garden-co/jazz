@@ -10,9 +10,9 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::query_manager::policy::PolicyExpr;
-use jazz_tools::query_manager::types::SchemaHash;
-use jazz_tools::query_manager::types::TablePolicies;
+use jazz_tools::schema_api::PolicyExpr;
+use jazz_tools::schema_api::SchemaHash;
+use jazz_tools::schema_api::TablePolicies;
 use jazz_tools::row_input;
 use jazz_tools::schema_manager::{Lens, LensOp, LensTransform};
 use jazz_tools::server::JazzServer;

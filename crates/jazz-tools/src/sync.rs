@@ -1,36 +1,12 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub mod vocabulary;
-
 /// Persistence tier — declaration order defines Ord (Local < EdgeServer < GlobalServer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum DurabilityTier {
     Local,
     EdgeServer,
     GlobalServer,
-}
-
-/// Unique identifier for a server connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ServerId(pub Uuid);
-
-impl ServerId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for ServerId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for ServerId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
 }
 
 /// Unique identifier for a client connection.
@@ -59,5 +35,3 @@ impl std::fmt::Display for ClientId {
         write!(f, "{}", self.0)
     }
 }
-
-pub use vocabulary::ConnectionSchemaDiagnostics;

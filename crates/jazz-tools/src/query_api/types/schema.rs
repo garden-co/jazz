@@ -412,7 +412,7 @@ fn table_policies_are_default(policies: &TablePolicies) -> bool {
 impl TableSchema {
     /// Create a new table schema with no explicit policies.
     ///
-    /// Runtime behavior depends on whether a compiled policy bundle is loaded.
+    /// Missing-policy behavior depends on the active row policy mode.
     pub fn new(columns: RowDescriptor) -> Self {
         Self {
             columns,
@@ -717,7 +717,7 @@ pub fn validate_policy_no_cycles(
                 ));
             }
 
-            // Bounded INHERITS is cycle-safe by runtime depth limit.
+            // Bounded INHERITS is cycle-safe because policy recursion depth is capped.
             if bounded {
                 return Ok(());
             }

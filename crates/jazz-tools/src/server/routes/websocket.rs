@@ -25,6 +25,7 @@ use jazz::wire::{
 };
 use tokio::sync::mpsc;
 
+use crate::schema_api::AuthMode;
 use crate::server::ServerState;
 
 const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
@@ -256,9 +257,9 @@ fn session_claims(
         "authMode".to_owned(),
         serde_json::Value::String(
             match session.auth_mode {
-                crate::query_manager::session::AuthMode::External => "external",
-                crate::query_manager::session::AuthMode::LocalFirst => "local-first",
-                crate::query_manager::session::AuthMode::Anonymous => "anonymous",
+                AuthMode::External => "external",
+                AuthMode::LocalFirst => "local-first",
+                AuthMode::Anonymous => "anonymous",
             }
             .to_owned(),
         ),
