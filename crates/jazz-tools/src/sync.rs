@@ -65,6 +65,6 @@ impl std::fmt::Display for ClientId {
 
 pub use sync_tracer::SyncTracer;
 pub use types::{
-    ConnectionSchemaDiagnostics, Destination, QueryId, QueryPropagation, RowMetadata,
-    SchemaWarning, Source, SyncError, SyncPayload,
+    ConnectionSchemaDiagnostics, Destination, QueryId, QueryPropagation, SchemaWarning, Source,
+    SyncError, SyncPayload,
 };

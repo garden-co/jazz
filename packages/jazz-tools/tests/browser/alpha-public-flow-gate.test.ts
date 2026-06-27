@@ -3,10 +3,12 @@ import {
   createDb,
   generateAuthSecret,
   publishStoredPermissions,
+  RowChangeKind,
   schema,
   type CompiledPermissions,
   type Db,
   type Query,
+  type RowDelta,
   type RowOf,
 } from "../../src/index.js";
 import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
@@ -169,6 +171,80 @@ describe("alpha public package flow", () => {
       }),
     );
     expect(await db.one(app.todos.where({ id: created.id }), { tier: "local" })).toEqual(created);
+  });
+
+  it("moves rows into and out of a filtered public subscription after local updates", async () => {
+    const appId = uniqueDbName("alpha-public-local-predicate-move");
+    const persistentDbName = uniqueDbName("alpha-public-local-predicate-move-opfs");
+    const db = ctx.track(
+      await createDb({
+        appId,
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName: persistentDbName },
+      }),
+    );
+    const openTodos = app.todos.where({ done: false }).orderBy("title");
+    const snapshots: Todo[][] = [];
+    const rowChanges: Array<RowDelta<Todo>> = [];
+    const unsubscribe = ctx.trackSubscription(
+      db.subscribeAll(openTodos, (delta) => {
+        snapshots.push([...delta.all]);
+        rowChanges.push(...delta.delta);
+      }),
+    );
+
+    const startsOpen = await db
+      .insert(app.todos, {
+        title: "Starts open",
+        done: false,
+        list: "predicate",
+      })
+      .wait({ tier: "local" });
+    const startsDone = await db
+      .insert(app.todos, {
+        title: "Starts done",
+        done: true,
+        list: "predicate",
+      })
+      .wait({ tier: "local" });
+
+    await expectTodoSummariesForQuery(db, openTodos, ["Starts open:open"], "local");
+    await waitForSnapshotSummaries(snapshots, ["Starts open:open"], "initial open predicate");
+
+    await db.update(app.todos, startsOpen.id, { done: true }).wait({ tier: "local" });
+    await expectTodoSummariesForQuery(db, openTodos, [], "local");
+    await waitForSnapshotSummaries(snapshots, [], "row leaves open predicate after update");
+    await waitForRowChange(
+      rowChanges,
+      (change) => change.kind === RowChangeKind.Removed && change.id === startsOpen.id,
+      "removed row after it leaves the open predicate",
+    );
+
+    await db.update(app.todos, startsDone.id, { done: false }).wait({ tier: "local" });
+    await expectTodoSummariesForQuery(db, openTodos, ["Starts done:open"], "local");
+    await waitForSnapshotSummaries(
+      snapshots,
+      ["Starts done:open"],
+      "row enters open predicate after update",
+    );
+    await waitForRowChange(
+      rowChanges,
+      (change) =>
+        change.kind === RowChangeKind.Added &&
+        change.id === startsDone.id &&
+        change.item.title === "Starts done",
+      "added row after it enters the open predicate",
+    );
+
+    unsubscribe();
+    expect(await db.one(app.todos.where({ id: startsOpen.id }), { tier: "local" })).toEqual({
+      ...startsOpen,
+      done: true,
+    });
+    expect(await db.one(app.todos.where({ id: startsDone.id }), { tier: "local" })).toEqual({
+      ...startsDone,
+      done: false,
+    });
   });
 
   it("gates richer public row shapes through local direct core queries and subscriptions", async () => {
@@ -881,15 +957,48 @@ async function expectTodoSummaries(
   summaries: string[],
   tier?: "local" | "edge",
 ): Promise<void> {
+  await expectTodoSummariesForQuery(db, app.todos.orderBy("title"), summaries, tier);
+}
+
+async function expectTodoSummariesForQuery(
+  db: Db,
+  query: Query<"todos">,
+  summaries: string[],
+  tier?: "local" | "edge",
+): Promise<void> {
   const rows = await waitForQuery(
     db,
-    app.todos.orderBy("title"),
+    query,
     (todos) => summariesEqual([...todos].sort(byTitle), summaries),
     `todos converge to ${summaries.join(", ")}`,
     15_000,
     tier,
   );
   expect([...rows].sort(byTitle).map(summary)).toEqual(summaries);
+}
+
+async function waitForSnapshotSummaries(
+  snapshots: Todo[][],
+  summaries: string[],
+  label: string,
+): Promise<void> {
+  await waitForCondition(
+    async () => snapshots.some((todos) => summariesEqual([...todos].sort(byTitle), summaries)),
+    5_000,
+    `subscription snapshot for ${label}`,
+  );
+}
+
+async function waitForRowChange(
+  changes: Array<RowDelta<Todo>>,
+  predicate: (change: RowDelta<Todo>) => boolean,
+  label: string,
+): Promise<void> {
+  await waitForCondition(
+    async () => changes.some(predicate),
+    5_000,
+    `subscription row delta for ${label}`,
+  );
 }
 
 async function waitForSubscribedTodoSummaries(
