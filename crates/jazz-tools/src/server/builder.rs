@@ -32,6 +32,10 @@ use crate::sync::DurabilityTier;
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(feature = "rocksdb")]
+const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
+#[cfg(feature = "sqlite")]
+const CATALOGUE_SQLITE_FILE: &str = "catalogue.sqlite";
+#[cfg(feature = "rocksdb")]
 const CORE_SERVER_ROCKSDB_DIR: &str = "core-server.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const EDGE_UPSTREAM_UNSUPPORTED_MESSAGE: &str = "edge upstream sync is temporarily unsupported while server-to-server sync is migrated to the core engine; refusing to start the legacy alpha transport";
@@ -228,7 +232,7 @@ impl ServerBuilder {
     /// Build the direct admin catalogue store used by HTTP catalogue routes.
     ///
     fn build_catalogue_store(&self) -> Result<(DirectCatalogueStore, Option<Schema>), String> {
-        let storage = self.build_main_storage()?;
+        let storage = self.build_catalogue_storage()?;
         let initial_schema = match &self.schema_mode {
             ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
             ServerSchemaMode::Dynamic => None,
@@ -319,7 +323,7 @@ impl ServerBuilder {
         }
     }
 
-    fn build_main_storage(&self) -> Result<DynStorage, String> {
+    fn build_catalogue_storage(&self) -> Result<DynStorage, String> {
         match &self.storage_backend {
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
@@ -327,18 +331,24 @@ impl ServerBuilder {
 
                 #[cfg(feature = "rocksdb")]
                 {
-                    let db_path = path.join("jazz.rocksdb");
+                    let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
                     let storage = RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
                         .map_err(|e| {
-                            format!("failed to open storage '{}': {e:?}", db_path.display())
+                            format!(
+                                "failed to open catalogue storage '{}': {e:?}",
+                                db_path.display()
+                            )
                         })?;
                     Ok(Box::new(storage))
                 }
                 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
                 {
-                    let db_path = path.join("jazz.sqlite");
+                    let db_path = path.join(CATALOGUE_SQLITE_FILE);
                     let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                        format!("failed to open storage '{}': {e:?}", db_path.display())
+                        format!(
+                            "failed to open catalogue storage '{}': {e:?}",
+                            db_path.display()
+                        )
                     })?;
                     Ok(Box::new(storage))
                 }
@@ -351,9 +361,12 @@ impl ServerBuilder {
             StorageBackend::Sqlite { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                let db_path = path.join("jazz.sqlite");
+                let db_path = path.join(CATALOGUE_SQLITE_FILE);
                 let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                    format!("failed to open storage '{}': {e:?}", db_path.display())
+                    format!(
+                        "failed to open catalogue storage '{}': {e:?}",
+                        db_path.display()
+                    )
                 })?;
                 Ok(Box::new(storage))
             }
@@ -361,10 +374,13 @@ impl ServerBuilder {
             StorageBackend::RocksDb { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                let db_path = path.join("jazz.rocksdb");
+                let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
                 let storage =
                     RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                        format!("failed to open storage '{}': {e:?}", db_path.display())
+                        format!(
+                            "failed to open catalogue storage '{}': {e:?}",
+                            db_path.display()
+                        )
                     })?;
                 Ok(Box::new(storage))
             }
@@ -709,7 +725,7 @@ mod tests {
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn rocksdb_builder_starts_core_server_with_separate_persistent_storage_after_restart() {
+    async fn rocksdb_builder_starts_core_server_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-core-server-restart");
         let schema = crate::query_manager::types::SchemaBuilder::new()
@@ -731,7 +747,7 @@ mod tests {
                 .expect("build RocksDB server with core server");
 
             assert!(built.state.core_server().is_some());
-            assert!(data_dir.path().join("jazz.rocksdb").exists());
+            assert!(data_dir.path().join(CATALOGUE_ROCKSDB_DIR).exists());
             assert!(data_dir.path().join(CORE_SERVER_ROCKSDB_DIR).exists());
         }
 
