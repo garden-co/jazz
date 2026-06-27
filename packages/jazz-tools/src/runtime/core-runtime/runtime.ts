@@ -187,6 +187,14 @@ type RuntimeQueryJson = {
   array_subqueries?: unknown;
 };
 
+type RuntimeArraySubquery = {
+  column_name: string;
+  table: string;
+  inner_column: string;
+  outer_column: string;
+  nested_arrays?: unknown;
+};
+
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -638,26 +646,12 @@ export class CoreRuntime implements Runtime {
     if (!Array.isArray(subqueries)) return rows;
     let result = rows;
     for (const raw of subqueries) {
-      if (!raw || typeof raw !== "object") throw unsupportedRelationQueryError();
-      const subquery = raw as {
-        column_name?: unknown;
-        table?: unknown;
-        inner_column?: unknown;
-        outer_column?: unknown;
-      };
-      if (
-        typeof subquery.column_name !== "string" ||
-        typeof subquery.table !== "string" ||
-        typeof subquery.inner_column !== "string" ||
-        typeof subquery.outer_column !== "string"
-      ) {
-        throw unsupportedRelationQueryError();
-      }
+      const subquery = readRuntimeArraySubquery(raw);
       const outerColumn = subquery.outer_column.split(".").at(-1)!;
       const next: RowState[] = [];
       for (const row of result) {
         const values = relationValues(row, outerColumn, this.schema);
-        const included =
+        let included =
           values.length === 0
             ? []
             : await this.queryPreparedRows(
@@ -669,6 +663,13 @@ export class CoreRuntime implements Runtime {
                 tier,
                 optionsJson,
               );
+        included = await this.attachArraySubqueries(
+          included,
+          subquery.nested_arrays,
+          identity,
+          tier,
+          optionsJson,
+        );
         next.push({
           ...row,
           values: row.values.concat({
@@ -720,15 +721,32 @@ export class CoreRuntime implements Runtime {
     const handle = this.nextSubscriptionId++;
     const recomputeQueryJson = subscriptionRecomputeQueryJson(queryJson);
     const subscriptionQueryJsons =
-      recomputeQueryJson == null ? [queryJson] : subscriptionTriggerQueryJsons(queryJson);
+      recomputeQueryJson == null
+        ? [queryJson]
+        : subscriptionTriggerQueryJsons(queryJson, this.schema);
     const opts = readOptions(tier);
     const identity = session ? parseUuid(session.user_id) : undefined;
     const sources = subscriptionQueryJsons.map((subscriptionQueryJson) => {
       const query = this.prepareQuery(subscriptionQueryJson);
-      const nativeSubscription = identity
-        ? this.db.subscribeForIdentity!(query, identity, opts)
-        : this.db.subscribe!(query, opts);
-      this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
+      let nativeSubscription: ReadableStream<unknown> | DirectSubscription;
+      try {
+        nativeSubscription = identity
+          ? this.db.subscribeForIdentity!(query, identity, opts)
+          : this.db.subscribe!(query, opts);
+      } catch (error) {
+        throw new Error(
+          `Direct core subscribe failed for ${subscriptionQueryJson}: ${errorMessage(error)}`,
+        );
+      }
+      try {
+        this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
+      } catch (error) {
+        throw new Error(
+          `Direct core subscription propagation failed for ${subscriptionQueryJson}: ${errorMessage(
+            error,
+          )}`,
+        );
+      }
       return { source: subscriptionSource(nativeSubscription), reading: false };
     });
     this.subscriptions.set(handle, {
@@ -859,7 +877,11 @@ export class CoreRuntime implements Runtime {
     const key = bytesKey(queryBytes);
     let query = this.preparedQueries.get(key);
     if (!query) {
-      query = this.db.prepareQuery(queryBytes);
+      try {
+        query = this.db.prepareQuery(queryBytes);
+      } catch (error) {
+        throw new Error(`Direct core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
+      }
       this.preparedQueries.set(key, query);
     }
     return query;
@@ -1389,7 +1411,7 @@ function subscriptionRecomputeQueryJson(queryJson: string): string | null {
     : null;
 }
 
-function subscriptionTriggerQueryJsons(queryJson: string): string[] {
+function subscriptionTriggerQueryJsons(queryJson: string, schema: WasmSchema): string[] {
   const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
   if (typeof parsed.table !== "string") throw unsupportedRelationQueryError();
   const triggers: string[] = [];
@@ -1401,7 +1423,7 @@ function subscriptionTriggerQueryJsons(queryJson: string): string[] {
   } else {
     triggers.push(queryJson);
   }
-  for (const subquery of subscriptionTriggerArraySubqueries(parsed.array_subqueries)) {
+  for (const subquery of subscriptionTriggerArraySubqueries(parsed.array_subqueries, schema)) {
     triggers.push(JSON.stringify(subquery));
   }
   return uniqueStrings(triggers);
@@ -1436,26 +1458,56 @@ function subscriptionTriggerRelations(relation: unknown): unknown[] {
 
 function subscriptionTriggerArraySubqueries(
   subqueries: unknown,
-): Array<{ table: string; conditions: Array<{ column: string; op: "isNotNull" }> }> {
+  schema: WasmSchema,
+): Array<{ table: string; conditions?: Array<{ column: string; op: "isNotNull" }> }> {
   if (subqueries == null) return [];
   if (!Array.isArray(subqueries)) throw unsupportedRelationQueryError();
-  return subqueries
-    .map((raw) => {
-      if (!raw || typeof raw !== "object") throw unsupportedRelationQueryError();
-      const subquery = raw as { table?: unknown; inner_column?: unknown };
-      if (typeof subquery.table !== "string" || typeof subquery.inner_column !== "string") {
-        throw unsupportedRelationQueryError();
-      }
-      if (subquery.inner_column === "id") return null;
-      return {
-        table: subquery.table,
-        conditions: [{ column: subquery.inner_column, op: "isNotNull" as const }],
-      };
-    })
-    .filter(
-      (query): query is { table: string; conditions: Array<{ column: string; op: "isNotNull" }> } =>
-        query != null,
+  const triggers: Array<{
+    table: string;
+    conditions?: Array<{ column: string; op: "isNotNull" }>;
+  }> = [];
+  for (const raw of subqueries) {
+    const subquery = readRuntimeArraySubquery(raw);
+    const column = schema[subquery.table]?.columns.find(
+      (entry) => entry.name === subquery.inner_column,
     );
+    triggers.push(
+      column?.nullable === true
+        ? {
+            table: subquery.table,
+            conditions: [{ column: subquery.inner_column, op: "isNotNull" as const }],
+          }
+        : { table: subquery.table },
+    );
+    triggers.push(...subscriptionTriggerArraySubqueries(subquery.nested_arrays, schema));
+  }
+  return triggers;
+}
+
+function readRuntimeArraySubquery(raw: unknown): RuntimeArraySubquery {
+  if (!raw || typeof raw !== "object") throw unsupportedRelationQueryError();
+  const subquery = raw as {
+    column_name?: unknown;
+    table?: unknown;
+    inner_column?: unknown;
+    outer_column?: unknown;
+    nested_arrays?: unknown;
+  };
+  if (
+    typeof subquery.column_name !== "string" ||
+    typeof subquery.table !== "string" ||
+    typeof subquery.inner_column !== "string" ||
+    typeof subquery.outer_column !== "string"
+  ) {
+    throw unsupportedRelationQueryError();
+  }
+  return {
+    column_name: subquery.column_name,
+    table: subquery.table,
+    inner_column: subquery.inner_column,
+    outer_column: subquery.outer_column,
+    nested_arrays: subquery.nested_arrays,
+  };
 }
 
 function tableFromRelation(relation: unknown): string {
