@@ -565,7 +565,7 @@ export class CoreRuntime implements Runtime {
   ): Promise<RowState[]> {
     const input = (project as { input?: unknown }).input;
     const chain = readJoinChain(input);
-    if (!chain) throw unsupportedRelationQueryError();
+    if (!chain || chain.hops.length === 0) throw unsupportedRelationQueryError();
     let rows = await this.evaluateRelation(chain.seed, identity, tier, optionsJson);
     const relations = analyzeRelations(this.schema);
     let currentTable = rows[0]?.table ?? tableFromRelation(chain.seed);
@@ -1388,7 +1388,7 @@ function subscriptionTriggerRelations(relation: unknown): unknown[] {
   const record = relation as Record<string, unknown>;
   if (record.Project && typeof record.Project === "object") {
     const chain = readJoinChain((record.Project as { input?: unknown }).input);
-    if (!chain) throw unsupportedRelationQueryError();
+    if (!chain || chain.hops.length === 0) throw unsupportedRelationQueryError();
     return [
       ...subscriptionTriggerRelations(chain.seed),
       ...chain.hops.map((hop) => ({ TableScan: { table: hop.table } })),
@@ -1532,14 +1532,6 @@ function encodeSimpleRelationQuery(
 } {
   const unwrapped = unwrapSimpleQuery(table, query);
   if (!unwrapped) throw unsupportedRelationQueryError();
-  const unsupportedIdComparator = unwrapped.predicates.find(
-    (filter) => filter.column === "id" && filter.op !== "Eq" && filter.op !== "In",
-  );
-  if (unsupportedIdComparator) {
-    throw new Error(
-      `Direct core runtime does not support '${unsupportedIdComparator.op}' comparisons on id yet`,
-    );
-  }
   const hasPostFilter = unwrapped.predicates.some((filter) => filter.column === "id");
   return {
     hasPostFilter,
