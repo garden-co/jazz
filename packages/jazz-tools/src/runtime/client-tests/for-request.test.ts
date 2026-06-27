@@ -7,7 +7,6 @@ import {
   mockMutation,
   mockRow,
   runtimeTransactionRecordStubs,
-  schemaWithTodos,
   type AppContext,
   type Runtime,
 } from "./support.js";
@@ -36,45 +35,17 @@ describe("JazzClient runtime helpers", () => {
     expect(() => client.asBackend()).toThrow("serverUrl required for backend mode");
   });
 
-  it("accepts query builders for subscribe calls", async () => {
+  it("accepts runtime query JSON strings for subscribe calls", async () => {
     const { client, createSubscriptionCalls, executeSubscriptionCalls } = makeClient();
+    const queryJson = '{"relation_ir":{"table":"todos"}}';
 
-    const builder = {
-      _build() {
-        return '{"table":"todos"}';
-      },
-    };
-
-    client.subscribe(builder, () => {});
+    client.subscribe(queryJson, () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
-    expect(createSubscriptionCalls[0]![0]).toBe(builder._build());
+    expect(createSubscriptionCalls[0]![0]).toBe(queryJson);
     expect(executeSubscriptionCalls).toHaveLength(0);
     await flushMicrotasks();
     expect(executeSubscriptionCalls).toHaveLength(1);
-  });
-
-  it("translates schema-aware query builders for subscribe calls", async () => {
-    const { client, createSubscriptionCalls } = makeClient();
-
-    const builder = {
-      _schema: schemaWithTodos,
-      _build() {
-        return JSON.stringify({
-          table: "todos",
-          conditions: [],
-          includes: {},
-          orderBy: [],
-        });
-      },
-    };
-
-    client.subscribe(builder, () => {});
-
-    expect(createSubscriptionCalls).toHaveLength(1);
-    const parsed = JSON.parse(createSubscriptionCalls[0]![0]) as Record<string, unknown>;
-    expect(parsed.table).toBe("todos");
-    expect(parsed).toHaveProperty("relation_ir");
   });
 
   it("forwards structured RN delta payloads to subscription callbacks", async () => {

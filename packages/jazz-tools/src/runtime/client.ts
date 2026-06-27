@@ -11,7 +11,6 @@ import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
-import { translateQuery } from "./query-adapter.js";
 import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
@@ -246,15 +245,6 @@ export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
 }
 
-/**
- * QueryBuilder-compatible input accepted by query and subscribe APIs.
- */
-export interface QueryInput {
-  _build(): string;
-  /** Optional schema metadata available on generated QueryBuilder objects. */
-  _schema?: WasmSchema;
-}
-
 type QueryExecutionDefaultsContext = {
   serverUrl?: string;
   defaultDurabilityTier?: DurabilityTier;
@@ -286,30 +276,6 @@ export function resolveEffectiveQueryExecutionOptions(
     propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
   };
-}
-
-function resolveQueryJson(query: string | QueryInput): string {
-  if (typeof query === "string") {
-    return query;
-  }
-
-  const builtQuery = query._build();
-  const schema = query._schema;
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
-    return builtQuery;
-  }
-
-  // Query payloads already in runtime form include relation_ir and should pass through unchanged.
-  try {
-    const parsed = JSON.parse(builtQuery) as Record<string, unknown>;
-    if (parsed && typeof parsed === "object" && "relation_ir" in parsed) {
-      return builtQuery;
-    }
-  } catch {
-    return builtQuery;
-  }
-
-  return translateQuery(builtQuery, schema);
 }
 
 function isBrowserRuntime(): boolean {
@@ -823,22 +789,21 @@ export class JazzClient {
   /**
    * Execute a query and return all matching rows.
    *
-   * @param query Query builder or JSON-encoded query specification
+   * @param query JSON-encoded runtime query specification
    * @param options Optional read durability options
    * @returns Array of matching rows
    */
   async query(
-    query: string | QueryInput,
+    query: string,
     options?: InternalQueryExecutionOptions,
     session?: Session,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    const queryJson = resolveQueryJson(query);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const results = await this.runtime.query(
-      queryJson,
+      query,
       sessionJson,
       options?.runtimeSettledTier === null
         ? undefined
@@ -931,13 +896,13 @@ export class JazzClient {
   /**
    * Subscribe to a query and receive updates when results change.
    *
-   * @param query Query builder or JSON-encoded query specification
+   * @param query JSON-encoded runtime query specification
    * @param callback Called with delta whenever results change
    * @param options Optional read durability options
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
-    query: string | QueryInput,
+    query: string,
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
     session?: Session,
@@ -945,7 +910,6 @@ export class JazzClient {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
-    const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
 
     // Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
@@ -953,7 +917,7 @@ export class JazzClient {
     // via the scheduler so compilation + first tick run outside the caller's
     // synchronous stack (e.g. outside a React render).
     const handle = this.runtime.createSubscription(
-      queryJson,
+      query,
       sessionJson,
       normalizedOptions.tier,
       optionsJson,
