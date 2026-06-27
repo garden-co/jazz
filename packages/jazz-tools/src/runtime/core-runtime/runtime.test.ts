@@ -27,10 +27,11 @@ describe("CoreRuntime server transport", () => {
     const transport = new FakeTransport([Uint8Array.from([1, 2, 3])]);
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          connectUpstream: () => transport,
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -78,6 +79,77 @@ describe("CoreRuntime server transport", () => {
     expect(sockets[1]!.closed).toBe(true);
   });
 
+  it("uses the binding scheduler without manually ticking the db during server pumps", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([Uint8Array.from([7])]);
+    let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let dbTicks = 0;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () => ({
+          connectUpstream: () => transport,
+          setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+            schedulerCallback = callback;
+          },
+          tick: () => {
+            dbTicks += 1;
+          },
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    expect(schedulerCallback).toBeTypeOf("function");
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(transport.tickCount).toBeGreaterThan(0);
+    expect(dbTicks).toBe(0);
+
+    schedulerCallback?.("immediate");
+    await Promise.resolve();
+
+    expect(transport.tickCount).toBeGreaterThan(1);
+    expect(dbTicks).toBe(0);
+  });
+
+  it("requires direct db bindings to expose a tick scheduler", () => {
+    expect(
+      () =>
+        new CoreRuntime(
+          {
+            openMemory: () => ({
+              connectUpstream: () => new FakeTransport([]),
+              tick: () => undefined,
+            }),
+            openBrowser: async () => {
+              throw new Error("not used");
+            },
+          } as never,
+          testSchema,
+          new Uint8Array(16),
+          new Uint8Array(16),
+          1,
+          true,
+        ),
+    ).toThrow("Direct core runtime requires db.setTickScheduler");
+  });
+
   it("reports direct websocket auth failures through the auth failure callback", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -89,10 +161,11 @@ describe("CoreRuntime server transport", () => {
     const transport = new FakeTransport([]);
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          connectUpstream: () => transport,
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -129,10 +202,11 @@ describe("CoreRuntime server transport", () => {
     const transport = new FakeTransport([]);
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          connectUpstream: () => transport,
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -167,19 +241,20 @@ describe("CoreRuntime server transport", () => {
     };
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: () => Uint8Array.from([0]),
-          prepareQuery: () => ({}),
-          updateEncoded: (table: string, rowId: Uint8Array, patch: Uint8Array) => {
-            calls.push(["update", table, rowId, patch]);
-            return write;
-          },
-          delete: (table: string, rowId: Uint8Array) => {
-            calls.push(["delete", table, rowId]);
-            return write;
-          },
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: () => Uint8Array.from([0]),
+            prepareQuery: () => ({}),
+            updateEncoded: (table: string, rowId: Uint8Array, patch: Uint8Array) => {
+              calls.push(["update", table, rowId, patch]);
+              return write;
+            },
+            delete: (table: string, rowId: Uint8Array) => {
+              calls.push(["delete", table, rowId]);
+              return write;
+            },
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -218,22 +293,23 @@ describe("CoreRuntime server transport", () => {
     };
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: () =>
-            encodeRows([
-              {
-                table: "todos",
-                rowId: insertedRowIds[0]!,
-                title: "fresh local write",
-              },
-            ]),
-          prepareQuery: () => ({}),
-          insertWithIdEncoded: (_table: string, rowId: Uint8Array) => {
-            insertedRowIds.push(rowId);
-            return write;
-          },
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: () =>
+              encodeRows([
+                {
+                  table: "todos",
+                  rowId: insertedRowIds[0]!,
+                  title: "fresh local write",
+                },
+              ]),
+            prepareQuery: () => ({}),
+            insertWithIdEncoded: (_table: string, rowId: Uint8Array) => {
+              insertedRowIds.push(rowId);
+              return write;
+            },
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -275,23 +351,24 @@ describe("CoreRuntime server transport", () => {
     const authors: string[] = [];
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: () => {
-            throw new Error("session query should use allForIdentity");
-          },
-          allForIdentity: (_query: unknown, author: Uint8Array) => {
-            authors.push(formatUuidForTest(author));
-            return encodeRows([
-              {
-                table: "todos",
-                rowId: new Uint8Array(16),
-                title: "session scoped",
-              },
-            ]);
-          },
-          prepareQuery: () => ({}),
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              throw new Error("session query should use allForIdentity");
+            },
+            allForIdentity: (_query: unknown, author: Uint8Array) => {
+              authors.push(formatUuidForTest(author));
+              return encodeRows([
+                {
+                  table: "todos",
+                  rowId: new Uint8Array(16),
+                  title: "session scoped",
+                },
+              ]);
+            },
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -326,11 +403,12 @@ describe("CoreRuntime server transport", () => {
   it("decodes fixed-width array columns from direct row batches", async () => {
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: () => encodeFileRows(),
-          prepareQuery: () => ({}),
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeFileRows(),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -370,14 +448,15 @@ describe("CoreRuntime server transport", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: () => new Uint8Array([0]),
-          prepareQuery: (query: Uint8Array) => {
-            preparedBytes = query;
-            return {};
-          },
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -422,26 +501,27 @@ describe("CoreRuntime server transport", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: () =>
-            encodeRows([
-              {
-                table: "todos",
-                rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-                title: "keep",
-              },
-              {
-                table: "todos",
-                rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-                title: "drop",
-              },
-            ]),
-          prepareQuery: (query: Uint8Array) => {
-            preparedBytes = query;
-            return {};
-          },
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: () =>
+              encodeRows([
+                {
+                  table: "todos",
+                  rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                  title: "keep",
+                },
+                {
+                  table: "todos",
+                  rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+                  title: "drop",
+                },
+              ]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -492,23 +572,24 @@ describe("CoreRuntime server transport", () => {
     const calls: string[] = [];
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: () => {
-            calls.push("all");
-            return encodeRows([
-              {
-                table: "todos",
-                rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-                title: "should not be read",
-              },
-            ]);
-          },
-          prepareQuery: () => {
-            calls.push("prepareQuery");
-            return {};
-          },
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              calls.push("all");
+              return encodeRows([
+                {
+                  table: "todos",
+                  rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                  title: "should not be read",
+                },
+              ]);
+            },
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -530,17 +611,18 @@ describe("CoreRuntime server transport", () => {
     const calls: string[] = [];
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          prepareQuery: () => {
-            calls.push("prepareQuery");
-            return {};
-          },
-          subscribe: () => {
-            calls.push("subscribe");
-            return new ReadableStream();
-          },
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            subscribe: () => {
+              calls.push("subscribe");
+              return new ReadableStream();
+            },
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -583,15 +665,16 @@ describe("CoreRuntime server transport", () => {
     const readOptions: unknown[] = [];
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: (_query: unknown, opts: unknown) => {
-            readOptions.push(opts);
-            return new Uint8Array([0]);
-          },
-          propagateQuery: () => undefined,
-          prepareQuery: () => ({}),
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: (_query: unknown, opts: unknown) => {
+              readOptions.push(opts);
+              return new Uint8Array([0]);
+            },
+            propagateQuery: () => undefined,
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -642,16 +725,17 @@ describe("CoreRuntime server transport", () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          prepareQuery: () => ({}),
-          subscribe: () =>
-            new ReadableStream({
-              start(streamController) {
-                controller = streamController;
-              },
-            }),
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => ({}),
+            subscribe: () =>
+              new ReadableStream({
+                start(streamController) {
+                  controller = streamController;
+                },
+              }),
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -751,14 +835,15 @@ describe("CoreRuntime server transport", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: () => new Uint8Array([0]),
-          prepareQuery: (query: Uint8Array) => {
-            preparedBytes = query;
-            return {};
-          },
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -802,14 +887,15 @@ describe("CoreRuntime server transport", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new CoreRuntime(
       {
-        openMemory: () => ({
-          all: () => new Uint8Array([0]),
-          prepareQuery: (query: Uint8Array) => {
-            preparedBytes = query;
-            return {};
-          },
-          tick: () => undefined,
-        }),
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -886,14 +972,15 @@ const testSchema = {
 function directRuntimeWithEmptyDb(): CoreRuntime {
   return new CoreRuntime(
     {
-      openMemory: () => ({
-        all: () => new Uint8Array([0]),
-        propagateQuery: () => undefined,
-        prepareQuery: () => ({}),
-        subscribe: () => new ReadableStream(),
-        subscribeForIdentity: () => new ReadableStream(),
-        tick: () => undefined,
-      }),
+      openMemory: () =>
+        fakeDb({
+          all: () => new Uint8Array([0]),
+          propagateQuery: () => undefined,
+          prepareQuery: () => ({}),
+          subscribe: () => new ReadableStream(),
+          subscribeForIdentity: () => new ReadableStream(),
+          tick: () => undefined,
+        }),
       openBrowser: async () => {
         throw new Error("not used");
       },
@@ -1032,6 +1119,7 @@ const fileSchema = {
 class FakeTransport implements DirectTransport {
   closed = false;
   readonly received: Uint8Array[] = [];
+  tickCount = 0;
 
   constructor(private readonly outgoing: Uint8Array[]) {}
 
@@ -1049,6 +1137,7 @@ class FakeTransport implements DirectTransport {
   }
 
   tick(): number {
+    this.tickCount += 1;
     return 0;
   }
 }
@@ -1158,6 +1247,15 @@ function encodeFileRows(): Uint8Array {
     }, 1);
   }, 1);
   return writer.finish();
+}
+
+function fakeDb<T extends object>(
+  db: T,
+): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
+  return {
+    setTickScheduler: () => undefined,
+    ...db,
+  };
 }
 
 function uuidBytes(value: string): Uint8Array {
