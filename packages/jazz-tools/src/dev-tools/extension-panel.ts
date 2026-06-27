@@ -618,7 +618,4 @@ class DevToolsJazzClient {
     }
     return this.fallbackSchema;
   }
-  getRuntime(): Runtime {
-    throw new Error("Method not implemented.");
-  }
 }
