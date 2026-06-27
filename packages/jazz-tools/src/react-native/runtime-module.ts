@@ -1,72 +1,40 @@
-import { JazzClient, type DurabilityTier } from "../runtime/client.js";
+import type { JazzClient, DurabilityTier } from "../runtime/client.js";
 import type { DbConfig as RuntimeDbConfig } from "../runtime/db.js";
 import {
   DbRuntimeModule,
   type DbRuntimeClientContext,
   type RuntimeTokenOptions,
 } from "../runtime/db-runtime-module.js";
-import { createJazzRnRuntime } from "./create-jazz-rn-runtime.js";
-import { getJazzRnSync, loadJazzRn } from "./jazz-rn-loader.js";
 
 export interface ReactNativeRuntimeDbConfig extends RuntimeDbConfig {
   dataPath?: string;
   tier?: DurabilityTier;
 }
 
+export const REACT_NATIVE_DIRECT_CORE_ALPHA_UNSUPPORTED_MESSAGE =
+  "[jazz-tools] React Native is unsupported in the direct-core alpha runtime. " +
+  "Use a non-React-Native runtime for now; the legacy alpha RuntimeCore path is intentionally disabled.";
+
+export function createReactNativeDirectCoreAlphaUnsupportedError(): Error {
+  return new Error(REACT_NATIVE_DIRECT_CORE_ALPHA_UNSUPPORTED_MESSAGE);
+}
+
 export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntimeDbConfig> {
   override readonly supportsPolicyBypass = false;
 
   protected override async loadRuntime(): Promise<void> {
-    await loadJazzRn();
+    throw createReactNativeDirectCoreAlphaUnsupportedError();
   }
 
-  override createClient({
-    config,
-    schema,
-    onAuthFailure,
-  }: DbRuntimeClientContext<ReactNativeRuntimeDbConfig>): JazzClient {
-    const tier = config.tier ?? "local";
-    const runtime = createJazzRnRuntime({
-      schema,
-      appId: config.appId,
-      env: config.env,
-      userBranch: config.userBranch,
-      tier,
-      dataPath: config.dataPath,
-    });
-
-    return JazzClient.connectWithRuntime(
-      runtime,
-      {
-        appId: config.appId,
-        schema,
-        serverUrl: config.serverUrl,
-        env: config.env,
-        userBranch: config.userBranch,
-        jwtToken: config.jwtToken,
-        adminSecret: config.adminSecret,
-        tier,
-        defaultDurabilityTier: "local",
-      },
-      {
-        onAuthFailure,
-      },
-    );
+  override createClient(_context: DbRuntimeClientContext<ReactNativeRuntimeDbConfig>): JazzClient {
+    throw createReactNativeDirectCoreAlphaUnsupportedError();
   }
 
-  override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return getJazzRnSync().jazz_rn.mintLocalFirstToken(
-      options.secret,
-      options.audience,
-      BigInt(options.ttlSeconds),
-    );
+  override mintLocalFirstToken(_options: RuntimeTokenOptions): string {
+    throw createReactNativeDirectCoreAlphaUnsupportedError();
   }
 
-  override mintAnonymousToken(options: RuntimeTokenOptions): string {
-    return getJazzRnSync().jazz_rn.mintAnonymousToken(
-      options.secret,
-      options.audience,
-      BigInt(options.ttlSeconds),
-    );
+  override mintAnonymousToken(_options: RuntimeTokenOptions): string {
+    throw createReactNativeDirectCoreAlphaUnsupportedError();
   }
 }

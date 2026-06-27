@@ -43,7 +43,6 @@
     },
     "./react-core": {
       "types": "./dist/react-core/index.d.ts",
-      "react-native": "./dist/react-native/react-core.js",
       "default": "./dist/react-core/index.js"
     },
     "./shared": {
