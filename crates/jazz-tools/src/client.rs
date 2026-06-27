@@ -229,9 +229,14 @@ impl DirectCoreEngine {
     }
 
     async fn wait_for_tick(&self) -> Result<()> {
-        self.tick()?;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        self.tick()
+        if self.has_local_driver {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(())
+        } else {
+            self.tick()?;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.tick()
+        }
     }
 
     async fn query_rows(
@@ -241,7 +246,15 @@ impl DirectCoreEngine {
         table: String,
         wait_for_coverage: bool,
     ) -> Result<Vec<jazz::node::CurrentRow>> {
-        DirectCoreInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
+        DirectCoreInner::handle_query(
+            &self.inner,
+            query,
+            opts,
+            table,
+            wait_for_coverage,
+            !self.has_local_driver,
+        )
+        .await
     }
 
     async fn subscribe(
@@ -251,7 +264,15 @@ impl DirectCoreEngine {
         table: String,
         tx: mpsc::UnboundedSender<OrderedRowDelta>,
     ) -> Result<()> {
-        DirectCoreInner::handle_subscribe(&self.inner, query, opts, table, tx).await
+        DirectCoreInner::handle_subscribe(
+            &self.inner,
+            query,
+            opts,
+            table,
+            tx,
+            !self.has_local_driver,
+        )
+        .await
     }
 
     fn insert(
@@ -328,7 +349,8 @@ impl DirectCoreEngine {
     }
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
-        DirectCoreInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
+        DirectCoreInner::handle_wait_for_batch(&self.inner, batch_id, tier, !self.has_local_driver)
+            .await
     }
 
     fn tick(&self) -> Result<()> {
@@ -423,6 +445,7 @@ impl DirectCoreInner {
         opts: CoreReadOpts,
         table: String,
         wait_for_coverage: bool,
+        tick_manually: bool,
     ) -> Result<Vec<jazz::node::CurrentRow>> {
         let prepared = {
             let inner = inner.borrow();
@@ -437,12 +460,14 @@ impl DirectCoreInner {
             while !inner.borrow().db.query_is_covered(&prepared)
                 && tokio::time::Instant::now() < deadline
             {
-                inner
-                    .borrow()
-                    .connection
-                    .borrow_mut()
-                    .tick()
-                    .map_err(|error| JazzError::Sync(error.to_string()))?;
+                if tick_manually {
+                    inner
+                        .borrow()
+                        .connection
+                        .borrow_mut()
+                        .tick()
+                        .map_err(|error| JazzError::Sync(error.to_string()))?;
+                }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             if !inner.borrow().db.query_is_covered(&prepared) {
@@ -452,12 +477,14 @@ impl DirectCoreInner {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        inner
-            .borrow()
-            .connection
-            .borrow_mut()
-            .tick()
-            .map_err(|error| JazzError::Sync(error.to_string()))?;
+        if tick_manually {
+            inner
+                .borrow()
+                .connection
+                .borrow_mut()
+                .tick()
+                .map_err(|error| JazzError::Sync(error.to_string()))?;
+        }
         let (db, prepared) = {
             let inner = inner.borrow();
             (Rc::clone(&inner.db), prepared)
@@ -476,6 +503,7 @@ impl DirectCoreInner {
         opts: CoreReadOpts,
         table: String,
         tx: mpsc::UnboundedSender<OrderedRowDelta>,
+        tick_manually: bool,
     ) -> Result<()> {
         let (db, prepared) = {
             let inner = inner.borrow();
@@ -491,12 +519,21 @@ impl DirectCoreInner {
             .map_err(|error| JazzError::Query(error.to_string()))?;
         let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(10));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut interval = tick_manually.then(|| {
+                let mut interval = tokio::time::interval(Duration::from_millis(10));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                interval
+            });
             let mut stream = stream;
             loop {
                 tokio::select! {
-                    _ = interval.tick() => {
+                    _ = async {
+                        if let Some(interval) = interval.as_mut() {
+                            interval.tick().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
                         if inner.borrow().connection.borrow_mut().tick().is_err() {
                             break;
                         }
@@ -524,6 +561,7 @@ impl DirectCoreInner {
         inner: &Rc<std::cell::RefCell<Self>>,
         batch_id: BatchId,
         tier: DurabilityTier,
+        tick_manually: bool,
     ) -> Result<()> {
         let tx_id = inner
             .borrow()
@@ -534,12 +572,14 @@ impl DirectCoreInner {
         let desired = core_tier(tier);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         loop {
-            inner
-                .borrow()
-                .connection
-                .borrow_mut()
-                .tick()
-                .map_err(|error| JazzError::Sync(error.to_string()))?;
+            if tick_manually {
+                inner
+                    .borrow()
+                    .connection
+                    .borrow_mut()
+                    .tick()
+                    .map_err(|error| JazzError::Sync(error.to_string()))?;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
             let state = inner
                 .borrow()
@@ -1420,6 +1460,14 @@ impl JazzClient {
             ClientEngine::Legacy { runtime } => runtime.transport_client_id(),
             #[cfg(feature = "direct-core-client")]
             ClientEngine::DirectCore { .. } => None,
+        }
+    }
+
+    #[cfg(feature = "direct-core-client")]
+    pub fn direct_core_local_driver_active(&self) -> bool {
+        match &self.engine {
+            ClientEngine::Legacy { .. } => false,
+            ClientEngine::DirectCore { engine, .. } => engine.has_local_driver,
         }
     }
 
