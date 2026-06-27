@@ -316,16 +316,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     storage_flush_retry_scheduled: bool,
     /// Last storage flush error recorded by a durability barrier.
     storage_flush_error: Option<StorageError>,
-    /// Legacy alpha transport handle for WebSocket sync.
-    #[cfg(feature = "legacy-alpha-transport")]
-    pub(crate) transport: Option<crate::transport_manager::TransportHandle>,
-    /// True when an inbound catalogue sync changed local catalogue state and
-    /// the transport handshake hash must be refreshed after the tick applies it.
-    #[cfg(feature = "legacy-alpha-transport")]
-    transport_catalogue_state_hash_dirty: bool,
-    /// Fallback outbox sender used when no `TransportHandle` is set (e.g. on
-    /// the server side, where the runtime fans out via `ConnectionEventHub`
-    /// instead of a WebSocket connection).
+    /// Fallback outbox sender used by legacy runtime tests and server-side
+    /// fanout through `ConnectionEventHub`.
     ///
     /// On wasm32 the bound is `dyn SyncSender` because WASM is single-threaded
     /// and the JS/web-sys types it holds (`JsValue`, `Function`, `Rc`) are
@@ -470,10 +462,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             storage_write_pending_flush: false,
             storage_flush_retry_scheduled: false,
             storage_flush_error: None,
-            #[cfg(feature = "legacy-alpha-transport")]
-            transport: None,
-            #[cfg(feature = "legacy-alpha-transport")]
-            transport_catalogue_state_hash_dirty: false,
             sync_sender: None,
             buffer_outbox_without_sync_sender: true,
             parked_sync_messages: Vec::new(),
@@ -681,8 +669,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn persist_schema(&mut self) -> ObjectId {
         let id = self.schema_manager.persist_schema(&mut self.storage);
         self.mark_storage_write_pending_flush();
-        #[cfg(feature = "legacy-alpha-transport")]
-        self.refresh_transport_catalogue_state_hash();
         info!(object_id = %id, "persisted schema to catalogue");
         id
     }
@@ -699,8 +685,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .schema_manager
             .persist_schema_object(&mut self.storage, &schema);
         self.mark_storage_write_pending_flush();
-        #[cfg(feature = "legacy-alpha-transport")]
-        self.refresh_transport_catalogue_state_hash();
         self.immediate_tick();
         id
     }
@@ -719,8 +703,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         )?;
         if id.is_some() {
             self.mark_storage_write_pending_flush();
-            #[cfg(feature = "legacy-alpha-transport")]
-            self.refresh_transport_catalogue_state_hash();
         }
         self.immediate_tick();
         Ok(id)
@@ -733,8 +715,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .publish_lens(&mut self.storage, lens)
             .map_err(|error| RuntimeError::WriteError(error.to_string()))?;
         self.mark_storage_write_pending_flush();
-        #[cfg(feature = "legacy-alpha-transport")]
-        self.refresh_transport_catalogue_state_hash();
         self.immediate_tick();
         Ok(id)
     }
@@ -761,8 +741,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.schema_manager
             .persist_schema_object(&mut self.storage, &schema);
         self.schema_manager.persist_lens(&mut self.storage, &lens);
-        #[cfg(feature = "legacy-alpha-transport")]
-        self.refresh_transport_catalogue_state_hash();
         Ok(())
     }
 
@@ -772,107 +750,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 }
 
-/// Create a `TransportManager`, seed it with the current catalogue state hash,
-/// install its handle on the given core, and return the manager for the caller
-/// to spawn on an appropriate executor.
-///
-/// Centralises the boilerplate that would otherwise be duplicated in every
-/// binding (Tokio, NAPI, RN, WASM).
-#[cfg(feature = "legacy-alpha-transport")]
-pub fn install_transport<S, Sch, W, T>(
-    core: &mut RuntimeCore<S, Sch>,
-    url: String,
-    auth: crate::transport_manager::AuthConfig,
-    tick: T,
-) -> crate::transport_manager::TransportManager<W, T>
-where
-    S: crate::storage::Storage,
-    Sch: Scheduler,
-    W: crate::transport_manager::StreamAdapter + 'static,
-    T: crate::transport_manager::TickNotifier + 'static,
-{
-    install_transport_with_retry_config(
-        core,
-        url,
-        auth,
-        tick,
-        crate::transport_manager::TransportRetryConfig::default(),
-    )
-}
-
-#[cfg(feature = "legacy-alpha-transport")]
-pub fn install_transport_with_retry_config<S, Sch, W, T>(
-    core: &mut RuntimeCore<S, Sch>,
-    url: String,
-    auth: crate::transport_manager::AuthConfig,
-    tick: T,
-    retry_config: crate::transport_manager::TransportRetryConfig,
-) -> crate::transport_manager::TransportManager<W, T>
-where
-    S: crate::storage::Storage,
-    Sch: Scheduler,
-    W: crate::transport_manager::StreamAdapter + 'static,
-    T: crate::transport_manager::TickNotifier + 'static,
-{
-    debug_assert!(
-        core.transport().is_none(),
-        "install_transport called while a transport is already installed; call clear_transport / disconnect first"
-    );
-    let (handle, manager) =
-        crate::transport_manager::create_with_retry_config::<W, T>(url, auth, tick, retry_config);
-    handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
-    handle.set_declared_schema_hash(
-        core.schema_manager()
-            .has_current_schema()
-            .then(|| core.schema_manager().current_hash().to_string()),
-    );
-    core.schema_manager
-        .query_manager_mut()
-        .sync_manager_mut()
-        .add_pending_server(handle.server_id);
-    core.set_transport(handle);
-    manager
-}
-
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
-    /// Attach a transport handle. Replaces any existing transport.
-    #[cfg(feature = "legacy-alpha-transport")]
-    pub fn set_transport(&mut self, handle: crate::transport_manager::TransportHandle) {
-        self.transport = Some(handle);
-    }
-
-    #[cfg(feature = "legacy-alpha-transport")]
-    pub(crate) fn mark_transport_catalogue_state_hash_dirty(&mut self) {
-        self.transport_catalogue_state_hash_dirty = true;
-    }
-
-    #[cfg(feature = "legacy-alpha-transport")]
-    fn refresh_transport_catalogue_state_hash(&mut self) {
-        if let Some(handle) = self.transport.as_ref() {
-            handle.set_catalogue_state_hash(Some(self.schema_manager.catalogue_state_hash()));
-        }
-        self.transport_catalogue_state_hash_dirty = false;
-    }
-
-    /// Detach the transport handle and remove its server from sync state.
-    #[cfg(feature = "legacy-alpha-transport")]
-    pub fn clear_transport(&mut self) {
-        if let Some(h) = self.transport.take() {
-            self.remove_server(h.server_id);
-        }
-    }
-
-    /// Returns a reference to the active transport handle, if any.
-    #[cfg(feature = "legacy-alpha-transport")]
-    pub fn transport(&self) -> Option<&crate::transport_manager::TransportHandle> {
-        self.transport.as_ref()
-    }
-}
-
-impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
-    /// Install a fallback sync sender used when no `TransportHandle` is set.
-    /// On the server side, this is the bridge from the runtime's outbox into
-    /// the per-connection `ConnectionEventHub` channels.
+    /// Install a fallback sync sender for legacy runtime tests and server-side
+    /// fanout into per-connection `ConnectionEventHub` channels.
     #[cfg(target_arch = "wasm32")]
     pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender>) {
         self.sync_sender = Some(sender);

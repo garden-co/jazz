@@ -716,54 +716,6 @@ fn peer_without_catalogue_hash_gets_full_catalogue_replay() {
     );
 }
 
-#[test]
-fn existing_peer_with_stale_catalogue_hash_gets_full_catalogue_replay_on_reconnect() {
-    let schema = test_schema();
-    let app_id = AppId::from_name("test-app");
-    let sync_manager = SyncManager::new();
-    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
-
-    let catalogue_state_hash = core.schema_manager().catalogue_state_hash();
-    let peer_id = ClientId::new();
-
-    core.ensure_client_as_peer_with_catalogue_state_hash(peer_id, Some(&catalogue_state_hash));
-    core.batched_tick();
-    let initial_messages = core.sync_sender().take();
-    assert_eq!(
-        catalogue_replay_to_client_count(&initial_messages, peer_id),
-        0,
-        "peer should not receive catalogue while its hash matches core"
-    );
-
-    let schema_object_id = core.persist_schema();
-    core.batched_tick();
-    let no_op_publish_messages = core.sync_sender().take();
-    assert_eq!(
-        catalogue_replay_to_client_count(&no_op_publish_messages, peer_id),
-        0,
-        "unchanged no-op catalogue publish should not duplicate catalogue messages"
-    );
-
-    core.ensure_client_as_peer_with_catalogue_state_hash(peer_id, Some(&catalogue_state_hash));
-    core.batched_tick();
-
-    let matching_reconnect_messages = core.sync_sender().take();
-    assert_eq!(
-        catalogue_replay_to_client_count(&matching_reconnect_messages, peer_id),
-        0,
-        "existing peer with matching hash should not receive replay on reconnect; messages: {matching_reconnect_messages:?}"
-    );
-
-    core.ensure_client_as_peer_with_catalogue_state_hash(peer_id, Some("stale-catalogue-hash"));
-    core.batched_tick();
-
-    let reconnect_messages = core.sync_sender().take();
-    assert!(
-        has_catalogue_replay_to_client(&reconnect_messages, peer_id, schema_object_id),
-        "existing peer with stale hash should receive replay on reconnect; messages: {reconnect_messages:?}"
-    );
-}
 // =========================================================================
 // Foreign Key — No Write-Time Validation
 // =========================================================================

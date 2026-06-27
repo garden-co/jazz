@@ -15,10 +15,10 @@ medium
 ## Notes
 
 - On a 64-bit overcommit host an oversized count/length usually surfaces as a clean decode error rather than an OOM (lazy reservation + a fast read failure). The genuinely memory-_committing_ path is LZ4 decompression (it writes the output), so the real exposure is: a constrained / no-overcommit server, or a 32-bit **WASM client** (linear-memory growth traps → the client bricks irrecoverably).
-- Failure mode today is poor: an over-cap or malformed frame on the steady-state loops is **silently dropped** (`frame_decode` → `None` → `continue` in `websocket.rs` and `transport_manager.rs`), with no error or ack to the sender. For a legitimate over-cap frame that means silent data loss / a stalled sync, not a recoverable error.
+- Failure mode today is poor: an over-cap or malformed frame on the steady-state loops is **silently dropped** (`frame_decode` -> `None` -> `continue` in `websocket.rs`), with no error or ack to the sender. For a legitimate over-cap frame that means silent data loss / a stalled sync, not a recoverable error.
 - Because legitimate frames are unbounded, a hardcoded receiver cap is the wrong shape — it is an invented policy that either rejects valid traffic (too low) or barely helps (too high). A fixed post-auth cap was deliberately **not** added for this reason.
 - Desired direction (the real fix): **byte-budgeted framing**.
-  - Add a byte budget `B` to the sender-side batchers (`transport_manager.rs` outbound, `websocket.rs` outbound — both currently count-only) so a batch is split across multiple frames to fit `B`. A 256 × 2 MiB batch becomes ⌈512 MiB / B⌉ frames automatically.
+  - Add a byte budget `B` to the sender-side batcher (`websocket.rs` outbound, currently count-only) so a batch is split across multiple frames to fit `B`. A 256 x 2 MiB batch becomes `ceil(512 MiB / B)` frames automatically.
   - Receiver cap then = `B` + LZ4 framing margin — tight and safe, because frames are bounded _by construction_ rather than by guesswork.
   - Splitting is only possible down to **one row** (a batch is atomic full-row data; sub-row chunking would be a deep CRDT/wire-format change). So `B` doubles as an effective max-row size, and a row larger than `B` should fail with a **loud, recoverable** send-side error (e.g. `RowExceedsFrameBudget { size, max }`) — never a panic or a silent drop.
   - Make `B` configurable (e.g. `JAZZ_MAX_FRAME_BYTES`, matching the existing `JAZZ_*` / `NODE_ENV` config pattern) so constrained deployments can tighten it and bulk-binary workloads can raise it.

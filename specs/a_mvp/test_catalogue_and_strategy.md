@@ -267,7 +267,6 @@ Do this file-by-file and require a short reason in the pruning PR.
 Known gaps from current repo notes:
 
 - Multi-server sync coverage is tracked in `specs/todo/issues/test_multi-server-sync.md`.
-- WebSocket transport integration coverage is tracked in `specs/todo/issues/test_websocket-transport-integration.md`.
 - Expo Android websocket e2e is tracked in `specs/todo/issues/expo-android-maestro-e2e-ws-unverified.md`.
 - Sync protocol reliability appears as an MVP idea in `specs/todo/ideas/1_mvp/sync-protocol-reliability.md`.
 
@@ -301,7 +300,6 @@ Start with these refactors because they should clarify the most with the least r
 Completed:
 
 - Split `crates/jazz-tools/src/runtime_core/tests.rs` into shared fixtures plus contract modules:
-  - `runtime_core/tests/install_transport_tests.rs`
   - `runtime_core/tests/basic.rs`
   - `runtime_core/tests/sync_replay.rs`
   - `runtime_core/tests/write_batch.rs`

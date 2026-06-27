@@ -7,11 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(feature = "direct-core-client")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(
-    feature = "direct-core-client",
-    feature = "rocksdb",
-    all(test, feature = "legacy-alpha-transport")
-))]
+#[cfg(any(feature = "direct-core-client", feature = "rocksdb"))]
 use std::time::Duration;
 
 use crate::query_manager::query::Query;
@@ -31,8 +27,6 @@ use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalog
 use crate::server::direct_client::DirectCoreWebSocketTransport;
 #[cfg(feature = "direct-core-client")]
 use crate::server::direct_schema::convert_alpha_schema;
-#[cfg(all(test, feature = "legacy-alpha-transport"))]
-use crate::storage::MemoryStorage;
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
 use crate::storage::SqliteStorage;
 use crate::storage::Storage;
@@ -40,8 +34,6 @@ use crate::storage::Storage;
 use crate::storage::{RocksDBStorage, StorageError};
 #[cfg(any(feature = "test-utils", feature = "rocksdb"))]
 use crate::sync_manager::ClientId;
-#[cfg(all(test, feature = "legacy-alpha-transport"))]
-use crate::sync_manager::OutboxEntry;
 use crate::sync_manager::{DurabilityTier, SyncManager};
 #[cfg(feature = "direct-core-client")]
 use crate::transport_auth::AuthConfig as WsAuthConfig;
@@ -77,8 +69,6 @@ use crate::ClientStorage;
 use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
 
 type DynStorage = Box<dyn Storage + Send>;
-#[cfg(all(test, feature = "legacy-alpha-transport"))]
-type ClientRuntime = crate::runtime_tokio::TokioRuntime<DynStorage>;
 #[cfg(feature = "direct-core-client")]
 type DirectCoreMemoryDb = CoreDb<CoreMemoryStorage>;
 #[cfg(all(feature = "direct-core-client", feature = "rocksdb"))]
@@ -1204,31 +1194,6 @@ fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     }
 }
 
-#[cfg(all(test, feature = "legacy-alpha-transport"))]
-async fn wait_for_initial_transport_handshake(
-    runtime: &ClientRuntime,
-    timeout_after: Duration,
-) -> Result<()> {
-    let connected = tokio::time::timeout(timeout_after, runtime.transport_wait_until_connected())
-        .await
-        .map_err(|_| {
-            JazzError::Connection(
-                "timed out waiting for WebSocket handshake to complete".to_string(),
-            )
-        })?;
-    if !connected {
-        return Err(JazzError::Connection(
-            "transport closed before WebSocket handshake completed".to_string(),
-        ));
-    }
-    // The watch signal means the transport queued `Connected`; drain the
-    // scheduled tick so `connect()` returns with the server registered.
-    runtime.flush().await.map_err(|e| {
-        JazzError::Connection(format!("failed to apply initial WebSocket handshake: {e}"))
-    })?;
-    Ok(())
-}
-
 impl JazzClient {
     #[cfg(feature = "direct-core-client")]
     fn check_direct_write_not_rejected(db: &DirectCoreBackend, tx_id: CoreTxId) -> Result<()> {
@@ -1764,8 +1729,6 @@ mod tests {
     use crate::query_manager::types::{SchemaHash, TableName, TablePolicies};
     #[cfg(feature = "rocksdb")]
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
-    #[cfg(feature = "legacy-alpha-transport")]
-    use crate::runtime_tokio::TokioRuntime;
     use crate::schema_manager::AppId;
     #[cfg(feature = "rocksdb")]
     use crate::storage::RocksDBStorage;
@@ -2064,31 +2027,6 @@ mod tests {
             .expect("query committed rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(ObjectId::from_uuid(rows[0].row_uuid().0), row_id);
-    }
-
-    #[cfg(feature = "legacy-alpha-transport")]
-    #[tokio::test]
-    async fn initial_transport_handshake_wait_errors_when_transport_is_absent() {
-        let app_id = AppId::from_name("client-missing-transport");
-        let context = make_offline_context(
-            app_id,
-            TempDir::new().expect("tempdir").keep(),
-            declared_todo_schema(),
-        );
-        let storage: DynStorage = Box::new(MemoryStorage::new());
-        let schema_manager =
-            build_client_schema_manager(storage.as_ref(), &context).expect("schema manager");
-        let runtime = TokioRuntime::new(schema_manager, storage, |_entry: OutboxEntry| {});
-
-        let result = wait_for_initial_transport_handshake(&runtime, Duration::from_secs(1)).await;
-
-        match result {
-            Err(JazzError::Connection(message)) => assert_eq!(
-                message,
-                "transport closed before WebSocket handshake completed"
-            ),
-            other => panic!("expected connection error for missing transport, got {other:?}"),
-        }
     }
 
     #[cfg(feature = "rocksdb")]
