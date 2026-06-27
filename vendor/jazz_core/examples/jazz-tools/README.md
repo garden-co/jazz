@@ -1,7 +1,7 @@
 # jazz-tools Alpha Example
 
 This package starts the actual alpha-style TypeScript package surface named
-`jazz-tools` over direct WASM objects. It runs in Node, keeps row writes encoded
+`jazz-tools` over core WASM objects. It runs in Node, keeps row writes encoded
 at the hot boundary, and uses `src/core-codec.ts` plus
 `src/row-codec.ts` for the small amount of postcard/record encoding that
 the binding layer needs to understand.
@@ -78,7 +78,7 @@ await backendContext.shutdown();
 methods preserve synchronous row visibility and return small write results:
 `insert`, `update`, `upsert`, and `restore` remain row-like while adding `.value`, `.handle`,
 and `.wait({ tier: "local" })`; `delete` returns the same write-result shape with
-`value: undefined`. `restore(table, id, data)` uses the real direct WasmDb restore
+`value: undefined`. `restore(table, id, data)` uses the real core WasmDb restore
 write and refuses currently visible rows so it does not silently behave like an
 overwrite. One-shot reads support `{ includeDeleted: true }` and the exported
 `isDeleted(row)` helper; deleted state is a non-enumerable row marker, not a user
@@ -121,7 +121,7 @@ reads and query-builder reads through transaction objects are still future work.
 `createJazzContext({ appId, app/schema, driver? })` is the smallest
 `jazz-tools/backend` compatibility slice for this WasmDb package. It returns
 `{ db(), asBackend(), shutdown() }`; both `db()` and `asBackend().db` point at
-the same `createDb` memory-backed direct WasmDb instance for now. `driver` may be
+the same `createDb` memory-backed core WasmDb instance for now. `driver` may be
 omitted or set to `"memory"`/`"local"`. Persistent backend storage is not exposed
 honestly in this slice yet, so `"persistent"` or other driver kinds throw before
 opening a DB.
@@ -133,7 +133,7 @@ npm install
 npm test
 ```
 
-`npm test` typechecks, compiles TypeScript, and runs the current direct
+`npm test` typechecks, compiles TypeScript, and runs the current core
 `jazz-tools` compatibility gates: auth/session helpers, client/provider helpers,
 package-root public API, schema DSL, transaction facade,
 backend context, and file/blob helpers.
@@ -154,8 +154,8 @@ backend context, and file/blob helpers.
   guard.
 - `npm run test:alpha-public-flow` runs the smallest public-flow adoption check.
   It is intentionally not part of `npm test` until identity-scoped owner-policy
-  reads are fixed on the direct facade.
-- `npm test` runs the direct public API, auth, React/provider, subscription,
+  reads are fixed on the core facade.
+- `npm test` runs the core public API, auth, React/provider, subscription,
   schema, transaction, backend, and file/blob gates.
 
 ## Scenario
@@ -169,9 +169,9 @@ The example package:
   `where` clauses, and a narrow title substring query with `limit`;
 - opens a memory-only files/blob slice with one `files` row per file containing
   `mime_type` and `data`, then verifies `createFileFromBlob`,
-  `loadFileAsBlob`, direct byte reads, and delete.
+  `loadFileAsBlob`, core byte reads, and delete.
 - keeps older server/WebSocket smoke coverage out of this package until it can be
-  rebuilt directly on `createDb`/`WasmDb.connectUpstream()` without the removed
+  rebuilt on `createDb`/`WasmDb.connectUpstream()` without the removed
   command/event helper layer.
 
 The dedicated `alpha-public-flow-gate.ts` script is the current smallest
@@ -182,12 +182,12 @@ equality, scalar `in`, integer/text ranges, nullable comparisons, text and array
 `contains`, whole-array `eq`/`in`, Bytea `eq`/`in`, multiple `where` clauses,
 result `limit`, and one-shot `include`/`hop`/`gather` facade reads over schema
 references. It currently fails at identity-scoped owner-policy reads, where the
-direct facade returns both owner rows instead of filtering to the requested
+core facade returns both owner rows instead of filtering to the requested
 identity.
 
 The auth/session slice is package-local in `jazz-tools.ts`. `createDb` accepts
 `appId`, `secret`, `jwtToken`, and `cookieSession`; `secret` deterministically
-derives a local-first session and direct account identity, while JWT `sub` maps
+derives a local-first session and core account identity, while JWT `sub` maps
 to `session.user_id` for local policy state. The DB exposes `getAuthState`,
 `onAuthChanged`, and `updateAuthToken`.
 
@@ -199,6 +199,6 @@ created or read.
 ## Deferred Server/Transport Gates
 
 The old HTTP, chat, shared-todo, and WebSocket smoke files were deleted with the
-command/event helper layer. They should come back as direct examples that own
+command/event helper layer. They should come back as core examples that own
 `Db`/`WasmDb` objects and use `WasmDb.connectUpstream()` for byte-frame sync,
 not as resurrected runtime handles or event polling.

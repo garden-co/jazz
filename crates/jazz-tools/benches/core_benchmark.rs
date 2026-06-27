@@ -1,4 +1,4 @@
-//! Direct jazz_core facade benchmarks.
+//! core facade benchmarks.
 //!
 //! These benchmarks intentionally exercise the replacement core path directly
 //! instead of the legacy jazz-tools RuntimeCore stack.
@@ -129,7 +129,7 @@ fn open_db_with_schema(seed: u64, schema: JazzSchema) -> DirectDb {
         )
         .with_id_source(SeededRowIdSource::new(seed)),
     ))
-    .expect("open direct benchmark db")
+    .expect("open core benchmark db")
 }
 
 fn row_uuid(index: usize) -> RowUuid {
@@ -166,7 +166,7 @@ fn seed_documents(db: &DirectDb, count: usize) -> Vec<RowUuid> {
         .map(|index| {
             let write = db
                 .insert("documents", cells(index))
-                .expect("seed direct benchmark row");
+                .expect("seed core benchmark row");
             block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
             write.row_uuid()
         })
@@ -178,7 +178,7 @@ fn seed_filtered_documents(db: &DirectDb, count: usize) -> Vec<RowUuid> {
         .map(|index| {
             let write = db
                 .insert("documents", filtered_cells(index))
-                .expect("seed direct benchmark row");
+                .expect("seed core benchmark row");
             block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
             write.row_uuid()
         })
@@ -238,8 +238,8 @@ fn filtered_documents_query(db: &DirectDb) -> jazz::db::PreparedQuery {
     .expect("prepare filtered documents query")
 }
 
-fn direct_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_core/insert");
+fn core_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("core/insert");
 
     for initial_rows in [1_000usize] {
         group.throughput(Throughput::Elements(1));
@@ -255,7 +255,7 @@ fn direct_insert(c: &mut Criterion) {
                     next += 1;
                     let write = db
                         .insert("documents", cells(next))
-                        .expect("direct insert should succeed");
+                        .expect("core insert should succeed");
                     block_on(write.wait(DurabilityTier::Local)).expect("insert should be local");
                     write.row_uuid()
                 });
@@ -266,8 +266,8 @@ fn direct_insert(c: &mut Criterion) {
     group.finish();
 }
 
-fn direct_update_and_read(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_core/update_read");
+fn core_update_and_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("core/update_read");
 
     for row_count in [1_000usize] {
         group.throughput(Throughput::Elements(1));
@@ -291,8 +291,8 @@ fn direct_update_and_read(c: &mut Criterion) {
                             Value::String(format!("Updated content {index}")),
                         )]),
                     )
-                    .expect("direct update should succeed");
-                    db.read(&query).expect("direct read should succeed").len()
+                    .expect("core update should succeed");
+                    db.read(&query).expect("core read should succeed").len()
                 });
             },
         );
@@ -301,8 +301,8 @@ fn direct_update_and_read(c: &mut Criterion) {
     group.finish();
 }
 
-fn direct_filtered_prepared_read(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_core/filtered_prepared_read");
+fn core_filtered_prepared_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("core/filtered_prepared_read");
 
     for row_count in [1_000usize] {
         group.throughput(Throughput::Elements(row_count as u64));
@@ -316,7 +316,7 @@ fn direct_filtered_prepared_read(c: &mut Criterion) {
 
                 b.iter(|| {
                     db.read(&query)
-                        .expect("direct filtered read should succeed")
+                        .expect("core filtered read should succeed")
                         .len()
                 });
             },
@@ -326,8 +326,8 @@ fn direct_filtered_prepared_read(c: &mut Criterion) {
     group.finish();
 }
 
-fn direct_reachable_policy_read(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_core/reachable_policy_read");
+fn core_reachable_policy_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("core/reachable_policy_read");
 
     for row_count in [1_000usize] {
         group.throughput(Throughput::Elements(row_count as u64));
@@ -341,7 +341,7 @@ fn direct_reachable_policy_read(c: &mut Criterion) {
 
                 b.iter(|| {
                     db.read(&query)
-                        .expect("direct reachable policy read should succeed")
+                        .expect("core reachable policy read should succeed")
                         .len()
                 });
             },
@@ -351,8 +351,8 @@ fn direct_reachable_policy_read(c: &mut Criterion) {
     group.finish();
 }
 
-fn direct_subscribed_write(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_core/subscribed_write");
+fn core_subscribed_write(c: &mut Criterion) {
+    let mut group = c.benchmark_group("core/subscribed_write");
 
     for row_count in [1_000usize] {
         group.throughput(Throughput::Elements(1));
@@ -376,7 +376,7 @@ fn direct_subscribed_write(c: &mut Criterion) {
                 b.iter(|| {
                     next += 1;
                     db.insert("documents", cells(next))
-                        .expect("direct subscribed insert should succeed");
+                        .expect("core subscribed insert should succeed");
                     match block_on(subscription.next_event()) {
                         Some(SubscriptionEvent::Delta { added, .. }) => added.len(),
                         other => panic!("expected subscription delta event, got {other:?}"),
@@ -389,8 +389,8 @@ fn direct_subscribed_write(c: &mut Criterion) {
     group.finish();
 }
 
-fn direct_owner_policy_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_core/owner_policy_insert");
+fn core_owner_policy_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("core/owner_policy_insert");
 
     for initial_rows in [1_000usize] {
         group.throughput(Throughput::Elements(1));
@@ -426,6 +426,6 @@ fn direct_owner_policy_insert(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = direct_insert, direct_update_and_read, direct_filtered_prepared_read, direct_subscribed_write, direct_owner_policy_insert, direct_reachable_policy_read
+    targets = core_insert, core_update_and_read, core_filtered_prepared_read, core_subscribed_write, core_owner_policy_insert, core_reachable_policy_read
 }
 criterion_main!(benches);

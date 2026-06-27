@@ -13,7 +13,7 @@ That is enough because the interesting structure lives inside the typed sync pay
 
 ### `/apps/:app_id/ws`
 
-Clients open one WebSocket and exchange direct core wire frames.
+Clients open one WebSocket and exchange core wire frames.
 
 Every WebSocket message uses the same outer frame shape:
 
@@ -22,7 +22,7 @@ Every WebSocket message uses the same outer frame shape:
 ```
 
 The initial auth handshake payload is JSON before compression. Once both sides
-confirm the direct wire protocol, post-handshake messages carry core
+confirm the core wire protocol, post-handshake messages carry core
 `WireFrame` payloads rather than the old alpha `SyncPayload` WebSocket event
 envelope.
 
@@ -30,12 +30,12 @@ The connection is app-scoped, so every non-health server interaction uses the sa
 prefix as the cloud server.
 
 Server-to-server upstream sync through the old alpha transport is paused while
-the direct core engine path becomes canonical. Direct client WebSocket files are
+the core engine path becomes canonical. Core client WebSocket files are
 kept under the server module.
 
 ## What Actually Travels
 
-The transport does not invent a second data model. It carries direct core wire
+The transport does not invent a second data model. It carries core wire
 messages that the core database already understands.
 
 That means transport code can stay thin. It does not need to understand relational semantics beyond "deserialize this payload and hand it to the runtime".
@@ -93,11 +93,11 @@ The in-repo server keeps a small route set:
 
 ## Key Files
 
-| File                                                      | Purpose                                |
-| --------------------------------------------------------- | -------------------------------------- |
-| `crates/jazz-tools/src/server/direct_client.rs`           | Direct core WebSocket client transport |
-| `crates/jazz-tools/src/server/routes/direct_websocket.rs` | Direct core WebSocket server route     |
-| `crates/jazz-tools/src/server/routes/`                    | In-repo HTTP server routes             |
-| `crates/jazz-tools/src/middleware/auth.rs`                | HTTP auth handling                     |
-| `packages/jazz-tools/src/runtime/sync-transport.ts`       | TypeScript transport helpers           |
-| `packages/jazz-tools/src/runtime/worker-bridge.ts`        | Browser worker transport bridge        |
+| File                                                | Purpose                         |
+| --------------------------------------------------- | ------------------------------- |
+| `crates/jazz-tools/src/server/websocket_client.rs`  | WebSocket client transport      |
+| `crates/jazz-tools/src/server/routes/websocket.rs`  | WebSocket server route          |
+| `crates/jazz-tools/src/server/routes/`              | In-repo HTTP server routes      |
+| `crates/jazz-tools/src/middleware/auth.rs`          | HTTP auth handling              |
+| `packages/jazz-tools/src/runtime/sync-transport.ts` | TypeScript transport helpers    |
+| `packages/jazz-tools/src/runtime/worker-bridge.ts`  | Browser worker transport bridge |

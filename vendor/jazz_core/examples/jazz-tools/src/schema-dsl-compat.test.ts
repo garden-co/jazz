@@ -33,7 +33,7 @@ type ProjectRow = s.RowOf<typeof app.projects>;
 
 const _projectRow: ProjectRow = { id: "project-1" };
 
-test("schema DSL column builders materialize to direct WasmDb column definitions", () => {
+test("schema DSL column builders materialize to core WasmDb column definitions", () => {
   assert.equal(_projectRow.id, "project-1");
   assert.equal(app.projects._table, "projects");
 

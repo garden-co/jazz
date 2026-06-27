@@ -9,15 +9,15 @@ mod builder;
 mod catalogue;
 mod catalogue_storage;
 mod core_server;
-pub mod direct_client;
-pub(crate) mod direct_schema;
 pub mod routes;
+pub(crate) mod schema_convert;
 mod shutdown;
 #[cfg(feature = "test-utils")]
 mod testing;
+pub mod websocket_client;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
-pub(crate) use catalogue::{DirectCatalogueStore, ServerCatalogue};
+pub(crate) use catalogue::{ServerCatalogue, StoredCatalogue};
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 pub(crate) use catalogue_storage::CatalogueRocksDbStorage;
 #[cfg(test)]
@@ -56,7 +56,7 @@ pub struct ServerState {
     /// Direct, storage-backed admin catalogue store. Production websocket sync,
     /// row storage, query execution, and client lifecycle are owned by
     /// the local-owner core server handle.
-    pub(crate) catalogue_store: DirectCatalogueStore,
+    pub(crate) catalogue_store: StoredCatalogue,
     pub(crate) catalogue: ServerCatalogue,
     #[allow(dead_code)]
     pub app_id: AppId,
@@ -70,7 +70,7 @@ pub struct ServerState {
     pub http_client: reqwest::Client,
     /// Configured verifier for external JWTs.
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
-    /// Sendable handle to the local-owner jazz_core peer loop for the direct websocket route.
+    /// Sendable handle to the local-owner jazz_core peer loop for the websocket route.
     pub(crate) core_server: StdRwLock<Option<core_server::LocalCoreServerHandle>>,
     pub(crate) core_server_storage_config: Option<StorageConfig>,
     pub shutdown: ShutdownController,
@@ -227,7 +227,7 @@ mod tests {
     ) -> Arc<ServerState> {
         let app_id = AppId::from_name("shutdown-storage-test");
         Arc::new(ServerState {
-            catalogue_store: DirectCatalogueStore::with_test_observability(
+            catalogue_store: StoredCatalogue::with_test_observability(
                 app_id,
                 Some(shutdown_test_schema()),
                 storage,

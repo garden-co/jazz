@@ -1,8 +1,8 @@
 # Batched Tick Orchestration - Legacy Alpha Runtime
 
-`RuntimeCore` was the old alpha runtime. In the grafted direct-core branch it
+`RuntimeCore` was the old alpha runtime. In the grafted core branch it
 has been deleted from active `jazz-tools`; these notes are retained only as
-historical context for behavior that must be rebuilt on the direct-core runtime.
+historical context for behavior that must be rebuilt on the core runtime.
 
 Application code wants two things at the same time:
 
@@ -26,7 +26,7 @@ The old runtime owns:
 - a `SyncSender`
 
 `QueryManager` lives inside `SchemaManager`, so the old relational stack settles
-inside one runtime entry point. New execution work should move to direct core /
+inside one runtime entry point. New execution work should move to core /
 Groove rather than adding behavior here.
 
 ## Why There Are Two Ticks

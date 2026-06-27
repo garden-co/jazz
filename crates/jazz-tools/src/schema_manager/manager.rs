@@ -87,7 +87,7 @@ pub struct CurrentPermissionsSummary {
 /// manager.persist_schema();
 /// manager.persist_lens(&lens);
 ///
-/// // Direct-core runtimes consume the schema/catalogue state exposed here.
+/// // Core runtimes consume the schema/catalogue state exposed here.
 /// ```
 pub struct SchemaManager {
     context: SchemaContext,
@@ -551,7 +551,7 @@ impl SchemaManager {
     // Multi-Schema Query Support
     // =========================================================================
 
-    /// Get branch names as strings for direct-core query planning.
+    /// Get branch names as strings for core query planning.
     pub fn all_branch_strings(&self) -> Vec<String> {
         self.context
             .all_branch_names()

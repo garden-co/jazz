@@ -33,7 +33,7 @@ const app = defineApp({
   }),
 });
 
-test("package root exports newest direct WasmDb public APIs", async () => {
+test("package root exports newest core WasmDb public APIs", async () => {
   assert.equal(typeof createLocalFirstJwtAsync, "function");
   const db = new PackageRootFixtureDb();
   const todos = db.table<Todo, Omit<Todo, "id">>("todos");

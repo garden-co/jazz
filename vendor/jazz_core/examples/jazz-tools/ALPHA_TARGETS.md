@@ -7,7 +7,7 @@ maintainers can recognize while deleting the old parallel engine paths, not to
 host a separate compatibility facade beside the real package.
 
 Operational rule for this branch: core is the product runtime. The
-remaining work should be expressed as public `jazz-tools` API gates, direct
+remaining work should be expressed as public `jazz-tools` API gates,
 core/Groove correctness gaps, or missing storage/server/auth surfaces. Do not
 add a second row-batch/sync-manager compatibility implementation to make old
 tests pass.
@@ -173,12 +173,12 @@ shuts down and remounts the app.
   example-local `TodoClient` owner task that keeps the core
   `JazzClient` on a current-thread `LocalSet` and gives Axum a `Send + Sync`
   request handle. This must stay example-local until we decide whether Rust HTTP
-  apps should talk to the direct `jazz-server` boundary or whether
+  apps should talk to the core `jazz-server` boundary or whether
   `jazz-tools` should expose a real native server gateway.
 - Browser persistent creation in the grafted `jazz-tools` package now uses a
   core dedicated worker for OPFS instead of the deleted broker/leader
   topology. The current positive browser gate covers public CRUD,
-  read-your-writes, subscriptions in the direct path, and local OPFS
+  read-your-writes, subscriptions in the core path, and local OPFS
   shutdown/reopen for a simple inserted row. It also covers persistent OPFS plus
   websocket convergence over a real Rust server for a todo-shaped flow,
   includeDeleted reads for edge-confirmed deletes, and binary-large-value
@@ -232,7 +232,7 @@ shuts down and remounts the app.
   query-builder gaps.
 - Public signed `Integer` values now bridge to core through an
   order-preserving `i32` bias before entering Groove's unsigned `U32` value
-  representation. This keeps negative values round-trippable and makes direct
+  representation. This keeps negative values round-trippable and makes core
   core range predicates such as `priority < 0` sort the same way public Jazz
   signed integers sort. This is a boundary encoding rule, not a new public
   type.
@@ -252,12 +252,12 @@ shuts down and remounts the app.
   flat included closure rows as ordinary descriptor/raw records. The TS WasmDb
   `subscribe(query, callback)` facade now accepts simple and nested forward
   includes such as `todos.include("owner")` and `users.include({ team: { include:
-{ parent: true } } })`, plus a depth-3 reverse include path over the direct
+{ parent: true } } })`, plus a depth-3 reverse include path over the core
   websocket server, and materializes the alpha-shaped included object from flat
   subscription rows. Hop and forward-gather app-shaped subscriptions now also
   pass through the public browser `useAll`/`useAllSuspense` gates. Those
   relation subscriptions are still maintained by the TypeScript core
-  runtime evaluating the supported relation shape and refreshing from direct
+  runtime evaluating the supported relation shape and refreshing from core
   subscription chunks; the remaining integration gap is native relation
   lowering/deltas in core, not another facade fallback. Selected include
   projections remain query-builder gaps. The nested-forward slice is pinned by
@@ -275,7 +275,7 @@ shuts down and remounts the app.
   changes, repeated same-row upsert sequences, sync and async `transaction(cb)`
   commit return/throw rollback behavior, and rollback after rejected async
   callbacks. Mergeable transaction reads and transaction query-builder reads
-  remain future work; session-scoped exclusive writes fail closed until direct
+  remain future work; session-scoped exclusive writes fail closed until core
   core exposes identity-aware exclusive staging.
 - Auth now has the first pure TypeScript alpha-shaped foundation in
   `jazz-tools.ts`: `Session`/`AuthMode`, JWT payload parsing, deterministic
@@ -352,7 +352,7 @@ shuts down and remounts the app.
   compatibility layer. This is still not upload routing, bounded streaming,
   durable object storage, resumable transfer, or full public file API coverage.
 - The old browser worker/broker package path has been deleted from the graft.
-  Browser memory clients still use the in-process direct `CoreRuntime` path, but
+  Browser memory clients still use the in-process core `CoreRuntime` path, but
   persistent browser clients now use one dedicated OPFS-owner worker through
   `PersistentBrowserOpfsProxyRuntime`. That worker owns the real
   `WasmDb.openBrowser(...)` database because OPFS requires worker ownership; it
@@ -382,7 +382,7 @@ shuts down and remounts the app.
   columns, and row/query encoding. `SchemaManager` now owns catalogue, schema,
   lens, and permissions-head state; it is no longer a query/write bridge and no
   longer stores or accepts `SyncManager`. Schema catalogue publication now uses
-  a local catalogue clock plus direct storage writes, and `SchemaManager` drains
+  a local catalogue clock plus core storage writes, and `SchemaManager` drains
   its own pending catalogue updates instead of the old sync inbox bridge. Any
   old `sync_manager` code has been deleted, and remaining storage/schema-manager
   code should be treated as public schema/query vocabulary or catalogue
@@ -455,7 +455,7 @@ shuts down and remounts the app.
   updates still fail several public query shapes; close that as core
   read/subscription completeness work, not as a facade fallback.
 - The core runtime no longer re-runs JS post-filters for public
-  predicates after prepared direct query reads. Public `id` predicates are part
+  predicates after prepared core query reads. Public `id` predicates are part
   of the native contract and lower to core `row_uuid`; the old simple
   JS post-filter fallback for `id` has been removed. Remaining TypeScript
   evaluator work should be framed as relation/include materialization over
@@ -519,7 +519,7 @@ shuts down and remounts the app.
    For subscriptions, simple/nested forward includes, hop/gather app-shaped
    subscriptions, and one depth-3 reverse include websocket gate with selected
    include projection materialization work. The remaining gap is moving this
-   relation maintenance out of TS recompute scaffolding and into native direct
+   relation maintenance out of TS recompute scaffolding and into native core
    core lowering/deltas.
    This is large but should be mechanically clearer than filtered subscription
    completeness.
@@ -568,7 +568,7 @@ subscription correctness after reload, ABI error mapping, format
 versioning/migration rules, quota and cleanup behavior, and worker-safe
 concurrency.
 
-### Direct-Core Worker Runtime Shape
+### Core Worker Worker Runtime Shape
 
 The clean package path is not the deleted alpha browser broker. The package now
 has a narrow single core dedicated worker runtime for browser
@@ -578,13 +578,13 @@ persistence:
   OPFS-backed core in a dedicated module worker, because
   `WasmDb.openBrowser(namespace, schema, config)` rejects on the main thread.
 - Browser memory DBs, Node, NAPI, and server paths should keep the current
-  in-process direct `CoreRuntime` path.
+  in-process core `CoreRuntime` path.
 - The public write API must keep synchronous mutation handles:
   `db.insert/update/delete/upsert/restore(...)` returns immediately with a row
   result/handle, and `.wait({ tier })` remains async.
 - The worker protocol must not restore `browser-broker`, `leader-lock`,
   `WorkerBridge`, `createWithWorker`, or the old package worker protocol.
-- Row and cell payloads should keep using the direct row/record encoding path;
+- Row and cell payloads should keep using the core row/record encoding path;
   do not introduce a JSON row-batch protocol for hot write/read payloads.
 
 The landed smallest vertical slice is:
@@ -602,7 +602,7 @@ The landed smallest vertical slice is:
    cross-origin-isolated `SharedArrayBuffer`/`Atomics.wait` synchronous RPC path
    where available. The mirror is the preferred default because public package
    users should not need cross-origin isolation just to write local state.
-4. The local OPFS reopen gate is unskipped for the package-level direct `Db`
+4. The local OPFS reopen gate is unskipped for the package-level core `Db`
    API, but still skipped for the real React DOM todo flow until app code can
    wait for local durability before unmount.
 5. The persistent OPFS websocket gate is unskipped for React todo CRUD and

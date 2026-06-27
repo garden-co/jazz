@@ -6,7 +6,7 @@ import {
   queryFromTable,
   readAbiRowBatch,
   type AbiRowBatch,
-} from "./direct-codec.js";
+} from "./core-codec.js";
 
 export { PostcardWriter, openConfig, queryFromTable };
 

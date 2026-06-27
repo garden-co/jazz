@@ -1,4 +1,4 @@
-//! Direct jazz_core WebSocket boundary.
+//! Jazz core WebSocket boundary.
 //!
 //! This route intentionally does not share the legacy `SyncPayload` `/ws`
 //! transport framing.
@@ -27,24 +27,23 @@ use tokio::sync::mpsc;
 
 use crate::server::ServerState;
 
-const DIRECT_WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
-const DIRECT_WS_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
-const DIRECT_WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const DIRECT_WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
-const DIRECT_WS_MAX_FRAME_BYTES: usize = 1 << 20;
-const DIRECT_WS_MAX_MESSAGE_BYTES: usize = DIRECT_WS_MAX_FRAME_BYTES;
+const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
+const WS_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
+const WS_MAX_FRAME_BYTES: usize = 1 << 20;
+const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
-static DIRECT_WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
-static DIRECT_WS_ADMISSIONS: OnceLock<std::sync::Mutex<DirectWsAdmissionRegistry>> =
-    OnceLock::new();
+static WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+static WS_ADMISSIONS: OnceLock<std::sync::Mutex<WebSocketAdmissionRegistry>> = OnceLock::new();
 
-/// Direct jazz_core websocket endpoint.
+/// Jazz WebSocket endpoint.
 ///
 /// This is a protocol boundary, not a compatibility shim for the legacy
 /// `SyncPayload` websocket. The semantic `SyncMessage` loop is deliberately
-/// gated on the server owning the state needed to open a real direct `jazz::Db`
+/// gated on the server owning the state needed to open a real `jazz::Db`
 /// peer.
-pub(super) async fn direct_ws_handler(
+pub(super) async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -59,72 +58,72 @@ pub(super) async fn direct_ws_handler(
             .into_response();
     }
 
-    ws.max_frame_size(DIRECT_WS_MAX_FRAME_BYTES)
-        .max_message_size(DIRECT_WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| handle_direct_ws_connection(socket, state, headers))
+    ws.max_frame_size(WS_MAX_FRAME_BYTES)
+        .max_message_size(WS_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
 }
 
 #[derive(Clone, Debug)]
-struct DirectWsAdmission {
+struct WebSocketAdmission {
     identity: AuthorId,
     claims: BTreeMap<String, CoreValue>,
     trust: CommitUnitTrust,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct DirectWsAdmissionKey {
+struct WebSocketAdmissionKey {
     app_id: crate::schema_manager::AppId,
     identity: AuthorId,
 }
 
 #[derive(Debug)]
-struct DirectWsAdmissionEntry {
+struct WebSocketAdmissionEntry {
     id: u64,
-    evict_tx: mpsc::UnboundedSender<DirectWsEviction>,
+    evict_tx: mpsc::UnboundedSender<WebSocketEviction>,
 }
 
 #[derive(Debug)]
-struct DirectWsEviction;
+struct WebSocketEviction;
 
 #[derive(Debug, Default)]
-struct DirectWsAdmissionRegistry {
-    by_key: HashMap<DirectWsAdmissionKey, VecDeque<DirectWsAdmissionEntry>>,
+struct WebSocketAdmissionRegistry {
+    by_key: HashMap<WebSocketAdmissionKey, VecDeque<WebSocketAdmissionEntry>>,
 }
 
-struct DirectWsAdmissionRegistration {
-    key: DirectWsAdmissionKey,
+struct WebSocketAdmissionRegistration {
+    key: WebSocketAdmissionKey,
     id: u64,
-    evict_rx: mpsc::UnboundedReceiver<DirectWsEviction>,
+    evict_rx: mpsc::UnboundedReceiver<WebSocketEviction>,
 }
 
-impl Drop for DirectWsAdmissionRegistration {
+impl Drop for WebSocketAdmissionRegistration {
     fn drop(&mut self) {
-        direct_ws_unregister_admission(self.key, self.id);
+        ws_unregister_admission(self.key, self.id);
     }
 }
 
-fn direct_ws_admission_registry() -> &'static std::sync::Mutex<DirectWsAdmissionRegistry> {
-    DIRECT_WS_ADMISSIONS.get_or_init(Default::default)
+fn ws_admission_registry() -> &'static std::sync::Mutex<WebSocketAdmissionRegistry> {
+    WS_ADMISSIONS.get_or_init(Default::default)
 }
 
-fn direct_ws_register_admission(key: DirectWsAdmissionKey) -> DirectWsAdmissionRegistration {
-    let id = DIRECT_WS_NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+fn ws_register_admission(key: WebSocketAdmissionKey) -> WebSocketAdmissionRegistration {
+    let id = WS_NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
     let (evict_tx, evict_rx) = mpsc::unbounded_channel();
-    let mut registry = direct_ws_admission_registry().lock().unwrap();
+    let mut registry = ws_admission_registry().lock().unwrap();
     let entries = registry.by_key.entry(key).or_default();
-    entries.push_back(DirectWsAdmissionEntry { id, evict_tx });
+    entries.push_back(WebSocketAdmissionEntry { id, evict_tx });
 
-    while entries.len() > DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
+    while entries.len() > WS_PER_IDENTITY_CONNECTION_CAP {
         if let Some(oldest) = entries.pop_front() {
-            let _ = oldest.evict_tx.send(DirectWsEviction);
+            let _ = oldest.evict_tx.send(WebSocketEviction);
         }
     }
 
-    DirectWsAdmissionRegistration { key, id, evict_rx }
+    WebSocketAdmissionRegistration { key, id, evict_rx }
 }
 
-fn direct_ws_unregister_admission(key: DirectWsAdmissionKey, id: u64) {
-    let mut registry = direct_ws_admission_registry().lock().unwrap();
+fn ws_unregister_admission(key: WebSocketAdmissionKey, id: u64) {
+    let mut registry = ws_admission_registry().lock().unwrap();
     let Some(entries) = registry.by_key.get_mut(&key) else {
         return;
     };
@@ -135,8 +134,8 @@ fn direct_ws_unregister_admission(key: DirectWsAdmissionKey, id: u64) {
 }
 
 #[cfg(test)]
-fn direct_ws_live_admissions_for(key: DirectWsAdmissionKey) -> usize {
-    direct_ws_admission_registry()
+fn ws_live_admissions_for(key: WebSocketAdmissionKey) -> usize {
+    ws_admission_registry()
         .lock()
         .unwrap()
         .by_key
@@ -145,23 +144,23 @@ fn direct_ws_live_admissions_for(key: DirectWsAdmissionKey) -> usize {
 }
 
 #[derive(serde::Deserialize)]
-struct DirectWsPrelude {
+struct WebSocketPrelude {
     peer_identity: String,
     auth: crate::transport_auth::AuthConfig,
 }
 
-async fn direct_ws_admission(
-    prelude: DirectWsPrelude,
+async fn ws_admission(
+    prelude: WebSocketPrelude,
     request_headers: &HeaderMap,
     state: &Arc<ServerState>,
-) -> Result<DirectWsAdmission, String> {
-    let peer_identity = direct_ws_peer_identity(&prelude.peer_identity)?;
+) -> Result<WebSocketAdmission, String> {
+    let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let auth = prelude.auth;
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
-        return Ok(DirectWsAdmission {
+        return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
             trust: CommitUnitTrust::TrustedBackend,
@@ -197,7 +196,7 @@ async fn direct_ws_admission(
     if backend_secret.is_some() && !has_jwt && !has_session_header {
         crate::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
-        return Ok(DirectWsAdmission {
+        return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
             trust: CommitUnitTrust::TrustedBackend,
@@ -206,9 +205,9 @@ async fn direct_ws_admission(
 
     if !has_jwt
         && !has_session_header
-        && direct_ws_has_auth_cookie(&headers, state.auth_config.auth_cookie_name.as_deref())
+        && ws_has_auth_cookie(&headers, state.auth_config.auth_cookie_name.as_deref())
     {
-        validate_direct_ws_cookie_origin(&headers)?;
+        validate_ws_cookie_origin(&headers)?;
     }
 
     let session = crate::middleware::auth::extract_session(
@@ -226,8 +225,8 @@ async fn direct_ws_admission(
         return Err("Session required. Provide JWT, backend secret, or admin secret.".to_owned());
     };
 
-    direct_ws_validate_session_identity(&session.user_id, peer_identity)?;
-    Ok(DirectWsAdmission {
+    ws_validate_session_identity(&session.user_id, peer_identity)?;
+    Ok(WebSocketAdmission {
         identity: peer_identity,
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
@@ -290,7 +289,7 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue, Strin
     }
 }
 
-fn direct_ws_peer_identity(identity: &str) -> Result<AuthorId, String> {
+fn ws_peer_identity(identity: &str) -> Result<AuthorId, String> {
     if identity.len() != 32 {
         return Err("peer_identity must be 32 hex characters".to_owned());
     }
@@ -301,22 +300,17 @@ fn direct_ws_peer_identity(identity: &str) -> Result<AuthorId, String> {
     Ok(AuthorId::from_bytes(bytes))
 }
 
-fn direct_ws_validate_session_identity(
-    user_id: &str,
-    peer_identity: AuthorId,
-) -> Result<(), String> {
+fn ws_validate_session_identity(user_id: &str, peer_identity: AuthorId) -> Result<(), String> {
     let session_identity = uuid::Uuid::parse_str(user_id.trim())
         .map(|uuid| AuthorId::from_bytes(*uuid.as_bytes()))
-        .map_err(|_| "direct websocket session user_id must be a UUID".to_owned())?;
+        .map_err(|_| "websocket session user_id must be a UUID".to_owned())?;
     if session_identity != peer_identity {
-        return Err(
-            "direct websocket peer_identity must match authenticated session user_id".to_owned(),
-        );
+        return Err("websocket peer_identity must match authenticated session user_id".to_owned());
     }
     Ok(())
 }
 
-fn direct_ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> bool {
+fn ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> bool {
     let Some(cookie_name) = cookie_name else {
         return false;
     };
@@ -333,21 +327,21 @@ fn direct_ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> 
         })
 }
 
-fn validate_direct_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
+fn validate_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
     let origin = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| "cookie websocket auth requires Origin header".to_owned())?;
-    let host = direct_ws_cookie_origin_host(headers)
+    let host = ws_cookie_origin_host(headers)
         .ok_or_else(|| "cookie websocket auth requires Host header".to_owned())?;
 
-    if direct_ws_origin_matches_host(origin, host) {
+    if ws_origin_matches_host(origin, host) {
         return Ok(());
     }
     Err("cookie websocket auth Origin does not match Host".to_owned())
 }
 
-fn direct_ws_cookie_origin_host(headers: &HeaderMap) -> Option<&str> {
+fn ws_cookie_origin_host(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("X-Forwarded-Host")
         .and_then(|value| value.to_str().ok())
@@ -361,7 +355,7 @@ fn direct_ws_cookie_origin_host(headers: &HeaderMap) -> Option<&str> {
         })
 }
 
-fn direct_ws_origin_matches_host(origin: &str, host: &str) -> bool {
+fn ws_origin_matches_host(origin: &str, host: &str) -> bool {
     let Ok(origin) = reqwest::Url::parse(origin) else {
         return false;
     };
@@ -374,7 +368,7 @@ fn direct_ws_origin_matches_host(origin: &str, host: &str) -> bool {
             "https" | "wss" => 443,
             _ => 80,
         });
-    let Ok(request_authority) = direct_ws_parse_authority(host, origin_port) else {
+    let Ok(request_authority) = ws_parse_authority(host, origin_port) else {
         return false;
     };
     if origin_host.eq_ignore_ascii_case(&request_authority.host)
@@ -386,16 +380,16 @@ fn direct_ws_origin_matches_host(origin: &str, host: &str) -> bool {
     is_loopback_host(origin_host) && is_loopback_host(&request_authority.host)
 }
 
-struct DirectWsAuthority {
+struct WebSocketAuthority {
     host: String,
     port: u16,
 }
 
-fn direct_ws_parse_authority(authority: &str, default_port: u16) -> Result<DirectWsAuthority, ()> {
+fn ws_parse_authority(authority: &str, default_port: u16) -> Result<WebSocketAuthority, ()> {
     let parsed = reqwest::Url::parse(&format!("ws://{authority}")).map_err(|_| ())?;
     let host = parsed.host_str().ok_or(())?.to_owned();
     let port = parsed.port().unwrap_or(default_port);
-    Ok(DirectWsAuthority { host, port })
+    Ok(WebSocketAuthority { host, port })
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -406,12 +400,12 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|addr| addr.is_loopback())
 }
 
-async fn read_direct_auth_prelude(
+async fn read_core_auth_prelude(
     socket: &mut WebSocket,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
-    tokio::time::timeout(DIRECT_WS_HANDSHAKE_READ_TIMEOUT, async {
+    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -420,7 +414,7 @@ async fn read_direct_auth_prelude(
             },
             changed = shutdown_rx.changed() => {
                 if changed.is_ok() && state.shutdown.is_shutting_down() {
-                    close_direct_ws_for_shutdown(socket).await;
+                    close_ws_for_shutdown(socket).await;
                 }
                 None
             }
@@ -430,12 +424,12 @@ async fn read_direct_auth_prelude(
     .unwrap_or_default()
 }
 
-async fn read_direct_wire_frame_batch(
+async fn read_core_wire_frame_batch(
     socket: &mut WebSocket,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
-    tokio::time::timeout(DIRECT_WS_HANDSHAKE_READ_TIMEOUT, async {
+    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -443,7 +437,7 @@ async fn read_direct_wire_frame_batch(
             },
             changed = shutdown_rx.changed() => {
                 if changed.is_ok() && state.shutdown.is_shutting_down() {
-                    close_direct_ws_for_shutdown(socket).await;
+                    close_ws_for_shutdown(socket).await;
                 }
                 None
             }
@@ -453,27 +447,27 @@ async fn read_direct_wire_frame_batch(
     .unwrap_or_default()
 }
 
-async fn handle_direct_ws_connection(
+async fn handle_ws_connection(
     mut socket: WebSocket,
     state: Arc<ServerState>,
     request_headers: HeaderMap,
 ) {
     let mut shutdown_rx = state.shutdown.subscribe();
     let Some(_websocket_guard) = state.shutdown.try_enter_websocket() else {
-        close_direct_ws_for_shutdown(&mut socket).await;
+        close_ws_for_shutdown(&mut socket).await;
         return;
     };
 
-    let Some(auth_bytes) = read_direct_auth_prelude(&mut socket, &mut shutdown_rx, &state).await
+    let Some(auth_bytes) = read_core_auth_prelude(&mut socket, &mut shutdown_rx, &state).await
     else {
         return;
     };
-    let prelude = match serde_json::from_slice::<DirectWsPrelude>(&auth_bytes)
-        .map_err(|error| format!("invalid direct websocket prelude: {error}"))
+    let prelude = match serde_json::from_slice::<WebSocketPrelude>(&auth_bytes)
+        .map_err(|error| format!("invalid websocket prelude: {error}"))
     {
         Ok(prelude) => prelude,
         Err(error) => {
-            send_direct_wire_error(
+            send_core_wire_error(
                 &mut socket,
                 WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
             )
@@ -482,10 +476,10 @@ async fn handle_direct_ws_connection(
             return;
         }
     };
-    let admission = match direct_ws_admission(prelude, &request_headers, &state).await {
+    let admission = match ws_admission(prelude, &request_headers, &state).await {
         Ok(admission) => admission,
         Err(error) => {
-            send_direct_wire_error(
+            send_core_wire_error(
                 &mut socket,
                 WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
             )
@@ -494,23 +488,23 @@ async fn handle_direct_ws_connection(
             return;
         }
     };
-    let mut admission_registration = direct_ws_register_admission(DirectWsAdmissionKey {
+    let mut admission_registration = ws_register_admission(WebSocketAdmissionKey {
         app_id: state.app_id,
         identity: admission.identity,
     });
 
-    let Some(first) = read_direct_wire_frame_batch(&mut socket, &mut shutdown_rx, &state).await
+    let Some(first) = read_core_wire_frame_batch(&mut socket, &mut shutdown_rx, &state).await
     else {
         return;
     };
 
-    let Some(WireFrame::Hello(remote_hello)) = decode_single_direct_frame(&first).ok() else {
-        send_direct_wire_error(
+    let Some(WireFrame::Hello(remote_hello)) = decode_single_core_frame(&first).ok() else {
+        send_core_wire_error(
             &mut socket,
             WireError::new(
                 WireErrorCode::MalformedFrame,
                 WireRetry::Never,
-                "direct websocket expects first wire frame to be WireFrame::Hello",
+                "websocket expects first wire frame to be WireFrame::Hello",
             ),
         )
         .await;
@@ -522,16 +516,16 @@ async fn handle_direct_ws_connection(
         &remote_hello,
         WIRE_PROTOCOL_VERSION,
         WIRE_PROTOCOL_VERSION,
-        DIRECT_WS_SUPPORTED_FEATURES,
+        WS_SUPPORTED_FEATURES,
     ) {
-        Ok(negotiated) if negotiated.features & DIRECT_WS_REQUIRED_FEATURES != 0 => negotiated,
+        Ok(negotiated) if negotiated.features & WS_REQUIRED_FEATURES != 0 => negotiated,
         Ok(_) => {
-            send_direct_wire_error(
+            send_core_wire_error(
                 &mut socket,
                 WireError::new(
                     WireErrorCode::UnsupportedFeature,
                     WireRetry::Never,
-                    "direct websocket requires sync message payload frames",
+                    "websocket requires sync message payload frames",
                 ),
             )
             .await;
@@ -539,19 +533,19 @@ async fn handle_direct_ws_connection(
             return;
         }
         Err(error) => {
-            send_direct_wire_error(&mut socket, error).await;
+            send_core_wire_error(&mut socket, error).await;
             let _ = socket.close().await;
             return;
         }
     };
 
     let Some(core_server) = state.core_server() else {
-        send_direct_wire_error(
+        send_core_wire_error(
             &mut socket,
             WireError::new(
                 WireErrorCode::Internal,
                 WireRetry::Never,
-                "direct websocket requires a published schema",
+                "websocket requires a published schema",
             ),
         )
         .await;
@@ -564,7 +558,7 @@ async fn handle_direct_ws_connection(
     {
         Ok(session) => session,
         Err(error) => {
-            send_direct_wire_error(
+            send_core_wire_error(
                 &mut socket,
                 WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
             )
@@ -578,12 +572,12 @@ async fn handle_direct_ws_connection(
     let server_hello = match encode_frame(&server_hello) {
         Ok(frame) => frame,
         Err(error) => {
-            send_direct_wire_error(
+            send_core_wire_error(
                 &mut socket,
                 WireError::new(
                     WireErrorCode::Internal,
                     WireRetry::Never,
-                    format!("failed to encode direct websocket server hello: {error}"),
+                    format!("failed to encode websocket server hello: {error}"),
                 ),
             )
             .await;
@@ -591,7 +585,7 @@ async fn handle_direct_ws_connection(
             return;
         }
     };
-    if send_direct_encoded_frames(&mut socket, &[server_hello])
+    if send_core_encoded_frames(&mut socket, &[server_hello])
         .await
         .is_err()
     {
@@ -602,11 +596,11 @@ async fn handle_direct_ws_connection(
         protocol_version = negotiated.protocol_version,
         features = negotiated.features,
         identity = ?admission.identity,
-        "direct jazz_core ws negotiated"
+        "websocket negotiated"
     );
 
     let mut core_activity_rx = core_server.subscribe_activity();
-    if drain_direct_ws_outbound(&mut socket, &core_server, session)
+    if drain_ws_outbound(&mut socket, &core_server, session)
         .await
         .is_err()
     {
@@ -619,36 +613,36 @@ async fn handle_direct_ws_connection(
         tokio::select! {
             eviction = admission_registration.evict_rx.recv() => {
                 if eviction.is_some() {
-                    send_direct_wire_error(
+                    send_core_wire_error(
                         &mut socket,
                         WireError::new(
                             WireErrorCode::Backpressure,
                             WireRetry::Later,
-                            "direct websocket peer_identity connection cap exceeded",
+                            "websocket peer_identity connection cap exceeded",
                         ),
                     )
                     .await;
-                    close_direct_ws_for_policy(&mut socket, "direct websocket connection cap exceeded").await;
+                    close_ws_for_policy(&mut socket, "websocket connection cap exceeded").await;
                 }
                 break;
             }
             changed = shutdown_rx.changed() => {
                 if changed.is_ok() && state.shutdown.is_shutting_down() {
-                    close_direct_ws_for_shutdown(&mut socket).await;
+                    close_ws_for_shutdown(&mut socket).await;
                     break;
                 }
             }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
-                    let frames = match decode_direct_encoded_frame_batch(&bytes) {
+                    let frames = match decode_core_encoded_frame_batch(&bytes) {
                         Ok(frames) => frames,
                         Err(_) => {
-                            send_direct_wire_error(
+                            send_core_wire_error(
                                 &mut socket,
                                 WireError::new(
                                     WireErrorCode::MalformedFrame,
                                     WireRetry::Never,
-                                    "failed to decode direct websocket frame batch",
+                                    "failed to decode websocket frame batch",
                                 ),
                             )
                             .await;
@@ -658,7 +652,7 @@ async fn handle_direct_ws_connection(
                     let outbound = match core_server.receive_tick_take(session, frames).await {
                         Ok(frames) => frames,
                         Err(error) => {
-                            send_direct_wire_error(
+                            send_core_wire_error(
                                 &mut socket,
                                 WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
                             )
@@ -666,7 +660,7 @@ async fn handle_direct_ws_connection(
                             break;
                         }
                     };
-                    if !outbound.is_empty() && send_direct_encoded_frames(&mut socket, &outbound).await.is_err() {
+                    if !outbound.is_empty() && send_core_encoded_frames(&mut socket, &outbound).await.is_err() {
                         break;
                     }
                 }
@@ -682,7 +676,7 @@ async fn handle_direct_ws_connection(
                 if changed.is_err() {
                     break;
                 }
-                if drain_direct_ws_outbound(&mut socket, &core_server, session).await.is_err() {
+                if drain_ws_outbound(&mut socket, &core_server, session).await.is_err() {
                     break;
                 }
             }
@@ -693,7 +687,7 @@ async fn handle_direct_ws_connection(
     let _ = socket.close().await;
 }
 
-async fn drain_direct_ws_outbound(
+async fn drain_ws_outbound(
     socket: &mut WebSocket,
     core_server: &crate::server::core_server::LocalCoreServerHandle,
     session: jazz_server::ServerSession,
@@ -702,13 +696,13 @@ async fn drain_direct_ws_outbound(
     if outbound.is_empty() {
         return Ok(());
     }
-    send_direct_encoded_frames(socket, &outbound)
+    send_core_encoded_frames(socket, &outbound)
         .await
         .map_err(|_| ())
 }
 
-fn decode_single_direct_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
-    let mut frames = decode_direct_frame_batch(bytes)?;
+fn decode_single_core_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+    let mut frames = decode_core_frame_batch(bytes)?;
     if frames.len() == 1 {
         Ok(frames.remove(0))
     } else {
@@ -716,19 +710,19 @@ fn decode_single_direct_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error
     }
 }
 
-fn decode_direct_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
-    let encoded_frames = decode_direct_encoded_frame_batch(bytes)?;
+fn decode_core_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
+    let encoded_frames = decode_core_encoded_frame_batch(bytes)?;
     encoded_frames
         .iter()
         .map(|frame| jazz::wire::decode_frame(frame))
         .collect()
 }
 
-fn decode_direct_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+fn decode_core_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
     postcard::from_bytes::<Vec<Vec<u8>>>(bytes)
 }
 
-async fn send_direct_encoded_frames(
+async fn send_core_encoded_frames(
     socket: &mut WebSocket,
     frames: &[Vec<u8>],
 ) -> Result<(), axum::Error> {
@@ -736,11 +730,11 @@ async fn send_direct_encoded_frames(
     socket.send(Message::Binary(batch)).await
 }
 
-async fn send_direct_wire_error(socket: &mut WebSocket, error: WireError) {
-    let _ = send_direct_wire_frames(socket, &[WireFrame::Error(error)]).await;
+async fn send_core_wire_error(socket: &mut WebSocket, error: WireError) {
+    let _ = send_core_wire_frames(socket, &[WireFrame::Error(error)]).await;
 }
 
-async fn send_direct_wire_frames(
+async fn send_core_wire_frames(
     socket: &mut WebSocket,
     frames: &[WireFrame],
 ) -> Result<(), axum::Error> {
@@ -753,7 +747,7 @@ async fn send_direct_wire_frames(
     socket.send(Message::Binary(batch)).await
 }
 
-async fn close_direct_ws_for_shutdown(socket: &mut WebSocket) {
+async fn close_ws_for_shutdown(socket: &mut WebSocket) {
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code: close_code::RESTART,
@@ -762,7 +756,7 @@ async fn close_direct_ws_for_shutdown(socket: &mut WebSocket) {
         .await;
 }
 
-async fn close_direct_ws_for_policy(socket: &mut WebSocket, reason: &'static str) {
+async fn close_ws_for_policy(socket: &mut WebSocket, reason: &'static str) {
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code: close_code::POLICY,
@@ -796,18 +790,18 @@ mod tests {
     use crate::middleware::AuthConfig;
     use crate::schema_api::Schema;
     use crate::schema_manager::AppId;
-    use crate::server::direct_client::DirectCoreWebSocketTransport;
+    use crate::server::websocket_client::WebSocketTransport;
     use crate::server::{ServerBuilder, StorageBackend};
 
-    const DIRECT_WS_STORM_SIZE: usize = 24;
-    const DIRECT_WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
-    const DIRECT_WS_PUMP_DEADLINE: Duration = Duration::from_secs(5);
+    const WS_STORM_SIZE: usize = 24;
+    const WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
+    const WS_PUMP_DEADLINE: Duration = Duration::from_secs(5);
 
     #[test]
-    fn direct_frame_batch_round_trips_wire_frames() {
+    fn core_frame_batch_round_trips_wire_frames() {
         let frames = vec![WireFrame::Hello(WireHello::current(
             WirePeerRole::Client,
-            DIRECT_WS_SUPPORTED_FEATURES,
+            WS_SUPPORTED_FEATURES,
         ))];
         let encoded = frames
             .iter()
@@ -816,57 +810,57 @@ mod tests {
             .unwrap();
         let batch = postcard::to_allocvec(&encoded).unwrap();
 
-        assert_eq!(decode_direct_frame_batch(&batch).unwrap(), frames);
+        assert_eq!(decode_core_frame_batch(&batch).unwrap(), frames);
     }
 
     #[test]
-    fn direct_ws_peer_identity_requires_hex_author() {
+    fn ws_peer_identity_requires_hex_author() {
         assert_eq!(
-            direct_ws_peer_identity("0102030405060708090a0b0c0d0e0f10").unwrap(),
+            ws_peer_identity("0102030405060708090a0b0c0d0e0f10").unwrap(),
             AuthorId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
         );
 
-        assert!(direct_ws_peer_identity("not-hex").is_err());
+        assert!(ws_peer_identity("not-hex").is_err());
     }
 
     #[test]
-    fn direct_ws_session_identity_must_match_peer_identity() {
+    fn ws_session_identity_must_match_peer_identity() {
         let peer = AuthorId::from_bytes([1; 16]);
         let matching = uuid::Uuid::from_bytes([1; 16]).to_string();
         let mismatching = uuid::Uuid::from_bytes([2; 16]).to_string();
 
-        assert!(direct_ws_validate_session_identity(&matching, peer).is_ok());
-        assert!(direct_ws_validate_session_identity(&mismatching, peer).is_err());
-        assert!(direct_ws_validate_session_identity("not-a-uuid", peer).is_err());
+        assert!(ws_validate_session_identity(&matching, peer).is_ok());
+        assert!(ws_validate_session_identity(&mismatching, peer).is_err());
+        assert!(ws_validate_session_identity("not-a-uuid", peer).is_err());
     }
 
     #[test]
-    fn direct_ws_cookie_auth_detects_configured_cookie() {
+    fn ws_cookie_auth_detects_configured_cookie() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
             "other=value; jazz-auth=token".parse().unwrap(),
         );
 
-        assert!(direct_ws_has_auth_cookie(&headers, Some("jazz-auth")));
-        assert!(!direct_ws_has_auth_cookie(&headers, Some("missing")));
-        assert!(!direct_ws_has_auth_cookie(&headers, None));
+        assert!(ws_has_auth_cookie(&headers, Some("jazz-auth")));
+        assert!(!ws_has_auth_cookie(&headers, Some("missing")));
+        assert!(!ws_has_auth_cookie(&headers, None));
     }
 
     #[test]
-    fn direct_ws_cookie_origin_accepts_same_origin_and_loopback() {
-        assert!(direct_ws_origin_matches_host(
+    fn ws_cookie_origin_accepts_same_origin_and_loopback() {
+        assert!(ws_origin_matches_host(
             "https://app.example:8443",
             "app.example:8443"
         ));
-        assert!(direct_ws_origin_matches_host(
+        assert!(ws_origin_matches_host(
             "http://localhost:5173",
             "127.0.0.1:4200"
         ));
     }
 
     #[test]
-    fn direct_ws_cookie_origin_uses_forwarded_host_before_host() {
+    fn ws_cookie_origin_uses_forwarded_host_before_host() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::ORIGIN,
@@ -875,14 +869,14 @@ mod tests {
         headers.insert(axum::http::header::HOST, "internal.local".parse().unwrap());
         headers.insert("X-Forwarded-Host", "app.example".parse().unwrap());
 
-        assert!(validate_direct_ws_cookie_origin(&headers).is_ok());
+        assert!(validate_ws_cookie_origin(&headers).is_ok());
 
         headers.insert("X-Forwarded-Host", "evil.example".parse().unwrap());
-        assert!(validate_direct_ws_cookie_origin(&headers).is_err());
+        assert!(validate_ws_cookie_origin(&headers).is_err());
     }
 
     #[test]
-    fn direct_ws_cookie_origin_uses_first_forwarded_host() {
+    fn ws_cookie_origin_uses_first_forwarded_host() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::ORIGIN,
@@ -894,34 +888,34 @@ mod tests {
             "app.example, proxy.local".parse().unwrap(),
         );
 
-        assert!(validate_direct_ws_cookie_origin(&headers).is_ok());
+        assert!(validate_ws_cookie_origin(&headers).is_ok());
     }
 
     #[test]
-    fn direct_ws_cookie_origin_rejects_missing_or_cross_origin() {
-        assert!(!direct_ws_origin_matches_host(
+    fn ws_cookie_origin_rejects_missing_or_cross_origin() {
+        assert!(!ws_origin_matches_host(
             "https://evil.example",
             "app.example"
         ));
 
         let mut headers = HeaderMap::new();
         headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-        assert!(validate_direct_ws_cookie_origin(&headers).is_err());
+        assert!(validate_ws_cookie_origin(&headers).is_err());
 
         headers.insert(
             axum::http::header::ORIGIN,
             "https://evil.example".parse().unwrap(),
         );
-        assert!(validate_direct_ws_cookie_origin(&headers).is_err());
+        assert!(validate_ws_cookie_origin(&headers).is_err());
     }
 
     #[test]
-    fn direct_ws_limits_are_capped_for_direct_websocket() {
-        assert_eq!(DIRECT_WS_MAX_FRAME_BYTES, 1 << 20);
-        assert_eq!(DIRECT_WS_MAX_MESSAGE_BYTES, DIRECT_WS_MAX_FRAME_BYTES);
+    fn ws_limits_are_capped_for_websocket() {
+        assert_eq!(WS_MAX_FRAME_BYTES, 1 << 20);
+        assert_eq!(WS_MAX_MESSAGE_BYTES, WS_MAX_FRAME_BYTES);
     }
 
-    async fn make_direct_ws_test_state() -> Arc<ServerState> {
+    async fn make_ws_test_state() -> Arc<ServerState> {
         ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
@@ -932,11 +926,11 @@ mod tests {
             .with_schema(Schema::new())
             .build()
             .await
-            .expect("build direct ws test state")
+            .expect("build websocket test state")
             .state
     }
 
-    fn direct_ws_todos_table_schema() -> TableSchema {
+    fn ws_todos_table_schema() -> TableSchema {
         TableSchema::new(
             "todos",
             [
@@ -948,12 +942,12 @@ mod tests {
         .with_write_policy(Policy::public())
     }
 
-    fn direct_ws_core_schema() -> JazzSchema {
-        JazzSchema::new([direct_ws_todos_table_schema()])
+    fn ws_schema_convert() -> JazzSchema {
+        JazzSchema::new([ws_todos_table_schema()])
     }
 
-    async fn make_direct_ws_convergence_test_state() -> Arc<ServerState> {
-        let schema = direct_ws_core_schema();
+    async fn make_ws_convergence_test_state() -> Arc<ServerState> {
+        let schema = ws_schema_convert();
         ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
@@ -965,16 +959,16 @@ mod tests {
             .with_core_server_schema(schema)
             .build()
             .await
-            .expect("build direct ws convergence test state")
+            .expect("build websocket convergence test state")
             .state
     }
 
     #[tokio::test]
-    async fn direct_ws_backend_session_must_match_peer_identity() {
-        let state = make_direct_ws_test_state().await;
+    async fn ws_backend_session_must_match_peer_identity() {
+        let state = make_ws_test_state().await;
         let authenticated = AuthorId::from_bytes([0x51; 16]);
         let forged_peer = AuthorId::from_bytes([0x52; 16]);
-        let prelude = DirectWsPrelude {
+        let prelude = WebSocketPrelude {
             peer_identity: hex::encode(forged_peer.as_bytes()),
             auth: crate::transport_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
@@ -987,26 +981,26 @@ mod tests {
             },
         };
 
-        let error = direct_ws_admission(prelude, &HeaderMap::new(), &state)
+        let error = ws_admission(prelude, &HeaderMap::new(), &state)
             .await
             .expect_err("mismatched authenticated session and peer_identity must be rejected");
 
         assert!(
             error.contains("peer_identity must match authenticated session user_id"),
-            "unexpected direct ws admission error: {error}"
+            "unexpected websocket admission error: {error}"
         );
     }
 
     // Internal admission-boundary test: core server policy reads are not yet
-    // observable through a public direct websocket client helper, so this pins
+    // observable through a public websocket client helper, so this pins
     // the security invariant at the route admission point that feeds
     // LocalCoreServerHandle::open(identity, claims, trust).
     #[tokio::test]
-    async fn direct_ws_backend_session_admits_session_claims_for_policy_reads() {
-        let state = make_direct_ws_test_state().await;
+    async fn ws_backend_session_admits_session_claims_for_policy_reads() {
+        let state = make_ws_test_state().await;
         let identity = AuthorId::from_bytes([0x61; 16]);
         let user_id = uuid::Uuid::from_bytes(*identity.as_bytes()).to_string();
-        let prelude = DirectWsPrelude {
+        let prelude = WebSocketPrelude {
             peer_identity: hex::encode(identity.as_bytes()),
             auth: crate::transport_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
@@ -1024,9 +1018,9 @@ mod tests {
             },
         };
 
-        let admission = direct_ws_admission(prelude, &HeaderMap::new(), &state)
+        let admission = ws_admission(prelude, &HeaderMap::new(), &state)
             .await
-            .expect("backend session direct websocket admission");
+            .expect("backend session websocket admission");
 
         assert_eq!(admission.identity, identity);
         assert_eq!(admission.trust, CommitUnitTrust::Session);
@@ -1064,15 +1058,15 @@ mod tests {
         );
     }
 
-    // Internal route-boundary test: this proves the reusable direct-core
+    // Internal route-boundary test: this proves the reusable core
     // websocket client helper negotiates the real /apps/<APP_ID>/ws route
     // without reintroducing the legacy SyncPayload websocket handler.
     #[tokio::test]
-    async fn direct_core_websocket_client_helper_negotiates_route_hello() {
-        let state = make_direct_ws_test_state().await;
-        let addr = start_direct_ws_test_server(state.clone()).await;
+    async fn core_websocket_client_helper_negotiates_route_hello() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
 
-        let transport = DirectCoreWebSocketTransport::connect(
+        let transport = WebSocketTransport::connect(
             format!("http://{addr}"),
             state.app_id,
             AuthorId::from_bytes([0x41; 16]),
@@ -1082,9 +1076,9 @@ mod tests {
             },
         )
         .await
-        .expect("direct core websocket helper should negotiate server hello");
+        .expect("websocket helper should negotiate server hello");
 
-        let schema = direct_ws_core_schema();
+        let schema = ws_schema_convert();
         let column_families = schema.column_families();
         let refs = column_families
             .iter()
@@ -1102,31 +1096,31 @@ mod tests {
             .with_id_source(SeededRowIdSource::new(0x4100)),
         )
         .await
-        .expect("open direct helper client db");
+        .expect("open client helper client db");
         db.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
         db.tick()
-            .expect("direct helper transport should accept db upstream frames");
+            .expect("client helper transport should accept db upstream frames");
     }
 
-    async fn start_direct_ws_test_server(state: Arc<ServerState>) -> std::net::SocketAddr {
+    async fn start_ws_test_server(state: Arc<ServerState>) -> std::net::SocketAddr {
         let app = super::super::create_router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind direct ws listener");
-        let addr = listener.local_addr().expect("direct ws listener addr");
+            .expect("bind websocket listener");
+        let addr = listener.local_addr().expect("websocket listener addr");
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
-                .expect("serve direct ws test app");
+                .expect("serve websocket test app");
         });
         addr
     }
 
-    fn direct_ws_url(addr: std::net::SocketAddr, app_id: AppId) -> String {
+    fn ws_url(addr: std::net::SocketAddr, app_id: AppId) -> String {
         format!("ws://{addr}/apps/{app_id}/ws")
     }
 
-    fn direct_ws_prelude(identity: AuthorId) -> Vec<u8> {
+    fn ws_prelude(identity: AuthorId) -> Vec<u8> {
         format!(
             r#"{{"peer_identity":"{}","auth":{{"admin_secret":"admin-secret"}}}}"#,
             hex::encode(identity.as_bytes())
@@ -1134,75 +1128,74 @@ mod tests {
         .into_bytes()
     }
 
-    fn direct_ws_client_hello_batch() -> Vec<u8> {
+    fn ws_client_hello_batch() -> Vec<u8> {
         let hello = WireFrame::Hello(WireHello::current(
             WirePeerRole::Client,
             FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
         ));
-        let encoded = vec![encode_frame(&hello).expect("encode direct client hello")];
-        postcard::to_allocvec(&encoded).expect("encode direct hello batch")
+        let encoded = vec![encode_frame(&hello).expect("encode client hello")];
+        postcard::to_allocvec(&encoded).expect("encode websocket hello batch")
     }
 
-    async fn open_negotiated_direct_ws(
+    async fn open_negotiated_ws(
         addr: std::net::SocketAddr,
         state: &Arc<ServerState>,
         identity: AuthorId,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        let (mut ws, _) = connect_async(direct_ws_url(addr, state.app_id))
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
-            .expect("connect direct ws");
-        ws.send(WsMessage::Binary(direct_ws_prelude(identity).into()))
+            .expect("connect websocket");
+        ws.send(WsMessage::Binary(ws_prelude(identity).into()))
             .await
-            .expect("send direct ws prelude");
-        ws.send(WsMessage::Binary(direct_ws_client_hello_batch().into()))
+            .expect("send websocket prelude");
+        ws.send(WsMessage::Binary(ws_client_hello_batch().into()))
             .await
-            .expect("send direct ws hello");
+            .expect("send websocket hello");
 
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
-            .expect("wait for direct server hello")
-            .expect("direct ws frame")
-            .expect("direct ws result");
+            .expect("wait for server hello")
+            .expect("websocket frame")
+            .expect("websocket result");
         let WsMessage::Binary(response) = response else {
-            panic!("expected direct server hello, got {response:?}");
+            panic!("expected server hello, got {response:?}");
         };
         let frames: Vec<Vec<u8>> =
-            postcard::from_bytes(&response).expect("decode direct ws response batch");
+            postcard::from_bytes(&response).expect("decode websocket response batch");
         assert_eq!(frames.len(), 1);
-        let WireFrame::Hello(server_hello) =
-            decode_frame(&frames[0]).expect("decode direct server hello")
+        let WireFrame::Hello(server_hello) = decode_frame(&frames[0]).expect("decode server hello")
         else {
-            panic!("expected direct server hello");
+            panic!("expected server hello");
         };
         assert_eq!(server_hello.role, WirePeerRole::Core);
         ws
     }
 
-    fn decode_direct_ws_message(msg: &WsMessage) -> Vec<WireFrame> {
+    fn decode_ws_message(msg: &WsMessage) -> Vec<WireFrame> {
         let WsMessage::Binary(bytes) = msg else {
             return Vec::new();
         };
         let encoded: Vec<Vec<u8>> =
-            postcard::from_bytes(bytes).expect("decode direct ws frame batch");
+            postcard::from_bytes(bytes).expect("decode websocket frame batch");
         encoded
             .iter()
-            .map(|frame| decode_frame(frame).expect("decode direct wire frame"))
+            .map(|frame| decode_frame(frame).expect("decode wire frame"))
             .collect()
     }
 
     #[derive(Clone, Default)]
-    struct TestDirectWireTransport {
-        queues: Rc<RefCell<TestDirectWireQueues>>,
+    struct TestWireTransport {
+        queues: Rc<RefCell<TestWireQueues>>,
     }
 
     #[derive(Default)]
-    struct TestDirectWireQueues {
+    struct TestWireQueues {
         inbound: VecDeque<Vec<u8>>,
         outbound: VecDeque<Vec<u8>>,
     }
 
-    impl TestDirectWireTransport {
+    impl TestWireTransport {
         fn push_inbound(&self, frames: impl IntoIterator<Item = Vec<u8>>) {
             self.queues.borrow_mut().inbound.extend(frames);
         }
@@ -1212,7 +1205,7 @@ mod tests {
         }
     }
 
-    impl WireTransport for TestDirectWireTransport {
+    impl WireTransport for TestWireTransport {
         fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
             self.queues.borrow_mut().outbound.push_back(frame);
             Ok(())
@@ -1223,13 +1216,13 @@ mod tests {
         }
     }
 
-    struct TestDirectClient {
+    struct TestClient {
         db: Db<CoreMemoryStorage>,
-        transport: TestDirectWireTransport,
+        transport: TestWireTransport,
         todos_table: TableSchema,
     }
 
-    impl TestDirectClient {
+    impl TestClient {
         async fn new(schema: JazzSchema, node_seed: u8, row_seed: u64) -> Self {
             let column_families = schema.column_families();
             let refs = column_families
@@ -1248,13 +1241,13 @@ mod tests {
                 .with_id_source(SeededRowIdSource::new(row_seed)),
             )
             .await
-            .expect("open direct client db");
-            let transport = TestDirectWireTransport::default();
+            .expect("open client db");
+            let transport = TestWireTransport::default();
             db.connect_upstream(Box::new(WireTransportAdapter::current(transport.clone())));
             Self {
                 db,
                 transport,
-                todos_table: direct_ws_todos_table_schema(),
+                todos_table: ws_todos_table_schema(),
             }
         }
 
@@ -1267,12 +1260,12 @@ mod tests {
                         ("done".to_owned(), CoreValue::Bool(false)),
                     ]),
                 )
-                .expect("insert direct client row")
+                .expect("insert client row")
                 .row_uuid()
         }
 
         fn tick_take(&self) -> Vec<Vec<u8>> {
-            self.db.tick().expect("tick direct client db");
+            self.db.tick().expect("tick client db");
             self.transport.take_outbound()
         }
 
@@ -1320,11 +1313,11 @@ mod tests {
         }
     }
 
-    fn direct_ws_frame_batch(frames: &[Vec<u8>]) -> Vec<u8> {
-        postcard::to_allocvec(frames).expect("encode direct ws frame batch")
+    fn ws_frame_batch(frames: &[Vec<u8>]) -> Vec<u8> {
+        postcard::to_allocvec(frames).expect("encode websocket frame batch")
     }
 
-    async fn try_receive_direct_ws_encoded_frames(
+    async fn try_receive_ws_encoded_frames(
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
@@ -1338,8 +1331,8 @@ mod tests {
         postcard::from_bytes(&bytes).unwrap_or_default()
     }
 
-    async fn pump_direct_client_once(
-        client: &TestDirectClient,
+    async fn pump_websocket_client_once(
+        client: &TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
@@ -1352,13 +1345,13 @@ mod tests {
             rounds += 1;
             assert!(
                 rounds <= 8,
-                "direct client kept producing follow-up websocket frames"
+                "client kept producing follow-up websocket frames"
             );
-            ws.send(WsMessage::Binary(direct_ws_frame_batch(&outbound).into()))
+            ws.send(WsMessage::Binary(ws_frame_batch(&outbound).into()))
                 .await
-                .expect("send direct client frames");
+                .expect("send client frames");
             sent += outbound.len();
-            let inbound = try_receive_direct_ws_encoded_frames(ws).await;
+            let inbound = try_receive_ws_encoded_frames(ws).await;
             if inbound.is_empty() {
                 outbound = client.tick_take();
             } else {
@@ -1369,13 +1362,13 @@ mod tests {
         (sent, received)
     }
 
-    async fn receive_direct_client_push_once(
-        client: &TestDirectClient,
+    async fn receive_websocket_client_push_once(
+        client: &TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> usize {
-        let inbound = try_receive_direct_ws_encoded_frames(ws).await;
+        let inbound = try_receive_ws_encoded_frames(ws).await;
         if inbound.is_empty() {
             return 0;
         }
@@ -1386,12 +1379,12 @@ mod tests {
             rounds += 1;
             assert!(
                 rounds <= 8,
-                "direct client kept producing pushed follow-up websocket frames"
+                "client kept producing pushed follow-up websocket frames"
             );
-            ws.send(WsMessage::Binary(direct_ws_frame_batch(&outbound).into()))
+            ws.send(WsMessage::Binary(ws_frame_batch(&outbound).into()))
                 .await
-                .expect("send direct client push follow-up frames");
-            let inbound = try_receive_direct_ws_encoded_frames(ws).await;
+                .expect("send client push follow-up frames");
+            let inbound = try_receive_ws_encoded_frames(ws).await;
             if inbound.is_empty() {
                 outbound = client.tick_take();
             } else {
@@ -1402,21 +1395,19 @@ mod tests {
         received
     }
 
-    // Internal route-boundary test: until direct websocket has a public
+    // Internal route-boundary test: until websocket has a public
     // high-level client facade, this wires two real jazz::Db clients through
-    // the real /apps/<APP_ID>/ws route and proves direct WireFrame batches
+    // the real /apps/<APP_ID>/ws route and proves WireFrame batches
     // flow through the server after one client writes.
     #[tokio::test(flavor = "current_thread")]
-    async fn direct_ws_clients_exchange_server_mediated_wire_frames() {
-        let state = make_direct_ws_convergence_test_state().await;
-        let addr = start_direct_ws_test_server(state.clone()).await;
-        let schema = direct_ws_core_schema();
-        let client_a = TestDirectClient::new(schema.clone(), 0xa1, 0xa100).await;
-        let client_b = TestDirectClient::new(schema, 0xb2, 0xb200).await;
-        let mut ws_a =
-            open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
-        let mut ws_b =
-            open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+    async fn ws_clients_exchange_server_mediated_wire_frames() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let schema = ws_schema_convert();
+        let client_a = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
+        let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
+        let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
+        let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
         let client_b_todos = client_b.propagate_todos_query();
 
         let _inserted = client_a.insert_todo("route sync");
@@ -1424,13 +1415,12 @@ mod tests {
         let mut frames_sent_to_server = 0;
         let mut frames_received_from_server = 0;
         let start = tokio::time::Instant::now();
-        while !client_b.edge_query_is_covered(&client_b_todos)
-            && start.elapsed() < DIRECT_WS_PUMP_DEADLINE
+        while !client_b.edge_query_is_covered(&client_b_todos) && start.elapsed() < WS_PUMP_DEADLINE
         {
-            let (sent, received) = pump_direct_client_once(&client_a, &mut ws_a).await;
+            let (sent, received) = pump_websocket_client_once(&client_a, &mut ws_a).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
-            let (sent, received) = pump_direct_client_once(&client_b, &mut ws_b).await;
+            let (sent, received) = pump_websocket_client_once(&client_b, &mut ws_b).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1438,40 +1428,38 @@ mod tests {
 
         assert!(
             frames_sent_to_server > 0,
-            "the writing direct client must send WireFrame batches through the websocket route"
+            "the writing client must send WireFrame batches through the websocket route"
         );
         assert!(
             frames_received_from_server > 0,
-            "the server must return direct WireFrame batches through the websocket route"
+            "the server must return WireFrame batches through the websocket route"
         );
         let titles = client_b.edge_todo_titles(&client_b_todos).await;
         assert_eq!(
             titles,
             vec!["route sync".to_owned()],
-            "the receiving direct client must materialize the row through the websocket route"
+            "the receiving client must materialize the row through the websocket route"
         );
     }
 
-    // Internal route-boundary test: this exercises the public direct websocket
+    // Internal route-boundary test: this exercises the public websocket
     // route with two real jazz::Db clients. The reader registers a query and
     // receives empty coverage before the writer uploads a later row; convergence
     // must arrive through the maintained subscription path without the reader
     // re-propagating its query.
     #[tokio::test(flavor = "current_thread")]
-    async fn direct_ws_empty_covered_reader_receives_later_writer_row_without_repropagating() {
-        let state = make_direct_ws_convergence_test_state().await;
-        let addr = start_direct_ws_test_server(state.clone()).await;
-        let schema = direct_ws_core_schema();
-        let client_b = TestDirectClient::new(schema.clone(), 0xb2, 0xb200).await;
-        let mut ws_b =
-            open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+    async fn ws_empty_covered_reader_receives_later_writer_row_without_repropagating() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let schema = ws_schema_convert();
+        let client_b = TestClient::new(schema.clone(), 0xb2, 0xb200).await;
+        let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
         let client_b_todos = client_b.propagate_todos_query();
 
         let start = tokio::time::Instant::now();
-        while !client_b.edge_query_is_covered(&client_b_todos)
-            && start.elapsed() < DIRECT_WS_PUMP_DEADLINE
+        while !client_b.edge_query_is_covered(&client_b_todos) && start.elapsed() < WS_PUMP_DEADLINE
         {
-            let _ = pump_direct_client_once(&client_b, &mut ws_b).await;
+            let _ = pump_websocket_client_once(&client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
@@ -1483,26 +1471,25 @@ mod tests {
             "reader should settle the initial covered result as empty"
         );
 
-        let client_a = TestDirectClient::new(schema, 0xa1, 0xa100).await;
-        let mut ws_a =
-            open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
+        let client_a = TestClient::new(schema, 0xa1, 0xa100).await;
+        let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
         let _inserted = client_a.insert_todo("after empty coverage");
 
         let start = tokio::time::Instant::now();
         let mut writer_sent = 0;
         let mut reader_received_push = 0;
         while client_b.edge_todo_titles(&client_b_todos).await.is_empty()
-            && start.elapsed() < DIRECT_WS_PUMP_DEADLINE
+            && start.elapsed() < WS_PUMP_DEADLINE
         {
-            let (sent, _) = pump_direct_client_once(&client_a, &mut ws_a).await;
+            let (sent, _) = pump_websocket_client_once(&client_a, &mut ws_a).await;
             writer_sent += sent;
-            reader_received_push += receive_direct_client_push_once(&client_b, &mut ws_b).await;
+            reader_received_push += receive_websocket_client_push_once(&client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         assert!(
             writer_sent > 0,
-            "writer must upload the later row through the direct websocket route"
+            "writer must upload the later row through the websocket route"
         );
         assert!(
             reader_received_push > 0,
@@ -1514,46 +1501,46 @@ mod tests {
         );
     }
 
-    async fn wait_for_direct_ws_live_admissions(
-        key: DirectWsAdmissionKey,
+    async fn wait_for_ws_live_admissions(
+        key: WebSocketAdmissionKey,
         predicate: impl Fn(usize) -> bool,
     ) -> usize {
         let start = tokio::time::Instant::now();
-        let mut live = direct_ws_live_admissions_for(key);
-        while !predicate(live) && start.elapsed() < DIRECT_WS_SETTLE_DEADLINE {
+        let mut live = ws_live_admissions_for(key);
+        while !predicate(live) && start.elapsed() < WS_SETTLE_DEADLINE {
             tokio::time::sleep(Duration::from_millis(25)).await;
-            live = direct_ws_live_admissions_for(key);
+            live = ws_live_admissions_for(key);
         }
         live
     }
 
-    // Internal route-boundary test: direct websocket liveness is not exposed
+    // Internal route-boundary test: websocket liveness is not exposed
     // through the public JazzClient API yet, so this observes the direct
     // admission registry as the user-visible socket closes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn same_direct_peer_identity_connections_are_bounded_by_eviction() {
-        let state = make_direct_ws_convergence_test_state().await;
-        let addr = start_direct_ws_test_server(state.clone()).await;
+    async fn same_core_peer_identity_connections_are_bounded_by_eviction() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorId::from_bytes([0x42; 16]);
-        let key = DirectWsAdmissionKey {
+        let key = WebSocketAdmissionKey {
             app_id: state.app_id,
             identity,
         };
 
         let mut sockets = Vec::new();
-        for _ in 0..DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
-            sockets.push(open_negotiated_direct_ws(addr, &state, identity).await);
+        for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
+            sockets.push(open_negotiated_ws(addr, &state, identity).await);
         }
 
         let mut oldest = sockets.remove(0);
-        let _newest = open_negotiated_direct_ws(addr, &state, identity).await;
+        let _newest = open_negotiated_ws(addr, &state, identity).await;
 
         let mut saw_backpressure = false;
         let mut saw_policy_close = false;
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(msg) = oldest.next().await {
                 let msg = msg.expect("oldest ws message");
-                for frame in decode_direct_ws_message(&msg) {
+                for frame in decode_ws_message(&msg) {
                     if let WireFrame::Error(error) = frame {
                         saw_backpressure = error.code == WireErrorCode::Backpressure
                             && error.retry == WireRetry::Later
@@ -1568,183 +1555,174 @@ mod tests {
             }
         })
         .await
-        .expect("oldest direct ws should be evicted");
+        .expect("oldest websocket should be evicted");
 
         assert!(
             saw_backpressure,
-            "evicted direct ws must receive a WireError"
+            "evicted websocket must receive a WireError"
         );
         assert!(
             saw_policy_close,
-            "evicted direct ws must receive a policy close"
+            "evicted websocket must receive a policy close"
         );
 
         tokio::time::timeout(Duration::from_secs(5), async {
-            while direct_ws_live_admissions_for(key) > DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
+            while ws_live_admissions_for(key) > WS_PER_IDENTITY_CONNECTION_CAP {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("direct admission cleanup");
-        assert_eq!(
-            direct_ws_live_admissions_for(key),
-            DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
-        );
+        .expect("websocket admission cleanup");
+        assert_eq!(ws_live_admissions_for(key), WS_PER_IDENTITY_CONNECTION_CAP);
     }
 
-    // Internal route-boundary test: direct websocket peer admission is not
+    // Internal route-boundary test: websocket peer admission is not
     // observable through the public JazzClient API yet, so this tests the
-    // direct protocol boundary and its admission registry.
+    // protocol boundary and its admission registry.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn direct_peer_identity_storm_is_bounded_without_rejecting_newest_connections() {
-        let state = make_direct_ws_convergence_test_state().await;
-        let addr = start_direct_ws_test_server(state.clone()).await;
+    async fn core_peer_identity_storm_is_bounded_without_rejecting_newest_connections() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorId::from_bytes([0x24; 16]);
-        let key = DirectWsAdmissionKey {
+        let key = WebSocketAdmissionKey {
             app_id: state.app_id,
             identity,
         };
 
         let mut pending = FuturesUnordered::new();
-        for _ in 0..DIRECT_WS_STORM_SIZE {
-            pending.push(open_negotiated_direct_ws(addr, &state, identity));
+        for _ in 0..WS_STORM_SIZE {
+            pending.push(open_negotiated_ws(addr, &state, identity));
         }
 
-        let mut sockets = Vec::with_capacity(DIRECT_WS_STORM_SIZE);
+        let mut sockets = Vec::with_capacity(WS_STORM_SIZE);
         while let Some(ws) = pending.next().await {
             sockets.push(ws);
         }
         assert_eq!(
             sockets.len(),
-            DIRECT_WS_STORM_SIZE,
-            "direct ws cap must evict older sockets, not reject new handshakes"
+            WS_STORM_SIZE,
+            "websocket cap must evict older sockets, not reject new handshakes"
         );
 
-        let live = wait_for_direct_ws_live_admissions(key, |count| {
-            count <= DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
-        })
-        .await;
+        let live =
+            wait_for_ws_live_admissions(key, |count| count <= WS_PER_IDENTITY_CONNECTION_CAP).await;
         assert!(
-            live <= DIRECT_WS_PER_IDENTITY_CONNECTION_CAP,
-            "direct ws must bound live admissions per peer_identity to {DIRECT_WS_PER_IDENTITY_CONNECTION_CAP}; got {live}"
+            live <= WS_PER_IDENTITY_CONNECTION_CAP,
+            "websocket must bound live admissions per peer_identity to {WS_PER_IDENTITY_CONNECTION_CAP}; got {live}"
         );
     }
 
     // Internal route-boundary test: identity isolation is enforced before the
     // core server has a higher-level public client surface to observe.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn direct_peer_identity_eviction_does_not_affect_other_identities() {
-        let state = make_direct_ws_convergence_test_state().await;
-        let addr = start_direct_ws_test_server(state.clone()).await;
+    async fn core_peer_identity_eviction_does_not_affect_other_identities() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
         let noisy_identity = AuthorId::from_bytes([0x31; 16]);
         let quiet_identity = AuthorId::from_bytes([0x32; 16]);
-        let noisy_key = DirectWsAdmissionKey {
+        let noisy_key = WebSocketAdmissionKey {
             app_id: state.app_id,
             identity: noisy_identity,
         };
-        let quiet_key = DirectWsAdmissionKey {
+        let quiet_key = WebSocketAdmissionKey {
             app_id: state.app_id,
             identity: quiet_identity,
         };
 
-        let mut quiet_sockets = Vec::with_capacity(DIRECT_WS_PER_IDENTITY_CONNECTION_CAP);
-        for _ in 0..DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
-            quiet_sockets.push(open_negotiated_direct_ws(addr, &state, quiet_identity).await);
+        let mut quiet_sockets = Vec::with_capacity(WS_PER_IDENTITY_CONNECTION_CAP);
+        for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
+            quiet_sockets.push(open_negotiated_ws(addr, &state, quiet_identity).await);
         }
         assert_eq!(
-            direct_ws_live_admissions_for(quiet_key),
-            DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
+            ws_live_admissions_for(quiet_key),
+            WS_PER_IDENTITY_CONNECTION_CAP
         );
 
         let mut pending = FuturesUnordered::new();
-        for _ in 0..DIRECT_WS_STORM_SIZE {
-            pending.push(open_negotiated_direct_ws(addr, &state, noisy_identity));
+        for _ in 0..WS_STORM_SIZE {
+            pending.push(open_negotiated_ws(addr, &state, noisy_identity));
         }
-        let mut noisy_sockets = Vec::with_capacity(DIRECT_WS_STORM_SIZE);
+        let mut noisy_sockets = Vec::with_capacity(WS_STORM_SIZE);
         while let Some(ws) = pending.next().await {
             noisy_sockets.push(ws);
         }
 
-        let noisy_live = wait_for_direct_ws_live_admissions(noisy_key, |count| {
-            count <= DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
-        })
-        .await;
+        let noisy_live =
+            wait_for_ws_live_admissions(noisy_key, |count| count <= WS_PER_IDENTITY_CONNECTION_CAP)
+                .await;
         assert!(
-            noisy_live <= DIRECT_WS_PER_IDENTITY_CONNECTION_CAP,
+            noisy_live <= WS_PER_IDENTITY_CONNECTION_CAP,
             "noisy identity live admissions must be bounded; got {noisy_live}"
         );
         assert_eq!(
-            direct_ws_live_admissions_for(quiet_key),
-            DIRECT_WS_PER_IDENTITY_CONNECTION_CAP,
+            ws_live_admissions_for(quiet_key),
+            WS_PER_IDENTITY_CONNECTION_CAP,
             "quiet identity admissions must not be evicted by another peer_identity storm"
         );
-        assert_eq!(quiet_sockets.len(), DIRECT_WS_PER_IDENTITY_CONNECTION_CAP);
-        assert_eq!(noisy_sockets.len(), DIRECT_WS_STORM_SIZE);
+        assert_eq!(quiet_sockets.len(), WS_PER_IDENTITY_CONNECTION_CAP);
+        assert_eq!(noisy_sockets.len(), WS_STORM_SIZE);
     }
 
     // Internal route-boundary test: repeated reconnects should keep applying
     // the cap, not only the first overflow.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn repeated_direct_peer_identity_evictions_keep_live_admissions_at_cap() {
-        let state = make_direct_ws_convergence_test_state().await;
-        let addr = start_direct_ws_test_server(state.clone()).await;
+    async fn repeated_core_peer_identity_evictions_keep_live_admissions_at_cap() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorId::from_bytes([0x33; 16]);
-        let key = DirectWsAdmissionKey {
+        let key = WebSocketAdmissionKey {
             app_id: state.app_id,
             identity,
         };
 
         let mut sockets = Vec::new();
-        for _ in 0..DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
-            sockets.push(open_negotiated_direct_ws(addr, &state, identity).await);
+        for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
+            sockets.push(open_negotiated_ws(addr, &state, identity).await);
         }
         assert_eq!(
-            wait_for_direct_ws_live_admissions(key, |count| {
-                count == DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
-            })
-            .await,
-            DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
+            wait_for_ws_live_admissions(key, |count| { count == WS_PER_IDENTITY_CONNECTION_CAP })
+                .await,
+            WS_PER_IDENTITY_CONNECTION_CAP
         );
 
-        for cycle in 0..(DIRECT_WS_PER_IDENTITY_CONNECTION_CAP * 3) {
-            sockets.push(open_negotiated_direct_ws(addr, &state, identity).await);
-            let live = wait_for_direct_ws_live_admissions(key, |count| {
-                count == DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
-            })
-            .await;
+        for cycle in 0..(WS_PER_IDENTITY_CONNECTION_CAP * 3) {
+            sockets.push(open_negotiated_ws(addr, &state, identity).await);
+            let live =
+                wait_for_ws_live_admissions(key, |count| count == WS_PER_IDENTITY_CONNECTION_CAP)
+                    .await;
             assert_eq!(
-                live, DIRECT_WS_PER_IDENTITY_CONNECTION_CAP,
-                "live direct admissions must stay at cap after reconnect cycle {cycle}; got {live}"
+                live, WS_PER_IDENTITY_CONNECTION_CAP,
+                "live websocket admissions must stay at cap after reconnect cycle {cycle}; got {live}"
             );
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn idle_direct_ws_upgrade_is_not_held_open_indefinitely() {
-        let state = make_direct_ws_test_state().await;
-        let addr = start_direct_ws_test_server(state.clone()).await;
-        let (mut ws, _) = connect_async(direct_ws_url(addr, state.app_id))
+    async fn idle_ws_upgrade_is_not_held_open_indefinitely() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
-            .expect("connect idle direct ws");
+            .expect("connect idle websocket");
 
-        tokio::time::sleep(DIRECT_WS_HANDSHAKE_READ_TIMEOUT + Duration::from_millis(500)).await;
+        tokio::time::sleep(WS_HANDSHAKE_READ_TIMEOUT + Duration::from_millis(500)).await;
         let outcome = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
         assert!(
             matches!(
                 outcome,
                 Ok(Some(Ok(WsMessage::Close(_)))) | Ok(Some(Err(_))) | Ok(None)
             ),
-            "idle direct ws upgrade must close after handshake timeout; observed {outcome:?}"
+            "idle websocket upgrade must close after handshake timeout; observed {outcome:?}"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn idle_direct_ws_upgrade_during_shutdown_closes_cleanly() {
-        let state = make_direct_ws_test_state().await;
-        let addr = start_direct_ws_test_server(state.clone()).await;
-        let (mut ws, _) = connect_async(direct_ws_url(addr, state.app_id))
+    async fn idle_ws_upgrade_during_shutdown_closes_cleanly() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
-            .expect("connect idle direct ws");
+            .expect("connect idle websocket");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(state.shutdown.request_shutdown());
@@ -1755,7 +1733,7 @@ mod tests {
                 outcome,
                 Ok(Some(Ok(WsMessage::Close(_)))) | Ok(Some(Err(_))) | Ok(None)
             ),
-            "idle direct ws upgrade must close cleanly under shutdown; observed {outcome:?}"
+            "idle websocket upgrade must close cleanly under shutdown; observed {outcome:?}"
         );
     }
 }

@@ -30,7 +30,7 @@ Primary files:
 - `crates/jazz-tools/src/query_manager/types/tests.rs`
 - `crates/jazz-tools/src/runtime_core/tests.rs`
 - `crates/jazz-tools/src/schema_manager/integration_tests.rs`
-- Removed in the direct-core graft: `crates/jazz-tools/src/sync_manager/tests.rs`
+- Removed in the core graft: `crates/jazz-tools/src/sync_manager/tests.rs`
   and `crates/jazz-tools/src/sync_manager/tests/*`
 - `crates/jazz-tools/src/test_row_history.rs`
 - `crates/jazz-tools/tests/auth_test.rs`
@@ -345,7 +345,7 @@ Completed:
 - Verified with `cargo test -p jazz-tools query_manager::rebac_tests --features test --lib`.
 - Removed direct SyncManager behavior tests from active source. Their former
   shape was a useful inventory, but replacement coverage must now be public
-  direct-core client/server/browser behavior rather than old-manager mechanics:
+  core client/server/browser behavior rather than old-manager mechanics:
   - `sync_manager/tests/basic.rs`
   - `sync_manager/tests/query_scope.rs`
   - `sync_manager/tests/subscriptions.rs`
@@ -357,7 +357,7 @@ Completed:
   - `sync_manager/tests/client_lifecycle.rs`
   - `sync_manager/tests/permissions.rs`
 - Formerly verified with `cargo test -p jazz-tools sync_manager::tests --features test --lib`;
-  this command is intentionally obsolete on the direct-core graft.
+  this command is intentionally obsolete on the core graft.
 - Split `crates/jazz-tools/src/schema_manager/integration_tests.rs` into shared fixtures plus integration modules:
   - `schema_manager/integration_tests/tests/catalogue.rs`
   - `schema_manager/integration_tests/tests/migration.rs`
@@ -383,7 +383,7 @@ This inventory includes test, spec, benchmark-test, config, and test-support fil
 - `crates/jazz-tools/src/runtime_core/tests.rs`
 - `crates/jazz-tools/src/schema_manager/integration_tests.rs`
 - `crates/jazz-tools/src/server/testing.rs`
-- Removed in the direct-core graft: `crates/jazz-tools/src/sync_manager/tests.rs`
+- Removed in the core graft: `crates/jazz-tools/src/sync_manager/tests.rs`
 - `crates/jazz-tools/src/test_row_history.rs`
 - `crates/jazz-tools/tests/auth_test.rs`
 - `crates/jazz-tools/tests/test_server.rs`

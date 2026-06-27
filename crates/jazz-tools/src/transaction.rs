@@ -1,4 +1,4 @@
-//! Neutral transaction vocabulary shared by public bindings and direct-core glue.
+//! Neutral transaction vocabulary shared by public bindings and core glue.
 
 use std::fmt;
 use std::str::FromStr;

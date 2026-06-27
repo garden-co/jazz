@@ -1,4 +1,4 @@
-//! Direct-core authorization-scope benchmarks.
+//! Core authorization-scope benchmarks.
 //!
 //! Ports the old server authorization-scope scenario onto the public
 //! `jazz::db` facade. The original benchmark measured a downstream
@@ -61,7 +61,7 @@ fn open_db(seed: u64, extra_columns: usize) -> DirectDb {
         )
         .with_id_source(SeededRowIdSource::new(seed)),
     ))
-    .expect("open direct authorization benchmark db")
+    .expect("open core authorization benchmark db")
 }
 
 fn item_cells(index: usize, extra_columns: usize) -> BTreeMap<String, Value> {
@@ -103,7 +103,7 @@ fn limited_items_query(db: &DirectDb, limit: usize) -> jazz::db::PreparedQuery {
 fn read_limit(db: &DirectDb, limit: usize) -> usize {
     let query = limited_items_query(db, limit);
     db.read(&query)
-        .expect("direct authorized limit read should succeed")
+        .expect("core authorized limit read should succeed")
         .len()
 }
 
@@ -119,7 +119,7 @@ fn subscribe_limit(db: &DirectDb, limit: usize) -> usize {
 }
 
 fn initial_authorized_scope(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_authorization_scope/initial_limit");
+    let mut group = c.benchmark_group("core_authorization_scope/initial_limit");
 
     for row_count in [1_000usize, 2_000, 10_000] {
         group.throughput(Throughput::Elements(row_count as u64));
@@ -140,7 +140,7 @@ fn initial_authorized_scope(c: &mut Criterion) {
 }
 
 fn initial_authorized_scope_with_wide_schema(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_authorization_scope/wide_schema");
+    let mut group = c.benchmark_group("core_authorization_scope/wide_schema");
 
     let (row_count, extra_columns) = (2_000usize, 256usize);
     group.throughput(Throughput::Elements(row_count as u64));
@@ -160,7 +160,7 @@ fn initial_authorized_scope_with_wide_schema(c: &mut Criterion) {
 }
 
 fn many_initial_authorized_scopes_share_schema_context(c: &mut Criterion) {
-    let mut group = c.benchmark_group("direct_authorization_scope/many_subscriptions");
+    let mut group = c.benchmark_group("core_authorization_scope/many_subscriptions");
 
     let (row_count, extra_columns, subscription_count) = (1_000usize, 256usize, 25usize);
     group.throughput(Throughput::Elements(
