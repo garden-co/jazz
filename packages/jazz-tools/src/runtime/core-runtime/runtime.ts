@@ -145,6 +145,11 @@ type PendingTx = {
   writes: Array<{ table: string; rowId: Uint8Array }>;
 };
 
+type CompletedTx = {
+  kind: TransactionKind;
+  state: "committed" | "rolled_back";
+};
+
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
@@ -202,6 +207,7 @@ export class CoreRuntime implements Runtime {
   private readonly schemaHash: string;
   private readonly preparedQueries = new Map<string, DirectPreparedQuery>();
   private readonly pendingTxs = new Map<string, PendingTx>();
+  private readonly completedTxs = new Map<string, CompletedTx>();
   private readonly writes = new Map<string, DirectWrite>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
@@ -285,6 +291,7 @@ export class CoreRuntime implements Runtime {
     }
     this.subscriptions.clear();
     this.pendingTxs.clear();
+    this.completedTxs.clear();
     this.writes.clear();
     this.queuedServerFrames.length = 0;
     this.serverTransport?.close();
@@ -304,7 +311,7 @@ export class CoreRuntime implements Runtime {
     const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
     const cells = encodeCellsForRow(this.table(table), values);
     const writeIdentity = identityFromWriteContext(_writeContext);
-    const tx = this.currentTx(_writeContext);
+    const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       assertNoSessionWriteInTx(writeIdentity);
       tx.tx.insertWithIdEncoded(table, rowId, cells);
@@ -328,7 +335,7 @@ export class CoreRuntime implements Runtime {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
     const writeIdentity = identityFromWriteContext(writeContext);
-    const tx = this.currentTx(writeContext);
+    const tx = this.currentTx(writeContext, "Insert");
     if (tx) {
       assertNoSessionWriteInTx(writeIdentity);
       tx.tx.restoreEncoded(table, rowId, cells);
@@ -352,7 +359,7 @@ export class CoreRuntime implements Runtime {
     const rowId = parseUuid(objectId);
     const patch = encodeCellsForPatch(this.table(table), values);
     const writeIdentity = identityFromWriteContext(writeContext);
-    const tx = this.currentTx(writeContext);
+    const tx = this.currentTx(writeContext, "Insert");
     if (tx) {
       assertNoSessionWriteInTx(writeIdentity);
       tx.tx.updateEncoded(table, rowId, patch);
@@ -376,7 +383,7 @@ export class CoreRuntime implements Runtime {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
     const writeIdentity = identityFromWriteContext(writeContext);
-    const tx = this.currentTx(writeContext);
+    const tx = this.currentTx(writeContext, "Insert");
     if (tx) {
       assertNoSessionWriteInTx(writeIdentity);
       tx.tx.upsertEncoded(table, rowId, cells);
@@ -395,7 +402,7 @@ export class CoreRuntime implements Runtime {
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeIdentity = identityFromWriteContext(writeContext);
-    const tx = this.currentTx(writeContext);
+    const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
       assertNoSessionWriteInTx(writeIdentity);
       tx.tx.delete(table, rowId);
@@ -423,10 +430,13 @@ export class CoreRuntime implements Runtime {
 
   commitTransaction(transactionId: string): void {
     const pending = this.pendingTxs.get(transactionId);
-    if (!pending) throw new Error(`unknown transaction ${transactionId}`);
+    if (!pending) {
+      throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
+    }
     const write = pending.tx.commit();
     this.writes.set(transactionId, write);
     this.pendingTxs.delete(transactionId);
+    this.completedTxs.set(transactionId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
   }
 
@@ -462,9 +472,12 @@ export class CoreRuntime implements Runtime {
 
   rollbackTransaction(transactionId: string): boolean {
     const pending = this.pendingTxs.get(transactionId);
-    if (!pending) return false;
+    if (!pending) {
+      throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
+    }
     pending.tx.rollback();
     this.pendingTxs.delete(transactionId);
+    this.completedTxs.set(transactionId, { kind: pending.kind, state: "rolled_back" });
     return true;
   }
 
@@ -475,6 +488,7 @@ export class CoreRuntime implements Runtime {
     optionsJson?: string | null,
   ): Promise<unknown> {
     assertSupportedReadOptions(tier, optionsJson);
+    assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const relationRows = await this.queryRelationShape(queryJson, sessionJson, tier, optionsJson);
     if (relationRows) return relationRows;
     const query = this.prepareQuery(queryJson);
@@ -895,9 +909,15 @@ export class CoreRuntime implements Runtime {
     return definition;
   }
 
-  private currentTx(writeContext?: string | null): PendingTx | undefined {
+  private currentTx(
+    writeContext: string | null | undefined,
+    operation: "Insert" | "Delete",
+  ): PendingTx | undefined {
     const id = txIdFromContext(writeContext);
-    return id ? this.pendingTxs.get(id) : undefined;
+    if (!id) return undefined;
+    const pending = this.pendingTxs.get(id);
+    if (pending) return pending;
+    throw new Error(`${operation} failed: WriteError("${txStateMessage(id, this.completedTxs)}")`);
   }
 
   private pumpSubscriptions(): void {
@@ -1120,6 +1140,58 @@ function assertNoSessionWriteInTx(writeIdentity: Uint8Array | undefined): void {
     "Direct core runtime cannot perform session-scoped transaction writes: " +
       "the core runtime mergeable transaction API has no identity-aware staging methods.",
   );
+}
+
+function txStateMessage(transactionId: string, completedTxs: Map<string, CompletedTx>): string {
+  const completed = completedTxs.get(transactionId);
+  if (completed?.state === "committed") {
+    return `transaction ${transactionId} is already committed`;
+  }
+  return `transaction ${transactionId} has already been completed or was never opened`;
+}
+
+function commitTransactionMessage(
+  transactionId: string,
+  completedTxs: Map<string, CompletedTx>,
+): string {
+  const message = txStateMessage(transactionId, completedTxs);
+  return completedTxs.get(transactionId)?.state === "committed"
+    ? `Write error: ${message}`
+    : `Commit transaction failed: Write error: ${message}`;
+}
+
+function rollbackTransactionMessage(
+  transactionId: string,
+  completedTxs: Map<string, CompletedTx>,
+): string {
+  const message = txStateMessage(transactionId, completedTxs);
+  return completedTxs.get(transactionId)?.state === "committed"
+    ? `Write error: ${message}`
+    : `Rollback transaction failed: Write error: ${message}`;
+}
+
+function assertTransactionReadOpen(
+  optionsJson: string | null | undefined,
+  pendingTxs: Map<string, PendingTx>,
+  completedTxs: Map<string, CompletedTx>,
+): void {
+  const transactionId = txIdFromOptions(optionsJson);
+  if (!transactionId || pendingTxs.has(transactionId)) return;
+  throw new Error(
+    `Query setup failed: Write error: ${txStateMessage(transactionId, completedTxs)}`,
+  );
+}
+
+function txIdFromOptions(optionsJson?: string | null): string | undefined {
+  if (!optionsJson) return undefined;
+  try {
+    const parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
+    return typeof parsed.transaction_batch_id === "string"
+      ? parsed.transaction_batch_id
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function readOptions(tier?: string | null, includeDeleted = false): unknown {
