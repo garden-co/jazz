@@ -4,8 +4,6 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::env;
-use std::ffi::OsString;
 use std::time::Duration;
 
 use jazz_tools::row_input;
@@ -15,39 +13,8 @@ use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, SchemaBuilder,
     SubscriptionStream, TableSchema, Value,
 };
-use serial_test::serial;
 use support::{publish_allow_all_permissions, wait_for_query};
 use uuid::Uuid;
-
-const DIRECT_CORE_LOCAL_TICK_DRIVER_ENV: &str = "JAZZ_DIRECT_CORE_LOCAL_TICK_DRIVER";
-
-struct ScopedDirectCoreLocalTickDriverEnv {
-    previous: Option<OsString>,
-}
-
-impl ScopedDirectCoreLocalTickDriverEnv {
-    fn enable() -> Self {
-        let previous = env::var_os(DIRECT_CORE_LOCAL_TICK_DRIVER_ENV);
-        // SAFETY: this guard is used only by a serial test and restores the
-        // previous value before the test exits.
-        unsafe {
-            env::set_var(DIRECT_CORE_LOCAL_TICK_DRIVER_ENV, "1");
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for ScopedDirectCoreLocalTickDriverEnv {
-    fn drop(&mut self) {
-        // SAFETY: guarded test-scoped restoration of the process environment.
-        unsafe {
-            match &self.previous {
-                Some(value) => env::set_var(DIRECT_CORE_LOCAL_TICK_DRIVER_ENV, value),
-                None => env::remove_var(DIRECT_CORE_LOCAL_TICK_DRIVER_ENV),
-            }
-        }
-    }
-}
 
 fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
@@ -268,20 +235,17 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[serial]
 async fn jazz_tools_cli_two_clients_sync_values() {
-    let _env = ScopedDirectCoreLocalTickDriverEnv::enable();
-
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client_a = JazzClient::connect(
+            let client_a = JazzClient::connect_with_direct_core_local_driver(
                 server.make_client_context_for_user(schema.clone(), "sync-values-user"),
             )
             .await
             .expect("connect client a");
-            let client_b = JazzClient::connect(
+            let client_b = JazzClient::connect_with_direct_core_local_driver(
                 server.make_client_context_for_user(schema, "sync-values-user"),
             )
             .await
@@ -529,61 +493,69 @@ async fn delete_through_one_client_removes_row_from_peer_query_results() {
     server.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn caller_supplied_uuid_is_used_for_created_row() {
-    let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &schema,
-    )
-    .await;
-    let client = JazzClient::connect(
-        server.make_client_context_for_user(schema.clone(), "external-id-writer"),
-    )
-    .await
-    .expect("connect writer");
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = test_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            publish_allow_all_permissions(
+                &server.base_url(),
+                server.app_id(),
+                server.admin_secret(),
+                &schema,
+            )
+            .await;
+            let client = JazzClient::connect_with_direct_core_local_driver(
+                server.make_client_context_for_user(schema.clone(), "external-id-writer"),
+            )
+            .await
+            .expect("connect writer");
+            assert!(
+                client.direct_core_local_driver_active(),
+                "client should exercise the direct-core local tick driver"
+            );
 
-    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+            wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
-    let external_id =
-        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("parse external uuid");
+            let external_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")
+                .expect("parse external uuid");
 
-    let (todo_id, expected_values, _) = client
-        .insert_with_id(
-            "todos",
-            external_id,
-            HashMap::from([
-                (
-                    "title".to_string(),
-                    Value::Text("external-id-created".to_string()),
-                ),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
-        .expect("create row with external id");
+            let (todo_id, expected_values, _) = client
+                .insert_with_id(
+                    "todos",
+                    external_id,
+                    HashMap::from([
+                        (
+                            "title".to_string(),
+                            Value::Text("external-id-created".to_string()),
+                        ),
+                        ("completed".to_string(), Value::Boolean(false)),
+                    ]),
+                )
+                .expect("create row with external id");
 
-    assert_eq!(todo_id.uuid(), &external_id);
+            assert_eq!(todo_id.uuid(), &external_id);
 
-    let rows = wait_for_query(
-        &client,
-        QueryBuilder::new("todos").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "query returns row created with external id",
-        |rows| {
-            (rows.len() == 1 && rows[0].0 == todo_id && rows[0].1 == expected_values)
-                .then_some(rows)
-        },
-    )
-    .await;
+            let rows = wait_for_query(
+                &client,
+                QueryBuilder::new("todos").build(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(25),
+                "query returns row created with external id",
+                |rows| {
+                    (rows.len() == 1 && rows[0].0 == todo_id && rows[0].1 == expected_values)
+                        .then_some(rows)
+                },
+            )
+            .await;
 
-    assert_eq!(rows[0].0.uuid(), &external_id);
+            assert_eq!(rows[0].0.uuid(), &external_id);
 
-    client.shutdown().await.expect("shutdown writer");
-    server.shutdown().await;
+            client.shutdown().await.expect("shutdown writer");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 #[tokio::test]
