@@ -8,7 +8,7 @@ use jazz_server::StorageConfig;
 mod builder;
 mod catalogue;
 mod catalogue_storage;
-mod core_server;
+mod local_engine;
 pub mod routes;
 pub(crate) mod schema_convert;
 mod shutdown;
@@ -55,7 +55,7 @@ impl ServerTopology {
 pub struct ServerState {
     /// Direct, storage-backed admin catalogue store. Production websocket sync,
     /// row storage, query execution, and client lifecycle are owned by
-    /// the local-owner core server handle.
+    /// the local-owner engine handle.
     pub(crate) catalogue_store: StoredCatalogue,
     pub(crate) catalogue: ServerCatalogue,
     #[allow(dead_code)]
@@ -71,35 +71,34 @@ pub struct ServerState {
     /// Configured verifier for external JWTs.
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// Sendable handle to the local-owner jazz_core peer loop for the websocket route.
-    pub(crate) core_server: StdRwLock<Option<core_server::LocalCoreServerHandle>>,
-    pub(crate) core_server_storage_config: Option<StorageConfig>,
+    pub(crate) local_engine: StdRwLock<Option<local_engine::LocalEngineHandle>>,
+    pub(crate) local_engine_storage_config: Option<StorageConfig>,
     pub shutdown: ShutdownController,
 }
 
 impl ServerState {
-    pub(crate) fn core_server(&self) -> Option<core_server::LocalCoreServerHandle> {
-        self.core_server.read().unwrap().clone()
+    pub(crate) fn local_engine(&self) -> Option<local_engine::LocalEngineHandle> {
+        self.local_engine.read().unwrap().clone()
     }
 
-    pub(crate) fn start_core_server(
+    pub(crate) fn start_local_engine(
         &self,
         schema: jazz::schema::JazzSchema,
-    ) -> Result<core_server::LocalCoreServerHandle, String> {
-        if let Some(core_server) = self.core_server() {
-            return Ok(core_server);
+    ) -> Result<local_engine::LocalEngineHandle, String> {
+        if let Some(local_engine) = self.local_engine() {
+            return Ok(local_engine);
         }
 
         let storage_config = self
-            .core_server_storage_config
+            .local_engine_storage_config
             .clone()
-            .ok_or_else(|| "core server storage is not configured".to_owned())?;
-        let mut core_server = self.core_server.write().unwrap();
-        if let Some(existing) = core_server.clone() {
+            .ok_or_else(|| "local engine storage is not configured".to_owned())?;
+        let mut local_engine = self.local_engine.write().unwrap();
+        if let Some(existing) = local_engine.clone() {
             return Ok(existing);
         }
-        let started =
-            core_server::LocalCoreServerHandle::start_with_storage(schema, storage_config)?;
-        *core_server = Some(started.clone());
+        let started = local_engine::LocalEngineHandle::start_with_storage(schema, storage_config)?;
+        *local_engine = Some(started.clone());
         Ok(started)
     }
 
@@ -243,8 +242,8 @@ mod tests {
                 .build()
                 .expect("build HTTP client"),
             jwt_verifier: None,
-            core_server: StdRwLock::new(None),
-            core_server_storage_config: None,
+            local_engine: StdRwLock::new(None),
+            local_engine_storage_config: None,
             shutdown: ShutdownController::new(timeout),
         })
     }

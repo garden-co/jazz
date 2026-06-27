@@ -150,7 +150,7 @@ fn convert_column_type(
         ColumnType::Integer => Ok(GrooveColumnType::U32),
         ColumnType::BigInt => Err(err(
             format!("$.{}.{}", table.as_str(), column),
-            "BIGINT is signed, but core server fixed schemas only support unsigned integer columns",
+            "BIGINT is signed, but local engine fixed schemas only support unsigned integer columns",
         )),
         ColumnType::BatchId => Err(err(
             format!("$.{}.{}", table.as_str(), column),

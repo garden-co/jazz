@@ -3,7 +3,7 @@
 //! This route intentionally does not share the legacy `SyncPayload` `/ws`
 //! transport framing.
 //! It accepts postcard-encoded batches of raw `jazz::wire::WireFrame` bytes,
-//! matching the core server binding/server carrier shape.
+//! matching the jazz_core binding/server carrier shape.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -539,7 +539,7 @@ async fn handle_ws_connection(
         }
     };
 
-    let Some(core_server) = state.core_server() else {
+    let Some(local_engine) = state.local_engine() else {
         send_core_wire_error(
             &mut socket,
             WireError::new(
@@ -552,7 +552,7 @@ async fn handle_ws_connection(
         let _ = socket.close().await;
         return;
     };
-    let session = match core_server
+    let session = match local_engine
         .open(admission.identity, admission.claims, admission.trust)
         .await
     {
@@ -599,12 +599,12 @@ async fn handle_ws_connection(
         "websocket negotiated"
     );
 
-    let mut core_activity_rx = core_server.subscribe_activity();
-    if drain_ws_outbound(&mut socket, &core_server, session)
+    let mut core_activity_rx = local_engine.subscribe_activity();
+    if drain_ws_outbound(&mut socket, &local_engine, session)
         .await
         .is_err()
     {
-        core_server.close(session);
+        local_engine.close(session);
         let _ = socket.close().await;
         return;
     }
@@ -649,7 +649,7 @@ async fn handle_ws_connection(
                             break;
                         }
                     };
-                    let outbound = match core_server.receive_tick_take(session, frames).await {
+                    let outbound = match local_engine.receive_tick_take(session, frames).await {
                         Ok(frames) => frames,
                         Err(error) => {
                             send_core_wire_error(
@@ -676,23 +676,23 @@ async fn handle_ws_connection(
                 if changed.is_err() {
                     break;
                 }
-                if drain_ws_outbound(&mut socket, &core_server, session).await.is_err() {
+                if drain_ws_outbound(&mut socket, &local_engine, session).await.is_err() {
                     break;
                 }
             }
         }
     }
 
-    core_server.close(session);
+    local_engine.close(session);
     let _ = socket.close().await;
 }
 
 async fn drain_ws_outbound(
     socket: &mut WebSocket,
-    core_server: &crate::server::core_server::LocalCoreServerHandle,
+    local_engine: &crate::server::local_engine::LocalEngineHandle,
     session: jazz_server::ServerSession,
 ) -> Result<(), ()> {
-    let outbound = core_server.tick_take(session).await.map_err(|_| ())?;
+    let outbound = local_engine.tick_take(session).await.map_err(|_| ())?;
     if outbound.is_empty() {
         return Ok(());
     }
@@ -956,7 +956,7 @@ mod tests {
             })
             .with_storage(StorageBackend::InMemory)
             .with_schema(Schema::new())
-            .with_core_server_schema(schema)
+            .with_local_engine_schema(schema)
             .build()
             .await
             .expect("build websocket convergence test state")
@@ -991,10 +991,10 @@ mod tests {
         );
     }
 
-    // Internal admission-boundary test: core server policy reads are not yet
+    // Internal admission-boundary test: local engine policy reads are not yet
     // observable through a public websocket client helper, so this pins
     // the security invariant at the route admission point that feeds
-    // LocalCoreServerHandle::open(identity, claims, trust).
+    // LocalEngineHandle::open(identity, claims, trust).
     #[tokio::test]
     async fn ws_backend_session_admits_session_claims_for_policy_reads() {
         let state = make_ws_test_state().await;
@@ -1613,7 +1613,7 @@ mod tests {
     }
 
     // Internal route-boundary test: identity isolation is enforced before the
-    // core server has a higher-level public client surface to observe.
+    // local engine has a higher-level public client surface to observe.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn core_peer_identity_eviction_does_not_affect_other_identities() {
         let state = make_ws_convergence_test_state().await;
