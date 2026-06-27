@@ -7,7 +7,7 @@ use serde_bytes::ByteBuf;
 
 use crate::metadata::RowProvenance;
 use crate::object::ObjectId;
-use crate::row_histories::BatchId;
+use crate::transaction::BatchId;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

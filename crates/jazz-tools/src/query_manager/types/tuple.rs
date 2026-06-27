@@ -4,7 +4,7 @@ use smolset::SmolSet;
 
 use crate::metadata::RowProvenance;
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::BatchId;
+use crate::transaction::BatchId;
 
 use super::encoding::{decode_row, encode_row};
 use super::*;

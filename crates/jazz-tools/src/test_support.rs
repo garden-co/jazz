@@ -10,13 +10,12 @@ use crate::query_manager::query::Query;
 #[cfg(feature = "test-utils")]
 use crate::query_manager::types::Value;
 use crate::query_manager::types::{Schema, SchemaHash};
-use crate::row_histories::{
-    ApplyRowBatchResult, BatchId, RowHistoryError, StoredRowBatch, apply_row_batch,
-};
+use crate::row_histories::{ApplyRowBatchResult, RowHistoryError, StoredRowBatch, apply_row_batch};
 use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{
     MemoryStorage, Storage, StorageError, metadata_from_row_locator, row_locator_from_metadata,
 };
+use crate::transaction::BatchId;
 #[cfg(feature = "test-utils")]
 use crate::{DurabilityTier, JazzClient};
 

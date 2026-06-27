@@ -12,7 +12,6 @@ use std::time::Duration;
 
 #[cfg(feature = "test-utils")]
 use crate::query_manager::types::RowPolicyMode;
-use crate::row_histories::BatchId;
 #[cfg(feature = "direct-core-client")]
 use crate::schema_api::OrderedRowDelta;
 #[cfg(any(feature = "direct-core-client", feature = "test-utils"))]
@@ -28,6 +27,7 @@ use crate::server::direct_schema::convert_alpha_schema;
 use crate::sync::ClientId;
 #[cfg(feature = "direct-core-client")]
 use crate::sync::DurabilityTier;
+use crate::transaction::BatchId;
 #[cfg(feature = "direct-core-client")]
 use crate::transport_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;

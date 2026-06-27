@@ -237,7 +237,6 @@ interface WriteContextPayload {
   session?: Session;
   attribution?: string;
   updated_at?: number;
-  batch_mode?: "direct" | "transactional";
   batch_id?: string;
   target_branch_name?: string;
 }

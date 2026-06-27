@@ -7,4 +7,4 @@ pub use crate::query_manager::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
     RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
-pub use crate::row_histories::BatchId;
+pub use crate::transaction::BatchId;

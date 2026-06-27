@@ -916,7 +916,7 @@ pub fn test_catalogue_entry_nonexistent_returns_none(factory: &dyn Fn() -> Box<d
 
 pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let batch_id = crate::row_histories::BatchId::new();
+    let batch_id = crate::transaction::BatchId::new();
     let mut record = LocalBatchRecord::new(
         batch_id,
         BatchMode::Direct,
@@ -979,8 +979,8 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
 
 pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let low = crate::row_histories::BatchId::from_uuid(uuid::Uuid::from_u128(1));
-    let high = crate::row_histories::BatchId::from_uuid(uuid::Uuid::from_u128(2));
+    let low = crate::transaction::BatchId::from_uuid(uuid::Uuid::from_u128(1));
+    let high = crate::transaction::BatchId::from_uuid(uuid::Uuid::from_u128(2));
 
     storage
         .upsert_local_batch_record(&LocalBatchRecord::new(high, BatchMode::Direct, true, None))
@@ -1002,7 +1002,7 @@ pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() ->
 
 pub fn test_local_batch_record_delete_removes_record(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let batch_id = crate::row_histories::BatchId::new();
+    let batch_id = crate::transaction::BatchId::new();
     let record = LocalBatchRecord::new(
         batch_id,
         BatchMode::Transactional,
@@ -1026,7 +1026,7 @@ pub fn test_local_batch_record_delete_removes_record(factory: &dyn Fn() -> Box<d
 
 pub fn test_authoritative_batch_fate_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let batch_id = crate::row_histories::BatchId::new();
+    let batch_id = crate::transaction::BatchId::new();
     let settlement = BatchFate::Rejected {
         batch_id,
         code: "permission_denied".to_string(),
@@ -1045,7 +1045,7 @@ pub fn test_authoritative_batch_fate_round_trip(factory: &dyn Fn() -> Box<dyn St
 
 pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let batch_id = crate::row_histories::BatchId::new();
+    let batch_id = crate::transaction::BatchId::new();
     let alice = ObjectId::from_uuid(uuid::Uuid::from_u128(301));
     let bob = ObjectId::from_uuid(uuid::Uuid::from_u128(302));
     let submission = SealedBatchSubmission::new(
@@ -1115,7 +1115,7 @@ pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Sto
 
 pub fn test_sealed_batch_submission_delete_removes_record(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let batch_id = crate::row_histories::BatchId::new();
+    let batch_id = crate::transaction::BatchId::new();
     let submission = SealedBatchSubmission::new(
         batch_id,
         crate::batch_fate::BatchMode::Direct,
@@ -1212,7 +1212,7 @@ pub fn test_close_releases_resources_for_reopen(factory: &PersistentStorageFacto
 pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorageFactory) {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
-    let batch_id = crate::row_histories::BatchId::new();
+    let batch_id = crate::transaction::BatchId::new();
     let mut record = LocalBatchRecord::new(
         batch_id,
         BatchMode::Direct,
@@ -1268,7 +1268,7 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
 pub fn test_authoritative_batch_fate_survives_close_reopen(factory: &PersistentStorageFactory) {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
-    let batch_id = crate::row_histories::BatchId::new();
+    let batch_id = crate::transaction::BatchId::new();
     let settlement = BatchFate::Rejected {
         batch_id,
         code: "session_required".to_string(),
@@ -1296,7 +1296,7 @@ pub fn test_authoritative_batch_fate_survives_close_reopen(factory: &PersistentS
 pub fn test_sealed_batch_submission_survives_close_reopen(factory: &PersistentStorageFactory) {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
-    let batch_id = crate::row_histories::BatchId::new();
+    let batch_id = crate::transaction::BatchId::new();
     let submission = SealedBatchSubmission::new(
         batch_id,
         crate::batch_fate::BatchMode::Direct,
