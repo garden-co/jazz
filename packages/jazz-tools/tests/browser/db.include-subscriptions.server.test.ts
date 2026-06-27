@@ -266,5 +266,4 @@ function hasProjectedTodo(
 
 async function ensureDirectRuntimeReady(db: Db): Promise<void> {
   (db as unknown as { getClient(schema: unknown): unknown }).getClient(app.wasmSchema);
-  await (db as unknown as { ensureBridgeReady(): Promise<void> }).ensureBridgeReady();
 }

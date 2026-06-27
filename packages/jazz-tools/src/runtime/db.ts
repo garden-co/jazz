@@ -1103,34 +1103,6 @@ export class Db {
       }
     });
   }
-  /**
-   * No-op retained for subclasses that wait for runtime readiness.
-   */
-  protected async ensureBridgeReady(): Promise<void> {}
-
-  protected async ensureQueryReady(_options?: QueryOptions): Promise<void> {
-    await this.ensureBridgeReady();
-  }
-
-  private async ensureWriteWaitReady(_options: { tier: DurabilityTier }): Promise<void> {
-    await this.ensureBridgeReady();
-  }
-
-  private async waitForDurableRuntimeSettle(): Promise<void> {
-    await this.ensureBridgeReady();
-  }
-
-  private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
-    const wait = handle.wait.bind(handle);
-    handle.wait = (async (options: { tier: DurabilityTier }) => {
-      await this.ensureWriteWaitReady(options);
-      const result = await wait(options);
-      await this.waitForDurableRuntimeSettle();
-      return result;
-    }) as THandle["wait"];
-    return handle;
-  }
-
   private installMainThreadWasmTelemetry(): void {
     const collectorUrl = this.resolveTelemetryCollectorUrl();
     if (!collectorUrl || !this.runtimeModule || this.disposeWasmTelemetry) {
@@ -1251,10 +1223,8 @@ export class Db {
       context?.session,
       context?.attribution,
     );
-    return this.wrapWriteWait(
-      inserted.mapValue((row) =>
-        transformOutputRow(table, transformRow(row, table._schema, table._table)),
-      ),
+    return inserted.mapValue((row) =>
+      transformOutputRow(table, transformRow(row, table._schema, table._table)),
     );
   }
 
@@ -1281,10 +1251,8 @@ export class Db {
       context?.session,
       context?.attribution,
     );
-    return this.wrapWriteWait(
-      restored.mapValue((row) =>
-        transformOutputRow(table, transformRow(row, table._schema, table._table)),
-      ),
+    return restored.mapValue((row) =>
+      transformOutputRow(table, transformRow(row, table._schema, table._table)),
     );
   }
 
@@ -1302,9 +1270,7 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    return this.wrapWriteWait(
-      client.upsert(table._table, values, options, context?.session, context?.attribution),
-    );
+    return client.upsert(table._table, values, options, context?.session, context?.attribution);
   }
 
   /**
@@ -1322,8 +1288,13 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    return this.wrapWriteWait(
-      client.update(table._table, id, updates, options, context?.session, context?.attribution),
+    return client.update(
+      table._table,
+      id,
+      updates,
+      options,
+      context?.session,
+      context?.attribution,
     );
   }
 
@@ -1335,9 +1306,7 @@ export class Db {
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    return this.wrapWriteWait(
-      client.delete(table._table, id, options, context?.session, context?.attribution),
-    );
+    return client.delete(table._table, id, options, context?.session, context?.attribution);
   }
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
@@ -1492,7 +1461,6 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
-    await this.ensureQueryReady(queryOptions);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const runtimeQueryOptions = usesRelationTraversal
@@ -1712,14 +1680,6 @@ export class Db {
     }
     this.clearActiveQuerySubscriptionTraces();
 
-    let shutdownError: unknown = null;
-
-    try {
-      await this.ensureBridgeReady();
-    } catch (error) {
-      shutdownError ??= error;
-    }
-
     this.mutationErrorListeners.clear();
     this.disposeWasmTelemetry?.();
     this.disposeWasmTelemetry = null;
@@ -1728,10 +1688,6 @@ export class Db {
     }
     this.clients.clear();
     this.clientSchemas.clear();
-
-    if (shutdownError) {
-      throw shutdownError;
-    }
   }
 
   private notifyActiveQuerySubscriptionTraceListeners(): void {
