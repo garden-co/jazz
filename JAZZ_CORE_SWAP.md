@@ -199,11 +199,10 @@ Until deleted, treat them as replacement targets only.
 - Remaining catalogue-store simplification gap: `DirectCatalogueStore` now uses
   a storage-backed `CatalogueIndex` for schema hashes, publish timestamps,
   migration/lens connectivity, and permissions heads/bundles. The old
-  `SchemaManager` no longer serves admin catalogue reads/writes, but still
-  seeds the initial direct catalogue store and remains behind test-only
-  synthetic lifecycle helpers. The next cleanup is to construct catalogue
-  state directly from app/schema inputs and isolate any remaining test helper
-  needs.
+  `SchemaManager` no longer serves admin catalogue reads/writes and production
+  server startup no longer constructs one to seed catalogue state. It remains
+  only behind test-only synthetic lifecycle helpers. The next cleanup is to
+  replace those test helpers or move them fully onto direct-core observability.
 - Direct prepared reads now cover the browser gate's include, hop, UUID-array
   hop, gather, and array-membership `IN` shapes without a broad table fallback.
   Relation-shaped subscriptions reuse the same direct recompute path and now
@@ -262,6 +261,11 @@ Until deleted, treat them as replacement targets only.
   are inactive because the crate has `autotests = false` and no explicit
   `[[test]]` targets for them. Any revived storage regression coverage should
   be moved crate-internal or exposed through narrow `test_support` helpers.
+- Public Rust sync identity/durability/tracing types now live in
+  `jazz_tools::sync` and are re-exported from the crate root. The old
+  `sync_manager` module remains crate-private legacy machinery; internal old
+  modules may still import compatibility aliases from it until they are deleted
+  or ported.
 - Rust `JazzClient` no longer has a `ClientEngine::{Legacy, DirectCore}` split:
   server-backed direct-core memory clients are the only live construction path,
   and offline/persistent client construction fails closed until direct-core

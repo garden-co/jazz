@@ -4,7 +4,8 @@
 //! TransportManager owns the live WebSocket connection and reconnects on failure.
 
 use crate::query_manager::types::SchemaHash;
-use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId, SyncPayload};
+use crate::sync::{ClientId, ServerId};
+use crate::sync_manager::types::{InboxEntry, OutboxEntry, SyncPayload};
 pub use crate::transport_auth::AuthConfig;
 use futures::channel::mpsc;
 use std::time::Duration;

@@ -13,17 +13,22 @@ use crate::middleware::AuthConfig;
 use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
-use crate::query_manager::types::{Schema, SchemaHash};
-use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
+use crate::query_manager::types::Schema;
+use crate::schema_manager::AppId;
+#[cfg(test)]
+use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 use crate::server::routes;
 use crate::server::{
     ConnectionEventHub, DirectCatalogueStore, DynStorage, ServerState, ServerTopology,
 };
+use crate::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
 use crate::storage::SqliteStorage;
-use crate::storage::{MemoryStorage, Storage};
+#[cfg(test)]
+use crate::storage::Storage;
+#[cfg(test)]
 use crate::sync_manager::{DurabilityTier, SyncManager};
 
 #[cfg(feature = "rocksdb")]
@@ -72,7 +77,7 @@ pub struct ServerBuilder {
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
     core_server_schema: Option<JazzSchema>,
-    sync_tracer: Option<crate::sync_manager::sync_tracer::SyncTracer>,
+    sync_tracer: Option<crate::sync::SyncTracer>,
     upstream_url: Option<String>,
     shutdown_timeout: Duration,
     #[cfg(test)]
@@ -100,10 +105,7 @@ impl ServerBuilder {
         }
     }
 
-    pub fn with_sync_tracer(
-        mut self,
-        tracer: crate::sync_manager::sync_tracer::SyncTracer,
-    ) -> Self {
+    pub fn with_sync_tracer(mut self, tracer: crate::sync::SyncTracer) -> Self {
         self.sync_tracer = Some(tracer);
         self
     }
@@ -227,18 +229,35 @@ impl ServerBuilder {
 
     /// Build the direct admin catalogue store used by HTTP catalogue routes.
     ///
-    /// This intentionally reuses `SchemaManager` catalogue algorithms without
-    /// creating a runtime, sync engine, or websocket path.
     fn build_catalogue_store(&self) -> Result<(DirectCatalogueStore, Option<Schema>), String> {
         let storage = self.build_main_storage()?;
-        let schema_manager = self.build_schema_manager(storage.as_ref())?;
-        let latest_catalogue_schema = self.latest_published_schema(&schema_manager);
-        Ok((
-            DirectCatalogueStore::new(schema_manager, storage),
-            latest_catalogue_schema,
-        ))
+        let initial_schema = match &self.schema_mode {
+            ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
+            ServerSchemaMode::Dynamic => None,
+        };
+
+        #[cfg(test)]
+        let store = {
+            let schema_manager = self.build_schema_manager(storage.as_ref())?;
+            let test_sync_manager = server_sync_manager(self.local_durability_tier());
+            DirectCatalogueStore::with_test_schema_manager(
+                self.app_id,
+                initial_schema,
+                storage,
+                schema_manager,
+                test_sync_manager,
+            )
+        };
+        #[cfg(not(test))]
+        let store = DirectCatalogueStore::new(self.app_id, initial_schema, storage);
+
+        let latest_catalogue_schema = store
+            .latest_published_schema()
+            .map_err(|error| format!("failed to read latest catalogue schema: {error:?}"))?;
+        Ok((store, latest_catalogue_schema))
     }
 
+    #[cfg(test)]
     fn build_schema_manager(&self, storage: &dyn Storage) -> Result<SchemaManager, String> {
         let sync_manager = server_sync_manager(self.local_durability_tier());
 
@@ -325,22 +344,6 @@ impl ServerBuilder {
         }
     }
 
-    fn latest_published_schema(&self, schema_manager: &SchemaManager) -> Option<Schema> {
-        let mut candidates = Vec::<(u64, SchemaHash)>::new();
-        for hash in schema_manager.known_schema_hashes() {
-            if let Some(published_at) = schema_manager.schema_published_at(&hash) {
-                candidates.push((published_at, hash));
-            }
-        }
-        candidates.sort_by(|(left_time, left_hash), (right_time, right_hash)| {
-            left_time
-                .cmp(right_time)
-                .then_with(|| left_hash.as_bytes().cmp(right_hash.as_bytes()))
-        });
-        let (_, hash) = candidates.pop()?;
-        schema_manager.get_known_schema(&hash).cloned()
-    }
-
     fn build_main_storage(&self) -> Result<DynStorage, String> {
         match &self.storage_backend {
             StorageBackend::Persistent { path } => {
@@ -394,6 +397,7 @@ impl ServerBuilder {
         }
     }
 
+    #[cfg(test)]
     fn local_durability_tier(&self) -> DurabilityTier {
         if self.upstream_url.is_some() {
             DurabilityTier::EdgeServer
@@ -403,6 +407,7 @@ impl ServerBuilder {
     }
 }
 
+#[cfg(test)]
 fn server_sync_manager(local_tier: DurabilityTier) -> SyncManager {
     let sync_manager = SyncManager::new().with_durability_tier(local_tier);
 
@@ -413,6 +418,7 @@ fn server_sync_manager(local_tier: DurabilityTier) -> SyncManager {
     }
 }
 
+#[cfg(test)]
 fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
     !matches!(
         std::env::var("NODE_ENV"),

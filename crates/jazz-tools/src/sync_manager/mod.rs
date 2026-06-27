@@ -11,6 +11,7 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
 use crate::row_histories::{BatchId, RowVisibilityChange};
 use crate::storage::{PreparedRowTableContext, Storage};
+pub(crate) use crate::sync::{ClientId, DurabilityTier, ServerId};
 
 // Module declarations
 pub mod clock;
@@ -18,7 +19,9 @@ pub mod forwarding;
 pub mod inbox;
 pub mod permissions;
 pub mod sync_logic;
-pub mod sync_tracer;
+pub(crate) mod sync_tracer {
+    pub(crate) use crate::sync::sync_tracer::*;
+}
 pub mod types;
 
 use clock::MonotonicClock;

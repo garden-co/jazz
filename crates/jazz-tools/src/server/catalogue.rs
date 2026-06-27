@@ -15,11 +15,11 @@ use crate::schema_manager::encoding::{
     encode_schema,
 };
 use crate::schema_manager::manager::{CurrentPermissionsSummary, PermissionsHeadSummary};
-use crate::schema_manager::{AppId, Lens, SchemaManager};
+use crate::schema_manager::{AppId, Lens};
 use crate::server::DynStorage;
 use crate::storage::StorageError;
 #[cfg(test)]
-use crate::sync_manager::{ClientId, InboxEntry, QueryPropagation, SyncPayload};
+use crate::sync_manager::{ClientId, InboxEntry, QueryPropagation, SyncManager, SyncPayload};
 
 /// Server-local catalogue facade.
 ///
@@ -57,7 +57,9 @@ pub(crate) struct DirectCatalogueStore {
     app_id: AppId,
     index: Mutex<CatalogueIndex>,
     #[cfg(test)]
-    schema_manager: Mutex<SchemaManager>,
+    schema_manager: Mutex<Option<crate::schema_manager::SchemaManager>>,
+    #[cfg(test)]
+    sync_manager: Mutex<SyncManager>,
     storage: Mutex<DynStorage>,
     #[cfg(test)]
     test_query_subscriptions: Mutex<
@@ -71,26 +73,36 @@ pub(crate) struct DirectCatalogueStore {
 }
 
 impl DirectCatalogueStore {
-    pub(crate) fn new(schema_manager: SchemaManager, storage: DynStorage) -> Self {
-        let app_id = schema_manager.app_id();
+    pub(crate) fn new(app_id: AppId, initial_schema: Option<Schema>, storage: DynStorage) -> Self {
         let mut index = CatalogueIndex::from_storage(storage.as_ref(), app_id).unwrap_or_default();
-        for hash in schema_manager.known_schema_hashes() {
-            if let Some(schema) = schema_manager.get_known_schema(&hash) {
-                index.schemas.entry(hash).or_insert_with(|| schema.clone());
-            }
-            if let Some(published_at) = schema_manager.schema_published_at(&hash) {
-                index.schema_published_at.insert(hash, published_at);
-            }
+        if let Some(schema) = initial_schema {
+            index.add_schema(schema);
         }
         Self {
             app_id,
             index: Mutex::new(index),
             #[cfg(test)]
-            schema_manager: Mutex::new(schema_manager),
+            schema_manager: Mutex::new(None),
+            #[cfg(test)]
+            sync_manager: Mutex::new(SyncManager::new()),
             storage: Mutex::new(storage),
             #[cfg(test)]
             test_query_subscriptions: Mutex::new(Vec::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_schema_manager(
+        app_id: AppId,
+        initial_schema: Option<Schema>,
+        storage: DynStorage,
+        schema_manager: crate::schema_manager::SchemaManager,
+        sync_manager: SyncManager,
+    ) -> Self {
+        let store = Self::new(app_id, initial_schema, storage);
+        *store.schema_manager.lock().expect("schema manager lock") = Some(schema_manager);
+        *store.sync_manager.lock().expect("sync manager lock") = sync_manager;
+        store
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -105,7 +117,7 @@ impl DirectCatalogueStore {
     #[allow(dead_code)]
     pub(crate) fn with_schema_manager<R>(
         &self,
-        f: impl FnOnce(&SchemaManager) -> R,
+        f: impl FnOnce(&crate::schema_manager::SchemaManager) -> R,
     ) -> Result<R, RuntimeError> {
         #[cfg(test)]
         {
@@ -113,7 +125,12 @@ impl DirectCatalogueStore {
                 .schema_manager
                 .lock()
                 .map_err(|_| RuntimeError::LockError)?;
-            Ok(f(&schema_manager))
+            let schema_manager = schema_manager.as_ref().ok_or_else(|| {
+                RuntimeError::WriteError(
+                    "schema manager is not available in direct catalogue store".to_string(),
+                )
+            })?;
+            Ok(f(schema_manager))
         }
         #[cfg(not(test))]
         {
@@ -129,11 +146,11 @@ impl DirectCatalogueStore {
         &self,
         f: impl FnOnce(&crate::sync_manager::SyncManager) -> R,
     ) -> Result<R, RuntimeError> {
-        let schema_manager = self
-            .schema_manager
+        let sync_manager = self
+            .sync_manager
             .lock()
             .map_err(|_| RuntimeError::LockError)?;
-        Ok(f(schema_manager.query_manager().sync_manager()))
+        Ok(f(&sync_manager))
     }
 
     #[cfg(test)]
@@ -142,14 +159,11 @@ impl DirectCatalogueStore {
         client_id: ClientId,
         _session: Option<crate::query_manager::session::Session>,
     ) -> Result<(), RuntimeError> {
-        let mut schema_manager = self
-            .schema_manager
+        let mut sync_manager = self
+            .sync_manager
             .lock()
             .map_err(|_| RuntimeError::LockError)?;
-        schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .add_client(client_id);
+        sync_manager.add_client(client_id);
         Ok(())
     }
 
@@ -178,10 +192,15 @@ impl DirectCatalogueStore {
                 .lock()
                 .map_err(|_| RuntimeError::LockError)?;
             let branches = schema_manager
-                .all_branches()
-                .into_iter()
-                .map(|branch| branch.as_str().to_string())
-                .collect();
+                .as_ref()
+                .map(|schema_manager| {
+                    schema_manager
+                        .all_branches()
+                        .into_iter()
+                        .map(|branch| branch.as_str().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
             drop(schema_manager);
             let query_json = serde_json::to_string(&query)
                 .unwrap_or_else(|_| "{\"error\":\"query serialization failed\"}".to_string());
@@ -288,6 +307,11 @@ impl DirectCatalogueStore {
         #[cfg(not(test))]
         Vec::new()
     }
+
+    pub(crate) fn latest_published_schema(&self) -> Result<Option<Schema>, RuntimeError> {
+        let index = self.index.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(index.latest_published_schema())
+    }
 }
 
 fn storage_error(error: StorageError) -> RuntimeError {
@@ -371,6 +395,21 @@ impl CatalogueIndex {
         self.permissions_bundles
             .get(&head.bundle_object_id)
             .cloned()
+    }
+
+    fn latest_published_schema(&self) -> Option<Schema> {
+        let mut candidates = self
+            .schema_published_at
+            .iter()
+            .map(|(hash, published_at)| (*published_at, *hash))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|(left_time, left_hash), (right_time, right_hash)| {
+            left_time
+                .cmp(right_time)
+                .then_with(|| left_hash.as_bytes().cmp(right_hash.as_bytes()))
+        });
+        let (_, hash) = candidates.pop()?;
+        self.schemas.get(&hash).cloned()
     }
 
     fn apply_entry(&mut self, entry: &CatalogueEntry) {
@@ -539,7 +578,10 @@ fn permissions_bundle_object_id(
 }
 
 fn permissions_head_object_id(app_id: AppId) -> ObjectId {
-    SchemaManager::permissions_head_object_id_for(app_id)
+    ObjectId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!("jazz-catalogue-permissions-head:{}", app_id.uuid()).as_bytes(),
+    ))
 }
 
 fn catalogue_metadata(app_id: AppId, object_type: ObjectType) -> HashMap<String, String> {

@@ -23,6 +23,7 @@ pub(crate) mod runtime_core;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
+pub mod sync;
 // Legacy alpha storage is still used internally by the admin catalogue runtime.
 // Keep it out of the public API, including `test-utils`, so new callers do not
 // build against it as a second sync/storage engine. Storage-specific regression
@@ -72,18 +73,18 @@ pub use query_manager::types::{
 pub use row_histories::BatchId;
 pub use schema_manager::AppId;
 #[cfg(feature = "client")]
-pub use sync_manager::sync_tracer::SyncTracer;
+pub use sync::SyncTracer;
 
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
 
 pub use object::ObjectId;
 #[cfg(feature = "client")]
-pub use sync_manager::ClientId;
+pub use sync::ClientId;
 #[cfg(feature = "client")]
-pub use sync_manager::DurabilityTier;
+pub use sync::DurabilityTier;
 #[cfg(feature = "client")]
-pub use sync_manager::ServerId;
+pub use sync::ServerId;
 
 /// Configuration for connecting to Jazz.
 #[cfg(feature = "client")]

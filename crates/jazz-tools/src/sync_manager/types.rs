@@ -12,72 +12,12 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
 use crate::row_histories::{BatchId, StoredRowBatch};
+use crate::sync::{ClientId, DurabilityTier, ServerId};
 
 /// Error returned when a policy denies an operation.
 #[derive(Debug, Clone)]
 pub struct PolicyError {
     pub message: String,
-}
-
-// ============================================================================
-// ID Types
-// ============================================================================
-
-/// Persistence tier — declaration order defines Ord (Local < EdgeServer < GlobalServer).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub enum DurabilityTier {
-    Local,
-    EdgeServer,
-    GlobalServer,
-}
-
-/// Unique identifier for a server connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ServerId(pub Uuid);
-
-impl ServerId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for ServerId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for ServerId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Unique identifier for a client connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ClientId(pub Uuid);
-
-impl ClientId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Parse from UUID string.
-    pub fn parse(s: &str) -> Option<Self> {
-        Uuid::parse_str(s).ok().map(ClientId)
-    }
-}
-
-impl Default for ClientId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for ClientId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
 }
 
 /// Unique identifier for a query subscription.
