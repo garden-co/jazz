@@ -125,8 +125,8 @@ Until deleted, treat them as replacement targets only.
     `jazz_core` storage integration path.
 
 - `crates/jazz-tools/src/sync_manager`
-  - Old sync internals, inbox, forwarding, settlement, transaction sealing, and
-    permission sync checks.
+  - Deleted old sync internals, inbox, forwarding, settlement, transaction
+    sealing, and permission sync checks.
 
 - `crates/jazz-tools/src/query_manager/manager.rs`, `graph`, `graph_nodes`,
   `subscriptions.rs`, `writes.rs`, `indices.rs`, `policy*.rs`,
@@ -216,8 +216,8 @@ Until deleted, treat them as replacement targets only.
   `schema.int()` is represented in direct core as `U32`, with writes and query
   literals restricted to the non-negative signed 32-bit subset (`0..=i32::MAX`).
 - The direct websocket route is the intended sync boundary. Old
-  `transport_protocol.rs`, `transport_manager.rs`, and `sync_manager` code
-  should not regain ownership of `/ws` semantics.
+  `transport_protocol.rs` and `transport_manager.rs` code should not regain
+  ownership of `/ws` semantics; the old `sync_manager` module has been deleted.
 - Runtime-facing HTTP/auth error DTOs now live in `transport_error.rs`; any
   remaining `transport_protocol` dependency should be treated as legacy alpha
   transport surface or test compatibility, not shared server API.
@@ -274,9 +274,8 @@ Until deleted, treat them as replacement targets only.
   be moved crate-internal or exposed through narrow `test_support` helpers.
 - Public Rust sync identity/durability/tracing types now live in
   `jazz_tools::sync` and are re-exported from the crate root. The old
-  `sync_manager` module remains crate-private legacy machinery; internal old
-  modules may still import compatibility aliases from it until they are deleted
-  or ported.
+  `sync_manager` module has been deleted; needed compatibility vocabulary must
+  live under `sync` or another non-legacy module.
 - Rust `JazzClient` no longer has a `ClientEngine::{Legacy, DirectCore}` split:
   direct-core clients are the only live construction path. Server-backed
   clients still connect over the direct websocket route; offline persistent

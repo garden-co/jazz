@@ -344,9 +344,9 @@ API/testability gap, not as covered app persistence.
   longer stores or accepts `SyncManager`. Schema catalogue publication now uses
   a local catalogue clock plus direct storage writes, and `SchemaManager` drains
   its own pending catalogue updates instead of the old sync inbox bridge. Any
-  remaining old `sync_manager`/storage/schema-manager code should be treated as
-  public schema/query vocabulary or catalogue scaffolding until it is ported to
-  core-native types, not as a second engine to extend. The
+  old `sync_manager` code has been deleted, and remaining storage/schema-manager
+  code should be treated as public schema/query vocabulary or catalogue
+  scaffolding until it is ported to core-native types, not as a second engine to extend. The
   server admin catalogue now depends on dedicated catalogue-only memory/RocksDB
   storage instead of `Box<dyn Storage>` or old storage backend adapters. SQLite
   remains a native/client storage implementation, but direct-core
@@ -360,9 +360,8 @@ API/testability gap, not as covered app persistence.
   instead of pinning old semantic sync frames.
   Stable sync vocabulary (`SyncPayload`, query ids/propagation, endpoint
   roles, diagnostics, and tracer-facing payload names) now lives under
-  `jazz_tools::sync` / `jazz_tools::sync::vocabulary`; `sync_manager` only
-  re-exports that vocabulary while its remaining legacy implementation islands
-  are hollowed or deleted.
+  `jazz_tools::sync` / `jazz_tools::sync::vocabulary`; the old `sync_manager`
+  module has been deleted instead of retained as a hollow compatibility shim.
 
 ## Next targets
 
