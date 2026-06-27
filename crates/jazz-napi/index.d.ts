@@ -27,6 +27,11 @@ export declare class NapiRuntime {
   commitBatch(batchId: string): void
   waitForBatch(batchId: string, tier: string): Promise<void>
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
+  /**
+   * Compose an SSR sync bundle of this runtime's state for `query` under
+   * `session`, returning its wire bytes for a client to apply.
+   */
+  composeQueryBundle(queryJson: string, sessionJson?: string | undefined | null): Buffer
   unsubscribe(handle: number): void
   /** Phase 1 of 2-phase subscribe: allocate a handle and store query params. */
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number

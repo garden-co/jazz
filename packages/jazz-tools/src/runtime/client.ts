@@ -98,6 +98,16 @@ export interface Runtime {
   onAuthFailure(callback: (reason: string) => void): void;
   /** @internal Enable senderless outbox buffering for brokered browser-tab runtimes. */
   enableOutboxBufferingWithoutSyncSender?(): void;
+  /**
+   * Compose an SSR sync bundle of this runtime's CRDT state for a query,
+   * returning its wire bytes for a client to apply. Server-side (NAPI).
+   */
+  composeQueryBundle?(query_json: string, session_json?: string | null): Uint8Array;
+  /**
+   * Seed this runtime's store from an SSR sync bundle before sync connects, so
+   * hydrated rows are present on first paint. Client-side (WASM).
+   */
+  applyQueryBundle?(bytes: Uint8Array): void;
 }
 
 /**
@@ -1082,6 +1092,30 @@ export class JazzClient {
    */
   connectTransport(url: string, auth: AuthConfig): void {
     this.runtime.connect(httpUrlToWs(url, this.context.appId), JSON.stringify(auth));
+  }
+
+  /**
+   * Compose the CRDT sync bundle for a translated query under `sessionJson`,
+   * returning its wire bytes for a client to apply (SSR hydration). Throws if
+   * the underlying runtime cannot compose (e.g. a browser/WASM runtime).
+   */
+  composeQueryBundle(queryJson: string, sessionJson?: string | null): Uint8Array {
+    if (!this.runtime.composeQueryBundle) {
+      throw new Error("Underlying runtime does not support composeQueryBundle()");
+    }
+    return this.runtime.composeQueryBundle(queryJson, sessionJson ?? null);
+  }
+
+  /**
+   * Seed this runtime's store from a sync bundle's wire bytes, before sync
+   * connects. Throws if the underlying runtime cannot apply (e.g. a server/NAPI
+   * runtime).
+   */
+  applyQueryBundle(bytes: Uint8Array): void {
+    if (!this.runtime.applyQueryBundle) {
+      throw new Error("Underlying runtime does not support applyQueryBundle()");
+    }
+    this.runtime.applyQueryBundle(bytes);
   }
 
   /**

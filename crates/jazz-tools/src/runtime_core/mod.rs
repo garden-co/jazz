@@ -892,6 +892,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 }
 
+mod bundle;
 mod durability;
 mod subscriptions;
 mod sync;

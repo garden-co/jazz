@@ -2,8 +2,12 @@
 
 The canonical Next.js server-side rendering / RSC story for Jazz: a Server Component reading the database via `jazz-tools/backend` alongside a Client Component using the standard `jazz-tools/react` hooks. The `next-*` starters under `starters/` are pure client-side; this example is where SSR + Server Actions + `BACKEND_SECRET` live.
 
-- `pnpm run sync-server`
+- `cp .env.example .env` and fill in values (`NEXT_PUBLIC_JAZZ_APP_ID`, `NEXT_PUBLIC_JAZZ_SERVER_URL`, `BACKEND_SECRET`)
 - `pnpm run dev`
+
+The browser e2e (`pnpm test:e2e`) runs the app against the sync server named in
+`NEXT_PUBLIC_JAZZ_SERVER_URL` — the hosted server by default — so it needs a real
+app id and `BACKEND_SECRET`.
 
 ## Hot points
 

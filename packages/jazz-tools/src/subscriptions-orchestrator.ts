@@ -163,13 +163,18 @@ const SHARED_PENDING: UseAllStatePending<any> = {
   error: null,
 };
 
-interface DbLike {
+export interface DbLike {
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
     session?: Session,
   ): () => void;
+  /**
+   * Apply a sync bundle to the live store. Absent on the db-less seed db used
+   * before {@link SubscriptionsOrchestrator.attachDb}.
+   */
+  applyQueryBundle?(bytes: Uint8Array): void;
 }
 
 export class SubscriptionsOrchestrator {
@@ -180,10 +185,14 @@ export class SubscriptionsOrchestrator {
   // entry exists; keeps the snapshot identity stable for useSyncExternalStore.
   private readonly seededStates = new Map<string, UseAllState<any>>();
   private session?: Session | null;
+  /** Bundles queued before the live db attaches; drained by {@link attachDb}. */
+  private readonly pendingBundles: Uint8Array[] = [];
+  /** Whether the live db has attached; once true, late snapshots are ignored. */
+  private attached = false;
 
   constructor(
     private readonly config: { appId: string },
-    private readonly db: DbLike,
+    private db: DbLike,
     session?: Session | null,
   ) {
     this.session = session;
@@ -201,6 +210,51 @@ export class SubscriptionsOrchestrator {
     for (const entry of this.entries.values()) {
       this.resubscribeEntry(entry);
     }
+  }
+
+  /**
+   * Hydrate the live store from a sync bundle. When a live db is already present
+   * (a provider that builds the orchestrator bound to its db), apply it right
+   * away so the store holds the rows before the subscription's first delivery.
+   * In the db-less seed phase (server SSR, first paint before the runtime loads)
+   * there is no store yet, so the bundle is queued for {@link attachDb} to drain.
+   */
+  queueBundle(bytes: Uint8Array): void {
+    if (this.db.applyQueryBundle) {
+      this.db.applyQueryBundle(bytes);
+      return;
+    }
+    this.pendingBundles.push(bytes);
+  }
+
+  /**
+   * Attach the live db, optionally setting the session in the same pass. Drains
+   * any queued bundles into the store first — so the rows are present when the
+   * first re-subscription delivery lands, flash-free — then re-subscribes every
+   * entry against the live db. Passing the session here, rather than a separate
+   * setSession call, means each entry re-subscribes once, under the right user.
+   */
+  attachDb(db: DbLike, session?: Session | null): void {
+    this.db = db;
+    this.attached = true;
+    if (session !== undefined) {
+      this.session = session;
+    }
+    for (const bytes of this.pendingBundles) {
+      this.db.applyQueryBundle?.(bytes);
+    }
+    this.pendingBundles.length = 0;
+    for (const entry of this.entries.values()) {
+      this.reattachEntry(entry);
+    }
+  }
+
+  /**
+   * Whether the live db has attached. After attach, a late-mounting hook's
+   * frozen snapshot is ignored — it subscribes to the live store instead.
+   */
+  isAttached(): boolean {
+    return this.attached;
   }
 
   async shutdown(): Promise<void> {
@@ -227,10 +281,15 @@ export class SubscriptionsOrchestrator {
     snapshot?: T[],
   ): string {
     const key = this.computeKey(query, options);
+    // Keep an already-stored snapshot when this call doesn't carry one:
+    // seedSnapshot() puts the seed in the query definition, and useAll calls
+    // makeQueryKey() (with no snapshot) right after — it must not wipe the seed
+    // before getCacheEntry() reads it.
+    const previous = this.queryDefinitions.get(key) as QueryDefinition<T> | undefined;
     this.queryDefinitions.set(key, {
       query,
       options,
-      snapshot: snapshot ? [...snapshot] : undefined,
+      snapshot: snapshot ? [...snapshot] : previous?.snapshot,
     });
     // A re-seed invalidates any memoised pre-entry snapshot state.
     this.seededStates.delete(key);
@@ -242,6 +301,24 @@ export class SubscriptionsOrchestrator {
     }
 
     return key;
+  }
+
+  seedSnapshot<T extends { id: string }>(key: string, snapshot: T[]): void {
+    const previous = this.queryDefinitions.get(key) as QueryDefinition<T> | undefined;
+    this.queryDefinitions.set(key, {
+      query: previous?.query as QueryBuilder<T>,
+      options: previous?.options,
+      snapshot: [...snapshot],
+    });
+
+    const existing = this.entries.get(key) as InternalCacheEntry<T> | undefined;
+    if (existing && existing.state.status === "pending") {
+      existing.state = { status: "fulfilled", data: [...snapshot], error: null };
+      existing.resolvefulfilled([...snapshot]);
+      for (const listener of Array.from(existing.listeners)) {
+        listener.onfulfilled?.(existing.state.data);
+      }
+    }
   }
 
   getCacheEntry<T extends { id: string }>(key: string): CacheEntryHandle<T> {
@@ -452,6 +529,22 @@ export class SubscriptionsOrchestrator {
     entry.state = { status: "pending", data: undefined, promise: next, error: null };
   }
 
+  /**
+   * Re-point an entry's subscription at the freshly-attached live db without
+   * resetting its state. Used by {@link attachDb}: queued bundles are drained
+   * into the live store first, so a seeded entry's rows are already present and
+   * the live subscription's first delivery reconciles without churn. Resetting
+   * to `pending` here (as a session change does) would blank the UI for a frame
+   * — the flash this whole seed path exists to avoid.
+   */
+  private reattachEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
+    if (entry.unsubscribe) {
+      entry.unsubscribe();
+      entry.unsubscribe = undefined;
+    }
+    this.subscribeEntry(entry);
+  }
+
   private resubscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     if (entry.unsubscribe) {
       entry.unsubscribe();
@@ -479,7 +572,17 @@ function sessionsEqual(a: Session | null, b: Session | null): boolean {
     return true;
   }
 
-  return JSON.stringify(a) === JSON.stringify(b);
+  // Key-order-insensitive, consistent with the query-key serialization, so two
+  // semantically-identical sessions don't trigger a full resubscribe.
+  return canonicalStringify(a) === canonicalStringify(b);
+}
+
+export function computeQueryKey<T extends { id: string }>(
+  appId: string,
+  query: QueryBuilder<T>,
+  options?: QueryOptions,
+): string {
+  return `${appId}:${serializeQueryOptions(options)}:${query._build()}`;
 }
 
 function serializeQueryOptions(options?: QueryOptions): string {
@@ -487,5 +590,22 @@ function serializeQueryOptions(options?: QueryOptions): string {
     return "{}";
   }
 
-  return JSON.stringify(options);
+  return canonicalStringify(options);
+}
+
+function canonicalStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalStringify(item)).join(",")}]`;
+  }
+  const entries = Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map((key) => {
+      const serialized = canonicalStringify((value as Record<string, unknown>)[key]);
+      return serialized === undefined ? undefined : `${JSON.stringify(key)}:${serialized}`;
+    })
+    .filter((entry): entry is string => entry !== undefined);
+  return `{${entries.join(",")}}`;
 }

@@ -206,9 +206,9 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
-          tier: "edge",
           localUpdates: "deferred",
           propagation: "local-only",
+          tier: "edge",
         })}:${query._build()}`,
       );
     } finally {
@@ -228,6 +228,34 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(deferredKey).not.toBe(defaultKey);
       expect(localOnlyKey).not.toBe(defaultKey);
       expect(localOnlyKey).not.toBe(deferredKey);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U07d makeQueryKey is invariant under options property order", async () => {
+    const harness = createUnitHarness("app-so-u07d");
+    const query = makeQuery();
+
+    try {
+      const keyA = harness.manager.makeQueryKey(query, {
+        tier: "edge",
+        localUpdates: "deferred",
+        propagation: "local-only",
+      });
+      const keyB = harness.manager.makeQueryKey(query, {
+        propagation: "local-only",
+        tier: "edge",
+        localUpdates: "deferred",
+      });
+      const keyC = harness.manager.makeQueryKey(query, {
+        localUpdates: "deferred",
+        propagation: "local-only",
+        tier: "edge",
+      });
+
+      expect(keyA).toBe(keyB);
+      expect(keyA).toBe(keyC);
     } finally {
       await harness.manager.shutdown();
     }
@@ -498,6 +526,84 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("SO-U19d seeded snapshot survives until subscribeAll delivers, then transitions to live data", async () => {
+    const harness = createUnitHarness("app-seed-order");
+    try {
+      const query = makeQuery();
+      const expectedKey = `app-seed-order:{}:${query._build()}`;
+      const seeded = [makeTodo("seeded", "from-server")];
+      const live = [makeTodo("live", "from-local")];
+
+      harness.manager.seedSnapshot<Todo>(expectedKey, seeded);
+      harness.manager.makeQueryKey(query);
+      const entry = harness.manager.getCacheEntry<Todo>(expectedKey);
+
+      // Before any local data arrives the entry exposes the seeded snapshot.
+      expect(entry.status).toBe("fulfilled");
+      const seededState = entry.state;
+      if (seededState.status !== "fulfilled") {
+        throw new Error(`expected fulfilled state but got ${seededState.status}`);
+      }
+      expect(seededState.data).toEqual(seeded);
+
+      // When local cache (or sync) emits, the entry transitions to live data.
+      harness.emit(0, makeDelta(live));
+      const liveState = entry.state;
+      if (liveState.status !== "fulfilled") {
+        throw new Error(`expected fulfilled state but got ${liveState.status}`);
+      }
+      expect(liveState.data).toEqual(live);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U19b seedSnapshot pre-fills the cache for a precomputed key", async () => {
+    const harness = createUnitHarness("app-seed");
+    try {
+      const query = makeQuery();
+      const expectedKey = `app-seed:{}:${query._build()}`;
+      const snapshot = [makeTodo("seeded", "from-server")];
+
+      harness.manager.seedSnapshot<Todo>(expectedKey, snapshot);
+
+      const clientKey = harness.manager.makeQueryKey(query);
+      expect(clientKey).toBe(expectedKey);
+
+      const entry = harness.manager.getCacheEntry<Todo>(clientKey);
+      expect(entry.status).toBe("fulfilled");
+      expect(entry.state).toEqual({
+        status: "fulfilled",
+        data: snapshot,
+        error: null,
+      });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U19c makeQueryKey without snapshot preserves a previously seeded snapshot", async () => {
+    const harness = createUnitHarness("app-seed-preserve");
+    try {
+      const query = makeQuery();
+      const expectedKey = `app-seed-preserve:{}:${query._build()}`;
+      const snapshot = [makeTodo("seeded", "from-server")];
+
+      harness.manager.seedSnapshot<Todo>(expectedKey, snapshot);
+      harness.manager.makeQueryKey(query);
+
+      const entry = harness.manager.getCacheEntry<Todo>(expectedKey);
+      expect(entry.status).toBe("fulfilled");
+      expect(entry.state).toEqual({
+        status: "fulfilled",
+        data: snapshot,
+        error: null,
+      });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U20 listener unsubscribe is idempotent", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness();
@@ -583,6 +689,32 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       const key = harness.manager.computeKey(query);
 
       expect(key).toBe(harness.manager.makeQueryKey(query));
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U22b setSession is invariant under session property order", async () => {
+    const session: Session = {
+      user_id: "alice",
+      claims: { role: "reader", org: "acme" },
+      authMode: "external",
+    };
+    const harness = createUnitHarness("orchestrator-unit-session-order", session);
+
+    try {
+      harness.makeEntry();
+      expect(harness.calls).toHaveLength(1);
+
+      // Same session, with top-level and nested keys in a different order.
+      harness.manager.setSession({
+        authMode: "external",
+        claims: { org: "acme", role: "reader" },
+        user_id: "alice",
+      });
+
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
     } finally {
       await harness.manager.shutdown();
     }
@@ -681,5 +813,82 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     } finally {
       await harness.manager.shutdown();
     }
+  });
+
+  it("SO-U30 attachDb applies queued bundles then re-subscribes entries to the live store", async () => {
+    const noop = () => {};
+    type Db = ConstructorParameters<typeof SubscriptionsOrchestrator>[1];
+    const seedDb = { subscribeAll: () => noop } as Db;
+    const manager = new SubscriptionsOrchestrator({ appId: "attach-late" }, seedDb);
+
+    // An entry is registered and subscribed during the db-less seed phase.
+    const key = manager.makeQueryKey(makeQuery());
+    manager.getCacheEntry<Todo>(key);
+
+    // A sync bundle is queued before the live db attaches.
+    const bundle = new Uint8Array([7, 8, 9]);
+    manager.queueBundle(bundle);
+
+    // The live db attaches.
+    const applied: Uint8Array[] = [];
+    let liveSubscribes = 0;
+    const liveDb = {
+      subscribeAll: () => {
+        liveSubscribes += 1;
+        return noop;
+      },
+      applyQueryBundle: (b: Uint8Array) => applied.push(b),
+    } as Db;
+    manager.attachDb(liveDb);
+
+    expect(applied).toEqual([bundle]);
+    expect(liveSubscribes).toBe(1);
+
+    await manager.shutdown();
+  });
+
+  it("SO-U31 queueBundle applies immediately when a live db is already attached", async () => {
+    type Db = ConstructorParameters<typeof SubscriptionsOrchestrator>[1];
+    const applied: Uint8Array[] = [];
+    const liveDb = {
+      subscribeAll: () => () => {},
+      applyQueryBundle: (b: Uint8Array) => applied.push(b),
+    } as Db;
+    const manager = new SubscriptionsOrchestrator({ appId: "live" }, liveDb);
+
+    const bundle = new Uint8Array([1, 2, 3]);
+    manager.queueBundle(bundle);
+
+    // No separate seed phase: the live store hydrates right away.
+    expect(applied).toEqual([bundle]);
+    await manager.shutdown();
+  });
+
+  it("SO-U32 attachDb keeps a seeded fulfilled entry without resetting it", async () => {
+    const noop = () => {};
+    type Db = ConstructorParameters<typeof SubscriptionsOrchestrator>[1];
+    const seedDb = { subscribeAll: () => noop } as Db;
+    const manager = new SubscriptionsOrchestrator({ appId: "attach-seeded" }, seedDb);
+
+    // A snapshot-seeded entry is fulfilled during the db-less seed phase.
+    const seeded = [makeTodo("1", "seed")];
+    const key = manager.makeQueryKey(makeQuery(), undefined, seeded);
+    const entry = manager.getCacheEntry<Todo>(key);
+    const onReset = vi.fn();
+    entry.subscribe({ onReset });
+    expect(entry.status).toBe("fulfilled");
+
+    // The bundle is drained into the live store before re-subscription, so the
+    // seeded rows are valid — the entry must not flash back to pending.
+    const liveDb = {
+      subscribeAll: () => noop,
+      applyQueryBundle: () => {},
+    } as Db;
+    manager.attachDb(liveDb);
+
+    expect(entry.status).toBe("fulfilled");
+    expect(onReset).not.toHaveBeenCalled();
+
+    await manager.shutdown();
   });
 });

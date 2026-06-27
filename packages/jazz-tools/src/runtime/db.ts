@@ -2681,6 +2681,50 @@ export class Db {
   }
 
   /**
+   * Compose the CRDT sync bundle for `query` under this Db's scope, returning
+   * its wire bytes. The SSR snapshot builder ships this so the client hydrates
+   * its store flash-free. Mirrors {@link Db.subscribeAll}'s query translation.
+   */
+  composeQueryBundle<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    // Query options are intentionally unused: the bundle is the server's
+    // permission-filtered delivery for the query *predicate*; tier / propagation
+    // / localUpdates are client transport concerns, not row selectors.
+    _options?: QueryOptions,
+    session?: Session,
+  ): Uint8Array {
+    const client = this.getClient(query._schema);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(client.getSchema()),
+    );
+    const builderJson = query._build();
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
+    const planningSchema = resolveSchemaWithTable(
+      query._schema,
+      runtimeSchema.get,
+      builtQuery.table,
+    );
+    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const context = this.getRuntimeOperationContext();
+    const effectiveSession = context?.session ?? session;
+    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
+    return client.composeQueryBundle(wasmQuery, sessionJson);
+  }
+
+  /**
+   * Seed the live store from a sync bundle's wire bytes (SSR hydration), before
+   * sync connects. `clients` is keyed by schema for memoisation and schema reset,
+   * but an app runs one schema (like the server) so in practice this is the one
+   * client — and `applySnapshot`'s fingerprint guard already gates the bundle to
+   * the live query's schema before it reaches here.
+   */
+  applyQueryBundle(bytes: Uint8Array): void {
+    for (const client of this.clients.values()) {
+      client.applyQueryBundle(bytes);
+    }
+  }
+
+  /**
    * Shutdown the Db and release all resources.
    * Closes all memoized JazzClient connections and the worker.
    *

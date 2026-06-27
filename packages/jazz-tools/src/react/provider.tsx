@@ -31,15 +31,22 @@ export type JazzProviderProps = {
   fallback?: ReactNode;
   children: ReactNode;
   onJWTExpired?: () => Promise<string | null | undefined>;
+  /**
+   * Opt into the synchronous seed phase for SSR/hydration. When set, a child
+   * `useAll(query, { snapshot })` can render its rows on the first paint without
+   * suspending on the live client.
+   */
+  ssr?: boolean;
 };
 
-export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzProviderProps) {
+export function JazzProvider({ config, fallback, children, onJWTExpired, ssr }: JazzProviderProps) {
   return (
     <CoreJazzProvider
       config={config}
       fallback={fallback}
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
+      ssr={ssr}
     >
       {children}
     </CoreJazzProvider>
