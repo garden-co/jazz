@@ -46,7 +46,7 @@ test("update_history ingests engine-specific native and browser manifests from a
   writeJson(path.join(nativeRocksdbDir, "suite_status.json"), {
     benchmarks: [
       { id: "native:rocksdb:w4_cold_start", status: "passed" },
-      { id: "native-criterion:rocksdb:r1_crud_sustained", status: "passed" },
+      { id: "native-criterion:rocksdb:r1_crud", status: "passed" },
     ],
   });
   writeJson(path.join(nativeRocksdbDir, "w4_cold_start.json"), {
@@ -63,9 +63,9 @@ test("update_history ingests engine-specific native and browser manifests from a
     generated_at: "2026-04-08T10:00:00Z",
     benchmarks: [
       {
-        full_id: "realistic_phase1/crud_sustained_rocksdb/r1_s_rocksdb",
-        group_id: "realistic_phase1/crud_sustained_rocksdb",
-        benchmark_id: "r1_s_rocksdb",
+        full_id: "realistic_phase1_direct/r1_crud",
+        group_id: "realistic_phase1_direct/r1_crud",
+        benchmark_id: "r1_crud",
         throughput_elements: 100,
         scenario_id: "R1",
         scenario_name: "crud",
@@ -100,7 +100,7 @@ test("update_history ingests engine-specific native and browser manifests from a
   writeJson(path.join(nativeSqliteDir, "suite_status.json"), {
     benchmarks: [
       { id: "native:sqlite:w4_cold_start", status: "passed" },
-      { id: "native-criterion:sqlite:r1_crud_sustained", status: "passed" },
+      { id: "native-criterion:sqlite:r1_crud", status: "passed" },
     ],
   });
   writeJson(path.join(nativeSqliteDir, "w4_cold_start.json"), {
@@ -117,9 +117,9 @@ test("update_history ingests engine-specific native and browser manifests from a
     generated_at: "2026-04-08T10:00:00Z",
     benchmarks: [
       {
-        full_id: "realistic_phase1/crud_sustained_sqlite/r1_s_sqlite",
-        group_id: "realistic_phase1/crud_sustained_sqlite",
-        benchmark_id: "r1_s_sqlite",
+        full_id: "realistic_phase1_direct/r1_crud",
+        group_id: "realistic_phase1_direct/r1_crud",
+        benchmark_id: "r1_crud",
         throughput_elements: 100,
         scenario_id: "R1",
         scenario_name: "crud",
@@ -211,10 +211,7 @@ test("update_history ingests engine-specific native and browser manifests from a
 
   assert.ok(nativeSqliteCriterionRun, "expected native criterion SQLite run");
   assert.equal(nativeSqliteCriterionRun.id, "native-criterion:sqlite:100:1:abc123:s");
-  assert.equal(
-    nativeSqliteCriterionRun.scenarios[0].topology,
-    "realistic_phase1/crud_sustained_sqlite",
-  );
+  assert.equal(nativeSqliteCriterionRun.scenarios[0].topology, "realistic_phase1_direct/r1_crud");
 
   assert.ok(browserRun, "expected browser OPFS-btree run");
   assert.equal(browserRun.id, "browser:opfs-btree:100:1:abc123:s");

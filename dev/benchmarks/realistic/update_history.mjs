@@ -228,77 +228,29 @@ function nativeBenchmarkIdForFile(file, storageEngine) {
   return null;
 }
 
-function criterionBenchmarkId(benchmark) {
+function criterionBenchmarkId(benchmark, storageEngine) {
   const groupId = benchmark?.group_id;
   const exactMap = new Map([
-    ["realistic_phase1/crud_sustained_rocksdb", "native-criterion:rocksdb:r1_crud_sustained"],
-    ["realistic_phase1/crud_sustained_sqlite", "native-criterion:sqlite:r1_crud_sustained"],
+    ["realistic_phase1_direct/r1_crud", "native-criterion:r1_crud"],
+    ["realistic_phase1_direct/r2_reads", "native-criterion:r2_reads"],
     [
-      "realistic_phase1/crud_sustained_single_hop_rocksdb",
-      "native-criterion:rocksdb:r1_crud_sustained_single_hop",
+      "realistic_phase1_direct/r3_rocksdb_cold_load",
+      "native-criterion:rocksdb:r3_rocksdb_cold_load",
     ],
+    ["realistic_phase1_direct/r4_hot_task_history", "native-criterion:r4_hot_task_history"],
+    ["realistic_phase1_direct/r9_subscribed_write", "native-criterion:r9_subscribed_write"],
+    ["realistic_phase1_direct/r10_direct_sync_fanout", "native-criterion:r10_direct_sync_fanout"],
+    ["realistic_phase1_direct/r11_byte_wire_resume", "native-criterion:r11_byte_wire_resume"],
     [
-      "realistic_phase1/crud_sustained_single_hop_sqlite",
-      "native-criterion:sqlite:r1_crud_sustained_single_hop",
-    ],
-    ["realistic_phase1/reads_sustained_rocksdb", "native-criterion:rocksdb:r2_reads_sustained"],
-    ["realistic_phase1/reads_sustained_sqlite", "native-criterion:sqlite:r2_reads_sustained"],
-    [
-      "realistic_phase1/reads_sustained_single_hop_rocksdb",
-      "native-criterion:rocksdb:r2_reads_sustained_single_hop",
-    ],
-    [
-      "realistic_phase1/reads_sustained_single_hop_sqlite",
-      "native-criterion:sqlite:r2_reads_sustained_single_hop",
-    ],
-    [
-      "realistic_phase1/reads_sustained_with_write_churn_rocksdb",
-      "native-criterion:rocksdb:r2_reads_with_write_churn",
-    ],
-    [
-      "realistic_phase1/reads_sustained_with_write_churn_sqlite",
-      "native-criterion:sqlite:r2_reads_with_write_churn",
-    ],
-    ["realistic_phase1/cold_load_rocksdb", "native-criterion:rocksdb:r3_cold_load"],
-    ["realistic_phase1/cold_load_sqlite", "native-criterion:sqlite:r3_cold_load"],
-    ["realistic_phase1/fanout_updates_rocksdb", "native-criterion:rocksdb:r4_fanout_updates"],
-    ["realistic_phase1/fanout_updates_sqlite", "native-criterion:sqlite:r4_fanout_updates"],
-    [
-      "realistic_phase1/permission_recursive_rocksdb",
-      "native-criterion:rocksdb:r5_permission_recursive",
-    ],
-    [
-      "realistic_phase1/permission_recursive_sqlite",
-      "native-criterion:sqlite:r5_permission_recursive",
-    ],
-    [
-      "realistic_phase1/permission_write_heavy_rocksdb",
-      "native-criterion:rocksdb:r6_permission_write_heavy",
-    ],
-    [
-      "realistic_phase1/permission_write_heavy_sqlite",
-      "native-criterion:sqlite:r6_permission_write_heavy",
-    ],
-    ["realistic_phase1/hotspot_history_rocksdb", "native-criterion:rocksdb:r7_hotspot_history"],
-    ["realistic_phase1/hotspot_history_sqlite", "native-criterion:sqlite:r7_hotspot_history"],
-    [
-      "realistic_phase1/subscribed_write_path_rocksdb",
-      "native-criterion:rocksdb:r9_subscribed_write_path",
-    ],
-    [
-      "realistic_phase1/subscribed_write_path_sqlite",
-      "native-criterion:sqlite:r9_subscribed_write_path",
+      "realistic_phase1_direct/r12_recursive_permissions",
+      "native-criterion:r12_recursive_permissions",
     ],
   ]);
 
   if (exactMap.has(groupId)) {
-    return exactMap.get(groupId);
-  }
-  if (typeof groupId === "string" && groupId.startsWith("realistic_phase1/many_branches_rocksdb")) {
-    return "native-criterion:rocksdb:r8_many_branches";
-  }
-  if (typeof groupId === "string" && groupId.startsWith("realistic_phase1/many_branches_sqlite")) {
-    return "native-criterion:sqlite:r8_many_branches";
+    const id = exactMap.get(groupId);
+    if (id.includes(":rocksdb:") || id.includes(":sqlite:")) return id;
+    return `native-criterion:${storageEngine}:${id.replace("native-criterion:", "")}`;
   }
   return null;
 }
@@ -395,7 +347,9 @@ function jazzSimMetrics(record) {
 }
 
 function jazzSimScenarioSummary(record, benchmarkId) {
-  const scenarioId = String(record.scenario ?? path.basename(benchmarkId ?? "unknown") ?? "unknown");
+  const scenarioId = String(
+    record.scenario ?? path.basename(benchmarkId ?? "unknown") ?? "unknown",
+  );
   const phase = String(record.phase ?? "result");
   const metrics = jazzSimMetrics(record);
   const wallTimeMs = Number.isFinite(Number(record.elapsed_us))
@@ -579,7 +533,7 @@ function extractNativeCriterion(nativeDir) {
     .filter((x) => x && typeof x === "object" && typeof x.full_id === "string")
     .filter((x) => {
       if (passedIds.size === 0) return true;
-      const benchmarkId = criterionBenchmarkId(x);
+      const benchmarkId = criterionBenchmarkId(x, storageEngine);
       return benchmarkId ? passedIds.has(benchmarkId) : true;
     })
     .map((x) => criterionScenarioSummary(x));
