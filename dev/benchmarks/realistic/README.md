@@ -76,9 +76,7 @@ pnpm bench:realistic:export-criterion -- \
 
 The `criterion_realistic_phase1.*` artifact filenames are retained for history
 ingestion compatibility. New Criterion output is filtered from the active
-`realistic_phase1_direct/` prefix by default; old `realistic_phase1/` exports are
-archival only and correspond to the source captured under
-`crates/jazz-tools/benches/archive/realistic_phase1.rs.txt`.
+`realistic_phase1_direct/` prefix by default.
 
 ## Browser Runner (OPFS Worker)
 
