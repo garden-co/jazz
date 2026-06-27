@@ -203,6 +203,11 @@ Until deleted, treat them as replacement targets only.
 - Runtime-facing HTTP/auth error DTOs now live in `transport_error.rs`; any
   remaining `transport_protocol` dependency should be treated as legacy alpha
   transport surface or test compatibility, not shared server API.
+- The old alpha `TransportManager`, `transport_protocol`, runtime transport
+  slot, and Tokio `connect`/`ws_stream` path are gated behind
+  `transport`/`transport-websocket`. Direct-core browser/server flows should
+  depend only on the direct websocket route/client helper, not the alpha
+  transport manager machinery.
 - `ServerState::process_ws_client_frame` is gated to `test-utils`; it exists
   only as a fail-closed compatibility stub for legacy in-process tests that
   still inject alpha `SyncPayload` frames, not for production server traffic.

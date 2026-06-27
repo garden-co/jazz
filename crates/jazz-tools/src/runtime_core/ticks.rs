@@ -587,6 +587,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.schema_manager.process(&mut self.storage);
         }
 
+        #[cfg(feature = "transport")]
         if self.transport_catalogue_state_hash_dirty {
             self.refresh_transport_catalogue_state_hash();
         }
@@ -707,6 +708,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn batched_tick(&mut self) {
         let _span = debug_span!("batched_tick", tier = self.tier_label).entered();
 
+        #[cfg(feature = "transport")]
         self.handle_transport_messages();
 
         if !self.has_outbound()
@@ -789,13 +791,17 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             )
             .entered();
 
+            #[cfg(feature = "transport")]
             let handled_by_transport = self
                 .transport
                 .as_ref()
                 .is_some_and(|handle| matches!(msg.destination, crate::sync_manager::Destination::Server(server_id) if server_id == handle.server_id));
+            #[cfg(not(feature = "transport"))]
+            let handled_by_transport = false;
             if handled_by_transport
                 && matches!(msg.payload, SyncPayload::CatalogueEntryUpdated { .. })
             {
+                #[cfg(feature = "transport")]
                 if let Some(handle) = self.transport.as_ref() {
                     tracing::debug!(
                         server_id = %handle.server_id,
@@ -810,6 +816,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
 
             if handled_by_transport {
+                #[cfg(feature = "transport")]
                 if let Some(handle) = self.transport.as_ref() {
                     handle.send_outbox(msg);
                 }
@@ -828,6 +835,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
+    #[cfg(feature = "transport")]
     fn handle_transport_messages(&mut self) {
         let Some(server_id) = self.transport.as_ref().map(|handle| handle.server_id) else {
             return;
@@ -1034,6 +1042,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
+    #[cfg(feature = "transport")]
     fn park_sync_message_batch(
         &mut self,
         entries: Vec<crate::transport_manager::SequencedInboxEntry>,
