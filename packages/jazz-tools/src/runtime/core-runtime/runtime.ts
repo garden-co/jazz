@@ -93,7 +93,7 @@ type CoreDb = {
   delete(table: string, rowId: Uint8Array): DirectWrite;
   deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): DirectWrite;
   mergeableTx(): DirectTx;
-  setTickScheduler?(
+  setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
       | ((error: Error | null, urgency: string) => void),
@@ -200,7 +200,6 @@ export class CoreRuntime implements Runtime {
   private serverPumpScheduled = false;
   private serverPumpAgain = false;
   private closed = false;
-  private coreSchedulerInstalled = false;
   private nextTransactionId = 1;
   private nextSubscriptionId = 1;
 
@@ -220,15 +219,15 @@ export class CoreRuntime implements Runtime {
     this.db = opts?.persistentPath
       ? openPersistentDirectDb(Runtime, opts.persistentPath, this.schemaBytes, this.configBytes)
       : Runtime.openMemory(this.schemaBytes, this.configBytes);
-    if (this.db.setTickScheduler) {
-      this.coreSchedulerInstalled = true;
-      this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
-        const urgency = typeof first === "string" ? first : second;
-        if (urgency === "immediate" || urgency === "deferred") {
-          this.scheduleCoreWake(urgency);
-        }
-      }) as (error: Error | null, urgency: string) => void);
+    if (typeof this.db.setTickScheduler !== "function") {
+      throw new Error("Direct core runtime requires db.setTickScheduler");
     }
+    this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
+      const urgency = typeof first === "string" ? first : second;
+      if (urgency === "immediate" || urgency === "deferred") {
+        this.scheduleCoreWake(urgency);
+      }
+    }) as (error: Error | null, urgency: string) => void);
   }
 
   getDirectOpenPayload(): DirectOpenPayload {
@@ -679,20 +678,16 @@ export class CoreRuntime implements Runtime {
   }
 
   private pumpSubscriptions(): void {
-    if (!this.coreSchedulerInstalled) {
-      this.db.tick();
-    }
     for (const [handle, subscription] of this.subscriptions) {
       this.startSubscriptionReader(handle, subscription);
     }
   }
 
   private notifySyncNeeded(): void {
-    if (this.closed || this.coreSchedulerInstalled) return;
+    if (this.closed) return;
     for (const callback of this.syncNeededCallbacks) {
       callback();
     }
-    this.scheduleServerPump();
   }
 
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
@@ -777,7 +772,6 @@ export class CoreRuntime implements Runtime {
     if (this.closed || !transport) return;
     for (let round = 0; round < 32; round += 1) {
       transport.tick();
-      this.db.tick();
       const frames = normalizeTransportFrames(transport.recvWireFrames());
       if (frames.length > 0) {
         this.sendServerFrames(frames);
