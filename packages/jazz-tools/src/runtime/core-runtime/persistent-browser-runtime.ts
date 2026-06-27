@@ -42,7 +42,6 @@ type WriteRequest =
         values: InsertValues,
         writeContext: string | null | undefined,
         objectId: string,
-        transactionId: string,
       ];
     }
   | {
@@ -53,7 +52,6 @@ type WriteRequest =
         objectId: string,
         values: InsertValues,
         writeContext: string | null | undefined,
-        transactionId: string,
       ];
     }
   | {
@@ -64,7 +62,6 @@ type WriteRequest =
         objectId: string,
         values: Record<string, Value>,
         writeContext: string | null | undefined,
-        transactionId: string,
       ];
     }
   | {
@@ -75,18 +72,12 @@ type WriteRequest =
         objectId: string,
         values: InsertValues,
         writeContext: string | null | undefined,
-        transactionId: string,
       ];
     }
   | {
       id: number;
       method: "delete";
-      args: [
-        table: string,
-        objectId: string,
-        writeContext: string | null | undefined,
-        transactionId: string,
-      ];
+      args: [table: string, objectId: string, writeContext: string | null | undefined];
     };
 
 type WorkerRequest =
@@ -173,15 +164,7 @@ export class PersistentBrowserRuntime implements Runtime {
   ): DirectInsertResult {
     const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
     const transactionId = this.writeId();
-    this.queueWrite(
-      transactionId,
-      "insert",
-      table,
-      values,
-      writeContext,
-      formatUuid(rowId),
-      transactionId,
-    );
+    this.queueWrite(transactionId, "insert", table, values, writeContext, formatUuid(rowId));
     return {
       id: formatUuid(rowId),
       values: valuesForRow(this.schema, table, values),
@@ -196,7 +179,7 @@ export class PersistentBrowserRuntime implements Runtime {
     writeContext?: string | null,
   ): DirectInsertResult {
     const transactionId = this.writeId();
-    this.queueWrite(transactionId, "restore", table, objectId, values, writeContext, transactionId);
+    this.queueWrite(transactionId, "restore", table, objectId, values, writeContext);
     return { id: objectId, values: valuesForRow(this.schema, table, values), transactionId };
   }
 
@@ -208,7 +191,7 @@ export class PersistentBrowserRuntime implements Runtime {
   ): DirectMutationResult {
     encodeCellsForPatch(tableDefinition(this.schema, table), values);
     const transactionId = this.writeId();
-    this.queueWrite(transactionId, "update", table, objectId, values, writeContext, transactionId);
+    this.queueWrite(transactionId, "update", table, objectId, values, writeContext);
     return { transactionId };
   }
 
@@ -220,14 +203,14 @@ export class PersistentBrowserRuntime implements Runtime {
   ): DirectMutationResult {
     encodeCellsForRow(tableDefinition(this.schema, table), values);
     const transactionId = this.writeId();
-    this.queueWrite(transactionId, "upsert", table, objectId, values, writeContext, transactionId);
+    this.queueWrite(transactionId, "upsert", table, objectId, values, writeContext);
     return { transactionId };
   }
 
   delete(table: string, objectId: string, writeContext?: string | null): DirectMutationResult {
     tableDefinition(this.schema, table);
     const transactionId = this.writeId();
-    this.queueWrite(transactionId, "delete", table, objectId, writeContext, transactionId);
+    this.queueWrite(transactionId, "delete", table, objectId, writeContext);
     return { transactionId };
   }
 
