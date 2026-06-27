@@ -3,6 +3,9 @@
 This directory contains both active Criterion benches and legacy benchmark source
 material while the old `jazz-tools` engine is being replaced.
 
+Legacy source material lives under `archive/` with non-Rust suffixes so it is
+visibly archival and cannot be mistaken for an active direct-core benchmark.
+
 ## Active benches
 
 The active bench harness is the explicit `[[bench]]` list in
@@ -55,7 +58,7 @@ Next ports should prioritize the inactive deep-internal scenarios before they
 are reintroduced:
 
 - `memory_benchmark`
-- `realistic_phase1`
+- `archive/realistic_phase1.rs.txt`
 
 Inactive legacy benches should remain in the tree as source material for
 scenarios, scale factors, fixtures, and expected measurement coverage. Port them
