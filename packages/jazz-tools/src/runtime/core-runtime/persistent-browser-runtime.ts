@@ -133,6 +133,7 @@ export class PersistentBrowserRuntime implements Runtime {
   private nextCallId = 1;
   private nextSubscriptionId = 1;
   private closed = false;
+  private closing = false;
   private readonly opened: Promise<void>;
 
   constructor(
@@ -149,6 +150,14 @@ export class PersistentBrowserRuntime implements Runtime {
       this.handleWorkerMessage(event.data);
     };
     this.worker.onerror = (event) => {
+      if (
+        this.closing ||
+        this.closed ||
+        event.message.includes("Persistent browser core runtime closed")
+      ) {
+        this.resolveAll();
+        return;
+      }
       this.rejectAll(new Error(event.message));
     };
     this.opened = this.call("open", runtimeSources, dbName, schema, node, author).then(
@@ -251,9 +260,12 @@ export class PersistentBrowserRuntime implements Runtime {
           optionsJson,
         ) as Promise<number>,
     );
-    void remoteHandle.then((remote) => {
-      this.subscriptionLocalHandles.set(remote, localHandle);
-    });
+    void remoteHandle
+      .then((remote) => {
+        this.subscriptionLocalHandles.set(remote, localHandle);
+      })
+      .catch(ignoreExpectedShutdown);
+    void remoteHandle.catch(ignoreExpectedShutdown);
     this.remoteSubscriptions.set(localHandle, remoteHandle);
     return localHandle;
   }
@@ -262,35 +274,43 @@ export class PersistentBrowserRuntime implements Runtime {
     this.subscriptions.set(handle, onUpdate);
     const remoteHandle = this.remoteSubscriptions.get(handle);
     if (!remoteHandle) return;
-    void remoteHandle.then((remote) => this.call("executeSubscription", remote));
+    void remoteHandle
+      .then((remote) => this.call("executeSubscription", remote))
+      .catch(ignoreExpectedShutdown);
   }
 
   unsubscribe(handle: number): void {
     this.subscriptions.delete(handle);
     const remoteHandle = this.remoteSubscriptions.get(handle);
     this.remoteSubscriptions.delete(handle);
-    if (remoteHandle) void remoteHandle.then((remote) => this.call("unsubscribe", remote));
+    if (remoteHandle) {
+      void remoteHandle
+        .then((remote) => this.call("unsubscribe", remote))
+        .catch(ignoreExpectedShutdown);
+    }
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
-    try {
-      await this.call("close");
-    } finally {
-      this.closed = true;
-      this.worker.terminate();
-      this.rejectAll(new Error("Persistent browser core runtime closed"));
-    }
+    this.closing = true;
+    this.closed = true;
+    this.closing = false;
+    this.worker.terminate();
+    this.resolveAll();
   }
 
   async clearClientStorage(): Promise<void> {
     if (this.closed) return;
+    this.closing = true;
     try {
       await this.call("clearClientStorage");
+    } catch (error) {
+      if (!isExpectedShutdownError(error)) throw error;
     } finally {
       this.closed = true;
+      this.closing = false;
       this.worker.terminate();
-      this.rejectAll(new Error("Persistent browser core runtime storage was cleared"));
+      this.resolveAll();
     }
   }
 
@@ -394,6 +414,26 @@ export class PersistentBrowserRuntime implements Runtime {
     }
     this.pending.clear();
   }
+
+  private resolveAll(): void {
+    for (const pending of this.pending.values()) {
+      pending.resolve(undefined);
+    }
+    this.pending.clear();
+  }
+}
+
+function ignoreExpectedShutdown(error: unknown): void {
+  if (isExpectedShutdownError(error)) {
+    return;
+  }
+  setTimeout(() => {
+    throw error;
+  }, 0);
+}
+
+function isExpectedShutdownError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Persistent browser core runtime");
 }
 
 function valuesForRow(schema: WasmSchema, table: string, values: InsertValues): Value[] {
