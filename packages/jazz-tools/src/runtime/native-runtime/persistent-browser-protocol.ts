@@ -1,0 +1,107 @@
+import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
+import type { RuntimeSourcesConfig } from "../context.js";
+
+type OpenRequest = {
+  id: number;
+  method: "open";
+  args: [
+    runtimeSources: RuntimeSourcesConfig | undefined,
+    dbName: string,
+    schema: WasmSchema,
+    node: Uint8Array,
+    author: Uint8Array,
+  ];
+};
+
+// This protocol exists because OPFS-backed browser storage must be opened and
+// used from a dedicated worker. The main thread keeps the Runtime shape and
+// proxies calls to the worker that owns the real NativeRuntimeAdapter instance.
+export type PersistentBrowserWriteRequest =
+  | {
+      id: number;
+      method: "insert";
+      args: [
+        table: string,
+        values: InsertValues,
+        writeContext: string | null | undefined,
+        objectId: string,
+      ];
+    }
+  | {
+      id: number;
+      method: "restore";
+      args: [
+        table: string,
+        objectId: string,
+        values: InsertValues,
+        writeContext: string | null | undefined,
+      ];
+    }
+  | {
+      id: number;
+      method: "update";
+      args: [
+        table: string,
+        objectId: string,
+        values: Record<string, Value>,
+        writeContext: string | null | undefined,
+      ];
+    }
+  | {
+      id: number;
+      method: "upsert";
+      args: [
+        table: string,
+        objectId: string,
+        values: InsertValues,
+        writeContext: string | null | undefined,
+      ];
+    }
+  | {
+      id: number;
+      method: "delete";
+      args: [table: string, objectId: string, writeContext: string | null | undefined];
+    };
+
+export type PersistentBrowserOpfsOwnerRequest =
+  | OpenRequest
+  | PersistentBrowserWriteRequest
+  | {
+      id: number;
+      method: "waitForTransaction";
+      args: [transactionId: string, tier: string];
+    }
+  | {
+      id: number;
+      method: "query";
+      args: [
+        queryJson: string,
+        sessionJson: string | null | undefined,
+        tier: string | null | undefined,
+        optionsJson: string | null | undefined,
+      ];
+    }
+  | {
+      id: number;
+      method: "createSubscription";
+      args: [
+        queryJson: string,
+        sessionJson: string | null | undefined,
+        tier: string | null | undefined,
+        optionsJson: string | null | undefined,
+      ];
+    }
+  | { id: number; method: "executeSubscription"; args: [handle: number] }
+  | { id: number; method: "unsubscribe"; args: [handle: number] }
+  | { id: number; method: "clearClientStorage"; args: [] }
+  | { id: number; method: "connect"; args: [url: string, authJson: string] }
+  | { id: number; method: "disconnect"; args: [] }
+  | { id: number; method: "updateAuth"; args: [authJson: string] };
+
+export type PersistentBrowserWorkerMethod = PersistentBrowserOpfsOwnerRequest["method"];
+type RequestForMethod<Method extends PersistentBrowserWorkerMethod> = Extract<
+  PersistentBrowserOpfsOwnerRequest,
+  { method: Method }
+>;
+export type PersistentBrowserRequestArgs<Method extends PersistentBrowserWorkerMethod> =
+  RequestForMethod<Method>["args"];

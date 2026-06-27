@@ -498,7 +498,7 @@ class DevToolsJazzClient {
     this.fallbackSchema = schema;
   }
 
-  create(table: string, values: InsertValues): InsertResult {
+  create(_table: string, _values: InsertValues): InsertResult {
     throw new Error("DevTools client does not support non-durable create().");
   }
   async createDurable(
@@ -519,17 +519,17 @@ class DevToolsJazzClient {
     return (await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload)) as Row[];
   }
   queryInternal(
-    queryJson: string,
-    session?: Session,
-    options?: QueryExecutionOptions,
+    _queryJson: string,
+    _session?: Session,
+    _options?: QueryExecutionOptions,
   ): Promise<Row[]> {
     throw new Error("Method not implemented.");
   }
   update(
-    table: string,
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: { tier?: DurabilityTier },
+    _table: string,
+    _objectId: string,
+    _updates: Record<string, Value>,
+    _options?: { tier?: DurabilityTier },
   ): MutationResult {
     throw new Error("DevTools client does not support non-durable update().");
   }
@@ -547,7 +547,7 @@ class DevToolsJazzClient {
       tier: options?.tier,
     });
   }
-  delete(table: string, objectId: string, options?: { tier?: DurabilityTier }): MutationResult {
+  delete(_table: string, _objectId: string, _options?: { tier?: DurabilityTier }): MutationResult {
     throw new Error("DevTools client does not support non-durable delete().");
   }
   async deleteDurable(
