@@ -461,12 +461,13 @@ shuts down and remounts the app.
   server state and tests. Direct websocket lifecycle is accounted for through
   shutdown admission/drain tracking and explicit direct-core session close, not
   the old client TTL/reap loop.
-- Browser `useAll`/`useAllSuspense` tests now use direct-core-supported
-  `propagation: "full"` for successful QueryOptions cases and pin
-  `propagation: "local-only"` as an explicit current direct-core gap instead of
-  pretending it is supported. The same hook gates now cover signed integer
-  comparisons plus hop and gather relation subscriptions on the direct-core
-  path.
+- Browser `useAll`/`useAllSuspense` tests now cover direct-core
+  `propagation: "full"` and positive local persistent reads with
+  `propagation: "local-only"`. The local-only path is passed through to native
+  read options and direct core skips upstream subscription registration for
+  explicit local-only subscriptions. The same hook gates now cover signed
+  integer comparisons plus hop and gather relation subscriptions on the
+  direct-core path.
 
 ## Next targets
 

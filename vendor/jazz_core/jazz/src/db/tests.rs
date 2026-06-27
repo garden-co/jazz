@@ -1098,6 +1098,30 @@ fn db_facade_schedules_immediate_tick_for_propagated_query_coverage() {
 }
 
 #[test]
+fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let scheduler = Rc::new(RecordingScheduler::default());
+    db.set_tick_scheduler(Some(scheduler.clone()));
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+
+    let mut subscription = doctest_support::block_on(db.subscribe(
+        &prepared_query,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+        },
+    ))
+    .unwrap();
+
+    assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
+    assert_eq!(scheduler.take(), Vec::<TickUrgency>::new());
+    assert!(db.node.upstream_subscriptions.borrow().is_empty());
+}
+
+#[test]
 fn db_facade_schedules_immediate_tick_for_upstream_connection() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let scheduler = Rc::new(RecordingScheduler::default());

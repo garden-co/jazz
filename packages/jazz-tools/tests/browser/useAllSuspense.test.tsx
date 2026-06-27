@@ -507,17 +507,25 @@ describe("useAllSuspense browser integration", () => {
     );
   });
 
-  it("documents the direct core gap for local-only read propagation", async () => {
+  it("supports local-only read propagation", async () => {
     const client = track(
       await createJazzClient({
-        appId: uniqueId("local-only-gap"),
-        driver: { type: "persistent", dbName: uniqueId("local-only-gap") },
+        appId: uniqueId("local-only"),
+        driver: { type: "persistent", dbName: uniqueId("local-only") },
       }),
     );
 
+    await client.db.insert(todos, {
+      title: "local-only-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["local"],
+    });
+
     await expect(
       client.db.all(makeQuery<Todo>("todos", {}), { propagation: "local-only" }),
-    ).rejects.toThrow("Direct core runtime does not support read propagation 'local-only' yet");
+    ).resolves.toEqual([expect.objectContaining({ title: "local-only-task" })]);
   });
 
   it("does not include rows for non-matching text contains", async () => {

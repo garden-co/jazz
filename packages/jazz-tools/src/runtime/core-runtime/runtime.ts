@@ -495,7 +495,7 @@ export class CoreRuntime implements Runtime {
     if (relationRows) return relationRows;
     const query = this.prepareQuery(queryJson);
     const session = readSession(sessionJson);
-    const opts = readOptions(tier, queryIncludesDeleted(queryJson));
+    const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
     await this.propagateQueryIfNeeded(tier, optionsJson, query);
     const rows = session
       ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
@@ -700,8 +700,12 @@ export class CoreRuntime implements Runtime {
     const query = this.prepareQuery(queryJson);
     await this.propagateQueryIfNeeded(tier, optionsJson, query);
     const rows = identity
-      ? this.db.allForIdentity(query, identity, readOptions(tier, queryIncludesDeleted(queryJson)))
-      : this.db.all(query, readOptions(tier, queryIncludesDeleted(queryJson)));
+      ? this.db.allForIdentity(
+          query,
+          identity,
+          readOptions(tier, queryIncludesDeleted(queryJson), optionsJson),
+        )
+      : this.db.all(query, readOptions(tier, queryIncludesDeleted(queryJson), optionsJson));
     return filterRows(
       rowsFromBatches(readRowBatches(rows), this.schema),
       queryFiltersFromJson(queryJson, this.schema),
@@ -724,7 +728,7 @@ export class CoreRuntime implements Runtime {
       throw new Error("Direct core runtime does not support session-scoped subscriptions");
     }
     const handle = this.nextSubscriptionId++;
-    const opts = readOptions(tier);
+    const opts = readOptions(tier, false, optionsJson);
     const identity = session ? parseUuid(session.user_id) : undefined;
     const parsed = JSON.parse(queryJson) as RuntimeQueryJson;
     const relationKind = relationKindOf(parsed.relation_ir);
@@ -919,7 +923,7 @@ export class CoreRuntime implements Runtime {
     const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
     if (options.propagation != null && options.propagation !== "full") return;
     if (!this.db.propagateQuery) return;
-    this.db.propagateQuery(query, readOptions(tier));
+    this.db.propagateQuery(query, readOptions(tier, false, optionsJson));
     await this.waitForQueryCoverage(query);
   }
 
@@ -931,7 +935,10 @@ export class CoreRuntime implements Runtime {
     const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
     if (options.propagation != null && options.propagation !== "full") return;
     if (!this.db.propagateQuery) return;
-    this.db.propagateQuery(query, readOptions(tier === "local" ? "edge" : tier));
+    this.db.propagateQuery(
+      query,
+      readOptions(tier === "local" ? "edge" : tier, false, optionsJson),
+    );
   }
 
   private async waitForQueryCoverage(query: DirectPreparedQuery): Promise<void> {
@@ -1265,10 +1272,17 @@ function txIdFromOptions(optionsJson?: string | null): string | undefined {
   }
 }
 
-function readOptions(tier?: string | null, includeDeleted = false): unknown {
-  return includeDeleted
-    ? { tier: tier ?? "local", include_deleted: true }
-    : { tier: tier ?? "local" };
+function readOptions(
+  tier?: string | null,
+  includeDeleted = false,
+  optionsJson?: string | null,
+): unknown {
+  const options = optionsJson == null ? ({} as Record<string, unknown>) : JSON.parse(optionsJson);
+  const readOptions: Record<string, unknown> = { tier: tier ?? "local" };
+  if (includeDeleted) readOptions.include_deleted = true;
+  if (options.propagation === "local-only") readOptions.propagation = "local_only";
+  if (options.propagation === "full") readOptions.propagation = "full";
+  return readOptions;
 }
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
@@ -1311,7 +1325,7 @@ function relationRefreshSource(): DirectSubscription {
 function readSupportedReadOptions(optionsJson: string): void {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
   const propagation = parsed.propagation;
-  if (propagation != null && propagation !== "full") {
+  if (propagation != null && propagation !== "full" && propagation !== "local-only") {
     throw new Error(
       `Direct core runtime does not support read propagation '${String(propagation)}' yet`,
     );

@@ -1371,7 +1371,7 @@ fn direct_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<DirectRe
     if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
         opts.propagation = match propagation.as_str() {
             "Full" | "full" => DirectPropagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" => DirectPropagation::LocalOnly,
+            "LocalOnly" | "local_only" | "localOnly" | "local-only" => DirectPropagation::LocalOnly,
             other => {
                 return Err(napi::Error::from_reason(format!(
                     "unknown propagation {other}"
@@ -1878,7 +1878,10 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
+    use crate::direct_read_opts_from_json;
+    use jazz::db::Propagation as DirectPropagation;
     use jazz_tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
+    use serde_json::json;
 
     #[test]
     fn schema_json_roundtrip_preserves_enum_fk_and_defaults() {
@@ -1928,5 +1931,13 @@ mod tests {
             .column("done")
             .unwrap();
         assert_eq!(done.default, Some(Value::Boolean(false)));
+    }
+
+    #[test]
+    fn direct_read_opts_accept_public_local_only_spelling() {
+        let opts = direct_read_opts_from_json(Some(json!({ "propagation": "local-only" })))
+            .expect("parse direct read opts");
+
+        assert_eq!(opts.propagation, DirectPropagation::LocalOnly);
     }
 }
