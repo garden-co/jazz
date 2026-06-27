@@ -17,6 +17,7 @@ pub(crate) mod row_histories;
 #[cfg(feature = "legacy-alpha-engine")]
 #[allow(dead_code, unused_imports)]
 pub(crate) mod runtime_core;
+pub mod schema_api;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
@@ -52,14 +53,11 @@ use std::path::PathBuf;
 #[cfg(feature = "client")]
 use thiserror::Error;
 
-pub use query_manager::policy::{Operation, PolicyExpr};
-pub use query_manager::query::{Query, QueryBuilder};
-pub use query_manager::session::{Session, WriteContext};
-pub use query_manager::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
-    RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value,
+pub use schema_api::{
+    BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, OrderedRowDelta,
+    PolicyExpr, Query, QueryBuilder, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder,
+    SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext,
 };
-pub use row_histories::BatchId;
 pub use schema_manager::AppId;
 #[cfg(feature = "client")]
 pub use sync::SyncTracer;
