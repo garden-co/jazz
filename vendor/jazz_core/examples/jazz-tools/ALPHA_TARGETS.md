@@ -120,19 +120,22 @@ The grafted package now also has a browser alpha public-flow gate in
 slice proves public `schema.defineApp`, `createDb({ driver: "persistent" })`,
 direct in-process core construction, CRUD, `db.one`, `subscribeAll`, and
 read-your-writes in one browser session. The same file keeps skipped TODO gates
-for the remaining honest blockers: direct in-process browser persistence needs
-a durable flush/reopen gate before OPFS reload parity can be claimed, and the
-websocket gates still need cross-client subscription convergence over the real
+for the remaining honest blockers: `WasmDb.openBrowser(...)` must run in a
+dedicated worker, so package persistence needs a single direct-core
+worker-owned runtime that preserves synchronous public mutation handles; the
+websocket gates also need persistent cross-client convergence over the real
 Rust server boundary.
 
 ## Current gaps versus alpha
 
-- Browser persistent creation in the grafted `jazz-tools` package now opens the
-  direct core in-process instead of routing through the old broker/worker
+- Browser persistent creation in the grafted `jazz-tools` package currently
+  opens direct core in-process instead of routing through the old broker/worker
   topology. The current positive browser gate covers public CRUD,
   read-your-writes, and subscriptions in that direct path. Reload persistence is
-  not yet covered for the grafted package: local writes need an explicit durable
-  flush/reopen API or wait gate before OPFS reload parity can be claimed.
+  not yet covered for the grafted package: the OPFS backend rejects main-thread
+  opens, so package persistence needs a clean dedicated-worker owner for the
+  direct core DB, without resurrecting the old broker/leader compatibility
+  stack.
   `examples/browser-wasm` still has older OPFS reload coverage for the vendored
   example path, but the package gate is the integration source of truth.
 - Public TypeScript API compatibility is intentionally thin. Since this repo is
@@ -284,8 +287,8 @@ Rust server boundary.
    uses the repo's OPFS-backed browser storage path and the browser smoke
    has example-level reload coverage. The grafted `jazz-tools` package now
    bypasses the old worker broker and opens direct in-process browser core; next
-   it needs a durable flush/reopen gate so public `createDb` can prove OPFS
-   reload persistence directly. Expand coverage for true transactions,
+   it needs a direct-core dedicated worker runtime so public `createDb` can prove
+   OPFS reload persistence directly. Expand coverage for true transactions,
    history/index/table partitions, cursor correctness after reload, ABI error
    mapping, format versioning, and quota/cleanup handling.
 3. **Make durable `jazz-server` real.** The server now has an alpha-shaped
@@ -323,8 +326,9 @@ Rust server boundary.
 8. **Polish WebSocket protocol details later.** Current batched raw
    `WireFrame` bytes are good enough unless they block another target; full
    handshake/resume/control envelope design can wait.
-   The immediate browser blockers are direct-core OPFS reopen durability and
-   cross-client subscription convergence over the real Rust server boundary.
+   The immediate browser blockers are the direct-core dedicated-worker
+   persistence path and cross-client subscription convergence over the real Rust
+   server boundary.
 9. **Defer React Native; keep NAPI as a parity gate.** NAPI now has direct-core
    CRUD/subscription/policy/persistence/edge-sync coverage and should stay in
    the green path. React Native remains deferred until the browser/server/API
@@ -357,3 +361,47 @@ behavior, durable history/index/table partition coverage, cursor and
 subscription correctness after reload, ABI error mapping, format
 versioning/migration rules, quota and cleanup behavior, and worker-safe
 concurrency.
+
+### Direct-Core Worker Runtime Shape
+
+The clean package path is not the deleted alpha browser broker. The target is a
+single direct-core dedicated worker runtime for browser persistence:
+
+- `createDb({ driver: { type: "persistent", dbName } })` should open the
+  OPFS-backed direct core in a dedicated module worker, because
+  `WasmDb.openBrowser(namespace, schema, config)` rejects on the main thread.
+- Browser memory DBs, Node, NAPI, and server paths should keep the current
+  in-process direct `CoreRuntime` path.
+- The public write API must keep synchronous mutation handles:
+  `db.insert/update/delete/upsert/restore(...)` returns immediately with a row
+  result/handle, and `.wait({ tier })` remains async.
+- The worker protocol must not restore `browser-broker`, `leader-lock`,
+  `WorkerBridge`, `createWithWorker`, or the old package worker protocol.
+- Row and cell payloads should keep using the direct row/record encoding path;
+  do not introduce a JSON row-batch protocol for hot write/read payloads.
+
+The likely smallest vertical slice is:
+
+1. Add a `core-runtime` browser worker host that loads `jazz-wasm` from
+   `runtimeSources`, calls `WasmDb.openBrowser(...)`, and hosts a normal
+   `CoreRuntime` around the opened DB.
+2. Add a main-thread `Runtime` implementation backed by that dedicated worker,
+   responsible for request ids, pending write waits, subscription callbacks,
+   auth failure callbacks, shutdown, and transport forwarding.
+3. Preserve synchronous writes either by keeping a tiny in-memory direct-core
+   mirror on the main thread for immediate row materialization while sending the
+   encoded mutation to the worker for OPFS durability, or by using a
+   cross-origin-isolated `SharedArrayBuffer`/`Atomics.wait` synchronous RPC path
+   where available. The mirror is the preferred default because public package
+   users should not need cross-origin isolation just to write local state.
+4. Unskip the local OPFS reopen gate once insert, local wait, shutdown, reopen,
+   and local query-by-id pass through public `createDb`.
+
+Current blockers:
+
+- `CoreRuntime` opens storage synchronously in its constructor, while
+  `WasmDb.openBrowser(...)` is async and worker-only.
+- The public runtime write interface returns synchronous `Direct*Result`
+  objects, so a plain async `postMessage` facade would change public semantics.
+- The worker-owned persistent DB and any main-thread mirror must converge
+  deterministically under local writes, edge sync, subscriptions, and shutdown.
