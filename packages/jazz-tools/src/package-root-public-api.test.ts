@@ -259,6 +259,15 @@ const internalRuntimeExportPathFragments = [
   "/runtime/native-runtime",
 ] as const;
 
+const testAndHelperBuildPathFragments = [
+  ".test.",
+  "dev/test-helpers.",
+  "react-core/test-utils.",
+  "runtime/client-tests/",
+  "runtime/testing/",
+  "testing/relation-ir-test-helpers.",
+] as const;
+
 function listDistFiles(dir: string, prefix = ""): string[] {
   const files: string[] = [];
 
@@ -381,5 +390,15 @@ describe("package root public API", () => {
     );
 
     expect(unexpectedRuntimeFiles).toEqual([]);
+  });
+
+  it("does not publish tests or private test helpers in the package surface", () => {
+    const distDir = join(packageRootDir, "..", "dist");
+    const distFiles = listDistFiles(distDir);
+    const unexpectedTestFiles = distFiles.filter((file) =>
+      testAndHelperBuildPathFragments.some((fragment) => file.includes(fragment)),
+    );
+
+    expect(unexpectedTestFiles).toEqual([]);
   });
 });

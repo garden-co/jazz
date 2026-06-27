@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const srcDir = join(packageRoot, "src");
+const svelteDistDir = join(packageRoot, "dist", "svelte");
 
 async function fileExists(path) {
   try {
@@ -51,4 +52,25 @@ async function cleanupGeneratedSourceTypes() {
   }
 }
 
+async function cleanupGeneratedSvelteTestOutput() {
+  if (!(await fileExists(svelteDistDir))) {
+    return;
+  }
+
+  const files = await collectFiles(svelteDistDir);
+  const testOutputFiles = files.filter((file) => {
+    const relativePath = file.slice(svelteDistDir.length + 1).replaceAll("\\", "/");
+    return relativePath.includes(".test.") || relativePath.startsWith("test-helpers.svelte.");
+  });
+
+  for (const file of testOutputFiles) {
+    await rm(file, { force: true });
+  }
+
+  if (testOutputFiles.length > 0) {
+    console.log(`[build:svelte] removed ${testOutputFiles.length} test output files`);
+  }
+}
+
 await cleanupGeneratedSourceTypes();
+await cleanupGeneratedSvelteTestOutput();
