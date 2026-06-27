@@ -110,7 +110,7 @@ impl DirectCoreWebSocketTransport {
             auth,
         })
         .map_err(DirectCoreWebSocketClientError::EncodePrelude)?;
-        ws.send(Message::Binary(prelude.into()))
+        ws.send(Message::Binary(prelude))
             .await
             .map_err(DirectCoreWebSocketClientError::Send)?;
 
@@ -122,7 +122,7 @@ impl DirectCoreWebSocketTransport {
             encode_frame(&hello).map_err(DirectCoreWebSocketClientError::EncodeHello)?;
         let batch = postcard::to_allocvec(&vec![encoded_hello])
             .map_err(DirectCoreWebSocketClientError::EncodeHello)?;
-        ws.send(Message::Binary(batch.into()))
+        ws.send(Message::Binary(batch))
             .await
             .map_err(DirectCoreWebSocketClientError::Send)?;
 
@@ -251,7 +251,7 @@ async fn run_direct_ws_pump(
                 let Ok(bytes) = postcard::to_allocvec(&batch) else {
                     continue;
                 };
-                if ws.send(Message::Binary(bytes.into())).await.is_err() {
+                if ws.send(Message::Binary(bytes)).await.is_err() {
                     return;
                 }
             }

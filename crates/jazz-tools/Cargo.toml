@@ -31,6 +31,7 @@ transport-websocket = [
   "dep:webpki-roots",
 ]
 client = ["runtime-tokio", "transport-websocket", "dep:thiserror", "dep:tokio"]
+direct-core-client = ["client", "server"]
 server = [
   "transport-websocket",
   "dep:tokio",
@@ -44,7 +45,7 @@ server = [
 ]
 cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc"]
 test-utils = ["server", "client", "sqlite"]
-test = ["test-utils", "cli"]
+test = ["test-utils", "cli", "direct-core-client"]
 otel-core = [
   "server",
   "dep:opentelemetry",
