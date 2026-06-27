@@ -176,7 +176,7 @@ describe("Vanilla TS Todo App E2E", () => {
     const li = el.querySelector("#todo-list li")!;
     expect(li.classList.contains("done")).toBe(false);
 
-    // Click the checkbox — toggle handler is async (db.one then db.update)
+    // Click the checkbox to update the todo's done state.
     const checkbox = li.querySelector<HTMLInputElement>("input.toggle")!;
     checkbox.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
