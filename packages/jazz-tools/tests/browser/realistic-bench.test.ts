@@ -2238,7 +2238,6 @@ describe("realistic browser benchmark harness", () => {
 
       const anyDb = db as any;
       const client = anyDb.getClient(schema);
-      const runtime = client.getRuntime();
       const phases: Array<{ phase: string; ms: number }> = [];
 
       const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
@@ -2272,16 +2271,6 @@ describe("realistic browser benchmark harness", () => {
           return await originalQueryInternal(...args);
         } finally {
           phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
-        }
-      };
-
-      const originalRuntimeQuery = runtime.query.bind(runtime);
-      runtime.query = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalRuntimeQuery(...args);
-        } finally {
-          phases.push({ phase: "runtime.query", ms: performance.now() - startedAt });
         }
       };
 
@@ -2420,7 +2409,6 @@ describe("realistic browser benchmark harness", () => {
 
       const anyDb = allowedDb as any;
       const client = anyDb.getClient(permissionSchema);
-      const runtime = client.getRuntime();
       const phases: Array<{ phase: string; ms: number }> = [];
 
       const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
@@ -2454,16 +2442,6 @@ describe("realistic browser benchmark harness", () => {
           return await originalQueryInternal(...args);
         } finally {
           phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
-        }
-      };
-
-      const originalRuntimeQuery = runtime.query.bind(runtime);
-      runtime.query = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalRuntimeQuery(...args);
-        } finally {
-          phases.push({ phase: "runtime.query", ms: performance.now() - startedAt });
         }
       };
 
