@@ -163,7 +163,7 @@ describe("Db runtime schema order", () => {
     ]);
   });
 
-  it("carries session identity through local core runtime queries", async () => {
+  it("carries session identity through local native runtime queries", async () => {
     const generatedSchema: WasmSchema = {
       todos: {
         columns: [

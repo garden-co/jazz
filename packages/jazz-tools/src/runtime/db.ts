@@ -5,7 +5,7 @@
  * Handles query translation, execution, and result transformation.
  *
  * Key design:
- * - createDb() is async (pre-loads the core source)
+ * - createDb() is async (pre-loads the runtime source)
  * - insert/update/delete are sync (local-first immediate writes, no durability wait)
  * - all/one are async (need storage I/O for queries)
  */
@@ -995,7 +995,7 @@ export class Db {
   }
 
   /**
-   * Create a Db instance with a loaded core source.
+   * Create a Db instance with a loaded runtime source.
    * @internal Use createDb() instead.
    */
   static create(config: DbConfig, runtimeSource: AnyRuntimeSource): Db {
@@ -1004,7 +1004,7 @@ export class Db {
 
   /**
    * Get or create a JazzClient for the given schema.
-   * Synchronous because the core source is loaded before Db is created.
+   * Synchronous because the runtime source is loaded before Db is created.
    *
    */
   protected getClient(schema: WasmSchema): JazzClient {
@@ -1681,7 +1681,7 @@ function generateEphemeralSeedBase64Url(): string {
 /**
  * Create a new Db instance with the given configuration.
  *
- * This is an **async** factory function that pre-loads the core source.
+ * This is an **async** factory function that pre-loads the runtime source.
  * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
  * Use the `wait` method when you need a Promise that resolves at a durability tier.
  *
