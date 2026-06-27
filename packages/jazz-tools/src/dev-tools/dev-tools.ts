@@ -1,13 +1,6 @@
-import {
-  ActiveQuerySubscriptionTrace,
-  JazzClient,
-  DurabilityTier,
-  InsertValues,
-  QueryExecutionOptions,
-  Value,
-  WasmSchema,
-} from "../index.js";
-import { Db, DbConfig } from "../runtime/db.js";
+import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
+import type { JazzClient, DurabilityTier, QueryExecutionOptions } from "../runtime/client.js";
+import { Db, type ActiveQuerySubscriptionTrace, type DbConfig } from "../runtime/db.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
   DEVTOOLS_COMMANDS,
