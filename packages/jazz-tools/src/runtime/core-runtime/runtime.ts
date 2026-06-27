@@ -1520,14 +1520,15 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
 }
 
 function normalizeSubscriptionChunk(chunk: unknown):
-  | { type: "snapshot"; rows: AbiRowBatch[] }
+  | { type: "snapshot"; rows: AbiRowBatch[]; settled?: boolean }
   | {
       type: "delta";
       delta: { added: AbiRowBatch[]; updated: AbiRowBatch[]; removed: AbiRemovedRow[] };
+      settled?: boolean;
     }
   | { type: "closed" } {
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
-  const record = chunk as { type?: unknown; rows?: unknown; delta?: unknown };
+  const record = chunk as { type?: unknown; rows?: unknown; delta?: unknown; settled?: unknown };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
   }
@@ -1535,6 +1536,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     return {
       type: "snapshot",
       rows: readRowBatches(assertBytes(record.rows, "subscription rows")),
+      settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }
   if (record.type === "delta" || record.type === "Delta") {
@@ -1543,6 +1545,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: readAbiSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),
+      settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }
   throw new Error("unknown subscription chunk");
