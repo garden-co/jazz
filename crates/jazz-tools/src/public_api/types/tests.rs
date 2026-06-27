@@ -1,10 +1,5 @@
 use super::*;
-use std::collections::HashSet;
 use uuid::Uuid;
-
-fn test_row_provenance() -> crate::metadata::RowProvenance {
-    crate::metadata::RowProvenance::for_insert("jazz:test", 1)
-}
 
 #[test]
 fn column_type_fixed_sizes() {
@@ -189,55 +184,6 @@ fn row_descriptor_hash_changes_when_merge_strategy_changes() {
         counter.content_hash(),
         "changing only the merge strategy should change the schema hash"
     );
-}
-
-#[test]
-fn combined_row_descriptor_single() {
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("id", ColumnType::Uuid),
-        ColumnDescriptor::new("name", ColumnType::Text),
-    ]);
-
-    let combined = CombinedRowDescriptor::single("users", descriptor);
-
-    assert_eq!(combined.table_count(), 1);
-    assert_eq!(combined.resolve_column("users", "id"), Some((0, 0)));
-    assert_eq!(combined.resolve_column("users", "name"), Some((0, 1)));
-    assert_eq!(combined.resolve_unqualified("name"), Some((0, 1)));
-}
-
-#[test]
-fn combined_row_descriptor_join() {
-    let users_desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("id", ColumnType::Uuid),
-        ColumnDescriptor::new("name", ColumnType::Text),
-    ]);
-    let posts_desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("id", ColumnType::Uuid),
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("author_id", ColumnType::Uuid),
-    ]);
-
-    let combined = CombinedRowDescriptor::new(
-        vec!["users".to_string(), "posts".to_string()],
-        vec![users_desc, posts_desc],
-    );
-
-    assert_eq!(combined.table_count(), 2);
-    assert_eq!(combined.total_column_count(), 5);
-
-    // Qualified lookups
-    assert_eq!(combined.resolve_column("users", "id"), Some((0, 0)));
-    assert_eq!(combined.resolve_column("users", "name"), Some((0, 1)));
-    assert_eq!(combined.resolve_column("posts", "id"), Some((1, 0)));
-    assert_eq!(combined.resolve_column("posts", "title"), Some((1, 1)));
-    assert_eq!(combined.resolve_column("posts", "author_id"), Some((1, 2)));
-
-    // Unqualified lookup (first match wins)
-    // "id" exists in both tables, should return users.id
-    assert_eq!(combined.resolve_unqualified("id"), Some((0, 0)));
-    // "title" only exists in posts
-    assert_eq!(combined.resolve_unqualified("title"), Some((1, 1)));
 }
 
 // ========================================================================

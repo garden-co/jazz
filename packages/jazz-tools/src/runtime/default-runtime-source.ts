@@ -71,12 +71,12 @@ function authorBytesForSubject(subject: string, fallbackSeed: string): Uint8Arra
   return uuidBytes(subject) ?? deterministicBytes(`${fallbackSeed}:author`);
 }
 
-export class WasmRuntimeSource extends RuntimeSource<DbConfig> {
+export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   private module: WasmModule | null = null;
 
   private get wasmModule(): WasmModule {
     if (!this.module) {
-      throw new Error("WASM runtime source is not loaded");
+      throw new Error("Default runtime source is not loaded");
     }
     return this.module;
   }

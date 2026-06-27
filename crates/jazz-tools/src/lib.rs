@@ -9,7 +9,6 @@ pub mod middleware;
 pub mod object;
 #[cfg(feature = "otel-core")]
 pub mod otel;
-#[allow(dead_code, unused_imports, clippy::wrong_self_convention)]
 pub(crate) mod public_api;
 pub mod public_schema;
 pub mod schema_lens;

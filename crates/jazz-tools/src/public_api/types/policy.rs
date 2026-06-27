@@ -4,19 +4,6 @@ use crate::public_api::policy::{CmpOp, Operation, PolicyValue};
 use crate::public_api::relation_ir::{ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum RowPolicyMode {
-    #[default]
-    PermissiveLocal,
-    Enforcing,
-}
-
-impl RowPolicyMode {
-    pub fn denies_missing_explicit_policy(self) -> bool {
-        matches!(self, Self::Enforcing)
-    }
-}
-
 /// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -683,25 +670,8 @@ pub mod policy_expr {
             })
         }
 
-        pub fn into_rel_expr(self) -> RelExpr {
+        fn into_rel_expr(self) -> RelExpr {
             self.rel
-        }
-    }
-
-    impl IntoTableWhere for PredicateExpr {
-        type Output = Relation;
-
-        fn into_table_where(self, table: TableName) -> Self::Output {
-            Relation::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan { table }),
-                predicate: self,
-            })
-        }
-    }
-
-    impl From<RelExpr> for Relation {
-        fn from(rel: RelExpr) -> Self {
-            Self::new(rel)
         }
     }
 
@@ -713,9 +683,14 @@ pub mod policy_expr {
         }
     }
 
-    impl IntoExistsExpr for RelExpr {
-        fn into_exists_expr(self) -> PolicyExpr {
-            PolicyExpr::ExistsRel { rel: self }
+    impl IntoTableWhere for PredicateExpr {
+        type Output = Relation;
+
+        fn into_table_where(self, table: TableName) -> Self::Output {
+            Relation::new(RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan { table }),
+                predicate: self,
+            })
         }
     }
 

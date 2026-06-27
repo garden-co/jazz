@@ -29,23 +29,6 @@ pub enum PolicyValue {
     SessionRef(Vec<String>),
 }
 
-/// Default recursion depth for recursive permission checks.
-const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT: usize = 10;
-/// Hard cap recursion depth for recursive permission checks.
-pub(super) const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP: usize = 64;
-
-/// Resolve requested recursion depth for policy recursion.
-///
-/// Returns `None` when depth is invalid or exceeds hard cap.
-pub(super) fn normalize_recursive_max_depth(requested: Option<usize>) -> Option<usize> {
-    let depth = requested.unwrap_or(RECURSIVE_POLICY_MAX_DEPTH_DEFAULT);
-    if depth == 0 || depth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
-        None
-    } else {
-        Some(depth)
-    }
-}
-
 /// Database operation type for policy evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Operation {
@@ -150,7 +133,7 @@ pub enum PolicyExpr {
         via_column: String,
         /// Optional recursion depth override for recursive INHERITS evaluation.
         ///
-        /// If omitted, policy checks use [`RECURSIVE_POLICY_MAX_DEPTH_DEFAULT`].
+        /// If omitted, the core policy evaluator uses its default recursion depth.
         max_depth: Option<usize>,
     },
 
@@ -165,7 +148,7 @@ pub enum PolicyExpr {
         via_column: String,
         /// Optional recursion depth override for recursive INHERITS evaluation.
         ///
-        /// If omitted, policy checks use [`RECURSIVE_POLICY_MAX_DEPTH_DEFAULT`].
+        /// If omitted, the core policy evaluator uses its default recursion depth.
         max_depth: Option<usize>,
     },
 
@@ -615,14 +598,5 @@ mod tests {
         assert_eq!(encoded["type"], json!("ExistsRel"));
         let decoded: PolicyExpr = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, expr);
-    }
-
-    #[test]
-    fn recursive_depth_normalization_enforces_bounds() {
-        assert_eq!(normalize_recursive_max_depth(None), Some(10));
-        assert_eq!(normalize_recursive_max_depth(Some(1)), Some(1));
-        assert_eq!(normalize_recursive_max_depth(Some(64)), Some(64));
-        assert_eq!(normalize_recursive_max_depth(Some(0)), None);
-        assert_eq!(normalize_recursive_max_depth(Some(65)), None);
     }
 }

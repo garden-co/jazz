@@ -789,11 +789,6 @@ impl QueryBuilder {
         self
     }
 
-    pub(crate) fn branches_owned(mut self, branches: Vec<String>) -> Self {
-        self.query.branches = branches;
-        self
-    }
-
     /// Add an equals filter condition.
     pub fn filter_eq(mut self, column: impl Into<String>, value: Value) -> Self {
         let current = self.query.disjuncts.last_mut().unwrap();
@@ -1018,14 +1013,6 @@ impl QueryBuilder {
         let builder = ArraySubqueryBuilder::new(column_name);
         let configured = builder_fn(builder);
         self.query.array_subqueries.push(configured.build());
-        self
-    }
-
-    pub(crate) fn with_array_subqueries(
-        mut self,
-        array_subqueries: Vec<ArraySubquerySpec>,
-    ) -> Self {
-        self.query.array_subqueries = array_subqueries;
         self
     }
 

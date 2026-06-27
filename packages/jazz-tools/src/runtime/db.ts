@@ -38,7 +38,7 @@ import {
   type DeleteOptions,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
-import { WasmRuntimeSource } from "./wasm-runtime-source.js";
+import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -1762,5 +1762,5 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 }
 
 export async function createDb(config: DbConfig): Promise<Db> {
-  return await createDbWithRuntimeSource(config, new WasmRuntimeSource());
+  return await createDbWithRuntimeSource(config, new DefaultRuntimeSource());
 }
