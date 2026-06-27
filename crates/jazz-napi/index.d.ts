@@ -34,6 +34,9 @@ export type NapiDirectTx = DirectTx
 export declare class DirectWrite {
   get payload(): Uint8Array
   wait(tier: string): void
+  writeState(): any
+  nextWriteStateChange(): Promise<undefined>
+  close(): boolean
 }
 export type NapiDirectWrite = DirectWrite
 

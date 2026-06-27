@@ -114,7 +114,9 @@ type DirectSubscription = {
 type DirectWrite = {
   payload: Uint8Array;
   wait(tier: string): void;
-  writeState?(): unknown;
+  writeState(): unknown;
+  nextWriteStateChange(): Promise<void>;
+  close?(): boolean;
 };
 
 type DirectTx = {
@@ -239,6 +241,17 @@ export class CoreRuntime implements Runtime {
 
   close(): void {
     this.closed = true;
+    for (const subscription of this.subscriptions.values()) {
+      closeSubscriptionSource(subscription.source);
+    }
+    for (const write of this.writes.values()) {
+      write.close?.();
+    }
+    this.subscriptions.clear();
+    this.pendingTxs.clear();
+    this.writes.clear();
+    this.queuedServerFrames.length = 0;
+    this.syncNeededCallbacks.clear();
     this.serverTransport?.close();
     this.serverTransport = null;
     this.serverCarrier?.close();
@@ -416,9 +429,20 @@ export class CoreRuntime implements Runtime {
       } catch (error) {
         const rejected = rejectedWaitError(transactionId, error);
         if (rejected) throw rejected;
-        if (!isNotObservedWaitError(error)) throw error;
+        if (!isPendingWaitError(error)) throw error;
         this.pumpSubscriptions();
-        await sleep(10);
+        const change = write.nextWriteStateChange();
+        try {
+          this.pumpServerTransport();
+          write.wait(tier);
+          this.pumpSubscriptions();
+          return;
+        } catch (secondError) {
+          const secondRejected = rejectedWaitError(transactionId, secondError);
+          if (secondRejected) throw secondRejected;
+          if (!isPendingWaitError(secondError)) throw secondError;
+        }
+        await change;
       }
     }
   }
@@ -865,6 +889,16 @@ function readSession(sessionJson?: string | null): { user_id: string } | null {
   return { user_id: parsed.user_id };
 }
 
+function closeSubscriptionSource(source: SubscriptionState["source"]): void {
+  if ("close" in source && typeof source.close === "function") {
+    source.close();
+    return;
+  }
+  if ("cancel" in source && typeof source.cancel === "function") {
+    void source.cancel().catch(() => {});
+  }
+}
+
 function readSupportedReadOptions(optionsJson: string): void {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
   const propagation = parsed.propagation;
@@ -887,8 +921,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isNotObservedWaitError(error: unknown): boolean {
-  return errorMessage(error).includes("NotObserved");
+function isPendingWaitError(error: unknown): boolean {
+  const message = errorMessage(error);
+  return (
+    message.includes("NotObserved") ||
+    message.includes("has not been accepted at requested tier") ||
+    message.includes("has not reached requested tier")
+  );
 }
 
 function rejectedWaitError(

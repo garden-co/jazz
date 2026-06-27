@@ -22,7 +22,9 @@ declare module "jazz-wasm" {
   export class WasmWrite {
     readonly payload: Uint8Array;
     writeState(): unknown;
+    nextWriteStateChange(): Promise<void>;
     wait(tier: string): void;
+    close(): boolean;
   }
 
   export class WasmTransport {

@@ -28,6 +28,7 @@
 static GLOBAL: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
 use napi::bindgen_prelude::*;
+use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use serde::Deserialize;
@@ -133,13 +134,11 @@ enum DirectNapiDb {
 }
 
 enum DirectNapiWrite {
-    Memory(DirectWriteHandle<DirectMemoryStorage>),
-    Persistent(DirectWriteHandle<DirectRocksDbStorage>),
-    MemoryTx {
+    Memory {
         db: Rc<DirectDb<DirectMemoryStorage>>,
         tx_id: DirectTxId,
     },
-    PersistentTx {
+    Persistent {
         db: Rc<DirectDb<DirectRocksDbStorage>>,
         tx_id: DirectTxId,
     },
@@ -266,21 +265,58 @@ impl NapiDirectWrite {
         let tier = direct_durability_tier_from_str(&tier)?;
         if let Some(write) = &self.inner {
             match write {
-                DirectNapiWrite::Memory(write) => {
-                    direct_block_on(write.wait(tier))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                }
-                DirectNapiWrite::Persistent(write) => {
-                    direct_block_on(write.wait(tier))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                }
-                DirectNapiWrite::MemoryTx { db, tx_id } => direct_wait_for_tx(db, *tx_id, tier)?,
-                DirectNapiWrite::PersistentTx { db, tx_id } => {
-                    direct_wait_for_tx(db, *tx_id, tier)?
-                }
+                DirectNapiWrite::Memory { db, tx_id } => direct_wait_for_tx(db, *tx_id, tier)?,
+                DirectNapiWrite::Persistent { db, tx_id } => direct_wait_for_tx(db, *tx_id, tier)?,
             }
         }
         Ok(())
+    }
+
+    #[napi(js_name = "writeState")]
+    pub fn write_state(&self) -> napi::Result<serde_json::Value> {
+        let Some(write) = &self.inner else {
+            return Err(napi::Error::from_reason("write state is unavailable"));
+        };
+        let state = match write {
+            DirectNapiWrite::Memory { db, tx_id } => db.write_state(*tx_id),
+            DirectNapiWrite::Persistent { db, tx_id } => db.write_state(*tx_id),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(direct_write_state_to_json(&state))
+    }
+
+    #[napi(js_name = "nextWriteStateChange")]
+    pub fn next_write_state_change(&self, env: Env) -> napi::Result<PromiseRaw<'static, ()>> {
+        let Some(write) = &self.inner else {
+            return Err(napi::Error::from_reason("write state is unavailable"));
+        };
+        let mut deferred = std::ptr::null_mut();
+        let mut promise = std::ptr::null_mut();
+        let env = env.raw();
+        let status = unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) };
+        if status != sys::Status::napi_ok {
+            return Err(napi::Error::from_reason(
+                "failed to create write-state promise",
+            ));
+        }
+        match write {
+            DirectNapiWrite::Memory { db, tx_id } => {
+                db.on_next_write_state_change(*tx_id, move || {
+                    resolve_raw_promise(env, deferred);
+                });
+            }
+            DirectNapiWrite::Persistent { db, tx_id } => {
+                db.on_next_write_state_change(*tx_id, move || {
+                    resolve_raw_promise(env, deferred);
+                });
+            }
+        }
+        Ok(PromiseRaw::new(env, promise))
+    }
+
+    #[napi]
+    pub fn close(&mut self) -> bool {
+        self.inner.take().is_some()
     }
 }
 
@@ -702,10 +738,12 @@ impl NapiDirectDb {
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
             DirectNapiDb::Memory(db) => direct_write_memory(
+                Rc::clone(db),
                 db.insert_with_id(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             DirectNapiDb::Persistent(db) => direct_write_persistent(
+                Rc::clone(db),
                 db.insert_with_id(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -731,6 +769,7 @@ impl NapiDirectDb {
             DirectNapiDb::Memory(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_memory(
+                    Rc::clone(db),
                     db.insert_with_id_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -738,6 +777,7 @@ impl NapiDirectDb {
             DirectNapiDb::Persistent(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_persistent(
+                    Rc::clone(db),
                     db.insert_with_id_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -760,10 +800,12 @@ impl NapiDirectDb {
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
             DirectNapiDb::Memory(db) => direct_write_memory(
+                Rc::clone(db),
                 db.update(&table, row_id, patch)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             DirectNapiDb::Persistent(db) => direct_write_persistent(
+                Rc::clone(db),
                 db.update(&table, row_id, patch)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -789,6 +831,7 @@ impl NapiDirectDb {
             DirectNapiDb::Memory(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_memory(
+                    Rc::clone(db),
                     db.update_for_identity(author, &table, row_id, patch)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -796,6 +839,7 @@ impl NapiDirectDb {
             DirectNapiDb::Persistent(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_persistent(
+                    Rc::clone(db),
                     db.update_for_identity(author, &table, row_id, patch)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -818,10 +862,12 @@ impl NapiDirectDb {
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
             DirectNapiDb::Memory(db) => direct_write_memory(
+                Rc::clone(db),
                 db.upsert(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             DirectNapiDb::Persistent(db) => direct_write_persistent(
+                Rc::clone(db),
                 db.upsert(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -847,6 +893,7 @@ impl NapiDirectDb {
             DirectNapiDb::Memory(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_memory(
+                    Rc::clone(db),
                     db.upsert_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -854,6 +901,7 @@ impl NapiDirectDb {
             DirectNapiDb::Persistent(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_persistent(
+                    Rc::clone(db),
                     db.upsert_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -874,10 +922,12 @@ impl NapiDirectDb {
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
             DirectNapiDb::Memory(db) => direct_write_memory(
+                Rc::clone(db),
                 db.delete(&table, row_id)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             DirectNapiDb::Persistent(db) => direct_write_persistent(
+                Rc::clone(db),
                 db.delete(&table, row_id)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -901,6 +951,7 @@ impl NapiDirectDb {
             DirectNapiDb::Memory(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_memory(
+                    Rc::clone(db),
                     db.delete_for_identity(author, &table, row_id)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -908,6 +959,7 @@ impl NapiDirectDb {
             DirectNapiDb::Persistent(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_persistent(
+                    Rc::clone(db),
                     db.delete_for_identity(author, &table, row_id)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -930,10 +982,12 @@ impl NapiDirectDb {
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         match db {
             DirectNapiDb::Memory(db) => direct_write_memory(
+                Rc::clone(db),
                 db.restore(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             DirectNapiDb::Persistent(db) => direct_write_persistent(
+                Rc::clone(db),
                 db.restore(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -959,6 +1013,7 @@ impl NapiDirectDb {
             DirectNapiDb::Memory(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_memory(
+                    Rc::clone(db),
                     db.restore_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -966,6 +1021,7 @@ impl NapiDirectDb {
             DirectNapiDb::Persistent(db) => {
                 direct_set_identity_claims(db, author);
                 direct_write_persistent(
+                    Rc::clone(db),
                     db.restore_for_identity(author, &table, row_id, cells)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?,
                 )
@@ -1094,30 +1150,34 @@ fn direct_author_id_from_bytes(bytes: &[u8]) -> napi::Result<DirectAuthorId> {
 }
 
 fn direct_write_memory(
+    db: Rc<DirectDb<DirectMemoryStorage>>,
     write: DirectWriteHandle<DirectMemoryStorage>,
 ) -> napi::Result<NapiDirectWrite> {
+    let tx_id = write.mergeable_tx_id();
     let result = DirectWriteResult {
         row_id: write.row_uuid(),
-        tx_id: write.mergeable_tx_id(),
+        tx_id,
     };
     Ok(NapiDirectWrite {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        inner: Some(DirectNapiWrite::Memory(write)),
+        inner: Some(DirectNapiWrite::Memory { db, tx_id }),
     })
 }
 
 fn direct_write_persistent(
+    db: Rc<DirectDb<DirectRocksDbStorage>>,
     write: DirectWriteHandle<DirectRocksDbStorage>,
 ) -> napi::Result<NapiDirectWrite> {
+    let tx_id = write.mergeable_tx_id();
     let result = DirectWriteResult {
         row_id: write.row_uuid(),
-        tx_id: write.mergeable_tx_id(),
+        tx_id,
     };
     Ok(NapiDirectWrite {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        inner: Some(DirectNapiWrite::Persistent(write)),
+        inner: Some(DirectNapiWrite::Persistent { db, tx_id }),
     })
 }
 
@@ -1202,6 +1262,18 @@ where
     )))
 }
 
+fn direct_write_state_to_json(state: &jazz::db::WriteState) -> serde_json::Value {
+    serde_json::to_value(state).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
+    let mut undefined = std::ptr::null_mut();
+    let status = unsafe { sys::napi_get_undefined(env, &mut undefined) };
+    if status == sys::Status::napi_ok {
+        let _ = unsafe { sys::napi_resolve_deferred(env, deferred, undefined) };
+    }
+}
+
 fn direct_commit_tx<S>(db: &DirectDb<S>, writes: Vec<DirectNapiTxWrite>) -> napi::Result<DirectTxId>
 where
     S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
@@ -1253,7 +1325,7 @@ fn direct_commit_tx_memory(
     let tx_id = direct_commit_tx(db, writes)?;
     direct_tx_write(
         tx_id,
-        Some(DirectNapiWrite::MemoryTx {
+        Some(DirectNapiWrite::Memory {
             db: Rc::clone(db),
             tx_id,
         }),
@@ -1267,7 +1339,7 @@ fn direct_commit_tx_persistent(
     let tx_id = direct_commit_tx(db, writes)?;
     direct_tx_write(
         tx_id,
-        Some(DirectNapiWrite::PersistentTx {
+        Some(DirectNapiWrite::Persistent {
             db: Rc::clone(db),
             tx_id,
         }),
