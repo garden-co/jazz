@@ -97,7 +97,12 @@ type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 
 struct WriteStateWaiter {
     id: u64,
-    sender: oneshot::Sender<()>,
+    notify: WriteStateWaiterNotify,
+}
+
+enum WriteStateWaiterNotify {
+    Future(oneshot::Sender<()>),
+    Callback(Box<dyn FnOnce()>),
 }
 
 #[derive(Clone)]
@@ -286,6 +291,17 @@ where
     /// registering this future; this method is a wake primitive, not a predicate.
     pub fn next_write_state_change(&self, tx_id: TxId) -> WriteStateChange {
         self.node.register_write_state_waiter(tx_id)
+    }
+
+    /// Register a one-shot same-thread callback for the next state transition of
+    /// `tx_id`.
+    ///
+    /// This is the callback equivalent of [`Db::next_write_state_change`].
+    /// Callers should still read [`Db::write_state`] before and after
+    /// registration to avoid lost wakeups.
+    pub fn on_next_write_state_change(&self, tx_id: TxId, callback: impl FnOnce() + 'static) {
+        self.node
+            .register_write_state_callback(tx_id, Box::new(callback));
     }
 
     /// Start a query rooted at `table`.
@@ -1558,7 +1574,7 @@ where
             .or_default()
             .push(WriteStateWaiter {
                 id: waiter_id,
-                sender,
+                notify: WriteStateWaiterNotify::Future(sender),
             });
         WriteStateChange {
             waiters: Rc::clone(&self.write_state_waiters),
@@ -1566,6 +1582,20 @@ where
             waiter_id,
             receiver,
         }
+    }
+
+    fn register_write_state_callback(&self, tx_id: TxId, callback: Box<dyn FnOnce()>) {
+        let waiter_id = self.next_write_state_waiter_id.get();
+        self.next_write_state_waiter_id
+            .set(waiter_id.wrapping_add(1).max(1));
+        self.write_state_waiters
+            .borrow_mut()
+            .entry(tx_id)
+            .or_default()
+            .push(WriteStateWaiter {
+                id: waiter_id,
+                notify: WriteStateWaiterNotify::Callback(callback),
+            });
     }
 
     fn refresh_subscriptions(&self) -> Result<usize, Error> {
@@ -2418,7 +2448,12 @@ fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) {
         return;
     };
     for waiter in waiters {
-        let _ = waiter.sender.send(());
+        match waiter.notify {
+            WriteStateWaiterNotify::Future(sender) => {
+                let _ = sender.send(());
+            }
+            WriteStateWaiterNotify::Callback(callback) => callback(),
+        }
     }
 }
 

@@ -90,13 +90,10 @@ pub struct WasmWrite {
 }
 
 enum WasmWriteInner {
-    Memory(WriteHandle<MemoryStorage>),
     MemoryTx {
         db: Rc<Db<MemoryStorage>>,
         tx_id: TxId,
     },
-    #[cfg(target_arch = "wasm32")]
-    Browser(WriteHandle<OpfsStorage>),
     #[cfg(target_arch = "wasm32")]
     BrowserTx {
         db: Rc<Db<OpfsStorage>>,
@@ -114,15 +111,8 @@ impl WasmWrite {
     #[wasm_bindgen(js_name = writeState)]
     pub fn write_state(&self) -> Result<JsValue, JsValue> {
         match &self.inner {
-            Some(WasmWriteInner::Memory(write)) => {
-                write_state_to_js(write.write_state().map_err(to_js_error)?)
-            }
             Some(WasmWriteInner::MemoryTx { db, tx_id }) => {
                 write_state_to_js(db.write_state(*tx_id).map_err(to_js_error)?)
-            }
-            #[cfg(target_arch = "wasm32")]
-            Some(WasmWriteInner::Browser(write)) => {
-                write_state_to_js(write.write_state().map_err(to_js_error)?)
             }
             #[cfg(target_arch = "wasm32")]
             Some(WasmWriteInner::BrowserTx { db, tx_id }) => {
@@ -136,15 +126,8 @@ impl WasmWrite {
     pub fn wait(&self, tier: String) -> Result<(), JsValue> {
         let tier = durability_tier_from_str(&tier)?;
         match &self.inner {
-            Some(WasmWriteInner::Memory(write)) => {
-                block_on(write.wait(tier)).map_err(to_js_error)?;
-            }
             Some(WasmWriteInner::MemoryTx { db, tx_id }) => {
                 wait_for_tx(db, *tx_id, tier)?;
-            }
-            #[cfg(target_arch = "wasm32")]
-            Some(WasmWriteInner::Browser(write)) => {
-                block_on(write.wait(tier)).map_err(to_js_error)?;
             }
             #[cfg(target_arch = "wasm32")]
             Some(WasmWriteInner::BrowserTx { db, tx_id }) => {
@@ -153,6 +136,35 @@ impl WasmWrite {
             None => return Err(JsValue::from_str("write wait is unavailable")),
         }
         Ok(())
+    }
+
+    #[wasm_bindgen(js_name = nextWriteStateChange)]
+    pub fn next_write_state_change(&self) -> Result<js_sys::Promise, JsValue> {
+        match &self.inner {
+            Some(WasmWriteInner::MemoryTx { db, tx_id }) => {
+                let db = Rc::clone(db);
+                let tx_id = *tx_id;
+                Ok(future_to_promise(async move {
+                    db.next_write_state_change(tx_id).await;
+                    Ok(JsValue::UNDEFINED)
+                }))
+            }
+            #[cfg(target_arch = "wasm32")]
+            Some(WasmWriteInner::BrowserTx { db, tx_id }) => {
+                let db = Rc::clone(db);
+                let tx_id = *tx_id;
+                Ok(future_to_promise(async move {
+                    db.next_write_state_change(tx_id).await;
+                    Ok(JsValue::UNDEFINED)
+                }))
+            }
+            None => Err(JsValue::from_str("write state is unavailable")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn close(&mut self) -> bool {
+        self.inner.take().is_some()
     }
 }
 
@@ -350,9 +362,13 @@ impl WasmDbInner {
 
     fn insert(&self, table: &str, cells: RowCells) -> Result<WasmWrite, JsValue> {
         match self {
-            Self::Memory(db) => wasm_write_memory(db.insert(table, cells).map_err(to_js_error)?),
+            Self::Memory(db) => {
+                wasm_write_memory(Rc::clone(db), db.insert(table, cells).map_err(to_js_error)?)
+            }
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(db.insert(table, cells).map_err(to_js_error)?),
+            Self::Browser(db) => {
+                wasm_write_browser(Rc::clone(db), db.insert(table, cells).map_err(to_js_error)?)
+            }
         }
     }
 
@@ -364,11 +380,13 @@ impl WasmDbInner {
     ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
                 db.insert_with_id(table, row_id, cells)
                     .map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
                 db.insert_with_id(table, row_id, cells)
                     .map_err(to_js_error)?,
             ),
@@ -386,6 +404,7 @@ impl WasmDbInner {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
+                    Rc::clone(db),
                     db.insert_with_id_for_identity(identity, table, row_id, cells)
                         .map_err(to_js_error)?,
                 )
@@ -394,6 +413,7 @@ impl WasmDbInner {
             Self::Browser(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
+                    Rc::clone(db),
                     db.insert_with_id_for_identity(identity, table, row_id, cells)
                         .map_err(to_js_error)?,
                 )
@@ -403,13 +423,15 @@ impl WasmDbInner {
 
     fn update(&self, table: &str, row_id: RowUuid, patch: RowCells) -> Result<WasmWrite, JsValue> {
         match self {
-            Self::Memory(db) => {
-                wasm_write_memory(db.update(table, row_id, patch).map_err(to_js_error)?)
-            }
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                db.update(table, row_id, patch).map_err(to_js_error)?,
+            ),
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                wasm_write_browser(db.update(table, row_id, patch).map_err(to_js_error)?)
-            }
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                db.update(table, row_id, patch).map_err(to_js_error)?,
+            ),
         }
     }
 
@@ -424,6 +446,7 @@ impl WasmDbInner {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
+                    Rc::clone(db),
                     db.update_for_identity(identity, table, row_id, patch)
                         .map_err(to_js_error)?,
                 )
@@ -432,6 +455,7 @@ impl WasmDbInner {
             Self::Browser(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
+                    Rc::clone(db),
                     db.update_for_identity(identity, table, row_id, patch)
                         .map_err(to_js_error)?,
                 )
@@ -441,13 +465,15 @@ impl WasmDbInner {
 
     fn upsert(&self, table: &str, row_id: RowUuid, cells: RowCells) -> Result<WasmWrite, JsValue> {
         match self {
-            Self::Memory(db) => {
-                wasm_write_memory(db.upsert(table, row_id, cells).map_err(to_js_error)?)
-            }
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                db.upsert(table, row_id, cells).map_err(to_js_error)?,
+            ),
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                wasm_write_browser(db.upsert(table, row_id, cells).map_err(to_js_error)?)
-            }
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                db.upsert(table, row_id, cells).map_err(to_js_error)?,
+            ),
         }
     }
 
@@ -462,6 +488,7 @@ impl WasmDbInner {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
+                    Rc::clone(db),
                     db.upsert_for_identity(identity, table, row_id, cells)
                         .map_err(to_js_error)?,
                 )
@@ -470,6 +497,7 @@ impl WasmDbInner {
             Self::Browser(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
+                    Rc::clone(db),
                     db.upsert_for_identity(identity, table, row_id, cells)
                         .map_err(to_js_error)?,
                 )
@@ -479,9 +507,15 @@ impl WasmDbInner {
 
     fn delete(&self, table: &str, row_id: RowUuid) -> Result<WasmWrite, JsValue> {
         match self {
-            Self::Memory(db) => wasm_write_memory(db.delete(table, row_id).map_err(to_js_error)?),
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                db.delete(table, row_id).map_err(to_js_error)?,
+            ),
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(db.delete(table, row_id).map_err(to_js_error)?),
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                db.delete(table, row_id).map_err(to_js_error)?,
+            ),
         }
     }
 
@@ -495,6 +529,7 @@ impl WasmDbInner {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
+                    Rc::clone(db),
                     db.delete_for_identity(identity, table, row_id)
                         .map_err(to_js_error)?,
                 )
@@ -503,6 +538,7 @@ impl WasmDbInner {
             Self::Browser(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
+                    Rc::clone(db),
                     db.delete_for_identity(identity, table, row_id)
                         .map_err(to_js_error)?,
                 )
@@ -512,13 +548,15 @@ impl WasmDbInner {
 
     fn restore(&self, table: &str, row_id: RowUuid, cells: RowCells) -> Result<WasmWrite, JsValue> {
         match self {
-            Self::Memory(db) => {
-                wasm_write_memory(db.restore(table, row_id, cells).map_err(to_js_error)?)
-            }
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                db.restore(table, row_id, cells).map_err(to_js_error)?,
+            ),
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                wasm_write_browser(db.restore(table, row_id, cells).map_err(to_js_error)?)
-            }
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                db.restore(table, row_id, cells).map_err(to_js_error)?,
+            ),
         }
     }
 
@@ -533,6 +571,7 @@ impl WasmDbInner {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
+                    Rc::clone(db),
                     db.restore_for_identity(identity, table, row_id, cells)
                         .map_err(to_js_error)?,
                 )
@@ -541,6 +580,7 @@ impl WasmDbInner {
             Self::Browser(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
+                    Rc::clone(db),
                     db.restore_for_identity(identity, table, row_id, cells)
                         .map_err(to_js_error)?,
                 )
@@ -1219,26 +1259,34 @@ where
     );
 }
 
-fn wasm_write_memory(write: WriteHandle<MemoryStorage>) -> Result<WasmWrite, JsValue> {
+fn wasm_write_memory(
+    db: Rc<Db<MemoryStorage>>,
+    write: WriteHandle<MemoryStorage>,
+) -> Result<WasmWrite, JsValue> {
+    let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
         row_id: write.row_uuid(),
-        tx_id: write.mergeable_tx_id(),
+        tx_id,
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
-        inner: Some(WasmWriteInner::Memory(write)),
+        inner: Some(WasmWriteInner::MemoryTx { db, tx_id }),
     })
 }
 
 #[cfg(target_arch = "wasm32")]
-fn wasm_write_browser(write: WriteHandle<OpfsStorage>) -> Result<WasmWrite, JsValue> {
+fn wasm_write_browser(
+    db: Rc<Db<OpfsStorage>>,
+    write: WriteHandle<OpfsStorage>,
+) -> Result<WasmWrite, JsValue> {
+    let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
         row_id: write.row_uuid(),
-        tx_id: write.mergeable_tx_id(),
+        tx_id,
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
-        inner: Some(WasmWriteInner::Browser(write)),
+        inner: Some(WasmWriteInner::BrowserTx { db, tx_id }),
     })
 }
 
