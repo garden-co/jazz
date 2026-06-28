@@ -2694,18 +2694,6 @@ where
         self.materialize_maintained_view_graph(graph, &shape)
     }
 
-    #[cfg(test)]
-    pub(crate) fn maintained_view_seed_from_cold_snapshot(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-    ) -> Result<MaintainedSubscriptionView, Error> {
-        let (_subscription, maintained, _transitions, _tables) =
-            self.maintained_subscription_view_from_cold_snapshot(shape, binding, identity)?;
-        Ok(maintained)
-    }
-
     pub(crate) fn maintained_subscription_view_from_cold_snapshot(
         &mut self,
         shape: &ValidatedQuery,
@@ -2789,6 +2777,8 @@ where
             binding_descriptor,
             param_names.iter().cloned(),
         )?;
+        let terminal_tables = self.maintained_view_terminal_tables(shape)?;
+        let public_output = maintained_view_tagged_record_descriptor(terminal_tables.values())?;
         let mut binding_values = binding.values().clone();
         insert_claim_bindings(
             &mut binding_values,
@@ -2799,7 +2789,7 @@ where
         let values =
             binding_values_for_param_names(&binding_values, &param_names, &param_type_list)?;
         self.database
-            .bind_shape(prepared.id(), &values)
+            .bind_shape_with_output(prepared.id(), &values, public_output)
             .map_err(Error::Groove)
     }
 
@@ -6152,6 +6142,58 @@ fn maintained_view_tagged_field_names<'a>(
             .map(|(table, column)| maintained_view_tagged_user_field(&table, &column)),
     );
     fields
+}
+
+fn maintained_view_tagged_record_descriptor<'a>(
+    terminal_tables: impl IntoIterator<Item = &'a TableSchema>,
+) -> Result<RecordDescriptor, Error> {
+    let terminal_tables = terminal_tables.into_iter().collect::<Vec<_>>();
+    let Some(first_table) = terminal_tables.first() else {
+        return Err(Error::InvalidStoredValue(
+            "maintained view tagged output requires at least one terminal table",
+        ));
+    };
+    let history_descriptor = first_table.history_storage_table().record_schema();
+    let parents_type = history_descriptor
+        .fields()
+        .get(
+            history_descriptor
+                .field_index("parents")
+                .ok_or(Error::InvalidStoredValue(
+                    "history table must project parents",
+                ))?,
+        )
+        .ok_or(Error::InvalidStoredValue(
+            "history table must project parents",
+        ))?
+        .value_type
+        .clone();
+    let mut fields = vec![
+        ("event_kind".to_owned(), ValueType::String),
+        ("table_name".to_owned(), ValueType::String),
+        ("row_uuid".to_owned(), ValueType::Uuid),
+        ("content_tx_time".to_owned(), ValueType::U64),
+        ("content_tx_node_id".to_owned(), ValueType::U64),
+        ("tx_time".to_owned(), ValueType::U64),
+        ("tx_node_id".to_owned(), ValueType::U64),
+        ("schema_version".to_owned(), ValueType::U64),
+        ("parents".to_owned(), parents_type),
+        (
+            "_deletion".to_owned(),
+            maintained_view_nullable_deletion_type(),
+        ),
+    ];
+    fields.extend(
+        maintained_view_terminal_user_columns(terminal_tables)
+            .into_iter()
+            .map(|((table_name, column_name), column_type)| {
+                (
+                    maintained_view_tagged_user_field(&table_name, &column_name),
+                    ValueType::Nullable(Box::new(column_type.value_type())),
+                )
+            }),
+    );
+    Ok(RecordDescriptor::new(fields))
 }
 
 fn maintained_view_tagged_deletion_fields<'a>(
