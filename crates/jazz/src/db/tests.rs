@@ -2255,6 +2255,258 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
 }
 
 #[test]
+fn one_shot_propagated_query_records_empty_remote_coverage() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    assert!(!client.query_is_covered(&prepared));
+
+    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(client.query_is_covered(&prepared));
+    assert!(prepared_read(&client, &query).is_empty());
+}
+
+#[test]
+fn one_shot_propagated_query_rehydrates_already_covered_binding() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    seed(&server, "todos", cells("first", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_is_covered(&prepared));
+    assert_eq!(prepared_read(&client, &query).len(), 1);
+
+    seed(&server, "todos", cells("second", false, owner));
+    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
+    assert!(!client.query_is_covered(&prepared));
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(client.query_is_covered(&prepared));
+    assert_eq!(prepared_read(&client, &query).len(), 2);
+}
+
+#[test]
+fn one_shot_edge_query_rehydrates_already_covered_binding() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    seed(&server, "todos", cells("first", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    client.propagate_query_with_opts(&prepared, edge_subscribe_opts());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_is_covered(&prepared));
+    assert_eq!(prepared_read(&client, &query).len(), 1);
+
+    seed(&server, "todos", cells("second", false, owner));
+    client.propagate_query_with_opts(&prepared, edge_subscribe_opts());
+    assert!(!client.query_is_covered(&prepared));
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(client.query_is_covered(&prepared));
+    assert_eq!(prepared_read(&client, &query).len(), 2);
+}
+
+#[test]
+fn one_shot_edge_query_rehydrates_claim_bound_already_covered_binding() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "chats",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("joinCode", ColumnType::String.nullable()),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("chats").filter(any_of([])).policy_branch(
+            crate::query::PolicyBranch::from_query(
+                Query::from("chats").filter(eq(col("joinCode"), crate::query::claim("join_code"))),
+            ),
+        ),
+    ))
+    .with_write_policy(Policy::public())]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let reader = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, reader, &schema);
+    let join_code = "invite-code-123";
+    client.set_identity_claims(
+        reader,
+        BTreeMap::from([("join_code".to_owned(), Value::String(join_code.to_owned()))]),
+    );
+
+    let first = seed(
+        &server,
+        "chats",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("first".to_owned())),
+            (
+                "joinCode".to_owned(),
+                Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+            ),
+        ]),
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber_with_claims(
+        server_transport,
+        reader,
+        BTreeMap::from([("join_code".to_owned(), Value::String(join_code.to_owned()))]),
+    );
+
+    let query = Query::from("chats");
+    let prepared = prepared(&client, &query);
+    client.propagate_query_with_opts(&prepared, edge_subscribe_opts());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_is_covered(&prepared));
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
+        vec![first]
+    );
+
+    let second = seed(
+        &server,
+        "chats",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("second".to_owned())),
+            (
+                "joinCode".to_owned(),
+                Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+            ),
+        ]),
+    );
+    client.propagate_query_with_opts(&prepared, edge_subscribe_opts());
+    assert!(!client.query_is_covered(&prepared));
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(client.query_is_covered(&prepared));
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
+        vec![first, second]
+    );
+}
+
+#[test]
+fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "chats",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("joinCode", ColumnType::String.nullable()),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("chats").filter(any_of([])).policy_branch(
+            crate::query::PolicyBranch::from_query(
+                Query::from("chats").filter(eq(col("joinCode"), crate::query::claim("join_code"))),
+            ),
+        ),
+    ))
+    .with_write_policy(Policy::public())]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let reader = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, reader, &schema);
+    let join_code = "invite-code-123";
+    let claims = BTreeMap::from([("join_code".to_owned(), Value::String(join_code.to_owned()))]);
+    client.set_identity_claims(reader, claims.clone());
+
+    let first = seed(
+        &server,
+        "chats",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("first".to_owned())),
+            (
+                "joinCode".to_owned(),
+                Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+            ),
+        ]),
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, claims);
+
+    let query = Query::from("chats");
+    let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        row_ids(&delta_rows(block_on(subscription.next_event()).unwrap()).0),
+        vec![first]
+    );
+
+    let second = seed(
+        &server,
+        "chats",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("second".to_owned())),
+            (
+                "joinCode".to_owned(),
+                Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+            ),
+        ]),
+    );
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![second]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
+        vec![first, second]
+    );
+}
+
+#[test]
 fn write_state_waiter_resolves_on_remote_fate_update() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);

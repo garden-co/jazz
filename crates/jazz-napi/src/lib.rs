@@ -582,6 +582,27 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
+    #[napi(js_name = "setIdentityClaims")]
+    pub fn set_identity_claims(
+        &self,
+        author: Uint8Array,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
+            JsonValue,
+        >,
+    ) -> napi::Result<()> {
+        let author = core_author_id_from_bytes(&author)?;
+        let claims = core_claims_from_json(author, claims)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.set_identity_claims(author, claims),
+            NapiDbInnerStorage::Persistent(db) => db.set_identity_claims(author, claims),
+        }
+        Ok(())
+    }
+
     #[napi(js_name = "allForIdentity")]
     pub fn all_for_identity(
         &self,
@@ -1173,6 +1194,57 @@ where
             ("user_id".to_owned(), CoreValue::String(subject)),
         ]),
     );
+}
+
+fn core_claims_from_json(
+    author: CoreAuthorId,
+    claims: Option<JsonValue>,
+) -> napi::Result<BTreeMap<String, CoreValue>> {
+    let mut claims = match claims {
+        None | Some(JsonValue::Null) => BTreeMap::new(),
+        Some(JsonValue::Object(map)) => map
+            .into_iter()
+            .map(|(key, value)| Ok((key, core_claim_value_from_json(value)?)))
+            .collect::<napi::Result<BTreeMap<_, _>>>()?,
+        Some(_) => {
+            return Err(napi::Error::from_reason(
+                "identity claims must be an object",
+            ));
+        }
+    };
+    let subject = author.0.to_string();
+    claims.insert("subject".to_owned(), CoreValue::String(subject.clone()));
+    claims.insert("sub".to_owned(), CoreValue::String(subject.clone()));
+    claims.insert("user_id".to_owned(), CoreValue::String(subject));
+    Ok(claims)
+}
+
+fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
+    Ok(match value {
+        JsonValue::Null => CoreValue::Nullable(None),
+        JsonValue::Bool(value) => CoreValue::Bool(value),
+        JsonValue::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                CoreValue::U64(value)
+            } else if let Some(value) = value.as_f64() {
+                CoreValue::F64(value)
+            } else {
+                return Err(napi::Error::from_reason("unsupported numeric claim value"));
+            }
+        }
+        JsonValue::String(value) => CoreValue::String(value),
+        JsonValue::Array(values) => CoreValue::Array(
+            values
+                .into_iter()
+                .map(core_claim_value_from_json)
+                .collect::<napi::Result<Vec<_>>>()?,
+        ),
+        JsonValue::Object(_) => {
+            return Err(napi::Error::from_reason(
+                "nested object claims are not supported",
+            ));
+        }
+    })
 }
 
 fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {

@@ -1130,6 +1130,8 @@ where
 
 fn policy_values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
+        (Value::Nullable(Some(left)), right) => policy_values_equal(left, right),
+        (left, Value::Nullable(Some(right))) => policy_values_equal(left, right),
         (Value::Uuid(left), Value::String(right)) => uuid::Uuid::parse_str(right) == Ok(*left),
         (Value::String(left), Value::Uuid(right)) => uuid::Uuid::parse_str(left) == Ok(*right),
         _ => left == right,

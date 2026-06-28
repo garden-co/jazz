@@ -1439,6 +1439,47 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("rejects pending edge reads when the websocket transport errors during coverage wait", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              throw new Error("NotCovered");
+            },
+            connectUpstream: () => transport,
+            prepareQuery: () => ({}),
+            propagateQuery: () => undefined,
+            queryIsCovered: () => false,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+
+    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    await Promise.resolve();
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(4, 3, "server busy")]));
+
+    await expect(query).rejects.toThrow("server busy");
+  });
+
   it("passes supported subscription read tiers through", () => {
     const runtime = emptyNativeRuntime();
 

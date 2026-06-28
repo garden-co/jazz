@@ -292,6 +292,40 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
+  it("surfaces worker-owned edge read failures to the caller", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-edge-read-error-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    const queryPromise = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(worker.messages.some((message) => message.method === "query")).toBe(false);
+
+    const connectMessage = worker.messages.find((message) => message.method === "connect");
+    worker.respond(connectMessage!.id, undefined);
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+    const queryMessage = worker.messages.find((message) => message.method === "query");
+    worker.reject(queryMessage!.id, "edge coverage failed");
+
+    await expect(queryPromise).rejects.toThrow("edge coverage failed");
+    await runtime.close();
+  });
+
   it("does not send local reads to the worker before queued writes are visible", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 

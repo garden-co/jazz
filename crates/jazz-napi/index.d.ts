@@ -17,6 +17,7 @@ export declare class NapiDb {
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   prepareQuery(query: Uint8Array): PreparedQuery
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   propagateQuery(query: PreparedQuery, opts?: any | undefined | null): void
   queryIsCovered(query: PreparedQuery): boolean
