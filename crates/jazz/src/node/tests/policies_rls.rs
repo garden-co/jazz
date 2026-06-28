@@ -4143,105 +4143,31 @@ fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
     binding: &Binding,
     identity: AuthorId,
 ) {
-    let maintained = core
-        .maintained_view_seed_from_cold_snapshot(shape, binding, identity)
-        .unwrap();
-
-    let expected_result_current = core
-        .maintained_view_result_current(shape, binding, identity)
-        .unwrap();
-    assert_eq!(
-        maintained.active_result_entries(),
-        result_current_entries(core, &expected_result_current)
-    );
-
-    let expected_versions = core
-        .maintained_view_policy_readable_version_rows_by_tx(shape, identity)
-        .unwrap();
-    let txs = expected_versions.keys().copied().collect::<Vec<_>>();
-    assert_eq!(
-        maintained_versions_by_tx_key(&maintained, txs),
-        version_rows_by_tx_key(expected_versions)
-    );
-
-    let expected_replacements = core
-        .maintained_view_replacement_for_remove_by_row(shape, identity)
-        .unwrap();
-    let rows = expected_replacements.keys().copied().collect::<Vec<_>>();
-    assert_eq!(
-        maintained_replacements_by_row_key(&maintained, rows),
-        replacement_for_remove_key(expected_replacements)
-    );
-}
-
-fn result_current_entries(
-    core: &NodeState<RocksDbStorage>,
-    rows: &groove::ivm::RecordDeltas,
-) -> BTreeSet<ResultRowEntry> {
-    let row_idx = rows.descriptor.field_index("row_uuid").unwrap();
-    let time_idx = rows.descriptor.field_index("content_tx_time").unwrap();
-    let node_idx = rows.descriptor.field_index("content_tx_node_id").unwrap();
-    rows.to_values()
+    let expected_rows = core
+        .query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
         .unwrap()
         .into_iter()
-        .filter(|(_, weight)| *weight > 0)
-        .map(|(values, _)| {
-            let Value::Uuid(row_uuid) = values[row_idx] else {
-                panic!("row_uuid must be uuid");
-            };
-            let Value::U64(tx_time) = values[time_idx] else {
-                panic!("content_tx_time must be u64");
-            };
-            let Value::U64(tx_node_id) = values[node_idx] else {
-                panic!("content_tx_node_id must be u64");
-            };
-            let tx_node = core
-                .node_aliases
-                .iter()
-                .find_map(|(node, alias)| (alias.0 == tx_node_id).then_some(*node))
-                .unwrap();
-            (
-                groove::Intern::new(core.table("todos").unwrap().name.clone()),
-                RowUuid(row_uuid),
-                TxId::new(TxTime(tx_time), tx_node),
-            )
-        })
-        .collect()
-}
+        .map(|row| (groove::Intern::new(row.table().to_owned()), row.row_uuid()))
+        .collect::<BTreeSet<_>>();
+    let mut peer = if identity == AuthorId::SYSTEM {
+        PeerState::new()
+    } else {
+        PeerState::for_author(identity)
+    };
+    let update = peer.rehydrate_query(core, shape, binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
 
-fn maintained_versions_by_tx_key(
-    maintained: &crate::node::maintained_subscription_view::MaintainedSubscriptionView,
-    txs: impl IntoIterator<Item = TxId>,
-) -> BTreeMap<TxId, Vec<VersionRowKey>> {
-    txs.into_iter()
-        .map(|tx_id| {
-            let mut versions = maintained
-                .versions_by_tx(tx_id)
-                .into_iter()
-                .map(version_row_key)
-                .collect::<Vec<_>>();
-            versions.sort();
-            (tx_id, versions)
-        })
-        .collect()
-}
-
-fn maintained_replacements_by_row_key(
-    maintained: &crate::node::maintained_subscription_view::MaintainedSubscriptionView,
-    rows: impl IntoIterator<Item = RowUuid>,
-) -> BTreeMap<RowUuid, ReplacementKey> {
-    rows.into_iter()
-        .map(|row_uuid| {
-            let (content_winner, deletion_winner) = maintained.replacement_for("todos", row_uuid);
-            (
-                row_uuid,
-                ReplacementKey {
-                    content_winner: content_winner.map(version_row_key),
-                    deletion_winner: deletion_winner.map(version_row_key),
-                },
-            )
-        })
-        .collect()
+    assert_eq!(
+        adds.into_iter()
+            .map(|(table, row_uuid, _tx_id)| (table, row_uuid))
+            .collect::<BTreeSet<_>>(),
+        expected_rows,
+        "maintained subscription cold snapshot should match public query rows"
+    );
+    assert!(removes.is_empty());
+    let metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(metrics.hits_out, 1);
+    assert_eq!(metrics.full_recomputes_out, 0);
 }
 
 fn tagged_event_kinds(rows: &groove::ivm::RecordDeltas) -> BTreeSet<String> {
