@@ -44,9 +44,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
     LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
-    PreparedQuery as PreparedQueryInner, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
-    RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource, SubscriptionEvent,
-    SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
+    PreparedQuery as PreparedQueryInner, Propagation as CorePropagation,
+    QueryAttachment as CoreQueryAttachment, ReadOpts as CoreReadOpts, RowCells as CoreRowCells,
+    SeededRowIdSource as CoreSeededRowIdSource, SubscriptionEvent, SubscriptionStream,
+    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
 use jazz::groove::records::{
@@ -197,6 +198,11 @@ impl CoreWireTransport for NapiWireTransport {
 #[napi(js_name = "PreparedQuery")]
 pub struct PreparedQuery {
     inner: PreparedQueryInner,
+}
+
+#[napi(js_name = "QueryAttachment")]
+pub struct QueryAttachment {
+    inner: CoreQueryAttachment,
 }
 
 #[napi(js_name = "Write")]
@@ -635,34 +641,47 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
-    #[napi(js_name = "propagateQuery")]
-    pub fn propagate_query(
+    #[napi(js_name = "attachQuery")]
+    pub fn attach_query(
         &self,
         query: &PreparedQuery,
         opts: Option<serde_json::Value>,
-    ) -> napi::Result<()> {
+    ) -> napi::Result<QueryAttachment> {
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => db.propagate_query_with_opts(&query.inner, opts),
-            NapiDbInnerStorage::Persistent(db) => db.propagate_query_with_opts(&query.inner, opts),
-        }
-        Ok(())
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => db.attach_query_with_opts(&query.inner, opts),
+            NapiDbInnerStorage::Persistent(db) => db.attach_query_with_opts(&query.inner, opts),
+        };
+        Ok(QueryAttachment { inner })
     }
 
-    #[napi(js_name = "queryIsCovered")]
-    pub fn query_is_covered(&self, query: &PreparedQuery) -> napi::Result<bool> {
+    #[napi(js_name = "queryAttachmentIsCovered")]
+    pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> napi::Result<bool> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         Ok(match db {
-            NapiDbInnerStorage::Memory(db) => db.query_is_covered(&query.inner),
-            NapiDbInnerStorage::Persistent(db) => db.query_is_covered(&query.inner),
+            NapiDbInnerStorage::Memory(db) => db.query_attachment_is_covered(attachment.inner),
+            NapiDbInnerStorage::Persistent(db) => db.query_attachment_is_covered(attachment.inner),
         })
+    }
+
+    #[napi(js_name = "detachQuery")]
+    pub fn detach_query(&self, attachment: &QueryAttachment) -> napi::Result<()> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.detach_query(attachment.inner),
+            NapiDbInnerStorage::Persistent(db) => db.detach_query(attachment.inner),
+        }
+        Ok(())
     }
 
     #[napi]

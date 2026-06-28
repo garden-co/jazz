@@ -776,8 +776,8 @@ mod tests {
     use futures::stream::FuturesUnordered;
     use futures::{SinkExt as _, StreamExt as _};
     use jazz::db::{
-        Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, RowCells, SeededRowIdSource,
-        WireTransportAdapter,
+        Db, DbConfig, DbIdentity, PreparedQuery, QueryAttachment, ReadOpts, RowCells,
+        SeededRowIdSource, WireTransportAdapter,
     };
     use jazz::groove::schema::ColumnType as CoreColumnType;
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
@@ -1343,38 +1343,42 @@ mod tests {
             self.tick_take()
         }
 
-        fn propagate_todos_query(&self) -> PreparedQuery {
+        fn attach_todos_query(&self) -> (PreparedQuery, QueryAttachment) {
             let query = self
                 .db
                 .prepare_query(&self.db.table("todos"))
                 .expect("prepare todos query");
-            self.db.propagate_query_with_opts(
+            let attachment = self.db.attach_query_with_opts(
                 &query,
                 ReadOpts {
                     tier: DurabilityTier::Edge,
                     ..Default::default()
                 },
             );
-            query
+            (query, attachment)
         }
 
-        fn propagate_table_query(&self, table: &str) -> PreparedQuery {
+        fn attach_table_query(&self, table: &str) -> (PreparedQuery, QueryAttachment) {
             let query = self
                 .db
                 .prepare_query(&self.db.table(table))
                 .expect("prepare table query");
-            self.db.propagate_query_with_opts(
+            let attachment = self.db.attach_query_with_opts(
                 &query,
                 ReadOpts {
                     tier: DurabilityTier::Edge,
                     ..Default::default()
                 },
             );
-            query
+            (query, attachment)
         }
 
-        fn edge_query_is_covered(&self, query: &PreparedQuery) -> bool {
-            self.db.query_is_covered(query)
+        fn edge_attachment_is_covered(&self, attachment: QueryAttachment) -> bool {
+            self.db.query_attachment_is_covered(attachment)
+        }
+
+        fn detach_query(&self, attachment: QueryAttachment) {
+            self.db.detach_query(attachment);
         }
 
         async fn edge_todo_titles(&self, query: &PreparedQuery) -> Vec<String> {
@@ -1511,14 +1515,15 @@ mod tests {
         let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
         let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
         let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
-        let client_b_todos = client_b.propagate_todos_query();
+        let (client_b_todos, client_b_todos_attachment) = client_b.attach_todos_query();
 
         let _inserted = client_a.insert_todo("route sync");
 
         let mut frames_sent_to_server = 0;
         let mut frames_received_from_server = 0;
         let start = tokio::time::Instant::now();
-        while !client_b.edge_query_is_covered(&client_b_todos) && start.elapsed() < WS_PUMP_DEADLINE
+        while !client_b.edge_attachment_is_covered(client_b_todos_attachment)
+            && start.elapsed() < WS_PUMP_DEADLINE
         {
             let (sent, received) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
             frames_sent_to_server += sent;
@@ -1538,6 +1543,7 @@ mod tests {
             "the server must return WireFrame batches through the websocket route"
         );
         let titles = client_b.edge_todo_titles(&client_b_todos).await;
+        client_b.detach_query(client_b_todos_attachment);
         assert_eq!(
             titles,
             vec!["route sync".to_owned()],
@@ -1557,22 +1563,24 @@ mod tests {
         let schema = ws_public_schema_convert();
         let client_b = TestClient::new(schema.clone(), 0xb2, 0xb200).await;
         let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
-        let client_b_todos = client_b.propagate_todos_query();
+        let (client_b_todos, client_b_todos_attachment) = client_b.attach_todos_query();
 
         let start = tokio::time::Instant::now();
-        while !client_b.edge_query_is_covered(&client_b_todos) && start.elapsed() < WS_PUMP_DEADLINE
+        while !client_b.edge_attachment_is_covered(client_b_todos_attachment)
+            && start.elapsed() < WS_PUMP_DEADLINE
         {
             let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
-            client_b.edge_query_is_covered(&client_b_todos),
+            client_b.edge_attachment_is_covered(client_b_todos_attachment),
             "reader query must be covered by the initial empty server response"
         );
         assert!(
             client_b.edge_todo_titles(&client_b_todos).await.is_empty(),
             "reader should settle the initial covered result as empty"
         );
+        client_b.detach_query(client_b_todos_attachment);
 
         let client_a = TestClient::new(schema, 0xa1, 0xa100).await;
         let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
@@ -1643,17 +1651,18 @@ mod tests {
         let docs_table = ws_private_docs_table_schema();
         let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
         let mut ws_b = open_negotiated_ws_session(addr, &state, bob).await;
-        let client_b_docs = client_b.propagate_table_query("docs");
+        let (client_b_docs, client_b_docs_attachment) = client_b.attach_table_query("docs");
 
         let start = tokio::time::Instant::now();
-        while !client_b.edge_query_is_covered(&client_b_docs) && start.elapsed() < WS_PUMP_DEADLINE
+        while !client_b.edge_attachment_is_covered(client_b_docs_attachment)
+            && start.elapsed() < WS_PUMP_DEADLINE
         {
             let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         assert!(
-            client_b.edge_query_is_covered(&client_b_docs),
+            client_b.edge_attachment_is_covered(client_b_docs_attachment),
             "Bob's docs query must be covered by the websocket route"
         );
         assert!(

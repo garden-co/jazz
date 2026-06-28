@@ -43,8 +43,9 @@ type NativeDb = {
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
-  propagateQuery?(query: PreparedQuery, opts: unknown): void;
-  queryIsCovered?(query: PreparedQuery): boolean;
+  attachQuery?(query: PreparedQuery, opts: unknown): unknown;
+  queryAttachmentIsCovered?(attachment: unknown): boolean;
+  detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array): PreparedQuery;
   subscribe?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
   subscribeForIdentity?(
@@ -481,11 +482,15 @@ export class NativeRuntimeAdapter implements Runtime {
     const session = readSession(sessionJson);
     this.applySessionClaims(session);
     const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
-    await this.propagateQueryIfNeeded(tier, optionsJson, query, session);
-    const rows = session
-      ? this.db.allForIdentity(query, session.identity, opts)
-      : this.db.all(query, opts);
-    return rowsFromBatches(readRowBatches(rows), this.schema);
+    const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
+    try {
+      const rows = session
+        ? this.db.allForIdentity(query, session.identity, opts)
+        : this.db.all(query, opts);
+      return rowsFromBatches(readRowBatches(rows), this.schema);
+    } finally {
+      if (attachment !== undefined) this.db.detachQuery?.(attachment);
+    }
   }
 
   createSubscription(
@@ -514,13 +519,6 @@ export class NativeRuntimeAdapter implements Runtime {
         : this.db.subscribe!(query, opts);
     } catch (error) {
       throw new Error(`Core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
-    }
-    try {
-      this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
-    } catch (error) {
-      throw new Error(
-        `Core subscription propagation failed for ${queryJson}: ${errorMessage(error)}`,
-      );
     }
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
@@ -688,23 +686,25 @@ export class NativeRuntimeAdapter implements Runtime {
     return query;
   }
 
-  private async propagateQueryIfNeeded(
+  private async attachQueryIfNeeded(
     tier: string | null | undefined,
     optionsJson: string | null | undefined,
     query: PreparedQuery,
     session: RuntimeSession | null,
-  ): Promise<void> {
+  ): Promise<unknown | undefined> {
     if (tier == null || tier === "local") return;
     const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
     if (options.propagation != null && options.propagation !== "full") return;
-    if (!this.db.propagateQuery) return;
-    this.db.propagateQuery(query, readOptions(tier, false, optionsJson));
-    if (!this.db.queryIsCovered) return;
+    if (!this.db.attachQuery) return;
+    const attachment = this.db.attachQuery(query, readOptions(tier, false, optionsJson));
+    if (!this.db.queryAttachmentIsCovered) return attachment;
     await this.waitForQueryCoverage(
+      attachment,
       query,
       readOptions(tier, false, optionsJson),
       session?.identity,
     );
+    return attachment;
   }
 
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
@@ -712,21 +712,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 
-  private propagateSubscriptionQueryIfNeeded(
-    tier: string | null | undefined,
-    optionsJson: string | null | undefined,
-    query: PreparedQuery,
-  ): void {
-    const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
-    if (options.propagation != null && options.propagation !== "full") return;
-    if (!this.db.propagateQuery) return;
-    this.db.propagateQuery(
-      query,
-      readOptions(tier === "local" ? "edge" : tier, false, optionsJson),
-    );
-  }
-
   private async waitForQueryCoverage(
+    attachment: unknown,
     query: PreparedQuery,
     opts: unknown,
     identity?: Uint8Array,
@@ -737,8 +724,8 @@ export class NativeRuntimeAdapter implements Runtime {
       this.throwServerTransportErrorForTier(tier);
       this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
-      if (this.db.queryIsCovered) {
-        if (this.db.queryIsCovered(query)) return;
+      if (this.db.queryAttachmentIsCovered) {
+        if (this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
         if (identity) {
@@ -746,7 +733,7 @@ export class NativeRuntimeAdapter implements Runtime {
         } else {
           this.db.all(query, opts);
         }
-        if (!this.db.queryIsCovered) return;
+        if (!this.db.queryAttachmentIsCovered) return;
       } catch (error) {
         if (!isPendingCoverageError(error)) throw error;
       }

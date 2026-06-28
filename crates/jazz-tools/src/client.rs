@@ -251,11 +251,31 @@ impl Backend {
         }
     }
 
-    fn query_is_covered(&self, prepared: &jazz::db::PreparedQuery) -> bool {
+    fn attach_query(
+        &self,
+        prepared: &jazz::db::PreparedQuery,
+        opts: CoreReadOpts,
+    ) -> jazz::db::QueryAttachment {
         match self {
-            Self::Memory(db) => db.query_is_covered(prepared),
+            Self::Memory(db) => db.attach_query_with_opts(prepared, opts),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.query_is_covered(prepared),
+            Self::RocksDb(db) => db.attach_query_with_opts(prepared, opts),
+        }
+    }
+
+    fn query_attachment_is_covered(&self, attachment: jazz::db::QueryAttachment) -> bool {
+        match self {
+            Self::Memory(db) => db.query_attachment_is_covered(attachment),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.query_attachment_is_covered(attachment),
+        }
+    }
+
+    fn detach_query(&self, attachment: jazz::db::QueryAttachment) {
+        match self {
+            Self::Memory(db) => db.detach_query(attachment),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.detach_query(attachment),
         }
     }
 
@@ -707,9 +727,13 @@ impl ClientDbInner {
                 .prepare_query(&query)
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
-        if wait_for_coverage {
-            Self::wait_for_query_coverage(inner, &prepared, opts).await?;
-        }
+        let attachment = if wait_for_coverage {
+            let attachment = inner.borrow().db.attach_query(&prepared, opts);
+            Self::wait_for_query_coverage(inner, attachment).await?;
+            Some(attachment)
+        } else {
+            None
+        };
         let (db, prepared) = {
             let inner = inner.borrow();
             (inner.db.clone(), prepared)
@@ -718,51 +742,31 @@ impl ClientDbInner {
             .all(&prepared, opts)
             .await
             .map_err(|error| JazzError::Query(error.to_string()))?;
+        if let Some(attachment) = attachment {
+            db.detach_query(attachment);
+        }
         inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
     }
 
     async fn wait_for_query_coverage(
         inner: &Rc<std::cell::RefCell<Self>>,
-        prepared: &jazz::db::PreparedQuery,
-        opts: CoreReadOpts,
+        attachment: jazz::db::QueryAttachment,
     ) -> Result<()> {
-        if inner.borrow().db.query_is_covered(prepared) {
+        if inner.borrow().db.query_attachment_is_covered(attachment) {
             return Ok(());
         }
-        let mut stream = {
-            let inner = inner.borrow();
-            inner
-                .db
-                .subscribe(prepared, opts)
-                .await
-                .map_err(|error| JazzError::Query(error.to_string()))?
-        };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if inner.borrow().db.query_is_covered(prepared) {
+            if inner.borrow().db.query_attachment_is_covered(attachment) {
                 return Ok(());
             }
-            let event = tokio::time::timeout_at(deadline, stream.next_event())
-                .await
-                .map_err(|_| {
-                    JazzError::Query("timed out waiting for query coverage".to_string())
-                })?;
-            match event {
-                Some(CoreSubscriptionEvent::Opened { settled, .. })
-                | Some(CoreSubscriptionEvent::Reset { settled, .. })
-                | Some(CoreSubscriptionEvent::Delta { settled, .. })
-                    if settled =>
-                {
-                    return Ok(());
-                }
-                Some(CoreSubscriptionEvent::Closed) | None => {
-                    return Err(JazzError::Query(
-                        "query coverage subscription closed before settling".to_string(),
-                    ));
-                }
-                Some(_) => {}
+            if tokio::time::Instant::now() >= deadline {
+                return Err(JazzError::Query(
+                    "timed out waiting for query coverage".to_string(),
+                ));
             }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
