@@ -65,9 +65,11 @@ queries and lowers only equality `column = parameter` predicates into binding
 joins. `INV-SHAPE-3` — a prepared-query's internal graph output includes every
 binding key column needed for routing, rejecting output-name collisions with
 parameter names, but `PreparedShape::output` and bound subscription
-notifications expose only the public query projection. `INV-SHAPE-4` —
-graph-level `prepare` rejects an `output_key_fields` entry absent from the graph
-output descriptor (`ShapeKeyFieldNotFound`).
+notifications expose only the public query projection. Graph-level callers that
+build internal routed outputs directly can bind with an explicit public output
+descriptor to expose clean rows while retaining hidden routing fields
+internally. `INV-SHAPE-4` — graph-level `prepare` rejects an `output_key_fields`
+entry absent from the graph output descriptor (`ShapeKeyFieldNotFound`).
 
 ## 5.3 The binding lifecycle
 
@@ -102,7 +104,9 @@ registered for that key (`INV-SHAPE-8`). Prepared-query subscribers receive a
 notification projection over that internal row, so hidden binding fields can
 route the delta without appearing in public rows. A shape commit tick therefore
 delivers to each bound subscriber exactly the changes to _its_ parameterized
-result.
+result. Graph-level prepared shapes use the same split when bound with an
+explicit public output descriptor: routing observes the internal output, while
+the subscriber stream receives the projected public record.
 
 _Further invariants._ `INV-SHAPE-9` — the per-key materialized snapshot is a
 weighted multiset; a delta bringing a record to weight zero removes it.

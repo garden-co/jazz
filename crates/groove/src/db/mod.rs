@@ -431,6 +431,23 @@ where
             .map_err(Error::IvmRuntime)
     }
 
+    /// Bind a prepared graph shape while projecting subscriber-visible rows.
+    ///
+    /// The prepared graph's internal output may contain hidden routing fields
+    /// named by `output_key_fields`; `public_output` selects the descriptor that
+    /// bound subscribers receive.
+    pub fn bind_shape_with_output(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        public_output: RecordDescriptor,
+    ) -> Result<Subscription, Error> {
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.ivm_runtime
+            .bind_shape_with_output(shape, binding_values, public_output, &storage)
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Run a one-shot SQL-ish query against the current storage snapshot.
     ///
     /// ```rust
