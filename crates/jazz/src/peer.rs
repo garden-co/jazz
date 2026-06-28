@@ -114,6 +114,7 @@ struct MaintainedRehydrateRequest<'a> {
     previous_row_result_set: &'a BTreeSet<ResultRowEntry>,
     reset_result_set: bool,
     result_table_filter: Option<&'a str>,
+    tier: DurabilityTier,
 }
 
 type RowKey = (groove::Intern<String>, RowUuid);
@@ -363,6 +364,7 @@ impl PeerState {
                             previous_row_result_set: &previous_row_result_set,
                             reset_result_set: false,
                             result_table_filter: Some(table),
+                            tier: DurabilityTier::Global,
                         },
                     ) {
                         Ok(update) => return Ok(update),
@@ -403,7 +405,7 @@ impl PeerState {
             &shape,
             &binding,
             subscription,
-            self.shipped_complete_tx_payloads.iter().cloned(),
+            self.acknowledged_complete_tx_payloads(),
             previous_tx_ids,
             previous_row_result_set,
             self.identity(),
@@ -570,7 +572,7 @@ impl PeerState {
                 shape,
                 binding,
                 subscription,
-                self.shipped_complete_tx_payloads.iter().cloned(),
+                self.acknowledged_complete_tx_payloads(),
                 state.previous_tx_ids(),
                 previous_row_result_set,
                 self.identity(),
@@ -672,7 +674,13 @@ impl PeerState {
             }
         }
         let previous_result_tx_ids = previous_tx_ids(previous_row_result_set.iter());
-        let peer_complete_tx_payloads = self.shipped_complete_tx_payloads.iter().copied().collect();
+        let tier = self
+            .subscriptions
+            .get(&subscription)
+            .and_then(|state| state.prepared_query.as_ref())
+            .map(|prepared| prepared.tier)
+            .unwrap_or(DurabilityTier::Global);
+        let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let update = {
             let maintained = &self
                 .subscriptions
@@ -691,6 +699,7 @@ impl PeerState {
                     result_row_adds,
                     result_row_removes,
                     identity: self.identity(),
+                    tier,
                     versions_by_tx: |tx_id| maintained.versions_by_tx(tx_id),
                     replacement_for: |table: String, row_uuid| {
                         maintained.replacement_for(&table, row_uuid)
@@ -737,6 +746,7 @@ impl PeerState {
             previous_row_result_set,
             reset_result_set,
             result_table_filter,
+            tier,
         } = request;
         let (receiver, maintained, transitions, tables) =
             node.maintained_subscription_view_from_cold_snapshot(shape, binding, self.identity())?;
@@ -754,7 +764,7 @@ impl PeerState {
             .difference(&current_row_result_set)
             .copied()
             .collect::<Vec<_>>();
-        let peer_complete_tx_payloads = self.shipped_complete_tx_payloads.iter().copied().collect();
+        let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let update = node.view_update_for_query_result_delta_maintained_view_add_bundles(
             crate::node::MaintainedViewBundleInputs {
                 subscription,
@@ -764,6 +774,7 @@ impl PeerState {
                 result_row_adds,
                 result_row_removes,
                 identity: self.identity(),
+                tier,
                 versions_by_tx: |tx_id| maintained.versions_by_tx(tx_id),
                 replacement_for: |table: String, row_uuid| {
                     maintained.replacement_for(&table, row_uuid)
@@ -817,7 +828,7 @@ impl PeerState {
                 shape,
                 binding,
                 subscription,
-                self.shipped_complete_tx_payloads.iter().cloned(),
+                self.acknowledged_complete_tx_payloads(),
                 [],
                 [],
                 self.identity(),
@@ -830,7 +841,7 @@ impl PeerState {
                     shape,
                     binding,
                     subscription,
-                    self.shipped_complete_tx_payloads.iter().cloned(),
+                    self.acknowledged_complete_tx_payloads(),
                     previous_tx_ids,
                     previous_row_result_set,
                     self.identity(),
@@ -946,6 +957,7 @@ impl PeerState {
                 previous_row_result_set: &previous_row_result_set,
                 reset_result_set: true,
                 result_table_filter: None,
+                tier: opts.tier,
             },
         )
     }
@@ -1035,6 +1047,13 @@ impl PeerState {
     /// Return transaction refs whose complete payload bundles have shipped on this peer.
     pub fn shipped_complete_tx_payloads(&self) -> &BTreeSet<TxId> {
         &self.shipped_complete_tx_payloads
+    }
+
+    fn acknowledged_complete_tx_payloads(&self) -> BTreeSet<TxId> {
+        // Complete-payload inventory refs are only safe once the receiver has
+        // explicitly acknowledged durable application. Until the protocol grows
+        // that ack, every served update must carry the required bundles again.
+        BTreeSet::new()
     }
 
     /// Configure whether accepted exclusive transactions should ship complete
@@ -1306,14 +1325,11 @@ impl PeerState {
         self.metrics.result_adds_out += result_row_adds.len() as u64;
         self.metrics.result_removes_out += result_row_removes.len() as u64;
 
-        for bundle in version_bundles {
-            if !bundle_contains_complete_tx_payload(bundle) {
-                continue;
-            }
-            if !self.shipped_complete_tx_payloads.insert(bundle.tx.tx_id) {
-                self.metrics.duplicate_version_bundles_out += 1;
-            }
-        }
+        self.metrics.duplicate_version_bundles_out += version_bundles
+            .iter()
+            .filter(|bundle| bundle_contains_complete_tx_payload(bundle))
+            .filter(|bundle| self.shipped_complete_tx_payloads.contains(&bundle.tx.tx_id))
+            .count() as u64;
     }
 
     fn unsettled_permission_scope_subscriptions<S>(

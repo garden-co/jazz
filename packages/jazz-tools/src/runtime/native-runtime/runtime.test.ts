@@ -8,6 +8,7 @@ import {
   isWireHello,
 } from "./websocket.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
+import { encodeSchema } from "./schema-codec.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -84,7 +85,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(sockets[1]!.closed).toBe(true);
   });
 
-  it("uses the binding scheduler without manually ticking the db during server pumps", async () => {
+  it("uses the binding scheduler to drive native db ticks outside server pumps", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
       constructor(url: string) {
@@ -130,7 +131,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(transport.tickCount).toBeGreaterThan(1);
-    expect(dbTicks).toBe(0);
+    expect(dbTicks).toBe(1);
   });
 
   it("resolves connect only after the owned native transport has pumped", async () => {
@@ -419,6 +420,106 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       ],
     );
+  });
+
+  it("runs scheduled core ticks before post-wait edge reads", async () => {
+    let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let ticked = false;
+    let subscriptionDrained = false;
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000123");
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => ({
+          all: () =>
+            ticked
+              ? encodeRows([
+                  {
+                    table: "todos",
+                    rowId,
+                    title: "visible after scheduled tick",
+                  },
+                ])
+              : encodeRows([]),
+          prepareQuery: () => ({}),
+          propagateQuery: () => undefined,
+          queryIsCovered: () => true,
+          subscribe: () => ({
+            readAll: () => {
+              if (!ticked || subscriptionDrained) return [];
+              subscriptionDrained = true;
+              return [
+                {
+                  type: "snapshot",
+                  rows: encodeRows([
+                    {
+                      table: "todos",
+                      rowId,
+                      title: "visible after scheduled tick",
+                    },
+                  ]),
+                },
+              ];
+            },
+          }),
+          insertWithIdEncoded: () => {
+            schedulerCallback?.("deferred");
+            return fakeWrite();
+          },
+          setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+            schedulerCallback = callback;
+          },
+          connectUpstream: () => new FakeTransport([]),
+          tick: () => {
+            ticked = true;
+          },
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const deltas: unknown[] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge");
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      deltas.push(delta);
+    });
+
+    const inserted = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "visible after scheduled tick" },
+      },
+      null,
+      "00000000-0000-0000-0000-000000000123",
+    );
+
+    await runtime.waitForTransaction(inserted.transactionId, "edge");
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000123",
+        values: [{ type: "Text", value: "visible after scheduled tick" }],
+      },
+    ]);
+    expect(deltas).toEqual([
+      [
+        {
+          kind: 0,
+          id: "00000000-0000-0000-0000-000000000123",
+          row: {
+            id: "00000000-0000-0000-0000-000000000123",
+            values: [{ type: "Text", value: "visible after scheduled tick" }],
+          },
+          index: 0,
+        },
+      ],
+    ]);
   });
 
   it("routes session-scoped queries through allForIdentity", async () => {
@@ -1289,13 +1390,18 @@ describe("NativeRuntimeAdapter server transport", () => {
     try {
       const transport = new FakeTransport([]);
       let covered = false;
-      let allCalls = 0;
+      let coverageProbeCalls = 0;
+      let rowReadCalls = 0;
       const runtime = new NativeRuntimeAdapter(
         {
           openMemory: () =>
             fakeDb({
               all: () => {
-                allCalls += 1;
+                if (!covered) {
+                  coverageProbeCalls += 1;
+                  throw new Error("NotCovered");
+                }
+                rowReadCalls += 1;
                 return new Uint8Array([0]);
               },
               connectUpstream: () => transport,
@@ -1320,13 +1426,14 @@ describe("NativeRuntimeAdapter server transport", () => {
       await vi.advanceTimersByTimeAsync(40);
 
       expect(transport.tickCount).toBeGreaterThan(0);
-      expect(allCalls).toBe(0);
+      expect(coverageProbeCalls).toBeGreaterThan(0);
+      expect(rowReadCalls).toBe(0);
 
       covered = true;
       await vi.advanceTimersByTimeAsync(10);
 
       await expect(query).resolves.toEqual([]);
-      expect(allCalls).toBe(1);
+      expect(rowReadCalls).toBe(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1934,6 +2041,103 @@ describe("NativeRuntimeAdapter server transport", () => {
       offset: 5,
     });
   });
+
+  it("serializes OR policy branches with Exists source id correlation", () => {
+    const policy = readSchemaSelectPolicyBranches(
+      encodeSchema({
+        documents: {
+          columns: [
+            { name: "visibility", column_type: { type: "Text" }, nullable: false },
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+          ],
+          policies: {
+            select: {
+              using: {
+                type: "Or",
+                exprs: [
+                  {
+                    type: "Cmp",
+                    column: "visibility",
+                    op: "Eq",
+                    value: { type: "Literal", value: { type: "Text", value: "public" } },
+                  },
+                  {
+                    type: "Exists",
+                    table: "document_members",
+                    condition: {
+                      type: "And",
+                      exprs: [
+                        {
+                          type: "Cmp",
+                          column: "document_id",
+                          op: "Eq",
+                          value: {
+                            type: "SessionRef",
+                            path: ["__jazz_outer_row", "id"],
+                          },
+                        },
+                        {
+                          type: "Cmp",
+                          column: "role",
+                          op: "Eq",
+                          value: { type: "Literal", value: { type: "Text", value: "reader" } },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+        document_members: {
+          columns: [
+            { name: "document_id", column_type: { type: "Uuid" }, nullable: false },
+            { name: "role", column_type: { type: "Text" }, nullable: false },
+          ],
+        },
+      }),
+      "documents",
+    );
+
+    expect(policy).toEqual({
+      table: "documents",
+      filters: [{ tag: 1, children: [] }],
+      joins: [],
+      branches: [
+        {
+          filters: [
+            {
+              tag: 3,
+              column: "visibility",
+              operand: { tag: 3, literalTag: 6, value: "public" },
+            },
+          ],
+          joins: [],
+        },
+        {
+          filters: [],
+          joins: [
+            {
+              table: "document_members",
+              onColumn: "document_id",
+              targetTag: 0,
+              sourceColumn: "id",
+              sourceLookup: undefined,
+              filters: [
+                {
+                  tag: 3,
+                  column: "role",
+                  operand: { tag: 3, literalTag: 6, value: "reader" },
+                },
+              ],
+              nestedJoins: [],
+            },
+          ],
+        },
+      ],
+    });
+  });
 });
 
 const testSchema = {
@@ -1989,6 +2193,7 @@ function readPreparedComparison(query: Uint8Array): {
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
   reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
   reader.readVec(() => undefined);
   reader.option(() => undefined);
@@ -2016,6 +2221,7 @@ function readPreparedUuidComparison(query: Uint8Array): {
   expect(rightOperandTag).toBe(3);
   const literalTag = reader.u64();
   const value = formatUuidForTest(reader.bytes());
+  reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
@@ -2052,6 +2258,7 @@ function readPreparedLimit(query: Uint8Array): number | undefined {
   reader.readVec(() => {
     skipPreparedPredicate(reader);
   });
+  reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
@@ -2129,6 +2336,7 @@ function readPreparedSelect(query: Uint8Array): string[] | undefined {
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
   return reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
 }
 
@@ -2151,6 +2359,7 @@ function readPreparedQueryShape(query: Uint8Array): {
     const value = reader.string();
     return { column, opTag, literalTag, value };
   });
+  reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
@@ -2183,6 +2392,146 @@ function readPreparedFirstLiteral(query: Uint8Array): {
   const value = reader.u64();
   return { column, opTag, literalTag, value };
 }
+
+function readSchemaSelectPolicyBranches(
+  schemaBytes: Uint8Array,
+  tableName: string,
+): {
+  table: string;
+  filters: TestPolicyPredicate[];
+  joins: TestPolicyJoin[];
+  branches: TestPolicyBranch[];
+} {
+  const reader = new PostcardReader(schemaBytes);
+  const tables = reader.readVec((tableReader) => {
+    const table = tableReader.string();
+    tableReader.readVec((columnReader) => {
+      columnReader.string();
+      skipSchemaValueType(columnReader);
+      columnReader.option(() => undefined);
+    });
+    const referenceCount = tableReader.u64();
+    for (let index = 0; index < referenceCount; index += 1) {
+      tableReader.string();
+      tableReader.string();
+    }
+    const selectPolicy = tableReader.option(readPolicyQueryForTest);
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.u64();
+    const indexCount = tableReader.u64();
+    for (let index = 0; index < indexCount; index += 1) {
+      tableReader.string();
+      tableReader.readVec((indexReader) => indexReader.string());
+    }
+    return { table, selectPolicy };
+  });
+  reader.option(() => undefined);
+  reader.option(() => undefined);
+
+  const policy = tables.find((table) => table.table === tableName)?.selectPolicy;
+  expect(policy).toBeDefined();
+  return policy!;
+}
+
+function readPolicyQueryForTest(reader: PostcardReader): {
+  table: string;
+  filters: TestPolicyPredicate[];
+  joins: TestPolicyJoin[];
+  branches: TestPolicyBranch[];
+} {
+  const table = reader.string();
+  const filters = reader.readVec(readPolicyPredicateForTest);
+  const joins = reader.readVec(readPolicyJoinForTest);
+  const branches = reader.readVec(readPolicyBranchForTest);
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  reader.option(() => undefined);
+  reader.u64();
+  return { table, filters, joins, branches };
+}
+
+function readPolicyBranchForTest(reader: PostcardReader): TestPolicyBranch {
+  const filters = reader.readVec(readPolicyPredicateForTest);
+  const joins = reader.readVec(readPolicyJoinForTest);
+  reader.readVec(() => undefined);
+  return { filters, joins };
+}
+
+function readPolicyJoinForTest(reader: PostcardReader): TestPolicyJoin {
+  const table = reader.string();
+  const onColumn = reader.string();
+  const targetTag = reader.u64();
+  const sourceColumn = reader.option((sourceReader) => sourceReader.string());
+  const sourceLookup = reader.option((lookupReader) => ({
+    table: lookupReader.string(),
+    rowIdSourceColumn: lookupReader.string(),
+    valueColumn: lookupReader.string(),
+  }));
+  const filters = reader.readVec(readPolicyPredicateForTest);
+  const nestedJoins = reader.readVec(readPolicyJoinForTest);
+  return { table, onColumn, targetTag, sourceColumn, sourceLookup, filters, nestedJoins };
+}
+
+function readPolicyPredicateForTest(reader: PostcardReader): TestPolicyPredicate {
+  const tag = reader.u64();
+  if (tag === 0 || tag === 1) {
+    return { tag, children: reader.readVec(readPolicyPredicateForTest) };
+  }
+  if (tag === 2) {
+    return { tag, child: readPolicyPredicateForTest(reader) };
+  }
+  if (tag === 3) {
+    expect(reader.u64()).toBe(0);
+    const column = reader.string();
+    return { tag, column, operand: readPolicyOperandForTest(reader) };
+  }
+  throw new Error(`unsupported policy predicate tag ${tag}`);
+}
+
+function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
+  const tag = reader.u64();
+  if (tag === 0) return { tag, column: reader.string() };
+  if (tag === 2) return { tag, claim: reader.string() };
+  if (tag === 3) {
+    const literalTag = reader.u64();
+    expect(literalTag).toBe(6);
+    return { tag, literalTag, value: reader.string() };
+  }
+  throw new Error(`unsupported policy operand tag ${tag}`);
+}
+
+function skipSchemaValueType(reader: PostcardReader): void {
+  const tag = reader.u64();
+  if (tag === 11 || tag === 12) skipSchemaValueType(reader);
+}
+
+type TestPolicyBranch = {
+  filters: TestPolicyPredicate[];
+  joins: TestPolicyJoin[];
+};
+
+type TestPolicyJoin = {
+  table: string;
+  onColumn: string;
+  targetTag: number;
+  sourceColumn: string | undefined;
+  sourceLookup: { table: string; rowIdSourceColumn: string; valueColumn: string } | undefined;
+  filters: TestPolicyPredicate[];
+  nestedJoins: TestPolicyJoin[];
+};
+
+type TestPolicyPredicate =
+  | { tag: number; children: TestPolicyPredicate[] }
+  | { tag: number; child: TestPolicyPredicate }
+  | { tag: number; column: string; operand: TestPolicyOperand };
+
+type TestPolicyOperand =
+  | { tag: number; column: string }
+  | { tag: number; claim: string }
+  | { tag: number; literalTag: number; value: string };
 
 function unsupportedJoinRelationIr(): unknown {
   return {

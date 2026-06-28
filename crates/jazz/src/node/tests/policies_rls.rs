@@ -749,6 +749,283 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
         BTreeSet::from([public_chat])
     );
 }
+
+#[test]
+fn message_read_policy_allows_public_chat_or_membership_join() {
+    let member = user(0xa1);
+    let other = user(0xb2);
+    let public_chat = row(0x18);
+    let private_chat = row(0x19);
+    let public_message = row(0x28);
+    let private_message = row(0x29);
+    let membership = row(0x1a);
+    let policy = Policy::shape(
+        Query::from("messages")
+            .join_via_row_id("chats", "chat_id", [eq(col("visibility"), lit("public"))])
+            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_column(
+                "chat_members",
+                "chat_id",
+                "chat_id",
+                [eq(col("user_id"), claim("user_id"))],
+            ))),
+    );
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("visibility", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("chats")
+                .filter(eq(col("visibility"), lit("public")))
+                .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via_column(
+                    "chat_members",
+                    "chat_id",
+                    "id",
+                    [eq(col("user_id"), claim("user_id"))],
+                ))),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "chat_members",
+            [
+                ColumnSchema::new("chat_id", ColumnType::Uuid),
+                ColumnSchema::new("user_id", ColumnType::String),
+            ],
+        )
+        .with_reference("chat_id", "chats")
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("chat_id", ColumnType::Uuid),
+                ColumnSchema::new("text", ColumnType::String),
+            ],
+        )
+        .with_reference("chat_id", "chats")
+        .with_read_policy(policy)
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("chats", public_chat, 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("public".to_owned())),
+            ("visibility".to_owned(), Value::String("public".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("chats", private_chat, 11).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("private".to_owned())),
+            ("visibility".to_owned(), Value::String("private".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("messages", public_message, 12).cells(BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(public_chat.0)),
+            ("text".to_owned(), Value::String("public message".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("messages", private_message, 13).cells(BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
+            ("text".to_owned(), Value::String("private message".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("chat_members", membership, 14).cells(BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
+            ("user_id".to_owned(), Value::String(member.0.to_string())),
+        ])),
+    );
+
+    let public_shape = Query::from("messages")
+        .join_via_row_id("chats", "chat_id", [eq(col("visibility"), lit("public"))])
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let public_binding = public_shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows(&public_shape, &public_binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([public_message])
+    );
+    assert_eq!(
+        core.query_rows(&public_shape, &public_binding, DurabilityTier::Edge)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([public_message])
+    );
+
+    let shape = Query::from("messages")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([public_message, private_message])
+    );
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, member)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([public_message, private_message])
+    );
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, other)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([public_message])
+    );
+}
+
+#[test]
+fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
+    let member = user(0xa1);
+    let other = user(0xb2);
+    let public_chat = row(0x18);
+    let private_chat = row(0x19);
+    let public_message = row(0x28);
+    let private_message = row(0x29);
+    let membership = row(0x1a);
+    let policy = Policy::shape(
+        Query::from("messages")
+            .join_via_row_id("chats", "chat_id", [eq(col("visibility"), lit("public"))])
+            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_column(
+                "chat_members",
+                "chat_id",
+                "chat_id",
+                [eq(col("user_id"), claim("user_id"))],
+            ))),
+    );
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "chat_members",
+            [
+                ColumnSchema::new("chat_id", ColumnType::Uuid),
+                ColumnSchema::new("user_id", ColumnType::String),
+            ],
+        )
+        .with_reference("chat_id", "chats")
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("visibility", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("chats")
+                .filter(eq(col("visibility"), lit("public")))
+                .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via_column(
+                    "chat_members",
+                    "chat_id",
+                    "id",
+                    [eq(col("user_id"), claim("user_id"))],
+                ))),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("chat_id", ColumnType::Uuid),
+                ColumnSchema::new("text", ColumnType::String),
+            ],
+        )
+        .with_reference("chat_id", "chats")
+        .with_read_policy(policy)
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    for commit in [
+        MergeableCommit::new("chats", public_chat, 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("public".to_owned())),
+            ("visibility".to_owned(), Value::String("public".to_owned())),
+        ])),
+        MergeableCommit::new("chats", private_chat, 11).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("private".to_owned())),
+            ("visibility".to_owned(), Value::String("private".to_owned())),
+        ])),
+        MergeableCommit::new("messages", public_message, 12).cells(BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(public_chat.0)),
+            ("text".to_owned(), Value::String("public message".to_owned())),
+        ])),
+        MergeableCommit::new("messages", private_message, 13).cells(BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
+            ("text".to_owned(), Value::String("private message".to_owned())),
+        ])),
+        MergeableCommit::new("chat_members", membership, 14).cells(BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
+            ("user_id".to_owned(), Value::String(member.0.to_string())),
+        ])),
+    ] {
+        let tx_id = core.commit_mergeable_many(vec![commit]).unwrap();
+        core.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
+            .unwrap();
+    }
+
+    let shape = Query::from("messages")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
+            .unwrap()
+            .is_empty(),
+        "global policy reads must not be authorized by edge-only dependency rows",
+    );
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, member)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([public_message, private_message])
+    );
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, other)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([public_message])
+    );
+
+    let mut other_peer = PeerState::edge_client(other);
+    let update = other_peer
+        .rehydrate_query_with_opts(
+            &mut core,
+            &shape,
+            &binding,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+            },
+        )
+        .unwrap();
+    assert_view_update_only_references_rows(&update, BTreeSet::from([public_chat, public_message]));
+    assert_view_update_only_ships_rows(&update, BTreeSet::from([public_chat, public_message]));
+}
+
 #[test]
 fn composed_read_policy_grants_and_revokes_incrementally() {
     let invited = user(0xa1);
@@ -1167,6 +1444,147 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
         .unwrap();
     assert_view_update_only_references_rows(&message_update, BTreeSet::from([row(0x21)]));
     assert_view_update_only_ships_rows(&message_update, BTreeSet::from([row(0x21)]));
+}
+
+#[test]
+fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("visibility", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("chats")
+                .filter(eq(lit(true), lit(false)))
+                .policy_branch(PolicyBranch::from_query(
+                    Query::from("chats").filter(eq(col("visibility"), lit("public"))),
+                ))
+                .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via_column(
+                    "chat_members",
+                    "chat_id",
+                    "id",
+                    [eq(col("user_id"), claim("user_id"))],
+                ))),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "chat_members",
+            [
+                ColumnSchema::new("chat_id", ColumnType::Uuid),
+                ColumnSchema::new("user_id", ColumnType::String),
+            ],
+        )
+        .with_reference("chat_id", "chats")
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    let public_chat = row(0x11);
+    let chat_tx = core
+        .commit_mergeable(
+            MergeableCommit::new("chats", public_chat, 10)
+                .made_by(alice)
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("public")),
+                    ("visibility".to_owned(), v("public")),
+                ])),
+        )
+        .unwrap();
+    core.apply_fate_update(chat_tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
+        .unwrap();
+
+    let shape = Query::from("chats")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut bob_peer = PeerState::edge_client(bob);
+
+    let update = bob_peer
+        .rehydrate_query_with_opts(
+            &mut core,
+            &shape,
+            &binding,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+            },
+        )
+        .unwrap();
+
+    assert_view_update_only_references_rows(&update, BTreeSet::from([public_chat]));
+    assert_view_update_only_ships_rows(&update, BTreeSet::from([public_chat]));
+}
+
+#[test]
+fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("visibility", ColumnType::String),
+                ColumnSchema::new("owner_id", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("chats")
+                .filter(eq(col("visibility"), lit("public")))
+                .policy_branch(PolicyBranch::from_query(
+                    Query::from("chats").filter(eq(col("owner_id"), claim("user_id"))),
+                )),
+        ))
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    let private_chat = row(0x12);
+    let tx = core
+        .commit_mergeable(
+            MergeableCommit::new("chats", private_chat, 10)
+                .made_by(alice)
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("private")),
+                    ("visibility".to_owned(), v("private")),
+                    ("owner_id".to_owned(), v(alice.0.to_string())),
+                ])),
+        )
+        .unwrap();
+    core.apply_fate_update(tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
+        .unwrap();
+
+    let shape = Query::from("chats")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut bob_peer = PeerState::edge_client(bob);
+
+    let update = bob_peer
+        .rehydrate_query_with_opts(
+            &mut core,
+            &shape,
+            &binding,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+            },
+        )
+        .unwrap();
+
+    let SyncMessage::ViewUpdate {
+        reset_result_set,
+        result_row_adds,
+        version_bundles,
+        ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    assert!(reset_result_set);
+    assert!(result_row_adds.is_empty());
+    assert!(version_bundles.is_empty());
 }
 
 #[test]

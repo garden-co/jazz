@@ -13,7 +13,7 @@ use crate::protocol::PeerPayloadInventory;
 #[derive(Default)]
 struct ClosureExpansionMemo {
     current_rows: BTreeMap<(String, RowUuid), Option<CurrentRow>>,
-    visible_current: BTreeMap<(String, RowUuid), Option<(CurrentRow, TxId)>>,
+    visible_current: BTreeMap<(String, RowUuid, DurabilityTier), Option<(CurrentRow, TxId)>>,
     join_rows_by_target: BTreeMap<JoinRowsKey, BTreeMap<RowUuid, Vec<CurrentRow>>>,
 }
 
@@ -23,6 +23,7 @@ struct JoinRowsKey {
     binding_id: BindingId,
     table: String,
     on_column: String,
+    tier: DurabilityTier,
 }
 
 fn maintained_view_tx_versions_contain_winner(
@@ -62,6 +63,7 @@ pub(crate) struct MaintainedViewBundleInputs<V, R> {
     pub(crate) result_row_adds: Vec<ResultRowEntry>,
     pub(crate) result_row_removes: Vec<ResultRowEntry>,
     pub(crate) identity: AuthorId,
+    pub(crate) tier: DurabilityTier,
     pub(crate) versions_by_tx: V,
     pub(crate) replacement_for: R,
 }
@@ -183,7 +185,7 @@ where
         let _previous_result_set = previous_result_set.into_iter().collect::<BTreeSet<_>>();
         let previous_row_result_set = previous_row_result_set.into_iter().collect::<BTreeSet<_>>();
         let degenerate_whole_table = is_degenerate_whole_table(shape, binding);
-        let mut context = ViewEvaluationContext::default();
+        let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
         let rows = if identity == AuthorId::SYSTEM
             && let Some((effective_shape, effective_binding, plan)) = prepared_plan
         {
@@ -219,7 +221,7 @@ where
                 )?;
             }
         }
-        self.expand_query_closure(shape, binding, &mut current_row_result_set)?;
+        self.expand_query_closure(shape, binding, &mut current_row_result_set, tier)?;
         let root_result_entries = current_row_result_set
             .iter()
             .filter(|(entry_table, _, _)| entry_table.as_str() == table_name)
@@ -256,6 +258,7 @@ where
             );
         let mut version_bundles = Vec::with_capacity(current_row_result_set.len());
         let mut peer_payload_inventory_refs = Vec::new();
+        let mut witnessed_result_row_adds = BTreeSet::new();
         let mut emitted_versions = BTreeSet::new();
         for (entry_table, row_uuid, tx_id) in &current_row_result_set {
             if previous_row_result_set.contains(&(entry_table.clone(), *row_uuid, *tx_id)) {
@@ -263,6 +266,7 @@ where
             }
             if peer_complete_tx_payloads.contains(tx_id) {
                 peer_payload_inventory_refs.push(*tx_id);
+                witnessed_result_row_adds.insert((entry_table.clone(), *row_uuid, *tx_id));
                 continue;
             }
             if !emitted_versions.insert(*tx_id) {
@@ -302,6 +306,13 @@ where
                     identity,
                     &mut context,
                 )?);
+                for (table, row_uuid) in wanted_rows {
+                    witnessed_result_row_adds.insert((
+                        groove::Intern::new(table.clone()),
+                        *row_uuid,
+                        *tx_id,
+                    ));
+                }
             }
         }
         for (entry_table, row_uuid, content_tx_id) in &current_row_result_set {
@@ -370,6 +381,7 @@ where
         result_row_adds.extend(
             current_row_result_set
                 .difference(&previous_row_result_set)
+                .filter(|entry| witnessed_result_row_adds.contains(*entry))
                 .cloned(),
         );
         let mut result_row_removes = Vec::with_capacity(previous_row_result_set.len());
@@ -578,9 +590,17 @@ where
             output.1,
             &shape.query().includes,
             &mut set,
+            DurabilityTier::Global,
             memo,
         )?;
-        self.expand_join_closure_for_output(shape, binding, output.1, &mut set, memo)?;
+        self.expand_join_closure_for_output(
+            shape,
+            binding,
+            output.1,
+            &mut set,
+            DurabilityTier::Global,
+            memo,
+        )?;
         self.retain_policy_atomic_rows(&mut set, identity, context)?;
         Ok(set)
     }
@@ -780,10 +800,11 @@ where
             result_row_adds,
             result_row_removes,
             identity,
+            tier,
             mut versions_by_tx,
             replacement_for,
         } = inputs;
-        let mut context = ViewEvaluationContext::default();
+        let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
         let mut policy_atomic_result_row_adds = Vec::with_capacity(result_row_adds.len());
         let mut tx_versions_cache = BTreeMap::<TxId, Vec<VersionRow>>::new();
         for entry in result_row_adds {
@@ -1366,10 +1387,11 @@ where
         set: &mut BTreeSet<ResultRowEntry>,
         table: &str,
         row_uuid: RowUuid,
+        tier: DurabilityTier,
         memo: &mut ClosureExpansionMemo,
     ) -> Result<(), Error> {
         if let Some(tx_id) =
-            self.visible_global_content_tx_id_now_with_memo(table, row_uuid, memo)?
+            self.visible_content_tx_id_for_view_tier_with_memo(table, row_uuid, tier, memo)?
         {
             set.insert((groove::Intern::new(table.to_owned()), row_uuid, tx_id));
             Ok(())
@@ -1385,10 +1407,11 @@ where
         set: &mut BTreeSet<ResultRowEntry>,
         table: &str,
         row_uuid: RowUuid,
+        tier: DurabilityTier,
         memo: &mut ClosureExpansionMemo,
     ) -> Result<(), Error> {
         if let Some(tx_id) =
-            self.visible_global_content_tx_id_now_with_memo(table, row_uuid, memo)?
+            self.visible_content_tx_id_for_view_tier_with_memo(table, row_uuid, tier, memo)?
         {
             set.insert((groove::Intern::new(table.to_owned()), row_uuid, tx_id));
         }
@@ -1400,9 +1423,10 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         set: &mut BTreeSet<ResultRowEntry>,
+        tier: DurabilityTier,
     ) -> Result<(), Error> {
         let mut memo = ClosureExpansionMemo::default();
-        self.expand_query_closure_with_memo(shape, binding, set, &mut memo)
+        self.expand_query_closure_with_memo(shape, binding, set, tier, &mut memo)
     }
 
     fn expand_query_closure_with_memo(
@@ -1410,6 +1434,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         set: &mut BTreeSet<ResultRowEntry>,
+        tier: DurabilityTier,
         memo: &mut ClosureExpansionMemo,
     ) -> Result<(), Error> {
         let output_table = shape.query().table.clone();
@@ -1424,9 +1449,10 @@ where
                 *row_uuid,
                 &shape.query().includes,
                 set,
+                tier,
                 memo,
             )?;
-            self.expand_join_closure_for_output(shape, binding, *row_uuid, set, memo)?;
+            self.expand_join_closure_for_output(shape, binding, *row_uuid, set, tier, memo)?;
         }
         Ok(())
     }
@@ -1437,6 +1463,7 @@ where
         binding: &Binding,
         output_row_uuid: RowUuid,
         set: &mut BTreeSet<ResultRowEntry>,
+        tier: DurabilityTier,
         memo: &mut ClosureExpansionMemo,
     ) -> Result<(), Error> {
         let output_table = shape.query().table.clone();
@@ -1451,7 +1478,7 @@ where
             let output_table_schema = self.table(&output_table)?.clone();
             let target_row_uuid = if let Some(source_column) = &join.source_column {
                 let Some(output_row) =
-                    self.current_row_now_with_memo(&output_table, output_row_uuid, memo)?
+                    self.current_row_now_with_memo(&output_table, output_row_uuid, tier, memo)?
                 else {
                     continue;
                 };
@@ -1467,6 +1494,7 @@ where
                 &join_binding,
                 &join_table,
                 join,
+                tier,
                 memo,
             )?;
             let join_rows = rows_by_target
@@ -1478,9 +1506,17 @@ where
                     set,
                     &join.table,
                     join_row.row_uuid(),
+                    tier,
                     memo,
                 )?;
-                self.expand_reference_closure(&join.table, join_row.row_uuid(), &[], set, memo)?;
+                self.expand_reference_closure(
+                    &join.table,
+                    join_row.row_uuid(),
+                    &[],
+                    set,
+                    tier,
+                    memo,
+                )?;
             }
         }
         Ok(())
@@ -1492,10 +1528,11 @@ where
         row_uuid: RowUuid,
         include_paths: &[crate::query::Include],
         set: &mut BTreeSet<ResultRowEntry>,
+        tier: DurabilityTier,
         memo: &mut ClosureExpansionMemo,
     ) -> Result<(), Error> {
         let table = self.table(table_name)?.clone();
-        let Some(row) = self.current_row_now_with_memo(table_name, row_uuid, memo)? else {
+        let Some(row) = self.current_row_now_with_memo(table_name, row_uuid, tier, memo)? else {
             return Ok(());
         };
         if include_paths.is_empty() {
@@ -1505,13 +1542,14 @@ where
                         set,
                         target_table,
                         RowUuid(target),
+                        tier,
                         memo,
                     )?;
                 }
             }
         }
         for include in include_paths {
-            self.expand_include_path(&table, &row, include, set, memo)?;
+            self.expand_include_path(&table, &row, include, set, tier, memo)?;
         }
         Ok(())
     }
@@ -1522,6 +1560,7 @@ where
         row: &CurrentRow,
         include: &crate::query::Include,
         set: &mut BTreeSet<ResultRowEntry>,
+        tier: DurabilityTier,
         memo: &mut ClosureExpansionMemo,
     ) -> Result<(), Error> {
         let mut current_table = table.clone();
@@ -1534,7 +1573,7 @@ where
                 return Ok(());
             };
             let Some(current_row) =
-                self.current_row_now_with_memo(&current_table.name, current_row_uuid, memo)?
+                self.current_row_now_with_memo(&current_table.name, current_row_uuid, tier, memo)?
             else {
                 return Ok(());
             };
@@ -1547,11 +1586,15 @@ where
                     set,
                     &target_table,
                     target_row,
+                    tier,
                     memo,
                 )?;
-            } else if let Some(tx_id) =
-                self.visible_global_content_tx_id_now_with_memo(&target_table, target_row, memo)?
-            {
+            } else if let Some(tx_id) = self.visible_content_tx_id_for_view_tier_with_memo(
+                &target_table,
+                target_row,
+                tier,
+                memo,
+            )? {
                 path_entries.push((groove::Intern::new(target_table.clone()), target_row, tx_id));
             } else {
                 return Ok(());
@@ -1569,6 +1612,7 @@ where
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
+        tier: DurabilityTier,
         memo: &mut ClosureExpansionMemo,
     ) -> Result<Option<CurrentRow>, Error> {
         let key = (table_name.to_owned(), row_uuid);
@@ -1576,70 +1620,50 @@ where
             return Ok(row.clone());
         }
         let row = self
-            .visible_global_current_row_now_with_memo(table_name, row_uuid, memo)?
+            .visible_current_row_for_view_tier_with_memo(table_name, row_uuid, tier, memo)?
             .map(|(row, _)| row);
         memo.current_rows.insert(key, row.clone());
         Ok(row)
     }
 
-    fn visible_global_content_tx_id_now_with_memo(
+    fn visible_content_tx_id_for_view_tier_with_memo(
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
+        tier: DurabilityTier,
         memo: &mut ClosureExpansionMemo,
     ) -> Result<Option<TxId>, Error> {
         Ok(self
-            .visible_global_current_row_now_with_memo(table_name, row_uuid, memo)?
+            .visible_current_row_for_view_tier_with_memo(table_name, row_uuid, tier, memo)?
             .map(|(_, tx_id)| tx_id))
     }
 
-    fn visible_global_current_row_now_with_memo(
+    fn visible_current_row_for_view_tier_with_memo(
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
+        tier: DurabilityTier,
         memo: &mut ClosureExpansionMemo,
     ) -> Result<Option<(CurrentRow, TxId)>, Error> {
-        let key = (table_name.to_owned(), row_uuid);
+        let key = (table_name.to_owned(), row_uuid, tier);
         if let Some(row) = memo.visible_current.get(&key) {
             return Ok(row.clone());
         }
 
         let table = self.table(table_name)?.clone();
-        let storage_tables = table.global_current_storage_tables();
-        let deletion_current_table = &storage_tables[1].name;
-        let deletion_descriptor = storage_tables[1].record_schema();
-        for raw in self
-            .database
-            .primary_key_scan_raw(deletion_current_table, &[Value::Uuid(row_uuid.0)])?
+        if self
+            .current_layer_winner_for_view_tier(table_name, row_uuid, VersionLayer::Deletion, tier)?
+            .is_some_and(|version| version.deletion().is_some())
         {
-            let record = BorrowedRecord::new(raw.record().raw(), &deletion_descriptor);
-            let deletion = deletion_event_from_value(
-                record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
-            )?;
-            if deletion == DeletionEvent::Deleted {
-                memo.visible_current.insert(key, None);
-                return Ok(None);
-            }
+            memo.visible_current.insert(key, None);
+            return Ok(None);
         }
-
-        let content_current_table = &storage_tables[0].name;
-        let content_descriptor = storage_tables[0].record_schema();
         let visible = self
-            .database
-            .primary_key_scan_raw(content_current_table, &[Value::Uuid(row_uuid.0)])?
-            .first()
-            .map(|raw| {
-                let record = BorrowedRecord::new(raw.record().raw(), &content_descriptor);
-                let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-                let tx_node_alias =
-                    NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
-                let tx_node =
-                    self.node_for_alias(tx_node_alias)
-                        .ok_or(Error::InvalidStoredValue(
-                            "global current node alias must exist",
-                        ))?;
-                let row = decode_current_row(&table, record)?;
-                Ok::<_, Error>((row, TxId::new(tx_time, tx_node)))
+            .current_layer_winner_for_view_tier(table_name, row_uuid, VersionLayer::Content, tier)?
+            .map(|version| {
+                let tx_id = self.version_tx_id(&version)?;
+                let row = self.current_row_from_materialized_version(&table, &version)?;
+                Ok::<_, Error>((row, tx_id))
             })
             .transpose()?;
         memo.visible_current.insert(key, visible.clone());
@@ -1652,6 +1676,7 @@ where
         join_binding: &Binding,
         join_table: &TableSchema,
         join: &crate::query::JoinVia,
+        tier: DurabilityTier,
         memo: &'a mut ClosureExpansionMemo,
     ) -> Result<&'a BTreeMap<RowUuid, Vec<CurrentRow>>, Error> {
         let key = JoinRowsKey {
@@ -1659,10 +1684,11 @@ where
             binding_id: join_binding.binding_id(),
             table: join.table.clone(),
             on_column: join.on_column.clone(),
+            tier,
         };
         if !memo.join_rows_by_target.contains_key(&key) {
             let mut rows_by_target: BTreeMap<RowUuid, Vec<CurrentRow>> = BTreeMap::new();
-            for join_row in self.query_rows(join_shape, join_binding, DurabilityTier::Global)? {
+            for join_row in self.query_rows(join_shape, join_binding, tier)? {
                 if let Some(Value::Uuid(uuid)) = join_row.cell(join_table, &join.on_column) {
                     rows_by_target
                         .entry(RowUuid(uuid))

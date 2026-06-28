@@ -62,6 +62,52 @@ const permissions = schema.definePermissions(app, ({ policy, anyOf, session }) =
   policy.announcements.allowDelete.always(),
 ]);
 
+const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, anyOf, session }) => [
+  policy.chats.allowRead.where((chat) =>
+    anyOf([
+      { visibility: "public" },
+      policy.chat_members.exists.where({
+        chat_id: chat.id,
+        user_id: session.user_id,
+      }),
+    ]),
+  ),
+  policy.chats.allowInsert.always(),
+  policy.chats.allowUpdate.always(),
+  policy.chats.allowDelete.always(),
+
+  policy.chat_members.allowRead.where({ user_id: session.user_id }),
+  policy.chat_members.allowInsert.where({ user_id: session.user_id }),
+  policy.chat_members.allowUpdate.always(),
+  policy.chat_members.allowDelete.where({ user_id: session.user_id }),
+
+  policy.messages.allowRead.where((message) =>
+    anyOf([
+      policy.chats.exists.where({
+        id: message.chat_id,
+        visibility: "public",
+      }),
+      policy.chat_members.exists.where({
+        chat_id: message.chat_id,
+        user_id: session.user_id,
+      }),
+    ]),
+  ),
+  policy.messages.allowInsert.where((message) =>
+    policy.chat_members.exists.where({
+      chat_id: message.chat_id,
+      user_id: session.user_id,
+    }),
+  ),
+  policy.messages.allowUpdate.always(),
+  policy.messages.allowDelete.always(),
+
+  policy.announcements.allowRead.always(),
+  policy.announcements.allowInsert.always(),
+  policy.announcements.allowUpdate.always(),
+  policy.announcements.allowDelete.always(),
+]);
+
 type Chat = RowOf<typeof app.chats>;
 type Message = RowOf<typeof app.messages>;
 
@@ -80,6 +126,88 @@ afterEach(async () => {
 });
 
 describe("raw websocket private read gate", () => {
+  it("reads messages through public-chat or membership read policy after edge writes", async () => {
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
+      uniqueDbName("chat-style-message-read"),
+    );
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, chatStyleMessagePermissions);
+
+    const alice = await openUserDb(appId, serverUrl, "chat-style-message-alice");
+    const bob = await openUserDb(appId, serverUrl, "chat-style-message-bob");
+    const aliceUserId = requireUserId(alice, "Alice");
+    const bobUserId = requireUserId(bob, "Bob");
+
+    const publicChat = await alice
+      .insert(app.chats, {
+        title: `public-chat-${Date.now()}`,
+        visibility: "public",
+        owner_id: aliceUserId,
+      })
+      .wait({ tier: "edge" });
+    await alice
+      .insert(app.chat_members, {
+        chat_id: publicChat.id,
+        user_id: aliceUserId,
+      })
+      .wait({ tier: "edge" });
+    const publicMessage = await alice
+      .insert(app.messages, {
+        chat_id: publicChat.id,
+        body: "public chat message",
+        author_id: aliceUserId,
+        owner_id: aliceUserId,
+      })
+      .wait({ tier: "edge" });
+
+    await expect(
+      waitForQuery(
+        bob,
+        app.chats,
+        (rows) => rows.some((row) => row.id === publicChat.id),
+        "Bob should read the public chat dependency",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await expect(
+      waitForQuery(
+        bob,
+        app.messages.where({ chat_id: publicChat.id }),
+        (rows) => rows.some((row) => row.id === publicMessage.id),
+        "Bob should read a public-chat message through the message read policy",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await bob
+      .insert(app.chat_members, {
+        chat_id: publicChat.id,
+        user_id: bobUserId,
+      })
+      .wait({ tier: "edge" });
+    const bobMessage = await bob
+      .insert(app.messages, {
+        chat_id: publicChat.id,
+        body: "bob member message",
+        author_id: bobUserId,
+        owner_id: bobUserId,
+      })
+      .wait({ tier: "edge" });
+
+    await expect(
+      waitForQuery(
+        bob,
+        app.messages.where({ chat_id: publicChat.id }),
+        (rows) => rows.some((row) => row.id === bobMessage.id),
+        "Bob should read his member message after an edge-confirmed membership",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+  }, 60_000);
+
   it("does not expose Alice's private chat or message rows to Bob without adminSecret", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("private-read-gate"),
@@ -97,7 +225,7 @@ describe("raw websocket private read gate", () => {
           visibility: "private",
           owner_id: aliceUserId,
         })
-        .wait({ tier: "global" }),
+        .wait({ tier: "edge" }),
       10_000,
       "Alice private chat insert did not reach the server",
     );
@@ -107,7 +235,7 @@ describe("raw websocket private read gate", () => {
           chat_id: privateChat.id,
           user_id: aliceUserId,
         })
-        .wait({ tier: "global" }),
+        .wait({ tier: "edge" }),
       10_000,
       "Alice private membership insert did not reach the server",
     );
@@ -119,7 +247,7 @@ describe("raw websocket private read gate", () => {
           author_id: aliceUserId,
           owner_id: aliceUserId,
         })
-        .wait({ tier: "global" }),
+        .wait({ tier: "edge" }),
       10_000,
       "Alice private message insert did not reach the server",
     );
@@ -129,7 +257,7 @@ describe("raw websocket private read gate", () => {
         .insert(app.announcements, {
           title: `public-control-${Date.now()}`,
         })
-        .wait({ tier: "global" }),
+        .wait({ tier: "edge" }),
       10_000,
       "Alice public control insert did not reach the server",
     );

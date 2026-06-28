@@ -537,7 +537,11 @@ fn append_exists_policy_clause(
     })?;
     let source_column = source_column.expect("join_column and source_column are set together");
 
-    Ok(query.join_via_column(exists_table, join_column, source_column, filters))
+    if join_column == "id" {
+        Ok(query.join_via_row_id(exists_table, source_column, filters))
+    } else {
+        Ok(query.join_via_column(exists_table, join_column, source_column, filters))
+    }
 }
 
 fn append_inherited_select_policy(
@@ -1076,6 +1080,62 @@ mod tests {
     }
 
     #[test]
+    fn converts_correlated_exists_against_id_to_row_id_join() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("chats")
+                    .column("name", ColumnType::Text)
+                    .column("isPublic", ColumnType::Boolean),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("chatId", "chats")
+                    .column("text", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Exists {
+                        table: "chats".to_owned(),
+                        condition: Box::new(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "chatId".to_owned(),
+                                ]),
+                            },
+                            PolicyExpr::Cmp {
+                                column: "isPublic".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::Literal(Value::Boolean(true)),
+                            },
+                        ])),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let messages = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "messages")
+            .unwrap();
+        let policy = messages.read_policy.as_ref().unwrap();
+        assert!(policy.filters.is_empty());
+        assert_eq!(policy.joins.len(), 1);
+        let join = &policy.joins[0];
+        assert_eq!(join.table, "chats");
+        assert_eq!(join.on_column, "id");
+        assert_eq!(join.target, JoinTarget::RowId);
+        assert_eq!(join.source_column.as_deref(), Some("chatId"));
+        assert_eq!(
+            join.filters,
+            vec![Predicate::Eq(
+                Operand::Column("isPublic".to_owned()),
+                Operand::Literal(GrooveValue::Bool(true)),
+            )]
+        );
+    }
+
+    #[test]
     fn converts_or_with_correlated_exists_to_policy_branches() {
         let schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("chats").column("isPublic", ColumnType::Boolean))
@@ -1131,6 +1191,79 @@ mod tests {
         assert_eq!(join.table, "chatMembers");
         assert_eq!(join.on_column, "chatId");
         assert_eq!(join.source_column.as_deref(), Some("chatId"));
+    }
+
+    #[test]
+    fn converts_chat_public_or_membership_select_policy_to_branches() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("chats")
+                    .column("title", ColumnType::Text)
+                    .column("visibility", ColumnType::Text)
+                    .column("owner_id", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Or(vec![
+                        PolicyExpr::Cmp {
+                            column: "visibility".to_owned(),
+                            op: CmpOp::Eq,
+                            value: PolicyValue::Literal(Value::Text("public".to_owned())),
+                        },
+                        PolicyExpr::Exists {
+                            table: "chat_members".to_owned(),
+                            condition: Box::new(PolicyExpr::And(vec![
+                                PolicyExpr::Cmp {
+                                    column: "chat_id".to_owned(),
+                                    op: CmpOp::Eq,
+                                    value: PolicyValue::SessionRef(vec![
+                                        "__jazz_outer_row".to_owned(),
+                                        "id".to_owned(),
+                                    ]),
+                                },
+                                PolicyExpr::Cmp {
+                                    column: "user_id".to_owned(),
+                                    op: CmpOp::Eq,
+                                    value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                },
+                            ])),
+                        },
+                    ]))),
+            )
+            .table(
+                TableSchemaBuilder::new("chat_members")
+                    .fk_column("chat_id", "chats")
+                    .column("user_id", ColumnType::Text),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let chats = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "chats")
+            .unwrap();
+        let policy = chats.read_policy.as_ref().unwrap();
+        assert_eq!(policy.filters, vec![Predicate::Any(Vec::new())]);
+        assert_eq!(policy.policy_branches.len(), 2);
+        assert_eq!(
+            policy.policy_branches[0].filters,
+            vec![Predicate::Eq(
+                Operand::Column("visibility".to_owned()),
+                Operand::Literal(GrooveValue::String("public".to_owned())),
+            )]
+        );
+        assert_eq!(policy.policy_branches[0].joins.len(), 0);
+        assert_eq!(policy.policy_branches[1].filters.len(), 0);
+        assert_eq!(policy.policy_branches[1].joins.len(), 1);
+        let join = &policy.policy_branches[1].joins[0];
+        assert_eq!(join.table, "chat_members");
+        assert_eq!(join.on_column, "chat_id");
+        assert_eq!(join.source_column.as_deref(), Some("id"));
+        assert_eq!(
+            join.filters,
+            vec![Predicate::Eq(
+                Operand::Column("user_id".to_owned()),
+                Operand::Claim("user_id".to_owned()),
+            )]
+        );
     }
 
     #[test]
