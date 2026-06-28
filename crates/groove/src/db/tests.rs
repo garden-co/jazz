@@ -1869,6 +1869,17 @@ fn prepared_subscription_can_route_with_separate_clean_output_projection() {
         .bind_shape(shape.id(), &[Value::String("Blue Train".to_owned())])
         .unwrap();
 
+    let public_output = RecordDescriptor::new([
+        ("id", ColumnType::U64.value_type()),
+        ("title", ColumnType::String.value_type()),
+    ]);
+    assert_eq!(
+        *database
+            .ivm_runtime
+            .subscription_output(subscription.id())
+            .unwrap(),
+        public_output
+    );
     let initial = subscription.recv().unwrap();
     assert_eq!(
         initial.descriptor,
@@ -1913,6 +1924,36 @@ fn prepared_subscription_can_route_with_separate_clean_output_projection() {
             (vec![7_u64.into(), "Blue Train".into()], 1),
         ]
     );
+}
+
+#[test]
+fn prepared_subscription_rejects_routing_graph_missing_clean_output_fields() {
+    let storage = MemoryStorage::new(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let output_graph = GraphBuilder::table("albums")
+        .project_fields([ProjectField::named("id"), ProjectField::named("title")]);
+    let routing_graph = GraphBuilder::join(
+        GraphBuilder::binding_source("missing_route_title_param", binding_descriptor),
+        GraphBuilder::table("albums"),
+        ["wanted"],
+        ["title"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("left.wanted", "__routing_wanted"),
+    ]);
+
+    assert!(matches!(
+        database.prepare_with_routing(
+            output_graph,
+            routing_graph,
+            "missing_route_title_param",
+            binding_descriptor,
+            ["__routing_wanted"],
+        ),
+        Err(Error::IvmRuntime(IvmRuntimeError::GraphFieldNotFound(field))) if field == "title"
+    ));
 }
 
 #[test]
