@@ -2491,6 +2491,35 @@ mod tests {
         assert_eq!(result_row_removes, expected_removes);
     }
 
+    fn assert_view_update_row_order(
+        update: SyncMessage,
+        expected_adds: Vec<(&str, RowUuid, TxId)>,
+        expected_removes: Vec<(&str, RowUuid, TxId)>,
+    ) {
+        let SyncMessage::ViewUpdate {
+            result_row_adds,
+            result_row_removes,
+            ..
+        } = update
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(
+            result_row_adds,
+            expected_adds
+                .into_iter()
+                .map(|(table, row, tx)| (table.to_owned().into(), row, tx))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result_row_removes,
+            expected_removes
+                .into_iter()
+                .map(|(table, row, tx)| (table.to_owned().into(), row, tx))
+                .collect::<Vec<_>>()
+        );
+    }
+
     fn query_subscription(
         peer: &PeerState,
         subscription: SubscriptionKey,
@@ -3179,6 +3208,175 @@ mod tests {
     }
 
     #[test]
+    fn maintained_subscription_view_order_by_without_limit_matches_one_shot_order() {
+        let (_dir, mut core) = open_node_with_schema(node(0x97), priority_schema());
+        let charlie_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(30), 1_000)
+                    .cells(priority_cells("charlie", 30)),
+            )
+            .unwrap();
+        let alpha_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(10), 1_001)
+                    .cells(priority_cells("alpha", 10)),
+            )
+            .unwrap();
+        let bravo_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(20), 1_002)
+                    .cells(priority_cells("bravo", 20)),
+            )
+            .unwrap();
+        accept_global(&mut core, charlie_tx, 1);
+        accept_global(&mut core, alpha_tx, 2);
+        accept_global(&mut core, bravo_tx, 3);
+        let shape = Query::from("todos")
+            .order_by("priority", OrderDirection::Asc)
+            .validate(&priority_schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = subscription_key(&shape, &binding);
+        let mut peer = PeerState::new();
+
+        let one_shot = core
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        assert_eq!(
+            one_shot,
+            vec![row_from_u64(10), row_from_u64(20), row_from_u64(30)]
+        );
+        assert!(maintained_subscription_id(&peer, subscription).is_some());
+        assert_view_update_row_order(
+            update,
+            vec![
+                ("todos", row_from_u64(10), alpha_tx),
+                ("todos", row_from_u64(20), bravo_tx),
+                ("todos", row_from_u64(30), charlie_tx),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            peer.maintained_subscription_view_metrics()
+                .full_recomputes_out,
+            0
+        );
+    }
+
+    #[test]
+    fn maintained_subscription_view_order_by_offset_without_limit_matches_one_shot_window() {
+        let (_dir, mut core) = open_node_with_schema(node(0x98), priority_schema());
+        let first_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(10), 1_000)
+                    .cells(priority_cells("first", 10)),
+            )
+            .unwrap();
+        let second_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(20), 1_001)
+                    .cells(priority_cells("second", 20)),
+            )
+            .unwrap();
+        let third_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(30), 1_002)
+                    .cells(priority_cells("third", 30)),
+            )
+            .unwrap();
+        accept_global(&mut core, third_tx, 1);
+        accept_global(&mut core, first_tx, 2);
+        accept_global(&mut core, second_tx, 3);
+        let shape = Query::from("todos")
+            .order_by("priority", OrderDirection::Asc)
+            .offset(1)
+            .validate(&priority_schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = subscription_key(&shape, &binding);
+        let mut peer = PeerState::new();
+
+        let one_shot = core
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        assert_eq!(one_shot, vec![row_from_u64(20), row_from_u64(30)]);
+        assert!(maintained_subscription_id(&peer, subscription).is_some());
+        assert_view_update_row_order(
+            update,
+            vec![
+                ("todos", row_from_u64(20), second_tx),
+                ("todos", row_from_u64(30), third_tx),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            peer.maintained_subscription_view_metrics()
+                .full_recomputes_out,
+            0
+        );
+    }
+
+    #[test]
+    fn maintained_subscription_view_without_order_by_matches_one_shot_row_id_order() {
+        let (_dir, mut core) = open_node_with_uuid(node(0x99));
+        let third_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(30), 1_000).cells(title_cells("third")),
+            )
+            .unwrap();
+        let first_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(10), 1_001).cells(title_cells("first")),
+            )
+            .unwrap();
+        let second_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(20), 1_002).cells(title_cells("second")),
+            )
+            .unwrap();
+        accept_global(&mut core, third_tx, 1);
+        accept_global(&mut core, first_tx, 2);
+        accept_global(&mut core, second_tx, 3);
+        let shape = Query::from("todos").validate(&schema()).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = subscription_key(&shape, &binding);
+        let mut peer = PeerState::new();
+
+        let one_shot = core
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        assert_eq!(
+            one_shot,
+            vec![row_from_u64(10), row_from_u64(20), row_from_u64(30)]
+        );
+        assert!(maintained_subscription_id(&peer, subscription).is_some());
+        assert_view_update_row_order(
+            update,
+            vec![
+                ("todos", row_from_u64(10), first_tx),
+                ("todos", row_from_u64(20), second_tx),
+                ("todos", row_from_u64(30), third_tx),
+            ],
+            vec![],
+        );
+    }
+
+    #[test]
     fn maintained_subscription_view_unsupported_limited_variants_error_loudly() {
         let (_dir, mut core) = open_node_with_uuid(node(0x90));
         let first_tx = core
@@ -3194,16 +3392,12 @@ mod tests {
         accept_global(&mut core, first_tx, 1);
         accept_global(&mut core, second_tx, 2);
         let no_order_limit = Query::from("todos").limit(2).validate(&schema()).unwrap();
-        let order_without_limit = Query::from("todos")
-            .order_by("title", OrderDirection::Asc)
-            .validate(&schema())
-            .unwrap();
         let offset_limit_one = Query::from("todos")
             .limit(1)
             .offset(1)
             .validate(&schema())
             .unwrap();
-        let shapes = [no_order_limit, order_without_limit, offset_limit_one];
+        let shapes = [no_order_limit, offset_limit_one];
         let mut peer = PeerState::new();
 
         for shape in shapes {

@@ -1853,7 +1853,9 @@ where
                     for row in update.adds {
                         rows_by_id.insert(subscription_row_key(&row), row);
                     }
-                    rows_by_id.into_values().collect::<Vec<_>>()
+                    let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
+                    node.borrow().apply_query_order(shape.query(), &mut rows)?;
+                    rows
                 } else {
                     previous.clone()
                 }
@@ -3347,6 +3349,8 @@ pub enum SubscriptionEvent {
     },
     /// Incremental materialized result change.
     Delta {
+        /// Complete materialized rows after applying this change.
+        current: Vec<CurrentRow>,
         /// Rows newly visible to the subscription.
         added: Vec<CurrentRow>,
         /// Rows still visible with changed projected cells.
@@ -3485,6 +3489,7 @@ fn subscription_delta_event(
     }
 
     SubscriptionEvent::Delta {
+        current: current.to_vec(),
         added,
         updated,
         removed,
