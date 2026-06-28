@@ -259,12 +259,13 @@ impl IvmRuntime {
             let Some(shape) = self.prepared_shapes.get(&shape_id) else {
                 continue;
             };
-            let output_node = shape
-                .routing
-                .as_ref()
-                .map(|routing| routing.output.node)
-                .unwrap_or(shape.output.node);
-            let records = evaluator.update_node(output_node)?;
+            if let Some(routing) = &shape.routing {
+                evaluator.update_node(shape.output.node)?;
+                let records = evaluator.update_node(routing.output.node)?;
+                shape_outputs.push((shape_id, records));
+                continue;
+            }
+            let records = evaluator.update_node(shape.output.node)?;
             shape_outputs.push((shape_id, records));
         }
         drop(evaluator);

@@ -1916,6 +1916,183 @@ fn prepared_subscription_can_route_with_separate_clean_output_projection() {
 }
 
 #[test]
+fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_bind() {
+    let storage = MemoryStorage::new(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Out of Scope".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(11), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let output_graph = GraphBuilder::join(
+        GraphBuilder::binding_source("existing_route_title_param", binding_descriptor),
+        GraphBuilder::table("albums"),
+        ["wanted"],
+        ["title"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+    ]);
+    let routing_graph = GraphBuilder::join(
+        GraphBuilder::binding_source("existing_route_title_param", binding_descriptor),
+        GraphBuilder::table("albums"),
+        ["wanted"],
+        ["title"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+        ProjectField::renamed("left.wanted", "__routing_wanted"),
+    ]);
+    let shape = database
+        .prepare_with_routing(
+            output_graph,
+            routing_graph,
+            "existing_route_title_param",
+            binding_descriptor,
+            ["__routing_wanted"],
+        )
+        .unwrap();
+    let subscription = database
+        .bind_shape(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![11_u64.into(), "Blue Train".into()], 1)]
+    );
+}
+
+#[test]
+fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_on_first_bind() {
+    let storage = MemoryStorage::new(&["edges"]);
+    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    insert_edge(&mut batch, 3, 4, 5);
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let output_graph = prepared_reachability_graph(GraphBuilder::table("edges"), 16);
+
+    let reach = RecordDescriptor::new([
+        ("seed", ColumnType::U64.value_type()),
+        ("dst", ColumnType::U64.value_type()),
+        ("__routing_seed", ColumnType::U64.value_type()),
+    ]);
+    let seed = GraphBuilder::binding_source("prepared-routed-reach", binding_descriptor)
+        .project_fields([
+            ProjectField::renamed("seed", "seed"),
+            ProjectField::renamed("seed", "dst"),
+            ProjectField::renamed("seed", "__routing_seed"),
+        ]);
+    let frontier = GraphBuilder::frontier_source("frontier", reach);
+    let step = GraphBuilder::join(
+        frontier,
+        GraphBuilder::table("edges").project(["src", "dst"]),
+        ["dst"],
+        ["src"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.seed", "seed"),
+        ProjectField::renamed("right.dst", "dst"),
+        ProjectField::renamed("left.__routing_seed", "__routing_seed"),
+    ]);
+    let routing_graph = GraphBuilder::recursive(seed, step, "frontier", 16);
+
+    let shape = database
+        .prepare_with_routing(
+            output_graph,
+            routing_graph,
+            "prepared-routed-reach",
+            binding_descriptor,
+            ["__routing_seed"],
+        )
+        .unwrap();
+    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+
+    let mut values = expect_recv_vals(&subscription);
+    sort_pairs_by_value(&mut values);
+    assert_eq!(
+        values,
+        [
+            (vec![Value::U64(1), Value::U64(1)], 1),
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+        ]
+    );
+}
+
+#[test]
+fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_binding() {
+    let storage = MemoryStorage::new(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(11), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let output_graph = GraphBuilder::join(
+        GraphBuilder::binding_source("double_route_title_param", binding_descriptor),
+        GraphBuilder::table("albums"),
+        ["wanted"],
+        ["title"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+    ]);
+    let routing_graph = GraphBuilder::join(
+        output_graph.clone().project_fields([
+            ProjectField::named("id"),
+            ProjectField::named("title"),
+            ProjectField::literal("__route_join", Value::U8(0)),
+        ]),
+        GraphBuilder::binding_source("double_route_title_param", binding_descriptor)
+            .project_fields([
+                ProjectField::named("wanted"),
+                ProjectField::literal("__route_join", Value::U8(0)),
+            ]),
+        ["__route_join"],
+        ["__route_join"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.id", "id"),
+        ProjectField::renamed("left.title", "title"),
+        ProjectField::renamed("right.wanted", "__routing_wanted"),
+    ]);
+    let shape = database
+        .prepare_with_routing(
+            output_graph,
+            routing_graph,
+            "double_route_title_param",
+            binding_descriptor,
+            ["__routing_wanted"],
+        )
+        .unwrap();
+    let subscription = database
+        .bind_shape(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![11_u64.into(), "Blue Train".into()], 1)]
+    );
+}
+
+#[test]
 fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
