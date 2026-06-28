@@ -30,6 +30,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
 
   const chatRowsResult = useAll(app.chats.where({ id: chatId }));
   const chatRows = chatRowsResult ?? [];
+  const chat = chatRows[0];
   const chatKnown = chatRows.length > 0;
 
   // Auto-join: if the user can see the chat but isn't a member yet, insert a
@@ -68,7 +69,15 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
       return;
     }
 
-    if (!userId || !chatKnown || !membershipKnown || isMember || autoJoined.current) return;
+    if (
+      !userId ||
+      !chatKnown ||
+      !chat?.isPublic ||
+      !membershipKnown ||
+      isMember ||
+      autoJoined.current
+    )
+      return;
     autoJoined.current = true;
     autoJoinPending.current = true;
 
@@ -83,7 +92,16 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
         autoJoined.current = false;
         autoJoinPending.current = false;
       });
-  }, [userId, chatKnown, membershipKnown, isMember, chatId, db, sharedWriteOptions]);
+  }, [
+    userId,
+    chatKnown,
+    chat?.isPublic,
+    membershipKnown,
+    isMember,
+    chatId,
+    db,
+    sharedWriteOptions,
+  ]);
 
   const observer = useRef<IntersectionObserver | null>(null);
 
@@ -106,7 +124,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const messages =
     useAll(
       app.messages
-        .where({ chatId })
+        .where({ chatId: chatKnown ? chatId : "00000000-0000-0000-0000-000000000000" })
         .include({ sender: true })
         .orderBy("createdAt", "desc")
         .limit(showNLastMessages + 1),
@@ -119,6 +137,25 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   };
 
   if (chatRowsResult !== undefined && !chatKnown && userId) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-8 text-center text-muted-foreground">
+        <p>You don't have permission to access this chat.</p>
+      </div>
+    );
+  }
+
+  if (!chatKnown) {
+    return (
+      <div className="flex-1 grid place-items-center p-8 text-center text-muted-foreground italic">
+        <div className="flex gap-2">
+          <Loader2Icon className="animate-spin" />
+          Loading chat...
+        </div>
+      </div>
+    );
+  }
+
+  if (!chat.isPublic && membershipKnown && !isMember) {
     return (
       <div className="flex-1 flex items-center justify-center p-8 text-center text-muted-foreground">
         <p>You don't have permission to access this chat.</p>
