@@ -1,4 +1,4 @@
-use crate::query::{Include, JoinMode, OrderDirection, PolicyBranch};
+use crate::query::{Include, JoinMode, OrderDirection, PolicyBranch, Predicate};
 
 #[test]
 fn write_policy_rejection_cleans_up_client() {
@@ -896,6 +896,181 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([public_message])
     );
+}
+
+#[test]
+fn camel_case_message_read_policy_incrementally_adds_member_message() {
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    let chat = row(0x18);
+    let alice_profile = row(0x38);
+    let bob_profile = row(0x39);
+    let alice_message = row(0x28);
+    let bob_message = row(0x29);
+    let alice_membership = row(0x1a);
+    let bob_membership = row(0x1b);
+    let policy = Policy::shape(
+        Query::from("messages")
+            .filter(Predicate::Any(Vec::new()))
+            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_row_id(
+                "chats",
+                "chatId",
+                [eq(col("isPublic"), lit(true))],
+            )))
+            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_column(
+                "chatMembers",
+                "chatId",
+                "chatId",
+                [eq(col("userId"), claim("user_id"))],
+            ))),
+    );
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("isPublic", ColumnType::Bool),
+                ColumnSchema::new("createdBy", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("chats")
+                .filter(Predicate::Any(Vec::new()))
+                .policy_branch(PolicyBranch::from_query(
+                    Query::from("chats").filter(eq(col("isPublic"), lit(true))),
+                ))
+                .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via_column(
+                    "chatMembers",
+                    "chatId",
+                    "id",
+                    [eq(col("userId"), claim("user_id"))],
+                ))),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "chatMembers",
+            [
+                ColumnSchema::new("chatId", ColumnType::Uuid),
+                ColumnSchema::new("userId", ColumnType::String),
+            ],
+        )
+        .with_reference("chatId", "chats")
+        .with_read_policy(Policy::shape(
+            Query::from("chatMembers")
+                .filter(Predicate::Any(Vec::new()))
+                .policy_branch(PolicyBranch::from_query(
+                    Query::from("chatMembers").filter(eq(col("userId"), claim("user_id"))),
+                ))
+                .policy_branch(PolicyBranch::from_query(Query::from("chatMembers").join_via_column(
+                    "chatMembers",
+                    "chatId",
+                    "chatId",
+                    [eq(col("userId"), claim("user_id"))],
+                ))),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("chatId", ColumnType::Uuid),
+                ColumnSchema::new("text", ColumnType::String),
+                ColumnSchema::new("senderId", ColumnType::Uuid),
+                ColumnSchema::new("createdAt", ColumnType::U64),
+            ],
+        )
+        .with_reference("chatId", "chats")
+        .with_reference("senderId", "profiles")
+        .with_read_policy(policy)
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "profiles",
+            [
+                ColumnSchema::new("userId", ColumnType::String),
+                ColumnSchema::new("name", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
+            ("isPublic".to_owned(), Value::Bool(true)),
+            ("createdBy".to_owned(), Value::String(alice.0.to_string())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("chatMembers", alice_membership, 11).cells(BTreeMap::from([
+            ("chatId".to_owned(), Value::Uuid(chat.0)),
+            ("userId".to_owned(), Value::String(alice.0.to_string())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("messages", alice_message, 12).cells(BTreeMap::from([
+            ("chatId".to_owned(), Value::Uuid(chat.0)),
+            ("text".to_owned(), Value::String("hello".to_owned())),
+            ("senderId".to_owned(), Value::Uuid(alice_profile.0)),
+            ("createdAt".to_owned(), Value::U64(12)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("profiles", alice_profile, 15).cells(BTreeMap::from([
+            ("userId".to_owned(), Value::String(alice.0.to_string())),
+            ("name".to_owned(), Value::String("Alice".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("profiles", bob_profile, 16).cells(BTreeMap::from([
+            ("userId".to_owned(), Value::String(bob.0.to_string())),
+            ("name".to_owned(), Value::String("Bob".to_owned())),
+        ])),
+    );
+
+    let shape = Query::from("messages")
+        .include("senderId")
+        .order_by("createdAt", OrderDirection::Desc)
+        .limit(21)
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut alice_peer = PeerState::for_author(alice);
+    alice_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+
+    let bob_membership_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("chatMembers", bob_membership, 13).cells(BTreeMap::from([
+            ("chatId".to_owned(), Value::Uuid(chat.0)),
+            ("userId".to_owned(), Value::String(bob.0.to_string())),
+        ])),
+    );
+    let bob_message_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("messages", bob_message, 14).cells(BTreeMap::from([
+            ("chatId".to_owned(), Value::Uuid(chat.0)),
+            ("text".to_owned(), Value::String("from bob".to_owned())),
+            ("senderId".to_owned(), Value::Uuid(bob_profile.0)),
+            ("createdAt".to_owned(), Value::U64(14)),
+        ])),
+    );
+
+    let update = alice_peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_view_update_only_references_rows(&update, BTreeSet::from([bob_message, bob_profile]));
+    assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
+    assert!(matches!(
+        update,
+        SyncMessage::ViewUpdate {
+            result_row_adds: ref adds,
+            ..
+        } if adds.contains(&("messages".to_owned().into(), bob_message, bob_message_tx))
+    ));
+    let _ = bob_membership_tx;
 }
 
 #[test]

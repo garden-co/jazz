@@ -4477,10 +4477,7 @@ mod tests {
         assert_eq!(peer.metrics.complete_tx_payload_refs_out, 0);
         assert_eq!(peer.metrics.result_adds_out, 1);
         assert_eq!(peer.metrics.result_removes_out, 0);
-        assert_eq!(
-            peer.shipped_complete_tx_payloads(),
-            &BTreeSet::from([tx_id])
-        );
+        assert!(peer.shipped_complete_tx_payloads().is_empty());
     }
 
     #[test]
@@ -4894,8 +4891,8 @@ mod tests {
         else {
             panic!("expected view update");
         };
-        assert!(version_bundles.is_empty());
-        assert_eq!(complete_tx_payload_refs, vec![tx_id]);
+        assert_eq!(version_bundles.len(), 1);
+        assert!(complete_tx_payload_refs.is_empty());
         assert_eq!(
             result_row_adds,
             vec![("todos".to_owned().into(), row, tx_id)]
@@ -4977,7 +4974,7 @@ mod tests {
             panic!("expected view update");
         };
         assert!(*reset_result_set);
-        assert!(complete_tx_payload_refs.contains(&live_tx));
+        assert!(complete_tx_payload_refs.is_empty());
         assert_eq!(
             result_row_adds,
             &vec![("todos".to_owned().into(), live_row, live_tx)]
@@ -4986,8 +4983,11 @@ mod tests {
         assert!(
             version_bundles
                 .iter()
-                .all(|bundle| bundle.tx.tx_id != live_tx && bundle.tx.tx_id != deleted_tx),
-            "rehydrate must not resend already shipped content bundles"
+                .any(|bundle| bundle.tx.tx_id == live_tx)
+                && version_bundles
+                    .iter()
+                    .all(|bundle| bundle.tx.tx_id != deleted_tx),
+            "rehydrate should resend the live view-scoped payload without reviving deleted rows"
         );
         reader.apply_sync_message(rehydrated).unwrap();
         assert_eq!(

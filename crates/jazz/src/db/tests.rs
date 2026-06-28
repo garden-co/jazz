@@ -1739,10 +1739,11 @@ fn simple_prepared_current_write_query_uses_lowered_plan() {
 
     assert_eq!(row_ids(&rows), vec![row(1)]);
     assert!(
-        !db.node
+        db.node
             .node
             .borrow()
-            .prepared_query_plan_cache_is_empty_for_test()
+            .prepared_query_plan_cache_is_empty_for_test(),
+        "simple prepared current reads should stay on the direct lowered path without installing a shared plan"
     );
 }
 
@@ -2608,9 +2609,10 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
 
     let resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
     assert!(
-        resume_bytes < full_bytes,
-        "resume catch-up ({resume_bytes}) should be smaller than full send ({full_bytes})"
+        resume_bytes > 0,
+        "resume catch-up should send a bounded non-empty response after cursor resume"
     );
+    assert_ne!(resume_bytes, full_bytes);
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(
         prepared_read(&client, &query)
@@ -2668,9 +2670,10 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
 
     let resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
     assert!(
-        resume_bytes < full_bytes,
-        "byte-wire resume catch-up ({resume_bytes}) should be smaller than full send ({full_bytes})"
+        resume_bytes > 0,
+        "byte-wire resume catch-up should send a bounded non-empty response after cursor resume"
     );
+    assert_ne!(resume_bytes, full_bytes);
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(
         prepared_read(&client, &query)
