@@ -393,7 +393,7 @@ function policyExistsToJoin(
     table: expr.table,
     onColumn: correlation.column,
     target: correlation.column === "id" && outer.column !== "id" ? "RowId" : "Column",
-    sourceColumn: outer.column === "id" ? undefined : outer.column,
+    sourceColumn: outer.column,
     filters,
   };
 }

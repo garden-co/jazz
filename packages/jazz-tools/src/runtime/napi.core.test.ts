@@ -67,6 +67,158 @@ const OWNED_TODOS_SCHEMA: WasmSchema = {
   },
 };
 
+const CHAT_POLICY_SCHEMA: WasmSchema = {
+  chats: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "visibility", column_type: { type: "Text" }, nullable: false },
+      { name: "owner_id", column_type: { type: "Text" }, nullable: false },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "Or",
+          exprs: [
+            {
+              type: "Cmp",
+              column: "visibility",
+              op: "Eq",
+              value: { type: "Literal", value: { type: "Text", value: "public" } },
+            },
+            {
+              type: "Exists",
+              table: "chat_members",
+              condition: {
+                type: "And",
+                exprs: [
+                  {
+                    type: "Cmp",
+                    column: "chat_id",
+                    op: "Eq",
+                    value: { type: "SessionRef", path: ["__jazz_outer_row", "id"] },
+                  },
+                  {
+                    type: "Cmp",
+                    column: "user_id",
+                    op: "Eq",
+                    value: { type: "SessionRef", path: ["user_id"] },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      insert: { with_check: { type: "True" } },
+      update: { using: { type: "True" } },
+      delete: { using: { type: "True" } },
+    },
+  },
+  chat_members: {
+    columns: [
+      {
+        name: "chat_id",
+        column_type: { type: "Uuid" },
+        nullable: false,
+        references: "chats",
+      },
+      { name: "user_id", column_type: { type: "Text" }, nullable: false },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "Cmp",
+          column: "user_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      insert: {
+        with_check: {
+          type: "Cmp",
+          column: "user_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      update: { using: { type: "True" } },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "user_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+    },
+  },
+  messages: {
+    columns: [
+      {
+        name: "chat_id",
+        column_type: { type: "Uuid" },
+        nullable: false,
+        references: "chats",
+      },
+      { name: "text", column_type: { type: "Text" }, nullable: false },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "Or",
+          exprs: [
+            {
+              type: "Exists",
+              table: "chats",
+              condition: {
+                type: "And",
+                exprs: [
+                  {
+                    type: "Cmp",
+                    column: "id",
+                    op: "Eq",
+                    value: { type: "SessionRef", path: ["__jazz_outer_row", "chat_id"] },
+                  },
+                  {
+                    type: "Cmp",
+                    column: "visibility",
+                    op: "Eq",
+                    value: { type: "Literal", value: { type: "Text", value: "public" } },
+                  },
+                ],
+              },
+            },
+            {
+              type: "Exists",
+              table: "chat_members",
+              condition: {
+                type: "And",
+                exprs: [
+                  {
+                    type: "Cmp",
+                    column: "chat_id",
+                    op: "Eq",
+                    value: { type: "SessionRef", path: ["__jazz_outer_row", "chat_id"] },
+                  },
+                  {
+                    type: "Cmp",
+                    column: "user_id",
+                    op: "Eq",
+                    value: { type: "SessionRef", path: ["user_id"] },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      insert: { with_check: { type: "True" } },
+      update: { using: { type: "True" } },
+      delete: { using: { type: "True" } },
+    },
+  },
+};
+
 describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () => {
   let server: LocalJazzServerHandle | null = null;
   const runtimes: NativeRuntimeAdapter[] = [];
@@ -875,6 +1027,108 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     }
   }, 15_000);
 
+  it("propagates session-authenticated branch-policy reads over websocket", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d003";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret: "core-napi-branch-policy-admin",
+      backendSecret: "core-napi-branch-policy-backend",
+      schema: encodeSchema(CHAT_POLICY_SCHEMA),
+    });
+
+    const openRuntime = (userId: string, sourceId: number) => {
+      const runtime = new NativeRuntimeAdapter(
+        { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+        CHAT_POLICY_SCHEMA,
+        deterministicBytes(`jazz-napi-core-branch-policy:${userId}:node`),
+        uuidBytes(userId),
+        sourceId,
+        true,
+      );
+      runtimes.push(runtime);
+      runtime.connect(
+        webSocketUrl(server!.url, appId),
+        JSON.stringify({
+          backend_secret: "core-napi-branch-policy-backend",
+          backend_session: { user_id: userId, claims: {} },
+        }),
+      );
+      return runtime;
+    };
+
+    const writer = openRuntime(ALICE_ID, 51);
+    const reader = openRuntime(BOB_ID, 52);
+    const inserted = writer.insert("chats", {
+      title: { type: "Text", value: "public websocket branch chat" },
+      visibility: { type: "Text", value: "public" },
+      owner_id: { type: "Text", value: ALICE_ID },
+    });
+
+    await waitForPromise(
+      writer.waitForTransaction(inserted.transactionId, "edge"),
+      "writer public chat insert did not settle at edge",
+    );
+
+    const bobSession = JSON.stringify({ user_id: BOB_ID, claims: {} });
+    const propagatedRow = await waitFor(async () => {
+      const rows = (await reader.query(
+        JSON.stringify({ table: "chats" }),
+        bobSession,
+        "edge",
+      )) as Array<{
+        id: string;
+        table: string;
+        values: unknown[];
+      }>;
+      return rows.find((row) => row.id === inserted.id);
+    }, "reader edge query did not receive public branch-policy chat");
+
+    expect(propagatedRow).toEqual({
+      id: inserted.id,
+      table: "chats",
+      values: [
+        { type: "Text", value: "public websocket branch chat" },
+        { type: "Text", value: "public" },
+        { type: "Text", value: ALICE_ID },
+      ],
+    });
+
+    const message = writer.insert("messages", {
+      chat_id: { type: "Uuid", value: inserted.id },
+      text: { type: "Text", value: "hello through public chat policy" },
+    });
+    await waitForPromise(
+      writer.waitForTransaction(message.transactionId, "edge"),
+      "writer public-chat message insert did not settle at edge",
+    );
+
+    const propagatedMessage = await waitFor(async () => {
+      const rows = (await reader.query(
+        JSON.stringify({ table: "messages" }),
+        bobSession,
+        "edge",
+      )) as Array<{
+        id: string;
+        table: string;
+        values: unknown[];
+      }>;
+      return rows.find((row) => row.id === message.id);
+    }, "reader edge query did not receive message through public-chat branch policy");
+
+    expect(propagatedMessage).toEqual({
+      id: message.id,
+      table: "messages",
+      values: [
+        { type: "Uuid", value: inserted.id },
+        { type: "Text", value: "hello through public chat policy" },
+      ],
+    });
+  }, 15_000);
+
   it("reopens a persistent database and reads previously written rows", async () => {
     const { NapiDb } = await loadNapiModule();
     const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-core-"));
@@ -951,6 +1205,18 @@ function deterministicBytes(seed: string): Uint8Array {
       hash = Math.imul(hash, 0x01000193);
     }
     view.setUint32(round * 4, hash >>> 0, true);
+  }
+  return bytes;
+}
+
+function uuidBytes(value: string): Uint8Array {
+  const hex = value.replaceAll("-", "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
+    throw new Error(`invalid UUID: ${value}`);
+  }
+  const bytes = new Uint8Array(16);
+  for (let index = 0; index < 16; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
 }

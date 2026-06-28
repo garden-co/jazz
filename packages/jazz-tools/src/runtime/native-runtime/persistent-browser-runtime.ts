@@ -36,6 +36,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   // produce the real core transaction id. These ids are pending handles
   // that are only valid for waitForTransaction translation below.
   private readonly writes = new Map<string, Promise<string>>();
+  private readonly settledWrites = new Map<string, Map<string, Promise<void>>>();
   private readonly transactionRemoteIds = new Map<string, Promise<string>>();
   private readonly transactionWrites = new Map<string, Promise<string>[]>();
   private readonly completedTxs = new Map<string, CompletedTxState>();
@@ -144,7 +145,14 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
     const pendingWrite = this.writes.get(transactionId);
     const workerTransactionId = pendingWrite ? await pendingWrite : transactionId;
-    await this.send("waitForTransaction", [workerTransactionId, tier]);
+    const wait = this.send("waitForTransaction", [workerTransactionId, tier]).then(() => undefined);
+    let waits = this.settledWrites.get(transactionId);
+    if (!waits) {
+      waits = new Map();
+      this.settledWrites.set(transactionId, waits);
+    }
+    waits.set(tier, wait);
+    await wait;
   }
 
   beginTransaction(kind: TransactionKind): string {
@@ -207,6 +215,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
     if (requiresServerPropagation(tier, optionsJson)) {
       await this.connectionReady;
+      await this.settleServerWaitsForRead(tier);
     }
     return this.send("query", [queryJson, sessionJson, tier, translatedOptionsJson]);
   }
@@ -224,6 +233,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
       if (requiresServerPropagation(tier, optionsJson)) {
         await this.connectionReady;
+        await this.settleServerWaitsForRead(tier);
       }
       return this.send("createSubscription", [
         queryJson,
@@ -446,6 +456,21 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       return;
     }
     await Promise.all(this.writes.values());
+  }
+
+  private async settleServerWaitsForRead(tier: string | null | undefined): Promise<void> {
+    if (tier !== "edge" && tier !== "global") return;
+    const waits: Promise<void>[] = [];
+    for (const writeWaits of this.settledWrites.values()) {
+      const globalWait = writeWaits.get("global");
+      if (globalWait) {
+        waits.push(globalWait);
+        continue;
+      }
+      const edgeWait = writeWaits.get("edge");
+      if (edgeWait) waits.push(edgeWait);
+    }
+    await Promise.all(waits);
   }
 
   private assertReadTransactionOpen(optionsJson: string | null | undefined): void {

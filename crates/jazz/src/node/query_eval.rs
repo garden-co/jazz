@@ -850,6 +850,17 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        if matches!(tier, DurabilityTier::Edge | DurabilityTier::Global)
+            && !self.uses_partitioned_or_schema_projected_read(shape)
+        {
+            let subscription = SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+            };
+            if self.query.settled_result_sets.contains_key(&subscription) {
+                return self.query_rows_from_result_set(shape, subscription);
+            }
+        }
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
         self.query_rows_with_prepared_plan_for_identity(&shape, &binding, tier, None, identity)
     }
@@ -1188,7 +1199,7 @@ where
             .iter()
             .map(|(node, alias)| (*alias, *node))
             .collect::<BTreeMap<_, _>>();
-        let mut context = ViewEvaluationContext::default();
+        let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
         for table in target_tables {
             let mut rows = BTreeMap::new();
             for row in self.current_rows_for_schema(&table, read_schema_version, tier)? {
@@ -2115,10 +2126,15 @@ where
             let join_table = self.lowered_related_table(&join.table, &options)?;
             let join_key = join_key(join);
             let left_key = if let Some(source_column) = &join.source_column {
-                format!("user_{source_column}")
+                query_field(source_column)
             } else {
                 "row_uuid".to_owned()
             };
+            if matches!(join.target, JoinTarget::RowId)
+                && !matches!(join.source_column.as_deref(), None | Some("id"))
+            {
+                graph = graph.unwrap_nullable(left_key.clone());
+            }
             let mut join_graph = options
                 .source_overrides
                 .get(&join.table)
@@ -2280,6 +2296,7 @@ where
                 result_row_adds,
                 result_row_removes,
                 identity,
+                tier: DurabilityTier::Global,
                 versions_by_tx: |tx_id| {
                     stream_b_versions_by_tx
                         .get(&tx_id)
@@ -3204,9 +3221,16 @@ where
         let left_key = join
             .source_column
             .as_ref()
-            .map(|column| format!("user_{column}"))
+            .map(|column| query_field(column))
             .unwrap_or_else(|| "row_uuid".to_owned());
         let join_key = join_key(join);
+        let root = if matches!(join.target, JoinTarget::RowId)
+            && !matches!(join.source_column.as_deref(), None | Some("id"))
+        {
+            root.unwrap_nullable(left_key.clone())
+        } else {
+            root
+        };
         let joined = if join.source_column.is_none() {
             let eligible = GraphBuilder::join(
                 root.project(["row_uuid"]),
