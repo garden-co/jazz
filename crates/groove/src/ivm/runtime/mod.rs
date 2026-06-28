@@ -259,7 +259,12 @@ impl IvmRuntime {
             let Some(shape) = self.prepared_shapes.get(&shape_id) else {
                 continue;
             };
-            let records = evaluator.update_node(shape.output.node)?;
+            let output_node = shape
+                .routing
+                .as_ref()
+                .map(|routing| routing.output.node)
+                .unwrap_or(shape.output.node);
+            let records = evaluator.update_node(output_node)?;
             shape_outputs.push((shape_id, records));
         }
         drop(evaluator);
@@ -524,11 +529,80 @@ impl IvmRuntime {
                     node: output_node,
                 },
                 output_key_fields: key_fields,
+                routing: None,
                 bindings: HashMap::new(),
                 auto_family_key: None,
             },
         );
         self.hydrate_shape_graph(output_node, storage)?;
+        Ok(PreparedShape { id: shape_id })
+    }
+
+    pub fn prepare_with_routing(
+        &mut self,
+        output_graph: GraphBuilder,
+        routing_graph: GraphBuilder,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+        routing_key_fields: impl IntoIterator<Item = impl Into<String>>,
+        storage: &impl OrderedKvStorage,
+    ) -> Result<PreparedShape, IvmRuntimeError> {
+        if !self.pending_binding_retractions.is_empty() {
+            self.tick_with_params(Vec::new(), Vec::new(), storage)?;
+        }
+        self.logical_nodes_requested +=
+            (count_builder_nodes(&output_graph) + count_builder_nodes(&routing_graph)) as u64;
+        let output = self.add_dedup_graph(&output_graph)?;
+        let routing_output = self.add_dedup_graph(&routing_graph)?;
+        let key_fields = routing_key_fields
+            .into_iter()
+            .map(|field| {
+                let field = field.into();
+                routing_output
+                    .output
+                    .field_index(&field)
+                    .ok_or(IvmRuntimeError::ShapeKeyFieldNotFound(field))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let notification_projection =
+            notification_projection_from_output(&routing_output.output, output.output)?;
+        let shape = binding_source_shape.into();
+        let shape_id = self.next_shape_id();
+        self.binding_sources
+            .entry(shape.clone())
+            .or_insert_with(|| BindingSourceState {
+                descriptor: binding_descriptor,
+                refcounts: HashMap::new(),
+            });
+        let retained_output = self.add_retainer(
+            output.node,
+            Retainer::PreparedShape(shape_id.retainer_key()),
+        );
+        let retained_routing = self.add_retainer(
+            routing_output.node,
+            Retainer::PreparedShape(shape_id.retainer_key()),
+        );
+        debug_assert!(retained_output);
+        debug_assert!(retained_routing);
+        let output_node = output.node;
+        let routing_node = routing_output.node;
+        self.prepared_shapes.insert(
+            shape_id,
+            PreparedShapeState {
+                shape: shape.clone(),
+                binding_descriptor,
+                output,
+                output_key_fields: key_fields,
+                routing: Some(PreparedShapeRouting {
+                    output: routing_output,
+                    notification_projection,
+                }),
+                bindings: HashMap::new(),
+                auto_family_key: None,
+            },
+        );
+        self.hydrate_shape_graph(output_node, storage)?;
+        self.hydrate_shape_graph(routing_node, storage)?;
         Ok(PreparedShape { id: shape_id })
     }
 
@@ -744,29 +818,7 @@ impl IvmRuntime {
             .prepared_shapes
             .get(&shape_id)
             .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
-        let mut expressions = Vec::with_capacity(descriptor.fields().len());
-        let mut mapping = Vec::with_capacity(descriptor.fields().len());
-        for field in descriptor.fields() {
-            let name = field
-                .name
-                .clone()
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            let index = shape
-                .output
-                .output
-                .field_index(&name)
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone()))?;
-            expressions.push(ProjectionExpr {
-                expression: PlanExpr::field(name),
-                output_name: field.name.clone(),
-            });
-            mapping.push((0, index));
-        }
-        Ok(ShapeNotificationProjection {
-            descriptor,
-            expressions,
-            mapping,
-        })
+        notification_projection_from_output(&shape.output.output, descriptor)
     }
 
     fn plan_auto_direct_family(
@@ -1073,6 +1125,7 @@ impl IvmRuntime {
         }
         let shape_name = shape.shape.clone();
         let output_node = shape.output.node;
+        let routing_node = shape.routing.as_ref().map(|routing| routing.output.node);
         self.prepared_shapes.remove(&shape_id);
         self.binding_sources.remove(&shape_name);
         self.auto_direct_families.remove(&key);
@@ -1080,6 +1133,12 @@ impl IvmRuntime {
             output_node,
             &Retainer::PreparedShape(shape_id.retainer_key()),
         );
+        if let Some(routing_node) = routing_node {
+            self.remove_retainer(
+                routing_node,
+                &Retainer::PreparedShape(shape_id.retainer_key()),
+            );
+        }
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
@@ -2330,8 +2389,15 @@ struct PreparedShapeState {
     binding_descriptor: RecordDescriptor,
     output: CompiledNode,
     output_key_fields: Vec<usize>,
+    routing: Option<PreparedShapeRouting>,
     bindings: HashMap<BindingKey, PreparedBindingState>,
     auto_family_key: Option<AutoDirectFamilyKey>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedShapeRouting {
+    output: CompiledNode,
+    notification_projection: ShapeNotificationProjection,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2461,6 +2527,33 @@ fn project_record_deltas(
     })
 }
 
+fn notification_projection_from_output(
+    source: &RecordDescriptor,
+    descriptor: RecordDescriptor,
+) -> Result<ShapeNotificationProjection, IvmRuntimeError> {
+    let mut expressions = Vec::with_capacity(descriptor.fields().len());
+    let mut mapping = Vec::with_capacity(descriptor.fields().len());
+    for field in descriptor.fields() {
+        let name = field
+            .name
+            .clone()
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+        let index = source
+            .field_index(&name)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone()))?;
+        expressions.push(ProjectionExpr {
+            expression: PlanExpr::field(name),
+            output_name: field.name.clone(),
+        });
+        mapping.push((0, index));
+    }
+    Ok(ShapeNotificationProjection {
+        descriptor,
+        expressions,
+        mapping,
+    })
+}
+
 fn route_shape_records(
     shape: &mut PreparedShapeState,
     records: RecordDeltas,
@@ -2468,7 +2561,12 @@ fn route_shape_records(
     if records.is_empty() {
         return Ok(Vec::new());
     }
-    if records.descriptor != shape.output.output {
+    let route_output = shape
+        .routing
+        .as_ref()
+        .map(|routing| routing.output.output)
+        .unwrap_or(shape.output.output);
+    if records.descriptor != route_output {
         return Err(IvmRuntimeError::GraphOutputMismatch);
     }
     let mapping = shape
@@ -2480,23 +2578,37 @@ fn route_shape_records(
         HashMap::<SubscriptionId, (RecordDescriptor, Vec<RecordDelta>)>::new();
     for delta in records.deltas {
         let key = BindingKey(shape.binding_descriptor.project_record_raw(
-            std::slice::from_ref(&shape.output.output),
+            std::slice::from_ref(&records.descriptor),
             &[delta.raw()],
             &mapping,
         )?);
+        let visible_delta = if let Some(routing) = &shape.routing {
+            RecordDelta {
+                record: project_record(
+                    &routing.notification_projection.expressions,
+                    &routing.notification_projection.mapping,
+                    routing.notification_projection.descriptor,
+                    &routing.output.output,
+                    delta.raw(),
+                )?,
+                weight: delta.weight,
+            }
+        } else {
+            delta.clone()
+        };
         let binding = shape.bindings.entry(key.clone()).or_default();
         let next_weight = binding
             .materialized
-            .get(&delta.record)
+            .get(&visible_delta.record)
             .copied()
             .unwrap_or_default()
-            + delta.weight;
+            + visible_delta.weight;
         if next_weight == 0 {
-            binding.materialized.remove(&delta.record);
+            binding.materialized.remove(&visible_delta.record);
         } else {
             binding
                 .materialized
-                .insert(delta.record.clone(), next_weight);
+                .insert(visible_delta.record.clone(), next_weight);
         }
         for (subscription_id, sender) in &binding.senders {
             let delta = if let Some(projection) = &sender.projection {
@@ -2506,12 +2618,12 @@ fn route_shape_records(
                         &projection.mapping,
                         projection.descriptor,
                         &shape.output.output,
-                        delta.raw(),
+                        visible_delta.raw(),
                     )?,
-                    weight: delta.weight,
+                    weight: visible_delta.weight,
                 }
             } else {
-                delta.clone()
+                visible_delta.clone()
             };
             by_subscription
                 .entry(*subscription_id)

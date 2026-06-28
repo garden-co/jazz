@@ -383,6 +383,29 @@ where
             .map_err(Error::IvmRuntime)
     }
 
+    /// Prepare a graph-level shape whose subscriber output and routing key are
+    /// evaluated from separate graph outputs.
+    pub fn prepare_with_routing(
+        &mut self,
+        output_graph: GraphBuilder,
+        routing_graph: GraphBuilder,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+        routing_key_fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<crate::ivm::PreparedShape, Error> {
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.ivm_runtime
+            .prepare_with_routing(
+                output_graph,
+                routing_graph,
+                binding_source_shape,
+                binding_descriptor,
+                routing_key_fields,
+                &storage,
+            )
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Bind a prepared graph shape by positional values.
     ///
     /// ```rust
