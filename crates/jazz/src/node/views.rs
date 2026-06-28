@@ -871,6 +871,8 @@ where
                     self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
                         &stored_tx,
                         &filtered_tx_versions,
+                        identity,
+                        &mut context,
                     )?,
                 );
                 record_maintained_view_stream_b_add_bundle();
@@ -941,6 +943,8 @@ where
                         self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
                             &stored_tx,
                             tx_versions,
+                            identity,
+                            &mut context,
                         )?,
                     );
                     record_maintained_view_removal_stream_bundle();
@@ -993,6 +997,8 @@ where
                                 self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
                                     &stored_tx,
                                     tx_versions,
+                                    identity,
+                                    &mut context,
                                 )?,
                             );
                             record_maintained_view_removal_stream_bundle();
@@ -1040,6 +1046,8 @@ where
                                 self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
                                     &stored_tx,
                                     tx_versions,
+                                    identity,
+                                    &mut context,
                                 )?,
                             );
                             record_maintained_view_removal_stream_bundle();
@@ -1801,6 +1809,8 @@ where
         &mut self,
         stored_tx: &StoredTransaction,
         tx_versions: &[VersionRow],
+        identity: AuthorId,
+        context: &mut ViewEvaluationContext,
     ) -> Result<VersionBundle, Error> {
         let Transaction {
             tx_id,
@@ -1828,6 +1838,14 @@ where
         };
         let mut versions = Vec::with_capacity(tx_versions.len());
         for candidate in tx_versions {
+            let table = self.table(candidate.table())?.clone();
+            if !self.read_policy_allows_version_memo(&table, candidate, identity, context)?
+                && !self.read_policy_allows_deletion_version_memo(
+                    &table, candidate, identity, context,
+                )?
+            {
+                continue;
+            }
             versions.push(self.version_record_from_row(candidate)?);
         }
         Ok(VersionBundle {

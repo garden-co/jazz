@@ -7,7 +7,7 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 
 use super::*;
 use crate::ids::{AuthorId, NodeUuid};
-use crate::protocol::{LensOp, TableLens};
+use crate::protocol::{CatalogueAck, LensOp, TableLens};
 use crate::query::{
     Include, JoinMode, all_of, any_of, col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
 };
@@ -58,6 +58,15 @@ fn event_settled(event: &SubscriptionEvent) -> bool {
 fn global_subscribe_opts() -> ReadOpts {
     ReadOpts {
         tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        include_deleted: false,
+    }
+}
+
+fn edge_subscribe_opts() -> ReadOpts {
+    ReadOpts {
+        tier: DurabilityTier::Edge,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
         include_deleted: false,
@@ -161,6 +170,32 @@ fn owner_write_schema() -> JazzSchema {
     )
     .with_read_policy(Policy::public())
     .with_write_policy(Policy::owner_only("todos", "owner"))])
+}
+
+fn owner_id_read_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "messages",
+        [
+            ColumnSchema::new("body", ColumnType::String),
+            ColumnSchema::new("owner_id", ColumnType::String),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("messages").filter(eq(col("owner_id"), crate::query::claim("user_id"))),
+    ))
+    .with_write_policy(Policy::public())])
+}
+
+fn owner_id_public_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "messages",
+        [
+            ColumnSchema::new("body", ColumnType::String),
+            ColumnSchema::new("owner_id", ColumnType::String),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())])
 }
 
 fn evolved_owner_write_schema() -> JazzSchema {
@@ -1894,6 +1929,16 @@ impl CoreDb {
             .accept_subscriber_with_trust(transport, identity, trust)
     }
 
+    fn accept_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<RocksDbStorage>>> {
+        self.server
+            .accept_subscriber_with_claims(transport, identity, claims)
+    }
+
     fn accept_subscriber_with_resume(
         &self,
         transport: Box<dyn Transport>,
@@ -2287,6 +2332,137 @@ fn db_sync_surface_round_trips_blob_large_value_to_reader() {
         prepared_read(&reader, &query)[0].cell(table, "data"),
         Some(Value::Bytes(payload))
     );
+}
+
+#[test]
+fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
+    let schema = owner_id_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let writer = open_db(0xa1, alice, &schema);
+    let reader = open_db(0xb2, bob, &schema);
+
+    let (writer_transport, server_writer_transport) = duplex();
+    let _writer_upstream = writer.connect_upstream(writer_transport);
+    let _writer_subscriber = server.accept_subscriber_with_claims(
+        server_writer_transport,
+        alice,
+        BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]),
+    );
+    writer
+        .insert(
+            "messages",
+            BTreeMap::from([
+                ("body".to_owned(), Value::String("alice private".to_owned())),
+                ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+            ]),
+        )
+        .unwrap();
+    writer.tick().unwrap();
+    server.tick().unwrap();
+
+    let (reader_transport, server_reader_transport) = duplex();
+    let _reader_upstream = reader.connect_upstream(reader_transport);
+    let _reader_subscriber = server.accept_subscriber_with_claims(
+        server_reader_transport,
+        bob,
+        BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
+    );
+    let query = Query::from("messages");
+    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    reader.tick().unwrap();
+    server.tick().unwrap();
+    reader.tick().unwrap();
+
+    assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish() {
+    let public_schema = owner_id_public_schema();
+    let permission_schema = owner_id_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &public_schema);
+    let writer = open_db(0xa1, alice, &permission_schema);
+    let reader = open_db(0xb2, bob, &permission_schema);
+
+    let schema_version = SchemaVersion::new(permission_schema.clone());
+    let schema_id = schema_version.id;
+    let acks = server.publish_schema(schema_version).unwrap();
+    assert!(acks.into_iter().any(|message| matches!(
+        message,
+        SyncMessage::CatalogueAck(CatalogueAck {
+            applied: true,
+            schema: Some(applied_schema),
+            ..
+        }) if applied_schema == schema_id
+    )));
+    let current_acks = server
+        .server
+        .node()
+        .borrow_mut()
+        .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: schema_id,
+            },
+        })
+        .unwrap();
+    assert!(current_acks.into_iter().any(|message| matches!(
+        message,
+        SyncMessage::CatalogueAck(CatalogueAck {
+            applied: true,
+            schema: Some(applied_schema),
+            ..
+        }) if applied_schema == schema_id
+    )));
+
+    let (writer_transport, server_writer_transport) = duplex();
+    let _writer_upstream = writer.connect_upstream(writer_transport);
+    let _writer_subscriber = server.accept_subscriber_with_claims(
+        server_writer_transport,
+        alice,
+        BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]),
+    );
+    writer
+        .insert(
+            "messages",
+            BTreeMap::from([
+                ("body".to_owned(), Value::String("alice private".to_owned())),
+                ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+            ]),
+        )
+        .unwrap();
+    writer.tick().unwrap();
+    server.tick().unwrap();
+
+    let (reader_transport, server_reader_transport) = duplex();
+    let _reader_upstream = reader.connect_upstream(reader_transport);
+    let _reader_subscriber = server.accept_subscriber_with_claims(
+        server_reader_transport,
+        bob,
+        BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
+    );
+    let query = Query::from("messages");
+    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    reader.tick().unwrap();
+    server.tick().unwrap();
+    reader.tick().unwrap();
+
+    assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
 }
 
 #[test]
