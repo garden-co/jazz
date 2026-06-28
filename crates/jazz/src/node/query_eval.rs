@@ -4152,11 +4152,23 @@ fn insert_claim_bindings(
 ) {
     let sub = claim_param_name("sub");
     if params.contains_key(&sub) {
-        values.insert(sub.clone(), Value::Uuid(identity.0));
+        values.insert(
+            sub.clone(),
+            claims
+                .and_then(|claims| claims.get("sub"))
+                .cloned()
+                .unwrap_or(Value::Uuid(identity.0)),
+        );
     }
     let user_id = claim_param_name("user_id");
     if params.contains_key(&user_id) {
-        values.insert(user_id.clone(), Value::String(identity.0.to_string()));
+        values.insert(
+            user_id.clone(),
+            claims
+                .and_then(|claims| claims.get("user_id"))
+                .cloned()
+                .unwrap_or_else(|| Value::String(identity.0.to_string())),
+        );
     }
     let is_admin = claim_param_name("isAdmin");
     if params.contains_key(&is_admin) {

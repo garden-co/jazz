@@ -14,8 +14,8 @@ use crate::public_schema::{
     TableSchema, Value,
 };
 
-const PUBLIC_USER_ID_SESSION_PATH: &str = "user_id";
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
+const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaConversionError {
@@ -775,7 +775,8 @@ fn convert_policy_operand(
 ) -> Result<Operand, SchemaConversionError> {
     match value {
         PolicyValue::SessionRef(path_segments)
-            if path_segments.as_slice() == [String::from(PUBLIC_USER_ID_SESSION_PATH)] =>
+            if path_segments.len() == 1
+                && PUBLIC_USER_ID_SESSION_PATHS.contains(&path_segments[0].as_str()) =>
         {
             Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()))
         }

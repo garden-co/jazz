@@ -1106,6 +1106,19 @@ fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: 
         .collect::<BTreeSet<_>>();
     assert_eq!(referenced_rows, expected_rows);
 }
+fn assert_view_update_only_ships_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
+    let SyncMessage::ViewUpdate {
+        version_bundles, ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    let shipped_rows = version_bundles
+        .iter()
+        .flat_map(|bundle| bundle.versions.iter().map(|version| version.row_uuid()))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(shipped_rows, expected_rows);
+}
 fn assert_policy_subscription_rows(
     reader: &mut NodeState<RocksDbStorage>,
     _subscription_ordinal: u64,

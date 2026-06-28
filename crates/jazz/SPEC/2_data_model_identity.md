@@ -82,14 +82,17 @@ cells.
 ## 2.4 Schema identity is content-addressed
 
 Schema identity is derived from schema content so independently observed copies
-of the same schema name the same version, while any semantic shape change names
-a different version. A `SchemaVersionId` is
+of the same storage shape name the same version, while any storage-shape change
+names a different version. A `SchemaVersionId` is
 `Uuid::new_v5(SCHEMA_VERSION_NAMESPACE, JazzSchema::canonical_bytes())`
 (`INV-DATA-6`), domain-tagged `"jazz-schema-v0"`. The canonical bytes cover
 sorted tables, names, columns in declared order, types, large-value kind, merge
-strategy, references, and read/write policy. Changing any of those inputs yields
-a new `SchemaVersionId`. This content-addressing is what lets multiple schema
-versions coexist (ch. 10).
+strategy, and references. They deliberately do **not** include read/write
+policies: policies are runtime/catalogue metadata attached to a storage schema
+version, so publishing permissions for the same tables can refresh authorization
+without creating a second physical storage partition. Changing any storage-shape
+input yields a new `SchemaVersionId`. This content-addressing is what lets
+multiple storage schema versions coexist (ch. 10).
 
 _Further invariants._ `INV-DATA-7`, `INV-DATA-8` — `SchemaVersionId` changes when
 a column's merge strategy changes, and when a column switches among `Bytes` /

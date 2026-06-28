@@ -16,7 +16,7 @@ use groove::schema::{
 };
 
 use crate::ids::{BranchId, SchemaVersionId};
-use crate::query::{Query, claim, col, eq, validated_query_canonical_bytes};
+use crate::query::{Query, claim, col, eq};
 
 /// Namespace used for schema-version UUIDv5 ids.
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
@@ -1064,13 +1064,6 @@ fn canonical_schema_bytes(schema: &JazzSchema) -> Vec<u8> {
             put_str(&mut bytes, column);
             put_str(&mut bytes, target);
         }
-        put_policy(&mut bytes, schema, &table.read_policy);
-        put_policy(&mut bytes, schema, &table.write_policy);
-    }
-    if schema.branch_read_policy.is_some() || schema.branch_write_policy.is_some() {
-        put_str(&mut bytes, "jazz-branch-rls-v0");
-        put_policy(&mut bytes, schema, &schema.branch_read_policy);
-        put_policy(&mut bytes, schema, &schema.branch_write_policy);
     }
     bytes
 }
@@ -1088,18 +1081,6 @@ fn put_large_value_kind(bytes: &mut Vec<u8>, kind: LargeValueKind) {
         LargeValueKind::Text => 1,
         LargeValueKind::Blob => 2,
     });
-}
-
-fn put_policy(bytes: &mut Vec<u8>, schema: &JazzSchema, policy: &Option<Query>) {
-    match policy {
-        None => bytes.push(0),
-        Some(query) => {
-            bytes.push(1);
-            let canonical = validated_query_canonical_bytes(query, schema)
-                .expect("schema policies are validated at construction");
-            put_bytes(bytes, &canonical);
-        }
-    }
 }
 
 fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
