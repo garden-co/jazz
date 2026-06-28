@@ -117,7 +117,10 @@ the subscriber stream receives the projected public record. For
 `prepare_with_routing`, the runtime evaluates the routing graph for prepared
 ticks, projects routing rows into binding keys, then projects those same rows
 back to the clean output descriptor before maintaining per-binding snapshots and
-notifying subscribers.
+notifying subscribers. The routing graph output must therefore contain every
+subscriber-visible output field with the same field name, plus the hidden
+routing key fields. Hidden routing fields are internal provenance only; they are
+not part of subscription snapshots, notifications, or `subscription_output`.
 
 _Further invariants._ `INV-SHAPE-9` — the per-key materialized snapshot is a
 weighted multiset; a delta bringing a record to weight zero removes it.
