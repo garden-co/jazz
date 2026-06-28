@@ -77,7 +77,7 @@ export class PolicyTestApp {
    * The callback is executed in an admin database context.
    */
   seed<T>(callback: (db: Db) => T): T {
-    const db = this.jazzContext.asBackend(this.app);
+    const db = this.jazzContext.asBackend();
     return callback(db);
   }
 
@@ -85,7 +85,7 @@ export class PolicyTestApp {
    * Get a database client for the given session.
    */
   as(session: Session): TestDb {
-    const db = this.jazzContext.forSession(session, this.app);
+    const db = this.jazzContext.forSession(session);
     return asTestDb(db, this.expect);
   }
 

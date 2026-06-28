@@ -549,6 +549,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverCarrier = carrier;
     this.serverCarrierPromise = carrier.ready().then(() => {
       this.flushQueuedServerFrames(carrier);
+      this.pumpServerTransport();
       return carrier;
     });
     this.serverCarrierPromise.catch((error) => {
@@ -572,9 +573,9 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverPumpAgain = false;
   }
 
-  updateAuth(authJson: string): void {
+  updateAuth(authJson: string): Promise<void> | void {
     if (!this.serverEndpointUrl) return;
-    this.connect(this.serverEndpointUrl, authJson);
+    return this.connect(this.serverEndpointUrl, authJson);
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
@@ -643,6 +644,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (options.propagation != null && options.propagation !== "full") return;
     if (!this.db.propagateQuery) return;
     this.db.propagateQuery(query, readOptions(tier, false, optionsJson));
+    if (!this.db.queryIsCovered) return;
     await this.waitForQueryCoverage(query);
   }
 

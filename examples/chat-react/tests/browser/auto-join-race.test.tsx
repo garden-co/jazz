@@ -24,7 +24,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ describe("auto-join race on first message send", () => {
   });
 
   it("composer is disabled until membership is confirmed, then message delivers", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = TEST_SERVER_URL;
     const runId = Date.now();
     const bobMessage = `first-send-${runId}`;
 
