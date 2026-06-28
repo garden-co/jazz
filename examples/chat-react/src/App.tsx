@@ -30,7 +30,9 @@ export function App({ config }: { config?: Partial<DbConfig> } = {}) {
 }
 
 function AppInner({ config }: { config?: Partial<DbConfig> }) {
-  const { secret, isLoading } = useLocalFirstAuth();
+  const auth = useLocalFirstAuth();
+  const secret = config?.secret ?? auth.secret;
+  const isLoading = config?.secret === undefined && auth.isLoading;
 
   if (isLoading || !secret) {
     return <p id="joining-chat">Loading...</p>;

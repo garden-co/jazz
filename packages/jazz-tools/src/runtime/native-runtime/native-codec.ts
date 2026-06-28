@@ -126,6 +126,7 @@ export function queryFromTable(table: string): Uint8Array {
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
   writer.none();
   writer.vec(() => undefined, 0);
   writer.none();
@@ -245,6 +246,7 @@ export function queryWithPredicates(
     const predicate = predicates[index]!;
     writePredicate(filter, predicate);
   }, predicates.length);
+  writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);

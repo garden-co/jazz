@@ -659,8 +659,11 @@ async fn handle_ws_connection(
                             break;
                         }
                     };
-                    if !outbound.is_empty() && send_ws_encoded_frames(&mut socket, &outbound).await.is_err() {
-                        break;
+                    if !outbound.is_empty() {
+                        if send_ws_encoded_frames(&mut socket, &outbound).await.is_err() {
+                            break;
+                        }
+                        core_server_shell.notify_activity();
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
@@ -697,7 +700,9 @@ async fn drain_ws_outbound(
     }
     send_ws_encoded_frames(socket, &outbound)
         .await
-        .map_err(|_| ())
+        .map_err(|_| ())?;
+    core_server_shell.notify_activity();
+    Ok(())
 }
 
 fn decode_single_ws_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {

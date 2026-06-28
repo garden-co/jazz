@@ -334,14 +334,18 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         .unwrap();
     let values = vec![Value::String("match".to_owned())];
 
-    assert!(matches!(
-        node.apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
-            shape_id: shape.shape_id(),
-            adds: vec![(binding.binding_id(), values.clone())],
-            removes: Vec::new(),
-        })),
-        Err(Error::InvalidStoredValue("binding delta for unknown shape"))
-    ));
+    node.apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
+        shape_id: shape.shape_id(),
+        adds: vec![(binding.binding_id(), values.clone())],
+        removes: Vec::new(),
+    }))
+    .unwrap();
+    assert!(
+        !node
+            .query
+            .registered_bindings
+            .contains_key(&shape.shape_id())
+    );
 
     node.apply_sync_message(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
@@ -349,6 +353,13 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         opts: crate::protocol::RegisterShapeOptions::default(),
     })
     .unwrap();
+    assert!(
+        node.query
+            .registered_bindings
+            .get(&shape.shape_id())
+            .unwrap()
+            .contains_key(&binding.binding_id())
+    );
     assert!(matches!(
         node.apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
             shape_id: shape.shape_id(),

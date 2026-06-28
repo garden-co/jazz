@@ -189,6 +189,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransport: Transport | null = null;
   private serverCarrier: WebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
+  private serverTransportError: Error | null = null;
+  private serverTransportErrorWaiters: Array<(error: Error) => void> = [];
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private serverPumpScheduled = false;
@@ -404,8 +406,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const write = this.writes.get(transactionId);
     if (!write) return;
     for (;;) {
+      this.throwServerTransportErrorForTier(tier);
       try {
         this.pumpServerTransport();
+        this.throwServerTransportErrorForTier(tier);
         write.wait(tier);
         this.pumpSubscriptions();
         return;
@@ -417,6 +421,7 @@ export class NativeRuntimeAdapter implements Runtime {
         const change = write.nextWriteStateChange();
         try {
           this.pumpServerTransport();
+          this.throwServerTransportErrorForTier(tier);
           write.wait(tier);
           this.pumpSubscriptions();
           return;
@@ -425,7 +430,8 @@ export class NativeRuntimeAdapter implements Runtime {
           if (secondRejected) throw secondRejected;
           if (!isPendingWaitError(secondError)) throw secondError;
         }
-        await change;
+        const transportError = this.waitForServerTransportError(tier);
+        await (transportError ? Promise.race([change, transportError]) : change);
       }
     }
   }
@@ -504,6 +510,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.callback = onUpdate;
+    if (subscription.rows.length > 0) {
+      subscription.callback(nativeDeltaFromRows(subscription.rows, []));
+    }
     this.startSubscriptionReader(handle, subscription);
   }
 
@@ -517,8 +526,9 @@ export class NativeRuntimeAdapter implements Runtime {
     this.subscriptions.delete(handle);
   }
 
-  connect(url: string, authJson: string): void {
+  connect(url: string, authJson: string): Promise<void> {
     this.disconnect();
+    this.serverTransportError = null;
     this.serverEndpointUrl = url;
     const transport = this.db.connectUpstream();
     this.serverTransport = transport;
@@ -531,6 +541,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.scheduleServerPump();
       },
       onError: (error) => {
+        this.handleServerTransportError(error);
         const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
       },
@@ -544,12 +555,15 @@ export class NativeRuntimeAdapter implements Runtime {
       this.handleServerTransportError(error);
     });
     this.scheduleServerPump();
+    return this.serverCarrierPromise.then(() => undefined);
   }
 
   disconnect(): void {
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
+    this.serverTransportError = null;
+    this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
     this.serverTransport?.close();
     this.serverTransport = null;
     this.serverEndpointUrl = null;
@@ -742,7 +756,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
-    if (subscription.cancelled || !subscription.callback) return;
+    if (subscription.cancelled) return;
     for (const source of subscription.sources) {
       if (!isReadableSubscriptionReader(source.source)) {
         this.drainNativeSubscription(handle, subscription, source);
@@ -858,7 +872,28 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private handleServerTransportError(error: unknown): void {
-    this.authFailureCallback?.(errorMessage(error));
+    const message = errorMessage(error);
+    this.serverTransportError = error instanceof Error ? error : new Error(message);
+    this.resolveServerTransportErrorWaiters(this.serverTransportError);
+  }
+
+  private throwServerTransportErrorForTier(tier: string): void {
+    if ((tier === "edge" || tier === "global") && this.serverTransportError) {
+      throw this.serverTransportError;
+    }
+  }
+
+  private waitForServerTransportError(tier: string): Promise<never> | null {
+    if (tier !== "edge" && tier !== "global") return null;
+    if (this.serverTransportError) return Promise.reject(this.serverTransportError);
+    return new Promise((_, reject) => {
+      this.serverTransportErrorWaiters.push(reject);
+    });
+  }
+
+  private resolveServerTransportErrorWaiters(error: Error): void {
+    const waiters = this.serverTransportErrorWaiters.splice(0);
+    for (const reject of waiters) reject(error);
   }
 }
 
@@ -1061,6 +1096,15 @@ function writeOrNormalizeRejection<T>(
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return Object.prototype.toString.call(error);
+    }
+  }
   return String(error);
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2Icon } from "lucide-react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
 import { ChatMessage } from "@/components/chat/ChatMessage";
@@ -21,9 +21,10 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const session = useSession();
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
-  const sharedWriteOptions: { tier: DurabilityTier } = {
-    tier: db.getConfig().serverUrl ? "edge" : "local",
-  };
+  const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
+    () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),
+    [db],
+  );
 
   const [showNLastMessages, setShowNLastMessages] = useState(INITIAL_MESSAGES_TO_SHOW);
 
@@ -33,8 +34,11 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
 
   // Auto-join: if the user can see the chat but isn't a member yet, insert a
   // chatMember row so they appear in the member list and can send messages.
-  const myMemberships =
-    useAll(app.chatMembers.where({ chatId, userId: userId ?? "__none__" })) ?? [];
+  const myMembershipsResult = useAll(
+    app.chatMembers.where({ chatId, userId: userId ?? "__none__" }),
+  );
+  const myMemberships = myMembershipsResult ?? [];
+  const membershipKnown = myMembershipsResult !== undefined;
   const isMember = myMemberships.length > 0;
   // autoJoinPending: true while we've started the insert but haven't yet
   // received server acknowledgement.  Used to suppress the isMember shortcut
@@ -50,6 +54,12 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const [membershipReady, setMembershipReady] = useState(false);
 
   useEffect(() => {
+    autoJoined.current = false;
+    autoJoinPending.current = false;
+    setMembershipReady(false);
+  }, [chatId]);
+
+  useEffect(() => {
     // If the local store already shows membership AND we haven't just inserted
     // it ourselves (i.e. this is a pre-existing membership), unlock the
     // composer immediately — no insert needed.
@@ -58,7 +68,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
       return;
     }
 
-    if (!userId || !chatKnown || isMember || autoJoined.current) return;
+    if (!userId || !chatKnown || !membershipKnown || isMember || autoJoined.current) return;
     autoJoined.current = true;
     autoJoinPending.current = true;
 
@@ -73,13 +83,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
         autoJoined.current = false;
         autoJoinPending.current = false;
       });
-  }, [userId, chatKnown, isMember, chatId, db, sharedWriteOptions]);
-
-  useEffect(() => {
-    autoJoined.current = false;
-    autoJoinPending.current = false;
-    setMembershipReady(false);
-  }, [chatId]);
+  }, [userId, chatKnown, membershipKnown, isMember, chatId, db, sharedWriteOptions]);
 
   const observer = useRef<IntersectionObserver | null>(null);
 

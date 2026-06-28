@@ -26,8 +26,8 @@ use crate::ids::{
     SchemaVersionId,
 };
 use crate::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, ResultRowEntry, SchemaVersion, ShapeAst,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    BindingDelta, CurrentWriteSchema, LensOp, MigrationLens, ResultRowEntry, SchemaVersion,
+    ShapeAst, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, MergeStrategy, TableSchema, registered_column_transform};
@@ -333,6 +333,8 @@ struct Clock {
 struct Parking {
     /// Shape registrations waiting for an unknown schema version.
     parked_shape_registrations: BTreeMap<ShapeId, ShapeAst>,
+    /// Binding deltas waiting for their shape registration to become installable.
+    parked_binding_deltas: BTreeMap<ShapeId, Vec<BindingDelta>>,
     /// Commit units waiting for parent transactions or schema context.
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
     /// Catalogue commit units waiting to be applied in dependency order.
@@ -673,6 +675,7 @@ where
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.settled_result_sets.clear();
         self.parking.parked_shape_registrations.clear();
+        self.parking.parked_binding_deltas.clear();
         self.recover_from_storage()?;
         let self_node_alias = self.ensure_node_alias(self.node_uuid)?;
         self.self_node_alias = Some(self_node_alias);

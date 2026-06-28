@@ -28,6 +28,9 @@ pub struct Query {
     pub filters: Vec<Predicate>,
     /// Junction traversals.
     pub joins: Vec<JoinVia>,
+    /// Policy-only disjunctive branches.
+    #[serde(default)]
+    pub policy_branches: Vec<PolicyBranch>,
     /// Recursive reachability traversals.
     pub reachable: Vec<ReachableVia>,
     /// Included reference paths.
@@ -66,6 +69,7 @@ impl Query {
             table: table.into(),
             filters: Vec::new(),
             joins: Vec::new(),
+            policy_branches: Vec::new(),
             reachable: Vec::new(),
             includes: Vec::new(),
             select: None,
@@ -74,6 +78,13 @@ impl Query {
             limit: None,
             offset: 0,
         }
+    }
+
+    /// Add a policy-only OR branch. Runtime query evaluation ignores these;
+    /// row policy checks treat the base query and every branch as alternatives.
+    pub fn policy_branch(mut self, branch: PolicyBranch) -> Self {
+        self.policy_branches.push(branch);
+        self
     }
 
     /// Add a filter.
@@ -112,7 +123,9 @@ impl Query {
             on_column: on_column.into(),
             target: JoinTarget::Column,
             source_column: None,
+            source_lookup: None,
             filters: filters.into_iter().collect(),
+            nested_joins: Vec::new(),
         });
         self
     }
@@ -132,7 +145,71 @@ impl Query {
             on_column: on_column.into(),
             target: JoinTarget::Column,
             source_column: Some(source_column.into()),
+            source_lookup: None,
             filters: filters.into_iter().collect(),
+            nested_joins: Vec::new(),
+        });
+        self
+    }
+
+    /// Add a traversal correlated through a referenced source row.
+    ///
+    /// This expresses `exists table where table.on_column = source.value_column`,
+    /// with `source.id = root.row_id_source_column`.
+    pub fn join_via_source_lookup(
+        mut self,
+        table: impl Into<String>,
+        on_column: impl Into<String>,
+        source_lookup: JoinSourceLookup,
+        filters: impl IntoIterator<Item = Predicate>,
+    ) -> Self {
+        self = self.join_via_source_lookup_with_target(
+            table,
+            on_column,
+            JoinTarget::Column,
+            source_lookup,
+            filters,
+        );
+        self
+    }
+
+    /// Add a traversal correlated through a referenced source row with an explicit target.
+    pub fn join_via_source_lookup_with_target(
+        mut self,
+        table: impl Into<String>,
+        on_column: impl Into<String>,
+        target: JoinTarget,
+        source_lookup: JoinSourceLookup,
+        filters: impl IntoIterator<Item = Predicate>,
+    ) -> Self {
+        self.joins.push(JoinVia {
+            table: table.into(),
+            on_column: on_column.into(),
+            target,
+            source_column: Some(source_lookup.value_column.clone()),
+            source_lookup: Some(source_lookup),
+            filters: filters.into_iter().collect(),
+            nested_joins: Vec::new(),
+        });
+        self
+    }
+
+    /// Add a junction traversal whose matched row must satisfy nested policy joins.
+    pub fn join_via_with_nested_joins(
+        mut self,
+        table: impl Into<String>,
+        on_column: impl Into<String>,
+        filters: impl IntoIterator<Item = Predicate>,
+        nested_joins: impl IntoIterator<Item = JoinVia>,
+    ) -> Self {
+        self.joins.push(JoinVia {
+            table: table.into(),
+            on_column: on_column.into(),
+            target: JoinTarget::Column,
+            source_column: None,
+            source_lookup: None,
+            filters: filters.into_iter().collect(),
+            nested_joins: nested_joins.into_iter().collect(),
         });
         self
     }
@@ -151,7 +228,9 @@ impl Query {
             on_column: "id".to_owned(),
             target: JoinTarget::RowId,
             source_column: Some(source_column.into()),
+            source_lookup: None,
             filters: filters.into_iter().collect(),
+            nested_joins: Vec::new(),
         });
         self
     }
@@ -328,6 +407,44 @@ impl Query {
     /// Validate and canonicalize this query against a Jazz schema.
     pub fn validate(&self, schema: &JazzSchema) -> Result<ValidatedQuery, QueryError> {
         validate_query(self, schema)
+    }
+}
+
+/// One policy-only alternative for authorizing a row.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct PolicyBranch {
+    /// Root-table filters for this policy alternative.
+    pub filters: Vec<Predicate>,
+    /// Junction traversals that must be satisfied for this alternative.
+    pub joins: Vec<JoinVia>,
+    /// Recursive reachability traversals that must be satisfied for this alternative.
+    pub reachable: Vec<ReachableVia>,
+}
+
+impl PolicyBranch {
+    /// Convert a query into a policy branch, discarding query-only output options.
+    pub fn from_query(query: Query) -> Self {
+        Self {
+            filters: query.filters,
+            joins: query.joins,
+            reachable: query.reachable,
+        }
+    }
+
+    pub(crate) fn as_query(&self, table: &str) -> Query {
+        Query {
+            table: table.to_owned(),
+            filters: self.filters.clone(),
+            joins: self.joins.clone(),
+            policy_branches: Vec::new(),
+            reachable: self.reachable.clone(),
+            includes: Vec::new(),
+            select: None,
+            order_by: Vec::new(),
+            aggregate: None,
+            limit: None,
+            offset: 0,
+        }
     }
 }
 
@@ -514,8 +631,26 @@ pub struct JoinVia {
     /// Optional root-table column used for row-correlated policy joins.
     #[serde(default)]
     pub source_column: Option<String>,
+    /// Optional parent-row lookup used when a policy inherited through a
+    /// reference needs to correlate through a column on the referenced row.
+    #[serde(default)]
+    pub source_lookup: Option<JoinSourceLookup>,
     /// Filters evaluated on the junction table.
     pub filters: Vec<Predicate>,
+    /// Additional joins evaluated relative to the joined row.
+    #[serde(default)]
+    pub nested_joins: Vec<JoinVia>,
+}
+
+/// How a [`JoinVia`] derives its target value from a referenced source row.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct JoinSourceLookup {
+    /// Referenced table to look up from the root row.
+    pub table: String,
+    /// Root-table column that stores the referenced row id.
+    pub row_id_source_column: String,
+    /// Column to read from the referenced row and use as this join's target.
+    pub value_column: String,
 }
 
 /// Target-table field used by a [`JoinVia`] traversal.
@@ -943,59 +1078,21 @@ fn validate_query_canonical_parts(
         validate_predicate(&root, predicate, &mut params)?;
     }
     for join in &query.joins {
-        let join_table = table(schema, &join.table)?;
-        match join.target {
-            JoinTarget::Column => {
-                planner_column_type(&join_table, &join.on_column)?;
-            }
-            JoinTarget::RowId => {
-                if join.on_column != "id" {
-                    return Err(QueryError::UnknownColumn {
-                        table: join.table.clone(),
-                        column: join.on_column.clone(),
-                    });
-                }
-            }
-        }
-        let target_table = if let Some(source_column) = &join.source_column {
-            planner_column_type(&root, source_column)?;
-            root.references
-                .get(source_column)
-                .ok_or_else(|| QueryError::JoinNotRefCompatible {
-                    join_table: query.table.clone(),
-                    column: source_column.clone(),
-                    target_table: "referenced table".to_owned(),
-                })?
-        } else {
-            &query.table
-        };
-        match join.target {
-            JoinTarget::Column => match join_table.references.get(&join.on_column) {
-                Some(target) if target == target_table => {}
-                _ => {
-                    return Err(QueryError::JoinNotRefCompatible {
-                        join_table: join.table.clone(),
-                        column: join.on_column.clone(),
-                        target_table: target_table.clone(),
-                    });
-                }
-            },
-            JoinTarget::RowId => {
-                if &join.table != target_table {
-                    return Err(QueryError::JoinNotRefCompatible {
-                        join_table: join.table.clone(),
-                        column: join.on_column.clone(),
-                        target_table: target_table.clone(),
-                    });
-                }
-            }
-        }
-        for predicate in &join.filters {
-            validate_predicate(&join_table, predicate, &mut params)?;
-        }
+        validate_join(schema, &root, &query.table, join, &mut params)?;
     }
     for reachable in &query.reachable {
         validate_reachable(schema, &root, reachable, &mut params)?;
+    }
+    for branch in &query.policy_branches {
+        for predicate in &branch.filters {
+            validate_predicate(&root, predicate, &mut params)?;
+        }
+        for join in &branch.joins {
+            validate_join(schema, &root, &query.table, join, &mut params)?;
+        }
+        for reachable in &branch.reachable {
+            validate_reachable(schema, &root, reachable, &mut params)?;
+        }
     }
     for include in &query.includes {
         validate_include(schema, &root, &include.path)?;
@@ -1016,6 +1113,110 @@ fn validate_query_canonical_parts(
     let normalized = normalize_query(query);
     let canonical = canonical_query_bytes(&normalized);
     Ok((normalized, params, canonical))
+}
+
+fn validate_join(
+    schema: &JazzSchema,
+    root: &TableSchema,
+    root_table: &str,
+    join: &JoinVia,
+    params: &mut BTreeMap<String, ColumnType>,
+) -> Result<(), QueryError> {
+    let join_table = table(schema, &join.table)?;
+    match join.target {
+        JoinTarget::Column => {
+            planner_column_type(&join_table, &join.on_column)?;
+        }
+        JoinTarget::RowId => {
+            if join.on_column != "id" {
+                return Err(QueryError::UnknownColumn {
+                    table: join.table.clone(),
+                    column: join.on_column.clone(),
+                });
+            }
+        }
+    }
+    let target_table = if let Some(lookup) = &join.source_lookup {
+        planner_column_type(root, &lookup.row_id_source_column)?;
+        let lookup_table = table(schema, &lookup.table)?;
+        match root.references.get(&lookup.row_id_source_column) {
+            Some(target) if target == &lookup.table => {}
+            _ => {
+                return Err(QueryError::JoinNotRefCompatible {
+                    join_table: root_table.to_owned(),
+                    column: lookup.row_id_source_column.clone(),
+                    target_table: lookup.table.clone(),
+                });
+            }
+        }
+        if lookup.value_column != "id" {
+            planner_column_type(&lookup_table, &lookup.value_column)?;
+        }
+        if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: lookup.table.clone(),
+                column: lookup.value_column.clone(),
+                target_table: "join source column".to_owned(),
+            });
+        }
+        if lookup.value_column == "id" {
+            lookup.table.clone()
+        } else {
+            lookup_table
+                .references
+                .get(&lookup.value_column)
+                .cloned()
+                .ok_or_else(|| QueryError::JoinNotRefCompatible {
+                    join_table: lookup.table.clone(),
+                    column: lookup.value_column.clone(),
+                    target_table: "referenced table".to_owned(),
+                })?
+        }
+    } else if let Some(source_column) = &join.source_column {
+        if source_column == "id" {
+            root_table.to_owned()
+        } else {
+            planner_column_type(root, source_column)?;
+            root.references.get(source_column).cloned().ok_or_else(|| {
+                QueryError::JoinNotRefCompatible {
+                    join_table: root_table.to_owned(),
+                    column: source_column.clone(),
+                    target_table: "referenced table".to_owned(),
+                }
+            })?
+        }
+    } else {
+        root_table.to_owned()
+    };
+    match join.target {
+        JoinTarget::Column => match join_table.references.get(&join.on_column) {
+            Some(target) if target == &target_table => {}
+            None if join.on_column == "id" && join.table == target_table => {}
+            _ => {
+                return Err(QueryError::JoinNotRefCompatible {
+                    join_table: join.table.clone(),
+                    column: join.on_column.clone(),
+                    target_table: target_table.to_owned(),
+                });
+            }
+        },
+        JoinTarget::RowId => {
+            if join.table != target_table {
+                return Err(QueryError::JoinNotRefCompatible {
+                    join_table: join.table.clone(),
+                    column: join.on_column.clone(),
+                    target_table: target_table.to_owned(),
+                });
+            }
+        }
+    }
+    for predicate in &join.filters {
+        validate_predicate(&join_table, predicate, params)?;
+    }
+    for nested in &join.nested_joins {
+        validate_join(schema, &join_table, &join.table, nested, params)?;
+    }
+    Ok(())
 }
 
 fn validate_aggregate(table: &TableSchema, aggregate: &AggregateQuery) -> Result<(), QueryError> {
@@ -1368,7 +1569,7 @@ fn claim_type(name: &str) -> Result<Option<ColumnType>, QueryError> {
         "user_id" => Ok(None),
         "team" => Ok(Some(ColumnType::Uuid)),
         "isAdmin" => Ok(Some(ColumnType::Bool)),
-        _ => Err(QueryError::UnknownParam(format!("claim:{name}"))),
+        _ => Ok(None),
     }
 }
 
@@ -1397,8 +1598,27 @@ fn normalize_query(query: &Query) -> Query {
     query.filters.sort_by_key(canonical_predicate_key);
     for join in &mut query.joins {
         join.filters.sort_by_key(canonical_predicate_key);
+        normalize_join(join);
     }
     query.joins.sort_by_key(canonical_join_key);
+    for branch in &mut query.policy_branches {
+        branch.filters.sort_by_key(canonical_predicate_key);
+        for join in &mut branch.joins {
+            join.filters.sort_by_key(canonical_predicate_key);
+            normalize_join(join);
+        }
+        branch.joins.sort_by_key(canonical_join_key);
+        for reachable in &mut branch.reachable {
+            reachable
+                .access_filters
+                .sort_by_key(canonical_predicate_key);
+            reachable.edge_filters.sort_by_key(canonical_predicate_key);
+        }
+        branch.reachable.sort_by_key(canonical_reachable_key);
+    }
+    query
+        .policy_branches
+        .sort_by_key(canonical_policy_branch_key);
     for reachable in &mut query.reachable {
         reachable
             .access_filters
@@ -1416,6 +1636,31 @@ fn normalize_query(query: &Query) -> Query {
         aggregate.aggregates.sort_by_key(canonical_aggregate_key);
     }
     query
+}
+
+fn normalize_join(join: &mut JoinVia) {
+    for nested in &mut join.nested_joins {
+        nested.filters.sort_by_key(canonical_predicate_key);
+        normalize_join(nested);
+    }
+    join.nested_joins.sort_by_key(canonical_join_key);
+}
+
+fn canonical_policy_branch_key(branch: &PolicyBranch) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    put_len(&mut bytes, branch.filters.len());
+    for filter in &branch.filters {
+        put_bytes(&mut bytes, &canonical_predicate_key(filter));
+    }
+    put_len(&mut bytes, branch.joins.len());
+    for join in &branch.joins {
+        put_bytes(&mut bytes, &canonical_join_key(join));
+    }
+    put_len(&mut bytes, branch.reachable.len());
+    for reachable in &branch.reachable {
+        put_bytes(&mut bytes, &canonical_reachable_key(reachable));
+    }
+    bytes
 }
 
 fn canonical_aggregate_key(aggregate: &Aggregate) -> Vec<u8> {
@@ -1464,6 +1709,19 @@ fn canonical_join_key(join: &JoinVia) -> Vec<u8> {
     if let Some(column) = &join.source_column {
         bytes.push(b's');
         put_str(&mut bytes, column);
+    }
+    if let Some(lookup) = &join.source_lookup {
+        bytes.push(b'l');
+        put_str(&mut bytes, &lookup.table);
+        put_str(&mut bytes, &lookup.row_id_source_column);
+        put_str(&mut bytes, &lookup.value_column);
+    }
+    if !join.nested_joins.is_empty() {
+        bytes.push(b'j');
+        put_len(&mut bytes, join.nested_joins.len());
+        for nested in &join.nested_joins {
+            put_bytes(&mut bytes, &canonical_join_key(nested));
+        }
     }
     for filter in &join.filters {
         put_bytes(&mut bytes, &canonical_predicate_key(filter));
@@ -1593,6 +1851,13 @@ fn canonical_query_bytes(query: &Query) -> Vec<u8> {
     put_len(&mut bytes, query.joins.len());
     for join in &query.joins {
         put_bytes(&mut bytes, &canonical_join_key(join));
+    }
+    if !query.policy_branches.is_empty() {
+        bytes.push(b'b');
+        put_len(&mut bytes, query.policy_branches.len());
+        for branch in &query.policy_branches {
+            put_bytes(&mut bytes, &canonical_policy_branch_key(branch));
+        }
     }
     if !query.reachable.is_empty() {
         bytes.push(b'r');

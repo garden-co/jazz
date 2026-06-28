@@ -73,6 +73,21 @@ export type PersistentBrowserOpfsOwnerRequest =
     }
   | {
       id: number;
+      method: "beginTransaction";
+      args: [kind: "mergeable" | "exclusive"];
+    }
+  | {
+      id: number;
+      method: "commitTransaction";
+      args: [transactionId: string];
+    }
+  | {
+      id: number;
+      method: "rollbackTransaction";
+      args: [transactionId: string];
+    }
+  | {
+      id: number;
       method: "query";
       args: [
         queryJson: string,
