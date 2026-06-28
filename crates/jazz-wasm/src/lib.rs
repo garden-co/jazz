@@ -145,19 +145,6 @@ struct WasmRow<'a> {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct WasmRemovedRow {
-    table: String,
-    row_id: RowUuid,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmSubscriptionDelta<'a> {
-    added: Vec<WasmRowBatch<'a>>,
-    updated: Vec<WasmRowBatch<'a>>,
-    removed: Vec<WasmRemovedRow>,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub struct WasmWriteResult {
     row_id: RowUuid,
     tx_id: jazz::tx::TxId,
@@ -1615,29 +1602,17 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;
         }
         SubscriptionEvent::Delta {
-            added,
-            updated,
-            removed,
+            current,
             settled,
             tier,
+            ..
         } => {
-            let delta = postcard::to_allocvec(&WasmSubscriptionDelta {
-                added: row_batches(&added),
-                updated: row_batches(&updated),
-                removed: removed
-                    .into_iter()
-                    .map(|removed| WasmRemovedRow {
-                        table: removed.table,
-                        row_id: removed.row_uuid,
-                    })
-                    .collect(),
-            })
-            .map_err(to_js_error)?;
-            set_prop(&object, "type", JsValue::from_str("delta"))?;
+            let rows = postcard::to_allocvec(&row_batches(&current)).map_err(to_js_error)?;
+            set_prop(&object, "type", JsValue::from_str("snapshot"))?;
             set_prop(
                 &object,
-                "delta",
-                js_sys::Uint8Array::from(delta.as_slice()).into(),
+                "rows",
+                js_sys::Uint8Array::from(rows.as_slice()).into(),
             )?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;

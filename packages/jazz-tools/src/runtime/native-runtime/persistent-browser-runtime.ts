@@ -265,10 +265,15 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
-    this.closed = true;
-    this.closing = false;
-    this.worker.terminate();
-    this.resolveAll();
+    try {
+      await this.opened;
+      await Promise.allSettled(this.writes.values());
+    } finally {
+      this.closed = true;
+      this.closing = false;
+      this.worker.terminate();
+      this.resolveAll();
+    }
   }
 
   async clearClientStorage(): Promise<void> {
