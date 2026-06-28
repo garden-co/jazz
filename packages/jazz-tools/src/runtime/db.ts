@@ -1556,6 +1556,7 @@ export class Db {
       builtQuery.table,
       queryOptions,
     );
+    callback(manager.seed([]));
     startNativeSubscription();
     if (this.config.serverUrl && queryOptions.propagation !== "local-only") {
       void this.all(query, { ...queryOptions, tier: "local", propagation: "local-only" })
