@@ -782,6 +782,7 @@ mod tests {
     use jazz::groove::schema::ColumnType as CoreColumnType;
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::NodeUuid;
+    use jazz::query::{Query, claim, col, eq};
     use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
     use jazz::tx::DurabilityTier;
     use jazz::wire::decode_frame;
@@ -945,6 +946,24 @@ mod tests {
 
     fn ws_public_schema_convert() -> JazzSchema {
         JazzSchema::new([ws_todos_table_schema()])
+    }
+
+    fn ws_private_docs_table_schema() -> TableSchema {
+        TableSchema::new(
+            "docs",
+            [
+                ColumnSchema::new("title", CoreColumnType::String),
+                ColumnSchema::new("owner", CoreColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("docs").filter(eq(col("owner"), claim("user_id"))),
+        ))
+        .with_write_policy(Policy::public())
+    }
+
+    fn ws_private_docs_schema_convert() -> JazzSchema {
+        JazzSchema::new([ws_private_docs_table_schema()])
     }
 
     async fn make_ws_convergence_test_state() -> Arc<ServerState> {
@@ -1129,6 +1148,23 @@ mod tests {
         .into_bytes()
     }
 
+    fn ws_session_prelude(identity: AuthorId) -> Vec<u8> {
+        let user_id = uuid::Uuid::from_bytes(*identity.as_bytes()).to_string();
+        serde_json::json!({
+            "peer_identity": hex::encode(identity.as_bytes()),
+            "auth": {
+                "backend_secret": "backend-secret",
+                "backend_session": {
+                    "user_id": user_id,
+                    "claims": {},
+                    "authMode": "external",
+                }
+            }
+        })
+        .to_string()
+        .into_bytes()
+    }
+
     fn ws_client_hello_batch() -> Vec<u8> {
         let hello = WireFrame::Hello(WireHello::current(
             WirePeerRole::Client,
@@ -1144,10 +1180,28 @@ mod tests {
         identity: AuthorId,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
+        open_negotiated_ws_with_prelude(addr, state, ws_prelude(identity)).await
+    }
+
+    async fn open_negotiated_ws_session(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        identity: AuthorId,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        open_negotiated_ws_with_prelude(addr, state, ws_session_prelude(identity)).await
+    }
+
+    async fn open_negotiated_ws_with_prelude(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        prelude: Vec<u8>,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
             .expect("connect websocket");
-        ws.send(WsMessage::Binary(ws_prelude(identity).into()))
+        ws.send(WsMessage::Binary(prelude.into()))
             .await
             .expect("send websocket prelude");
         ws.send(WsMessage::Binary(ws_client_hello_batch().into()))
@@ -1265,6 +1319,20 @@ mod tests {
                 .row_uuid()
         }
 
+        fn insert_private_doc(&self, title: &str, owner: AuthorId) -> jazz::ids::RowUuid {
+            let owner = uuid::Uuid::from_bytes(*owner.as_bytes()).to_string();
+            self.db
+                .insert(
+                    "docs",
+                    RowCells::from([
+                        ("title".to_owned(), CoreValue::String(title.to_owned())),
+                        ("owner".to_owned(), CoreValue::String(owner)),
+                    ]),
+                )
+                .expect("insert client doc")
+                .row_uuid()
+        }
+
         fn tick_take(&self) -> Vec<Vec<u8>> {
             self.db.tick().expect("tick client db");
             self.transport.take_outbound()
@@ -1280,6 +1348,21 @@ mod tests {
                 .db
                 .prepare_query(&self.db.table("todos"))
                 .expect("prepare todos query");
+            self.db.propagate_query_with_opts(
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..Default::default()
+                },
+            );
+            query
+        }
+
+        fn propagate_table_query(&self, table: &str) -> PreparedQuery {
+            let query = self
+                .db
+                .prepare_query(&self.db.table(table))
+                .expect("prepare table query");
             self.db.propagate_query_with_opts(
                 &query,
                 ReadOpts {
@@ -1307,6 +1390,25 @@ mod tests {
                 .expect("read edge todos")
                 .into_iter()
                 .filter_map(|row| match row.cell(&self.todos_table, "title") {
+                    Some(CoreValue::String(title)) => Some(title.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        async fn edge_titles(&self, query: &PreparedQuery, table: &TableSchema) -> Vec<String> {
+            self.db
+                .all(
+                    query,
+                    ReadOpts {
+                        tier: DurabilityTier::Edge,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("read edge rows")
+                .into_iter()
+                .filter_map(|row| match row.cell(table, "title") {
                     Some(CoreValue::String(title)) => Some(title.clone()),
                     _ => None,
                 })
@@ -1500,6 +1602,66 @@ mod tests {
         assert_eq!(
             client_b.edge_todo_titles(&client_b_todos).await,
             vec!["after empty coverage".to_owned()]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_reader_query_covered_empty_when_existing_row_hidden_by_read_policy() {
+        let schema = ws_private_docs_schema_convert();
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_core_server_shell_schema(schema.clone())
+            .build()
+            .await
+            .expect("build websocket private docs test state")
+            .state;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorId::from_bytes([0xa1; 16]);
+        let bob = AuthorId::from_bytes([0xb2; 16]);
+        let client_a = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
+        let mut ws_a = open_negotiated_ws_session(addr, &state, alice).await;
+        let _inserted = client_a.insert_private_doc("alice private", alice);
+
+        let start = tokio::time::Instant::now();
+        let mut writer_sent = 0;
+        while writer_sent == 0 && start.elapsed() < WS_PUMP_DEADLINE {
+            let (sent, _) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
+            writer_sent += sent;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            writer_sent > 0,
+            "Alice must upload the private row through the websocket route"
+        );
+
+        let docs_table = ws_private_docs_table_schema();
+        let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
+        let mut ws_b = open_negotiated_ws_session(addr, &state, bob).await;
+        let client_b_docs = client_b.propagate_table_query("docs");
+
+        let start = tokio::time::Instant::now();
+        while !client_b.edge_query_is_covered(&client_b_docs) && start.elapsed() < WS_PUMP_DEADLINE
+        {
+            let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            client_b.edge_query_is_covered(&client_b_docs),
+            "Bob's docs query must be covered by the websocket route"
+        );
+        assert!(
+            client_b
+                .edge_titles(&client_b_docs, &docs_table)
+                .await
+                .is_empty(),
+            "Bob must receive empty edge rows for Alice's private row"
         );
     }
 

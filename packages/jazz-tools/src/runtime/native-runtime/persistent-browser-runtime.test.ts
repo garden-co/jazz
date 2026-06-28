@@ -177,6 +177,60 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
+  it("orders edge reads after prior edge durability waits", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-edge-read-after-wait-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    const insert = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "edge read after wait" } },
+      undefined,
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+
+    const connectMessage = worker.messages.find((message) => message.method === "connect");
+    const insertMessage = worker.messages.find((message) => message.method === "insert");
+    worker.respond(connectMessage!.id, undefined);
+    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+
+    const waitPromise = runtime.waitForTransaction(insert.transactionId, "edge");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
+    });
+    const waitMessage = worker.messages.find((message) => message.method === "waitForTransaction");
+
+    const queryPromise = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(worker.messages.some((message) => message.method === "query")).toBe(false);
+
+    worker.respond(waitMessage!.id, undefined);
+    await waitPromise;
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+    const queryMessage = worker.messages.find((message) => message.method === "query");
+    expect(queryMessage?.args).toEqual([JSON.stringify({ table: "todos" }), null, "edge", null]);
+    worker.respond(queryMessage!.id, []);
+
+    await expect(queryPromise).resolves.toEqual([]);
+    await runtime.close();
+  });
+
   it("waits for the worker connect command before server-backed reads subscribe", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 

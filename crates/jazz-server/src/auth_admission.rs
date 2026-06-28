@@ -433,6 +433,9 @@ fn number_to_policy_claim(number: Number) -> Result<Value, AuthAdmissionError> {
 
 /// Deterministically map an auth subject to a Jazz author id.
 pub fn author_id_from_subject(subject: &str) -> AuthorId {
+    if let Ok(uuid) = uuid::Uuid::parse_str(subject.trim()) {
+        return AuthorId::from_bytes(*uuid.as_bytes());
+    }
     let mut lanes = [0xcbf29ce484222325_u64, 0x84222325cbf29ce4_u64];
     for (index, byte) in subject.as_bytes().iter().copied().enumerate() {
         let lane = index & 1;
@@ -452,4 +455,18 @@ pub fn bearer_from_authorization(value: &str) -> Option<&str> {
         .strip_prefix("Bearer ")
         .or_else(|| value.strip_prefix("bearer "))
         .filter(|token| !token.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uuid_subjects_preserve_author_identity() {
+        let subject = "00000000-0000-4000-8000-0000000000b2";
+        assert_eq!(
+            author_id_from_subject(subject),
+            AuthorId::from_bytes(*uuid::Uuid::parse_str(subject).unwrap().as_bytes())
+        );
+    }
 }

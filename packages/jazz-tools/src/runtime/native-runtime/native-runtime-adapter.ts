@@ -193,6 +193,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransportErrorWaiters: Array<(error: Error) => void> = [];
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
+  private coreTickScheduled = false;
+  private coreTickRunning = false;
+  private coreTickAgain = false;
   private serverPumpScheduled = false;
   private serverPumpAgain = false;
   private closed = false;
@@ -458,7 +461,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const query = this.prepareQuery(queryJson);
     const session = readSession(sessionJson);
     const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
-    await this.propagateQueryIfNeeded(tier, optionsJson, query);
+    await this.propagateQueryIfNeeded(tier, optionsJson, query, session);
     const rows = session
       ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
       : this.db.all(query, opts);
@@ -638,6 +641,7 @@ export class NativeRuntimeAdapter implements Runtime {
     tier: string | null | undefined,
     optionsJson: string | null | undefined,
     query: PreparedQuery,
+    session: { user_id: string } | null,
   ): Promise<void> {
     if (tier == null || tier === "local") return;
     const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
@@ -645,7 +649,11 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.propagateQuery) return;
     this.db.propagateQuery(query, readOptions(tier, false, optionsJson));
     if (!this.db.queryIsCovered) return;
-    await this.waitForQueryCoverage(query);
+    await this.waitForQueryCoverage(
+      query,
+      readOptions(tier, false, optionsJson),
+      session ? parseUuid(session.user_id) : undefined,
+    );
   }
 
   private propagateSubscriptionQueryIfNeeded(
@@ -662,13 +670,29 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
-  private async waitForQueryCoverage(query: PreparedQuery): Promise<void> {
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+  private async waitForQueryCoverage(
+    query: PreparedQuery,
+    opts: unknown,
+    identity?: Uint8Array,
+  ): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
       this.pumpServerTransport();
       if (this.db.queryIsCovered?.(query)) return;
+      try {
+        if (identity) {
+          this.db.allForIdentity(query, identity, opts);
+        } else {
+          this.db.all(query, opts);
+        }
+        return;
+      } catch (error) {
+        if (!isPendingCoverageError(error)) throw error;
+      }
       await sleep(10);
     }
     this.scheduleServerPump();
+    throw new Error("Timed out waiting for edge query coverage");
   }
 
   private table(table: string): { columns: ColumnDescriptor[]; policies?: TablePolicies } {
@@ -747,14 +771,42 @@ export class NativeRuntimeAdapter implements Runtime {
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
     if (this.closed) return;
     if (urgency === "immediate") {
-      this.pumpSubscriptions();
-      this.scheduleServerPump();
+      this.scheduleCoreTick();
       return;
     }
     queueMicrotask(() => {
+      this.scheduleCoreTick();
+    });
+  }
+
+  private scheduleCoreTick(): void {
+    if (this.closed) return;
+    if (this.coreTickRunning) {
+      this.coreTickAgain = true;
+      return;
+    }
+    if (this.coreTickScheduled) return;
+    this.coreTickScheduled = true;
+    queueMicrotask(() => {
+      this.coreTickScheduled = false;
+      this.runCoreTick();
+    });
+  }
+
+  private runCoreTick(): void {
+    if (this.closed || this.coreTickRunning) return;
+    this.coreTickRunning = true;
+    try {
+      this.db.tick();
       this.pumpSubscriptions();
       this.scheduleServerPump();
-    });
+    } finally {
+      this.coreTickRunning = false;
+    }
+    if (this.coreTickAgain) {
+      this.coreTickAgain = false;
+      this.scheduleCoreTick();
+    }
   }
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
@@ -1062,6 +1114,15 @@ function isPendingWaitError(error: unknown): boolean {
   return (
     message.includes("NotObserved") ||
     message.includes("has not been accepted at requested tier") ||
+    message.includes("has not reached requested tier")
+  );
+}
+
+function isPendingCoverageError(error: unknown): boolean {
+  const message = errorMessage(error);
+  return (
+    message.includes("NotCovered") ||
+    message.includes("not covered") ||
     message.includes("has not reached requested tier")
   );
 }

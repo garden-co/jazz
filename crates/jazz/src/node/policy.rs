@@ -7,14 +7,45 @@
 
 use super::*;
 
-#[derive(Default)]
 pub(super) struct ViewEvaluationContext {
+    policy_read_tier: DurabilityTier,
     pub(super) tx_read_policy_atomic: BTreeMap<(TxId, AuthorId), bool>,
     pub(super) tx_rows: BTreeMap<TxId, Option<StoredTransaction>>,
     tx_versions: BTreeMap<TxId, Vec<VersionRow>>,
-    result_entry_read_policy: BTreeMap<(String, RowUuid, TxId, AuthorId), bool>,
-    version_read_policy: BTreeMap<(String, RowUuid, TxId, VersionLayer, AuthorId, bool), bool>,
+    result_entry_read_policy: BTreeMap<(String, RowUuid, TxId, AuthorId, DurabilityTier), bool>,
+    version_read_policy: BTreeMap<
+        (
+            String,
+            RowUuid,
+            TxId,
+            VersionLayer,
+            AuthorId,
+            bool,
+            DurabilityTier,
+        ),
+        bool,
+    >,
     policy_join_rows_by_value: BTreeMap<PolicyJoinRowsKey, BTreeMap<Vec<u8>, Vec<CurrentRow>>>,
+}
+
+impl Default for ViewEvaluationContext {
+    fn default() -> Self {
+        Self::for_policy_read_tier(DurabilityTier::Global)
+    }
+}
+
+impl ViewEvaluationContext {
+    pub(super) fn for_policy_read_tier(policy_read_tier: DurabilityTier) -> Self {
+        Self {
+            policy_read_tier,
+            tx_read_policy_atomic: BTreeMap::new(),
+            tx_rows: BTreeMap::new(),
+            tx_versions: BTreeMap::new(),
+            result_entry_read_policy: BTreeMap::new(),
+            version_read_policy: BTreeMap::new(),
+            policy_join_rows_by_value: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -22,6 +53,7 @@ struct PolicyJoinRowsKey {
     schema_version: SchemaVersionId,
     table: String,
     on_column: String,
+    tier: DurabilityTier,
 }
 
 impl<S> NodeState<S>
@@ -81,7 +113,13 @@ where
         identity: AuthorId,
         context: &mut ViewEvaluationContext,
     ) -> Result<bool, Error> {
-        let key = (table_name.to_owned(), row_uuid, tx_id, identity);
+        let key = (
+            table_name.to_owned(),
+            row_uuid,
+            tx_id,
+            identity,
+            context.policy_read_tier,
+        );
         if let Some(allows) = context.result_entry_read_policy.get(&key) {
             return Ok(*allows);
         }
@@ -223,13 +261,17 @@ where
             version.layer(),
             identity,
             false,
+            context.policy_read_tier,
         );
         if let Some(allows) = context.version_read_policy.get(&key) {
             return Ok(*allows);
         }
         let (table, cells) = self.policy_projection_for_version_row(version)?;
         let allows = if let Some(policy) = table.read_policy.clone() {
-            if policy.joins.is_empty() && policy.reachable.is_empty() {
+            if policy.joins.is_empty()
+                && policy.reachable.is_empty()
+                && policy.policy_branches.is_empty()
+            {
                 self.policy_filters_allow(&table, &policy, identity, |column| {
                     cells.get(column).cloned()
                 })?
@@ -283,6 +325,7 @@ where
             version.layer(),
             identity,
             true,
+            context.policy_read_tier,
         );
         if let Some(allows) = context.version_read_policy.get(&key) {
             return Ok(*allows);
@@ -375,25 +418,12 @@ where
         &mut self,
         table: &TableSchema,
         row_uuid: RowUuid,
+        tier: DurabilityTier,
     ) -> Result<Option<CurrentRow>, Error> {
-        for tier in [
-            DurabilityTier::Global,
-            DurabilityTier::Edge,
-            DurabilityTier::Local,
-        ] {
-            if let Some(row) = self
-                .current_rows_for_schema(
-                    &table.name,
-                    self.catalogue.current_schema_version_id,
-                    tier,
-                )?
-                .into_iter()
-                .find(|row| row.row_uuid() == row_uuid)
-            {
-                return Ok(Some(row));
-            }
-        }
-        Ok(None)
+        Ok(self
+            .current_rows_for_schema(&table.name, self.catalogue.current_schema_version_id, tier)?
+            .into_iter()
+            .find(|row| row.row_uuid() == row_uuid))
     }
 
     fn policy_delete_subject_row(
@@ -434,7 +464,9 @@ where
             }
         }
 
-        if let Some(current) = self.policy_current_row(table, version.row_uuid())? {
+        if let Some(current) =
+            self.policy_current_row(table, version.row_uuid(), DurabilityTier::Global)?
+        {
             return Ok(Some(current));
         }
 
@@ -496,7 +528,14 @@ where
         if !self.policy_joins_allow(table, policy, row_uuid, identity, column_value)? {
             return Ok(false);
         }
-        self.policy_reachable_allow(table, policy, row_uuid, identity, column_value)
+        self.policy_reachable_allow(
+            table,
+            policy,
+            row_uuid,
+            identity,
+            column_value,
+            DurabilityTier::Global,
+        )
     }
 
     fn policy_allows_memo(
@@ -559,7 +598,14 @@ where
         )? {
             return Ok(false);
         }
-        self.policy_reachable_allow(table, policy, row_uuid, identity, column_value)
+        self.policy_reachable_allow(
+            table,
+            policy,
+            row_uuid,
+            identity,
+            column_value,
+            context.policy_read_tier,
+        )
     }
 
     pub(super) fn policy_filters_allow_current_row(
@@ -676,7 +722,13 @@ where
     ) -> Result<bool, Error> {
         for join in &policy.joins {
             let join_table = self.table(&join.table)?.clone();
-            let target = self.policy_join_target_value(table, join, row_uuid, column_value)?;
+            let target = self.policy_join_target_value(
+                table,
+                join,
+                row_uuid,
+                column_value,
+                DurabilityTier::Global,
+            )?;
             let Some(target) = target else {
                 return Ok(false);
             };
@@ -722,6 +774,7 @@ where
         join: &crate::query::JoinVia,
         row_uuid: RowUuid,
         column_value: &mut dyn FnMut(&str) -> Option<Value>,
+        tier: DurabilityTier,
     ) -> Result<Option<Value>, Error> {
         if let Some(lookup) = &join.source_lookup {
             let Some(Value::Uuid(parent_row_uuid)) = column_value(&lookup.row_id_source_column)
@@ -730,7 +783,7 @@ where
             };
             let lookup_table = self.table(&lookup.table)?.clone();
             let Some(parent_row) =
-                self.policy_current_row(&lookup_table, RowUuid(parent_row_uuid))?
+                self.policy_current_row(&lookup_table, RowUuid(parent_row_uuid), tier)?
             else {
                 return Ok(None);
             };
@@ -756,6 +809,7 @@ where
         row_uuid: RowUuid,
         identity: AuthorId,
         mut column_value: impl FnMut(&str) -> Option<Value>,
+        tier: DurabilityTier,
     ) -> Result<bool, Error> {
         for reachable in &policy.reachable {
             let Some(Value::Uuid(seed)) =
@@ -781,7 +835,7 @@ where
             let edge_rows = self.current_rows_for_schema(
                 &reachable.edge_table,
                 self.catalogue.current_schema_version_id,
-                DurabilityTier::Global,
+                tier,
             )?;
             for _ in 0..reachable.max_depth.max(1) {
                 let before = reachable_teams.len();
@@ -832,7 +886,7 @@ where
             for access_row in self.current_rows_for_schema(
                 &reachable.access_table,
                 self.catalogue.current_schema_version_id,
-                DurabilityTier::Global,
+                tier,
             )? {
                 if !self.policy_filters_allow_current_row(
                     &access_table,
@@ -878,7 +932,13 @@ where
     ) -> Result<bool, Error> {
         for join in &policy.joins {
             let join_table = self.table(&join.table)?.clone();
-            let target = self.policy_join_target_value(table, join, row_uuid, &mut column_value)?;
+            let target = self.policy_join_target_value(
+                table,
+                join,
+                row_uuid,
+                &mut column_value,
+                context.policy_read_tier,
+            )?;
             let Some(target) = target else {
                 return Ok(false);
             };
@@ -930,13 +990,14 @@ where
             schema_version: self.catalogue.current_schema_version_id,
             table: join.table.clone(),
             on_column: join.on_column.clone(),
+            tier: context.policy_read_tier,
         };
         if !context.policy_join_rows_by_value.contains_key(&key) {
             let mut rows_by_target: BTreeMap<Vec<u8>, Vec<CurrentRow>> = BTreeMap::new();
             for row in self.current_rows_for_schema(
                 &join.table,
                 self.catalogue.current_schema_version_id,
-                DurabilityTier::Global,
+                context.policy_read_tier,
             )? {
                 if let Some(value) = policy_join_row_value(&row, join_table, &join.on_column)
                     && let Some(key) = policy_value_key(&value)
