@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -109,7 +109,7 @@ describe("Invite Flow E2E", () => {
   // -------------------------------------------------------------------------
 
   it("allows a user to join a private chat via invite link", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = TEST_SERVER_URL;
     const randomSecret = `Secret-${Math.random().toString(36).substring(7)}`;
     let inviteLink = "";
 

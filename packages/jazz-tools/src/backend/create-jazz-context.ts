@@ -152,6 +152,7 @@ class BackendDb extends Db {
   constructor(
     config: DbConfig,
     coreSource: RuntimeSource<DbConfig>,
+    private readonly runtimeSchema: WasmSchema,
     private readonly operationContext: { session?: Session; attribution?: string } | null,
     scopedAuthState?: AuthState,
   ) {
@@ -173,6 +174,10 @@ class BackendDb extends Db {
     readSession?: Session;
   } | null {
     return this.operationContext;
+  }
+
+  protected override getClient(_schema: WasmSchema): JazzClient {
+    return super.getClient(this.runtimeSchema);
   }
 }
 
@@ -252,13 +257,16 @@ export class JazzContext {
       userBranch: this.config.userBranch,
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
+      backendSecret: this.config.backendSecret,
     };
   }
 
   private wrapDb(session?: Session, attribution?: string, backendScoped = false): Db {
+    const schema = this.resolveSchema();
     return new BackendDb(
       this.buildDbConfig(),
       this.coreSource,
+      schema,
       session || attribution ? { session, attribution } : null,
       backendScoped
         ? {

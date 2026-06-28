@@ -105,7 +105,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         return;
       }
       case "updateAuth": {
-        getRuntime().updateAuth(...message.args);
+        await getRuntime().updateAuth(...message.args);
         postResult(message.id, undefined);
         return;
       }
