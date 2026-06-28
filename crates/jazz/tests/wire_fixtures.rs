@@ -3,9 +3,9 @@ use groove::schema::ColumnType;
 use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::node::content_store::Extent;
 use jazz::protocol::{
-    BindingDelta, CatalogueAck, ContentExtent, CurrentWriteSchema, LensOp, MigrationLens,
-    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, SchemaVersion, ShapeAst,
-    SubscriptionKey, SyncMessage, TableLens,
+    CatalogueAck, ContentExtent, CurrentWriteSchema, LensOp, MigrationLens, PeerPayloadInventory,
+    RegisterShapeOptions, ResultRowEntry, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
+    SyncMessage, TableLens,
 };
 use jazz::query::{BindingId, Query, ShapeId};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
@@ -83,12 +83,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
-            "binding_delta_empty_todos_binding",
-            "BindingDelta",
-            SyncMessage::BindingDelta(BindingDelta {
+            "subscribe_empty_todos_binding",
+            "Subscribe",
+            SyncMessage::Subscribe(Subscribe {
                 shape_id,
-                adds: vec![(binding_id, Vec::new())],
-                removes: Vec::new(),
+                subscription,
+                values: Vec::new(),
             }),
         ),
         (
@@ -184,11 +184,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 lens: Some(MigrationLensId::from_bytes([0x66; 16])),
                 applied: true,
             }),
-        ),
-        (
-            "rehydrate_todos_subscription",
-            "Rehydrate",
-            SyncMessage::Rehydrate { subscription },
         ),
         (
             "fetch_content_extent_body",

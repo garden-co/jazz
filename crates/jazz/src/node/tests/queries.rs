@@ -334,10 +334,13 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         .unwrap();
     let values = vec![Value::String("match".to_owned())];
 
-    node.apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
+    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
-        adds: vec![(binding.binding_id(), values.clone())],
-        removes: Vec::new(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+        },
+        values: values.clone(),
     }))
     .unwrap();
     assert!(
@@ -361,28 +364,24 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             .contains_key(&binding.binding_id())
     );
     assert!(matches!(
-        node.apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
+        node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
             shape_id: shape.shape_id(),
-            adds: vec![(binding.binding_id(), Vec::new())],
-            removes: Vec::new(),
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+            },
+            values: Vec::new(),
         })),
         Err(Error::InvalidStoredValue("binding arity mismatch"))
     ));
-    assert!(matches!(
-        node.apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
-            shape_id: shape.shape_id(),
-            adds: vec![(BindingId(uuid::Uuid::from_bytes([9; 16])), values.clone())],
-            removes: Vec::new(),
-        })),
-        Err(Error::InvalidStoredValue(
-            "binding id does not match values"
-        ))
-    ));
 
-    node.apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
+    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
-        adds: vec![(binding.binding_id(), values)],
-        removes: Vec::new(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+        },
+        values,
     }))
     .unwrap();
     assert!(
@@ -398,11 +397,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
     };
     node.query.settled_result_sets
         .insert(subscription, BTreeSet::new());
-    node.apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
-        shape_id: shape.shape_id(),
-        adds: Vec::new(),
-        removes: vec![binding.binding_id()],
-    }))
+    node.apply_sync_message(SyncMessage::Unsubscribe { subscription })
     .unwrap();
     assert!(
         !node.query.registered_bindings

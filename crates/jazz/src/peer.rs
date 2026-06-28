@@ -455,6 +455,20 @@ impl PeerState {
         self.query_update_inner(node, shape, binding)
     }
 
+    /// Build an incremental view update addressed to a usage-site subscription.
+    pub fn query_update_for_subscription<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        self.query_update_inner_for_subscription(node, subscription, shape, binding)
+    }
+
     #[cfg(test)]
     pub(crate) fn track_query_for_test<S>(
         &mut self,
@@ -500,6 +514,19 @@ impl PeerState {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
         };
+        self.query_update_inner_for_subscription(node, subscription, shape, binding)
+    }
+
+    fn query_update_inner_for_subscription<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
         self.clear_stale_groove_runtime_handles(node, subscription);
         let Some(state) = self.subscriptions.get(&subscription) else {
             return Ok(SyncMessage::ViewUpdate {
@@ -947,6 +974,21 @@ impl PeerState {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
         };
+        self.rehydrate_query_for_subscription_with_opts(node, subscription, shape, binding, opts)
+    }
+
+    /// Build a reset-result-set query view update for a usage-site subscription.
+    pub fn rehydrate_query_for_subscription_with_opts<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
         self.clear_stale_groove_runtime_handles(node, subscription);
         let previous_row_result_set = self
             .subscriptions
@@ -992,27 +1034,15 @@ impl PeerState {
         )
     }
 
-    /// Handles a rehydrate request for the current-row view carried by this
-    /// peer. The node remains simulation-first: the embedding chooses which peer/table a
-    /// subscription ref belongs to, and the peer rebuilds result_set from data.
-    pub fn handle_current_rows_rehydrate<S>(
+    /// Build a reset current-row view for `table`.
+    pub fn reset_current_rows<S>(
         &mut self,
         node: &mut NodeState<S>,
         table: &str,
-        message: SyncMessage,
     ) -> Result<SyncMessage, Error>
     where
         S: OrderedKvStorage,
     {
-        let SyncMessage::Rehydrate { subscription } = message else {
-            return Err(Error::UnsupportedSyncMessage("non-rehydrate peer request"));
-        };
-        let expected = node.whole_table_subscription_key(table)?;
-        if subscription != expected {
-            return Err(Error::UnsupportedSyncMessage(
-                "rehydrate for different query",
-            ));
-        }
         self.rehydrate_current_rows(node, table)
     }
 
@@ -4981,14 +5011,7 @@ mod tests {
             &vec![("todos".to_owned().into(), deleted_row, deleted_tx)]
         );
 
-        let subscription = core.whole_table_subscription_key("todos").unwrap();
-        let rehydrated = peer
-            .handle_current_rows_rehydrate(
-                &mut core,
-                "todos",
-                SyncMessage::Rehydrate { subscription },
-            )
-            .unwrap();
+        let rehydrated = peer.reset_current_rows(&mut core, "todos").unwrap();
         let SyncMessage::ViewUpdate {
             reset_result_set,
             version_bundles,

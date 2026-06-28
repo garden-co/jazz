@@ -48,8 +48,13 @@ pub enum SyncMessage {
         /// Registration options.
         opts: RegisterShapeOptions,
     },
-    /// Add or remove query bindings.
-    BindingDelta(BindingDelta),
+    /// Attach a usage-site subscription to a registered query shape.
+    Subscribe(Subscribe),
+    /// Detach a usage-site subscription.
+    Unsubscribe {
+        /// Usage-site subscription to detach.
+        subscription: SubscriptionKey,
+    },
     /// Publish an immutable schema-version payload.
     PublishSchema {
         /// Authenticated catalogue admin.
@@ -99,11 +104,6 @@ pub enum SyncMessage {
         result_row_adds: Vec<ResultRowEntry>,
         /// Row-specific result_set removals for the subscription.
         result_row_removes: Vec<ResultRowEntry>,
-    },
-    /// Request to rebuild a subscription view.
-    Rehydrate {
-        /// Query binding result set to rehydrate.
-        subscription: SubscriptionKey,
     },
     /// Bulk-lane request for bytes backing one content extent.
     FetchContentExtent {
@@ -425,15 +425,29 @@ pub struct ContentExtent {
     pub bytes: Vec<u8>,
 }
 
-/// Address of one query binding's result set.
+/// Address of one usage-site subscription result set.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
 pub struct SubscriptionKey {
     /// Registered query shape.
     pub shape_id: ShapeId,
-    /// Bound parameter set for the shape.
+    /// Usage-site subscription id. Historically this was the deterministic
+    /// binding id; coverage grouping now uses [`CoverageKey`] instead.
     pub binding_id: BindingId,
+}
+
+/// Shared coverage group for equivalent query bindings.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct CoverageKey {
+    /// Registered query shape.
+    pub shape_id: ShapeId,
+    /// Deterministic binding id derived from canonical binding values.
+    pub binding_id: BindingId,
+    /// Registration options that affect which rows can cover this view.
+    pub opts: RegisterShapeOptions,
 }
 
 /// Versioned query AST carried by shape registration.
@@ -467,7 +481,9 @@ impl ShapeAst {
 }
 
 /// Shape registration options.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
 pub struct RegisterShapeOptions {
     /// Durability tier the subscriber wants this shape served at.
     #[serde(default = "default_register_shape_tier")]
@@ -486,15 +502,15 @@ fn default_register_shape_tier() -> DurabilityTier {
     DurabilityTier::Global
 }
 
-/// Binding additions/removals for one registered shape.
+/// Usage-site subscription attach for one registered shape.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct BindingDelta {
+pub struct Subscribe {
     /// Shape whose binding set changes.
     pub shape_id: ShapeId,
-    /// Idempotent binding additions.
-    pub adds: Vec<(BindingId, Vec<Value>)>,
-    /// Idempotent binding removals.
-    pub removes: Vec<BindingId>,
+    /// Usage-site subscription address.
+    pub subscription: SubscriptionKey,
+    /// Binding values in shape parameter order.
+    pub values: Vec<Value>,
 }
 
 /// Table-qualified row result set entry: `(table, row_uuid, content_tx_id)`.

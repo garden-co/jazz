@@ -354,10 +354,7 @@ fn evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate() {
     );
 
     let mut peer = PeerState::new();
-    let subscription = core.whole_table_subscription_key("docs").unwrap();
-    let initial = peer
-        .handle_current_rows_rehydrate(&mut core, "docs", SyncMessage::Rehydrate { subscription })
-        .unwrap();
+    let initial = peer.reset_current_rows(&mut core, "docs").unwrap();
     assert!(peer.shipped_complete_tx_payloads().is_empty());
     edge.apply_sync_message(initial).unwrap();
 
@@ -380,9 +377,7 @@ fn evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate() {
     };
     edge.apply_content_extents(extents).unwrap();
 
-    let update = peer
-        .handle_current_rows_rehydrate(&mut core, "docs", SyncMessage::Rehydrate { subscription })
-        .unwrap();
+    let update = peer.reset_current_rows(&mut core, "docs").unwrap();
     let SyncMessage::ViewUpdate { version_bundles, .. } = &update else {
         panic!("expected view update");
     };

@@ -1219,25 +1219,70 @@ where
         if reset_result_set {
             self.query.settled_result_sets.remove(&subscription);
         }
-        let row_result_set = self
-            .query
-            .settled_result_sets
-            .entry(subscription)
-            .or_default();
-        for member in result_row_removes {
-            row_result_set.remove(&member);
+        let canonical_subscription = self.canonical_subscription_for_usage(subscription)?;
+        let mirrored_result_set = {
+            let row_result_set = self
+                .query
+                .settled_result_sets
+                .entry(subscription)
+                .or_default();
+            for member in result_row_removes {
+                row_result_set.remove(&member);
+            }
+            row_result_set.extend(result_row_adds);
+            row_result_set.clone()
+        };
+        if let Some(canonical_subscription) = canonical_subscription {
+            if reset_result_set {
+                self.query
+                    .settled_result_sets
+                    .remove(&canonical_subscription);
+            }
+            self.query
+                .settled_result_sets
+                .insert(canonical_subscription, mirrored_result_set.clone());
         }
-        row_result_set.extend(result_row_adds);
         // Diagnostic-only: the duplicate-content-version scan feeds a
         // debug_assert, so it is wasted work in release. Gate to debug builds.
         #[cfg(debug_assertions)]
-        if let Some((table, row_uuid, first, second)) = duplicate_row_result_set(row_result_set) {
+        if let Some((table, row_uuid, first, second)) =
+            duplicate_row_result_set(&mirrored_result_set)
+        {
             debug_assert!(
                 first == second,
                 "settled subscription {subscription:?} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
             );
         }
         Ok(())
+    }
+
+    fn canonical_subscription_for_usage(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Result<Option<SubscriptionKey>, Error> {
+        let Some(shape) = self.query.registered_shapes.get(&subscription.shape_id) else {
+            return Ok(None);
+        };
+        let Some(values) = self
+            .query
+            .registered_bindings
+            .get(&subscription.shape_id)
+            .and_then(|bindings| bindings.get(&subscription.binding_id))
+        else {
+            return Ok(None);
+        };
+        let value_map = shape
+            .params()
+            .keys()
+            .cloned()
+            .zip(values.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
+        let binding = shape.bind(value_map)?;
+        let canonical = SubscriptionKey {
+            shape_id: subscription.shape_id,
+            binding_id: binding.binding_id(),
+        };
+        Ok((canonical != subscription).then_some(canonical))
     }
 
     fn validate_result_row_adds_are_witnessed(

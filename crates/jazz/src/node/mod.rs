@@ -26,8 +26,8 @@ use crate::ids::{
     SchemaVersionId,
 };
 use crate::protocol::{
-    BindingDelta, CurrentWriteSchema, LensOp, MigrationLens, ResultRowEntry, SchemaVersion,
-    ShapeAst, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    CurrentWriteSchema, LensOp, MigrationLens, ResultRowEntry, SchemaVersion, ShapeAst, Subscribe,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, MergeStrategy, TableSchema, registered_column_transform};
@@ -333,8 +333,8 @@ struct Clock {
 struct Parking {
     /// Shape registrations waiting for an unknown schema version.
     parked_shape_registrations: BTreeMap<ShapeId, ShapeAst>,
-    /// Binding deltas waiting for their shape registration to become installable.
-    parked_binding_deltas: BTreeMap<ShapeId, Vec<BindingDelta>>,
+    /// Subscription attaches waiting for their shape registration to become installable.
+    parked_binding_deltas: BTreeMap<ShapeId, Vec<Subscribe>>,
     /// Commit units waiting for parent transactions or schema context.
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
     /// Catalogue commit units waiting to be applied in dependency order.

@@ -235,7 +235,7 @@ directions; relay/edge/core peer roles remain below the facade (ch. 9).
 
 `Db::tick()` services every connection once (`INV-API-22`). For each connection,
 `PeerConnection::tick` sends each unannounced subscription once
-(`RegisterShape` then `BindingDelta`, `INV-API-19`), uploads each local commit
+(`RegisterShape` then `Subscribe`, `INV-API-19`), uploads each local commit
 once (`INV-API-20`), drains inbound messages, applies them, and refreshes
 registered subscriptions (ch. 8).
 
