@@ -35,7 +35,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
 
   policy.messages.allowRead.where((message) =>
     anyOf([
-      allowedTo.read("chatId"),
+      policy.chats.exists.where({ id: message.chatId, isPublic: true }),
       policy.chatMembers.exists.where({ chatId: message.chatId, userId: session.user_id }),
     ]),
   );
