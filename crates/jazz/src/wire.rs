@@ -260,7 +260,7 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        BindingDelta, RegisterShapeOptions, ResultRowEntry, ShapeAst, SubscriptionKey,
+        RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscriptionKey,
     };
     use crate::query::{BindingId, Query, ShapeId};
     use crate::time::{GlobalSeq, TxTime};
@@ -356,10 +356,10 @@ mod tests {
                 ast: ShapeAst::new(Query::from("todos"), schema_version),
                 opts: RegisterShapeOptions::default(),
             },
-            SyncMessage::BindingDelta(BindingDelta {
+            SyncMessage::Subscribe(Subscribe {
                 shape_id,
-                adds: vec![(binding_id, Vec::new())],
-                removes: Vec::new(),
+                subscription,
+                values: Vec::new(),
             }),
             SyncMessage::ViewUpdate {
                 subscription,

@@ -124,8 +124,12 @@ where
                 self.register_shape(shape_id, ast)?;
                 Ok(Vec::new())
             }
-            SyncMessage::BindingDelta(delta) => {
-                self.apply_binding_delta(delta)?;
+            SyncMessage::Subscribe(subscribe) => {
+                self.apply_subscribe(subscribe)?;
+                Ok(Vec::new())
+            }
+            SyncMessage::Unsubscribe { subscription } => {
+                self.apply_unsubscribe(subscription);
                 Ok(Vec::new())
             }
             SyncMessage::PublishSchema { author, schema } => {
@@ -136,7 +140,6 @@ where
                 self.apply_set_current_write_schema(author, pointer)
             }
             SyncMessage::CatalogueAck(_) => Ok(Vec::new()),
-            SyncMessage::Rehydrate { .. } => Err(Error::UnsupportedSyncMessage("rehydrate")),
             SyncMessage::FetchContentExtent { .. } => {
                 Err(Error::UnsupportedSyncMessage("content extent fetch"))
             }

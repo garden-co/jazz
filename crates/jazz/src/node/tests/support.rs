@@ -1026,10 +1026,13 @@ fn register_shape_binding(
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect::<Vec<_>>();
-    node.apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
+    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
-        adds: vec![(binding.binding_id(), values)],
-        removes: Vec::new(),
+        subscription: crate::protocol::SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+        },
+        values,
     }))
     .unwrap();
 }
@@ -1143,9 +1146,7 @@ fn enqueue_rehydrate_with_dedup_assertion(
     let bundles_before = peer.metrics.version_bundles_out;
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     peer.forget_subscription(subscription);
-    let update = peer
-        .handle_current_rows_rehydrate(core, "todos", SyncMessage::Rehydrate { subscription })
-        .unwrap();
+    let update = peer.reset_current_rows(core, "todos").unwrap();
     let SyncMessage::ViewUpdate { version_bundles, .. } = &update else {
         panic!("expected view update");
     };

@@ -92,7 +92,7 @@ unreadable (`INV-QUERY-10`).
 
 A subscription binds a shape to one binding and is addressed by
 `SubscriptionKey { shape_id, binding_id }`. The wire vocabulary is
-`RegisterShape`, `BindingDelta`, `ViewUpdate`, and `Rehydrate` (ch. 8).
+`RegisterShape`, `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).
 
 The serving authority maintains the settled result set for each
 `(ShapeId, BindingId)`: the `ResultRowEntry` set plus its matched include paths
@@ -100,21 +100,20 @@ and join witnesses (§6.4). In Rust this server-side state is named
 `maintained_subscription_views`.
 The subscriber receives and stores its own **settled subscription result set**:
 the rows and matched include material it can answer settled reads from (§6.6).
-The two sides share entry shape, but have different roles. Only a `Rehydrate`
-resets the subscriber's settled result set.
+The two sides share entry shape, but have different roles. A `ViewUpdate` with
+`reset_result_set = true` resets the subscriber's settled result set.
 
 Two correctness properties govern result-set maintenance. Incremental
-result-set updates converge to the same row-result set as a full rehydrate over
-the same committed history (`INV-QUERY-15`). A `Rehydrate` resets the result set
-while retaining per-peer complete payload coverage (`INV-QUERY-7`). Payload dedup
-is per peer for complete transaction payloads: an already-shipped complete
-payload is sent in `peer_payload_inventory.complete_tx_payloads`, and a
-`VersionBundle` is emitted at most once per update (`INV-QUERY-20`). Partial
-payloads, including exclusive payloads, do not establish complete-transaction
-payload coverage unless the peer has received all versions for the transaction.
-Exclusive `ViewUpdate` visibility is view-atomic: a bundle may carry the
-exclusive versions needed for the maintained subscription view, and result rows
-for that view are emitted only when
+result-set updates converge to the same row-result set as a reset `ViewUpdate`
+over the same committed history (`INV-QUERY-15`). Reset `ViewUpdate`s retain
+per-peer complete payload coverage (`INV-QUERY-7`). Payload dedup is per peer for
+complete transaction payloads: an already-shipped complete payload is sent in
+`peer_payload_inventory.complete_tx_payloads`, and a `VersionBundle` is emitted
+at most once per update (`INV-QUERY-20`). Partial payloads, including exclusive
+payloads, do not establish complete-transaction payload coverage unless the peer
+has received all versions for the transaction. Exclusive `ViewUpdate` visibility
+is view-atomic: a bundle may carry the exclusive versions needed for the
+maintained subscription view, and result rows for that view are emitted only when
 that view's exclusive payload is complete (`INV-QUERY-19`, ch. 3).
 
 Subscription lifetime is reference-counted, with no TTL: a peer's shape
@@ -126,10 +125,12 @@ _Further invariants._ `INV-QUERY-16` — same-drain result churn folds by net
 outcome (enter-then-leave sends no add; leave-then-reenter replaces; same-tx
 retract/assert nets no update). `INV-QUERY-4` — shape registration rejects an
 AST whose id doesn't match `shape_id` and parks an unknown schema version until
-the catalogue arrives. `INV-QUERY-5` — a `BindingDelta` add matches the
-registered shape's arity and binding id; a remove drops that subscription's
-settled subscription result set. `INV-QUERY-6` — `RegisterShape` then `BindingDelta`
-causes the serving side to rehydrate that binding with a reset `ViewUpdate`.
+the catalogue arrives. `INV-QUERY-5` — a `Subscribe` attach names a registered
+shape and matches the registered shape's arity; `Unsubscribe` drops that
+usage-site subscription's settled subscription result set. `INV-QUERY-6` —
+`RegisterShape` then `Subscribe` causes the serving side to attach the
+usage-site subscription to the coverage group and answer with a reset
+`ViewUpdate`.
 
 ## 6.6 Reads, settled and local
 

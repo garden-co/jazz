@@ -66,9 +66,9 @@ The message variants and their payloads are:
 | `CommitUnit`                                                               | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                                                                          |
 | `FateUpdate`                                                               | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                                                                         |
 | `RegisterShape`                                                            | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                                                                                    |
-| `BindingDelta`                                                             | up             | `{ shape_id, adds: Vec<(BindingId, Vec<Value>)>, removes: Vec<BindingId> }`                                                                                                                  |
+| `Subscribe`                                                                | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                                                                            |
+| `Unsubscribe`                                                              | up             | `{ subscription: SubscriptionKey }`                                                                                                                                                          |
 | `ViewUpdate`                                                               | down           | `{ subscription: SubscriptionKey, reset_result_set: bool, version_bundles: Vec<VersionBundle>, peer_payload_inventory: PeerPayloadInventory, result_row_adds/removes: Vec<ResultRowEntry> }` |
-| `Rehydrate`                                                                | up (request)   | `{ subscription: SubscriptionKey }`                                                                                                                                                          |
 | `FetchContentExtent` / `ContentExtents`                                    | bulk lane      | `{ row, extent }` / `{ extents: Vec<ContentExtent> }`                                                                                                                                        |
 | `PublishSchema` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                                                                                       |
 
@@ -143,18 +143,24 @@ not a reusable tx-level reference.
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
 `INV-SYNC-20` — incremental view updates are observationally equivalent to a full
-rehydrate for the same `(shape_id, binding_id)` (ch. 6).
+reset `ViewUpdate` for the same coverage key (ch. 6).
 
-## 8.5 Rehydrate
+## 8.5 Subscription Attach, Reset, And Detach
 
-Rehydration gives a peer a complete subscription result when incremental state is
-not enough, such as after reconnect or result-set loss. A `Rehydrate` request
-rebuilds the subscription with a response that sets `reset_result_set = true` and
-provides a complete replacement. Applying that response clears the receiver's
-settled subscription result set before applying the replacement rows (`INV-SYNC-10`),
-because removals against a discarded server-side result set are no longer
-expressible. Per-peer payload dedup survives when peer state survives, even as
-the per-subscription result set is rebuilt (`INV-SYNC-11`).
+`Subscribe` attaches one usage-site subscription id to a registered shape and a
+binding value vector. The serving side groups subscriptions by coverage key
+`(shape_id, binding_id, opts)` and maintains one shared view for that key, then
+fans `ViewUpdate`s out to each usage-site `SubscriptionKey`. A new usage-site
+subscription always receives a complete replacement response with
+`reset_result_set = true`; later updates may be incremental. Applying a reset
+response clears the receiver's settled subscription result set before applying
+the replacement rows (`INV-SYNC-10`), because removals against a discarded
+server-side result set are no longer expressible.
+
+`Unsubscribe` detaches one usage-site subscription. When the last usage-site
+subscription for a coverage key detaches, the serving side may drop the shared
+maintained view and its runtime subscription state. Per-peer payload dedup
+survives view reset and detach while peer state survives (`INV-SYNC-11`).
 
 ## 8.6 Policy narrowing in sync
 
@@ -231,7 +237,7 @@ node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
   cursor acceptance/rejection, auth expiry, and unsupported-feature diagnostics.
 - 🔶 **Canonical fixtures.** The wire contract needs golden encode/decode
   fixtures for every message family, including `CommitUnit`, `FateUpdate`,
-  `RegisterShape`/`BindingDelta`, `ViewUpdate`, rehydrate, content extents, and
+  `RegisterShape`/`Subscribe`/`Unsubscribe`, `ViewUpdate`, content extents, and
   catalogue/lens lanes, with explicit coverage that row/version payload bytes
   remain custom `Record` payloads under the postcard envelope. Fixtures should
   be consumable from Rust and TypeScript before the TS API binds to live

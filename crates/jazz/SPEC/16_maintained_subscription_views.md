@@ -205,8 +205,8 @@ running a peer-local semantic scan after groove emits a broader delta.
 The operational target is O(touched partitions/groups plus boundary output), not
 O(result set). The allowed output is still the minimal net subscription delta:
 same-tick enter/leave churn consolidates before `ViewUpdate`, deterministic ties
-make replay byte-stable, and rehydrate remains an explicit reset path rather
-than the normal maintenance strategy.
+make replay byte-stable, and reset-result-set `ViewUpdate`s remain explicit
+attach/rebuild outputs rather than the normal maintenance strategy.
 
 ## 16.7 Binding event bridge
 
@@ -218,7 +218,7 @@ needs stable event records for:
 - result-row add/remove and replacement;
 - matched include path and join material;
 - version bundles vs `peer_payload_inventory.complete_tx_payloads`;
-- errors, rehydrate resets, and explicit full-recompute debt counters.
+- errors, reset-result-set updates, and explicit full-recompute debt counters.
 
 The Rust `WatchHandle` can remain conflated for simple callers, but the binding
 ABI must expose enough structured deltas for UI stores to maintain identity,
