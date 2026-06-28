@@ -238,6 +238,139 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
+  it("does not send local reads to the worker before queued writes are visible", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-read-after-write-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "read after write" } },
+      undefined,
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+
+    const queryPromise = runtime.query(JSON.stringify({ table: "todos" }), null, "local", null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(worker.messages.some((message) => message.method === "query")).toBe(false);
+
+    const insertMessage = worker.messages.find((message) => message.method === "insert");
+    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+    const queryMessage = worker.messages.find((message) => message.method === "query");
+    worker.respond(queryMessage!.id, []);
+
+    await expect(queryPromise).resolves.toEqual([]);
+    await runtime.close();
+  });
+
+  it("translates transaction read ids after staged transaction writes settle", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-transaction-read-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const localTxId = runtime.beginTransaction("mergeable");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "beginTransaction")).toBe(true);
+    });
+    const beginMessage = worker.messages.find((message) => message.method === "beginTransaction");
+    worker.respond(beginMessage!.id, "worker-tx-1");
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "inside tx" } },
+      JSON.stringify({ batch_id: localTxId }),
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+    const insertMessage = worker.messages.find((message) => message.method === "insert");
+    expect(insertMessage?.args[2]).toBe(JSON.stringify({ batch_id: "worker-tx-1" }));
+
+    const queryPromise = runtime.query(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      JSON.stringify({ transaction_batch_id: localTxId }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(worker.messages.some((message) => message.method === "query")).toBe(false);
+
+    worker.respond(insertMessage!.id, { transactionId: "worker-tx-1" });
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+    const queryMessage = worker.messages.find((message) => message.method === "query");
+    expect(queryMessage?.args[3]).toBe(JSON.stringify({ transaction_batch_id: "worker-tx-1" }));
+    worker.respond(queryMessage!.id, []);
+
+    await expect(queryPromise).resolves.toEqual([]);
+    await runtime.close();
+  });
+
+  it("rejects repeated transaction completion and writes after completion synchronously", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-completed-transaction-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const tx = runtime.beginTransaction("mergeable");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "beginTransaction")).toBe(true);
+    });
+    const beginMessage = worker.messages.find((message) => message.method === "beginTransaction");
+    worker.respond(beginMessage!.id, "worker-tx-1");
+
+    runtime.commitTransaction(tx);
+
+    expect(() => runtime.commitTransaction(tx)).toThrow(
+      `Write error: transaction ${tx} is already committed`,
+    );
+    expect(() => runtime.rollbackTransaction(tx)).toThrow(
+      `Write error: transaction ${tx} is already committed`,
+    );
+    expect(() =>
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "too late" } },
+        JSON.stringify({ batch_id: tx }),
+        "00000000-0000-0000-0000-000000000001",
+      ),
+    ).toThrow(`Insert failed: WriteError("transaction ${tx} is already committed")`);
+
+    await runtime.close();
+  });
+
   it("terminates locally on close without sending an OPFS owner close command", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
