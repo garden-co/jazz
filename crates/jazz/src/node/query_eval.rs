@@ -2689,7 +2689,7 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<groove::ivm::RecordDeltas, Error> {
-        let (shape, _binding, graph) =
+        let (shape, _binding, graph, _routing_graph) =
             self.maintained_view_tagged_terminal_graph(shape, binding, identity)?;
         self.materialize_maintained_view_graph(graph, &shape)
     }
@@ -2708,12 +2708,17 @@ where
         ),
         Error,
     > {
-        let (_shape, _binding, graph) =
+        let (_shape, _binding, graph, routing_graph) =
             self.maintained_view_tagged_terminal_graph(shape, binding, identity)?;
         let tables = self.maintained_view_terminal_tables(&_shape)?;
         self.database.flush().map_err(Error::Groove)?;
-        let subscription =
-            self.subscribe_maintained_view_tagged_graph(&_shape, &_binding, identity, graph)?;
+        let subscription = self.subscribe_maintained_view_tagged_graph(
+            &_shape,
+            &_binding,
+            identity,
+            graph,
+            routing_graph,
+        )?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
         let snapshot = subscription
@@ -2748,6 +2753,7 @@ where
         binding: &Binding,
         identity: AuthorId,
         graph: GraphBuilder,
+        routing_graph: GraphBuilder,
     ) -> Result<groove::ivm::Subscription, Error> {
         let param_types = graph_param_types(shape, &self.catalogue.schema)?;
         if param_types.is_empty() {
@@ -2771,14 +2777,13 @@ where
             ),
         );
         let binding_source_shape = maintained_view_binding_source_shape(shape);
-        let prepared = self.database.prepare(
+        let prepared = self.database.prepare_with_routing(
             graph,
+            routing_graph,
             binding_source_shape,
             binding_descriptor,
             param_names.iter().cloned(),
         )?;
-        let terminal_tables = self.maintained_view_terminal_tables(shape)?;
-        let public_output = maintained_view_tagged_record_descriptor(terminal_tables.values())?;
         let mut binding_values = binding.values().clone();
         insert_claim_bindings(
             &mut binding_values,
@@ -2789,7 +2794,7 @@ where
         let values =
             binding_values_for_param_names(&binding_values, &param_names, &param_type_list)?;
         self.database
-            .bind_shape_with_output(prepared.id(), &values, public_output)
+            .bind_shape(prepared.id(), &values)
             .map_err(Error::Groove)
     }
 
@@ -2798,7 +2803,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
-    ) -> Result<(ValidatedQuery, Binding, GraphBuilder), Error> {
+    ) -> Result<(ValidatedQuery, Binding, GraphBuilder, GraphBuilder), Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
         let shape = maintained_view_bind_filter_literals_with_mode(
             &shape,
@@ -2859,14 +2864,14 @@ where
                 ]);
             }
         }
-        let param_types = graph_param_types(&shape, &self.catalogue.schema)?;
-        let graph = append_maintained_view_binding_params_for_routing(
-            GraphBuilder::union(graphs),
+        let graph = GraphBuilder::union(graphs);
+        let routing_graph = append_maintained_view_binding_params_for_routing(
+            graph.clone(),
             &shape,
-            &param_types,
+            &graph_param_types(&shape, &self.catalogue.schema)?,
             terminal_tables.values(),
         );
-        Ok((shape, binding, graph))
+        Ok((shape, binding, graph, routing_graph))
     }
 
     pub(crate) fn maintained_view_terminal_tables(
@@ -6142,58 +6147,6 @@ fn maintained_view_tagged_field_names<'a>(
             .map(|(table, column)| maintained_view_tagged_user_field(&table, &column)),
     );
     fields
-}
-
-fn maintained_view_tagged_record_descriptor<'a>(
-    terminal_tables: impl IntoIterator<Item = &'a TableSchema>,
-) -> Result<RecordDescriptor, Error> {
-    let terminal_tables = terminal_tables.into_iter().collect::<Vec<_>>();
-    let Some(first_table) = terminal_tables.first() else {
-        return Err(Error::InvalidStoredValue(
-            "maintained view tagged output requires at least one terminal table",
-        ));
-    };
-    let history_descriptor = first_table.history_storage_table().record_schema();
-    let parents_type = history_descriptor
-        .fields()
-        .get(
-            history_descriptor
-                .field_index("parents")
-                .ok_or(Error::InvalidStoredValue(
-                    "history table must project parents",
-                ))?,
-        )
-        .ok_or(Error::InvalidStoredValue(
-            "history table must project parents",
-        ))?
-        .value_type
-        .clone();
-    let mut fields = vec![
-        ("event_kind".to_owned(), ValueType::String),
-        ("table_name".to_owned(), ValueType::String),
-        ("row_uuid".to_owned(), ValueType::Uuid),
-        ("content_tx_time".to_owned(), ValueType::U64),
-        ("content_tx_node_id".to_owned(), ValueType::U64),
-        ("tx_time".to_owned(), ValueType::U64),
-        ("tx_node_id".to_owned(), ValueType::U64),
-        ("schema_version".to_owned(), ValueType::U64),
-        ("parents".to_owned(), parents_type),
-        (
-            "_deletion".to_owned(),
-            maintained_view_nullable_deletion_type(),
-        ),
-    ];
-    fields.extend(
-        maintained_view_terminal_user_columns(terminal_tables)
-            .into_iter()
-            .map(|((table_name, column_name), column_type)| {
-                (
-                    maintained_view_tagged_user_field(&table_name, &column_name),
-                    ValueType::Nullable(Box::new(column_type.value_type())),
-                )
-            }),
-    );
-    Ok(RecordDescriptor::new(fields))
 }
 
 fn maintained_view_tagged_deletion_fields<'a>(
