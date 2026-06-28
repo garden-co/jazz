@@ -5,7 +5,7 @@
 //! global/local currency logic remains in [`super::currency`]. It is a node
 //! sublayer beside the main global history path.
 
-use super::policy::policy_value_key;
+use super::policy::{policy_join_row_value, policy_value_key};
 use super::query_eval::inline_current_graph;
 use super::*;
 use crate::schema::{
@@ -543,11 +543,52 @@ where
         context: &mut BranchEvaluationContext,
         mut column_value: impl FnMut(&str) -> Option<Value>,
     ) -> Result<bool, Error> {
+        if !request.policy.policy_branches.is_empty() {
+            if self.branch_policy_base_allows(
+                BranchPolicyRequest {
+                    table: request.table,
+                    policy: request.policy,
+                    row_uuid: request.row_uuid,
+                    identity: request.identity,
+                    branch: request.branch,
+                },
+                context,
+                &mut column_value,
+            )? {
+                return Ok(true);
+            }
+            for branch in &request.policy.policy_branches {
+                let branch_policy = branch.as_query(&request.policy.table);
+                if self.branch_policy_base_allows(
+                    BranchPolicyRequest {
+                        table: request.table,
+                        policy: &branch_policy,
+                        row_uuid: request.row_uuid,
+                        identity: request.identity,
+                        branch: request.branch,
+                    },
+                    context,
+                    &mut column_value,
+                )? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        self.branch_policy_base_allows(request, context, &mut column_value)
+    }
+
+    fn branch_policy_base_allows(
+        &mut self,
+        request: BranchPolicyRequest<'_>,
+        context: &mut BranchEvaluationContext,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
+    ) -> Result<bool, Error> {
         if !self.policy_filters_allow(
             request.table,
             request.policy,
             request.identity,
-            &mut column_value,
+            &mut *column_value,
         )? {
             return Ok(false);
         }
@@ -558,15 +599,11 @@ where
         &mut self,
         request: BranchPolicyRequest<'_>,
         context: &mut BranchEvaluationContext,
-        mut column_value: impl FnMut(&str) -> Option<Value>,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
     ) -> Result<bool, Error> {
         for join in &request.policy.joins {
             let join_table = self.table(&join.table)?.clone();
-            let target = if let Some(source_column) = &join.source_column {
-                column_value(source_column)
-            } else {
-                Some(Value::Uuid(request.row_uuid.0))
-            };
+            let target = self.branch_policy_join_target_value(&request, join, column_value)?;
             let Some(target) = target else {
                 return Ok(false);
             };
@@ -576,7 +613,8 @@ where
             let join_policy = crate::query::Query {
                 table: join.table.clone(),
                 filters: join.filters.clone(),
-                joins: Vec::new(),
+                joins: join.nested_joins.clone(),
+                policy_branches: Vec::new(),
                 reachable: Vec::new(),
                 includes: Vec::new(),
                 select: None,
@@ -592,13 +630,18 @@ where
                 request.branch,
                 context,
             )?;
-            if let Some(rows) = candidates.get(&target_key) {
+            if let Some(rows) = candidates.get(&target_key).cloned() {
                 for row in rows {
-                    if self.policy_filters_allow_current_row(
-                        &join_table,
-                        &join_policy,
-                        row,
-                        request.identity,
+                    if self.branch_policy_base_allows(
+                        BranchPolicyRequest {
+                            branch: request.branch,
+                            table: &join_table,
+                            policy: &join_policy,
+                            row_uuid: row.row_uuid(),
+                            identity: request.identity,
+                        },
+                        context,
+                        &mut |column| row.cell(&join_table, column),
                     )? {
                         found = true;
                         break;
@@ -610,6 +653,39 @@ where
             }
         }
         Ok(true)
+    }
+
+    fn branch_policy_join_target_value(
+        &mut self,
+        request: &BranchPolicyRequest<'_>,
+        join: &crate::query::JoinVia,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
+    ) -> Result<Option<Value>, Error> {
+        if let Some(lookup) = &join.source_lookup {
+            let Some(Value::Uuid(parent_row_uuid)) = column_value(&lookup.row_id_source_column)
+            else {
+                return Ok(None);
+            };
+            let lookup_table = self.table(&lookup.table)?.clone();
+            let Some(parent_row) = self
+                .branch_current_rows(&lookup.table, request.branch)?
+                .into_iter()
+                .find(|row| row.row_uuid() == RowUuid(parent_row_uuid))
+            else {
+                return Ok(None);
+            };
+            if lookup.value_column == "id" {
+                return Ok(Some(Value::Uuid(parent_row.row_uuid().0)));
+            }
+            return Ok(parent_row.cell(&lookup_table, &lookup.value_column));
+        }
+        if let Some(source_column) = &join.source_column {
+            if source_column == "id" {
+                return Ok(Some(Value::Uuid(request.row_uuid.0)));
+            }
+            return Ok(column_value(source_column));
+        }
+        Ok(Some(Value::Uuid(request.row_uuid.0)))
     }
 
     fn branch_policy_join_rows_by_target_memo<'a>(
@@ -627,7 +703,7 @@ where
         if !context.policy_join_rows_by_value.contains_key(&key) {
             let mut rows_by_target: BTreeMap<Vec<u8>, Vec<CurrentRow>> = BTreeMap::new();
             for row in self.branch_current_rows(&join.table, branch)? {
-                if let Some(value) = row.cell(join_table, &join.on_column)
+                if let Some(value) = policy_join_row_value(&row, join_table, &join.on_column)
                     && let Some(key) = policy_value_key(&value)
                 {
                     rows_by_target.entry(key).or_default().push(row);

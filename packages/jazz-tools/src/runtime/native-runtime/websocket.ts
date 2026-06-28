@@ -26,7 +26,7 @@ export type WebSocketConstructor = new (url: string) => BrowserWebSocket;
 export type BrowserWebSocket = {
   binaryType: "arraybuffer" | "blob";
   readonly readyState: number;
-  send(data: Uint8Array): void;
+  send(data: Uint8Array | string): void;
   close(): void;
   addEventListener(type: "open", listener: () => void): void;
   addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
@@ -108,6 +108,20 @@ export class WebSocketCarrier {
     this.socket.addEventListener("message", (event) => {
       void this.handleMessage(event.data);
     });
+    this.socket.addEventListener("error", () => {
+      this.onError?.({
+        code: "websocket_error",
+        retry: "later",
+        message: "websocket transport error",
+      });
+    });
+    this.socket.addEventListener("close", () => {
+      this.onError?.({
+        code: "websocket_closed",
+        retry: "later",
+        message: "websocket closed",
+      });
+    });
   }
 
   async send(frame: Uint8Array): Promise<void> {
@@ -140,13 +154,15 @@ export class WebSocketCarrier {
   }
 }
 
-export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): Uint8Array {
-  return new TextEncoder().encode(
-    JSON.stringify({
-      peer_identity: bytesToHex(peerIdentity),
-      auth: JSON.parse(authJson) as unknown,
-    }),
-  );
+export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {
+  const auth = JSON.parse(authJson) as Record<string, unknown>;
+  const sub = authSub(auth) ?? bytesToHex(peerIdentity);
+  return JSON.stringify({
+    peer_identity: bytesToHex(peerIdentity),
+    auth: { sub, ...auth },
+    sub,
+    ...auth,
+  });
 }
 
 export async function connectWebSocketCarrier(
@@ -229,4 +245,38 @@ function waitForOpen(socket: BrowserWebSocket): Promise<void> {
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function authSub(auth: Record<string, unknown>): string | null {
+  const directSub = auth.sub;
+  if (typeof directSub === "string" && directSub.trim()) return directSub.trim();
+  const jwtToken = auth.jwt_token;
+  if (typeof jwtToken === "string") {
+    const jwtSub = jwtSubject(jwtToken);
+    if (jwtSub) return jwtSub;
+  }
+  const session = auth.backend_session;
+  if (session && typeof session === "object") {
+    const userId = (session as { user_id?: unknown }).user_id;
+    if (typeof userId === "string" && userId.trim()) return userId.trim();
+  }
+  return null;
+}
+
+function jwtSubject(jwtToken: string): string | null {
+  const parts = jwtToken.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(base64UrlDecode(parts[1]!)) as { sub?: unknown };
+    return typeof payload.sub === "string" && payload.sub.trim() ? payload.sub.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function base64UrlDecode(value: string): string {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  if (typeof atob === "function") return atob(padded);
+  return Buffer.from(padded, "base64").toString("binary");
 }

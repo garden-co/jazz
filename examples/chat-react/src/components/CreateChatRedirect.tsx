@@ -22,23 +22,29 @@ export const CreateChatRedirect = () => {
     initialized.current = true;
 
     void (async () => {
-      const chat = await db
-        .insert(app.chats, {
+      const seeded = db.transaction((tx) => {
+        const chat = tx.insert(app.chats, {
           isPublic: true,
           createdBy: userId,
-        })
-        .wait(sharedWriteOptions);
+        });
 
-      await db.insert(app.chatMembers, { chatId: chat.id, userId }).wait(sharedWriteOptions);
+        tx.insert(app.chatMembers, { chatId: chat.id, userId });
 
-      await db
-        .insert(app.messages, {
+        tx.insert(app.messages, {
           chatId: chat.id,
           text: "Hello world",
           senderId: myProfile.id,
           createdAt: new Date(),
-        })
-        .wait(sharedWriteOptions);
+        });
+
+        return chat;
+      });
+      const chat = seeded.value;
+      await seeded.wait({ tier: "local" });
+
+      void seeded.wait(sharedWriteOptions).catch((error) => {
+        console.error("failed to persist initial chat", error);
+      });
 
       navigate(`/#/chat/${chat.id}`);
     })().catch((error) => {

@@ -1673,6 +1673,7 @@ where
             subscriptions: Rc::clone(&self.subscriptions),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
+            next_now_ms: Cell::new(1),
             link: ConnectionLink::Upstream {
                 pending,
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
@@ -1769,6 +1770,7 @@ where
             subscriptions: Rc::clone(&self.subscriptions),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
+            next_now_ms: Cell::new(1),
             link: ConnectionLink::Subscriber {
                 peer,
                 ingest_context: CommitUnitIngestContext { identity, trust },
@@ -2040,7 +2042,13 @@ where
                         Err(err) => self.send_wire_error(WireError::new(
                             WireErrorCode::MalformedFrame,
                             WireRetry::Never,
-                            format!("failed to decode sync message payload: {err}"),
+                            format!(
+                                "failed to decode sync message payload: {err}; frame_bytes={}; payload_bytes={}; frame_hex={}; payload_hex={}",
+                                bytes.len(),
+                                envelope.payload.len(),
+                                hex_diagnostic(&bytes),
+                                hex_diagnostic(&envelope.payload),
+                            ),
                         )),
                     }
                 }
@@ -2054,6 +2062,22 @@ where
         }
         None
     }
+}
+
+fn hex_diagnostic(bytes: &[u8]) -> String {
+    if bytes.len() <= 128 {
+        return hex_prefix(bytes, bytes.len());
+    }
+    hex_prefix(bytes, 16)
+}
+
+fn hex_prefix(bytes: &[u8], max: usize) -> String {
+    bytes
+        .iter()
+        .take(max)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// A live link between this `Db` and one peer, owned by the `Db`.
@@ -2071,6 +2095,7 @@ where
     subscriptions: SubscriptionList,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
+    next_now_ms: Cell<u64>,
     link: ConnectionLink,
     last_resume_bytes: Option<usize>,
 }
@@ -2168,6 +2193,7 @@ where
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub fn tick(&mut self) -> Result<DbTickStats, Error> {
         let mut stats = DbTickStats::default();
+        let tick_now_ms = self.next_now_ms();
         match &mut self.link {
             ConnectionLink::Upstream {
                 pending,
@@ -2401,9 +2427,27 @@ where
                         )?;
                     }
                 }
+                let fate_updates = {
+                    let mut node = self.node.borrow_mut();
+                    peer.drain_deferred_edge_fates(&mut node, tick_now_ms)?
+                };
+                for update in fate_updates {
+                    send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+                }
             }
         }
         Ok(stats)
+    }
+}
+
+impl<S> PeerConnection<S>
+where
+    S: OrderedKvStorage,
+{
+    fn next_now_ms(&self) -> u64 {
+        let next = self.next_now_ms.get();
+        self.next_now_ms.set(next + 1);
+        next
     }
 }
 

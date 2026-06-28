@@ -120,13 +120,22 @@ impl ServerShellHandle {
     }
 
     pub(crate) async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {
+        let activity_tx = self.activity_tx.clone();
         self.run(move |shell| {
-            shell
+            let result = shell
                 .tick()
                 .and_then(|()| shell.take_frames(session))
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string());
+            if result.is_ok() {
+                notify_shell_activity(&activity_tx);
+            }
+            result
         })
         .await
+    }
+
+    pub(crate) fn notify_activity(&self) {
+        notify_shell_activity(&self.activity_tx);
     }
 
     pub(crate) fn close(&self, session: ServerSession) {
