@@ -488,7 +488,7 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
   const { id: aliceToBobId } = await withTimeout(
     dbAlice
       .insert(todos, { title: `peer-sync-a2b-${label}-${Date.now()}`, done: false })
-      .wait({ tier: "local" }),
+      .wait({ tier: "edge" }),
     10_000,
     `${label} Alice->Bob peer sync insert did not resolve`,
   );
@@ -499,12 +499,13 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === aliceToBobId),
     `${label} Alice->Bob peer sync should reach Bob`,
     20_000,
+    "edge",
   );
 
   const { id: bobToAliceId } = await withTimeout(
     dbBob
       .insert(todos, { title: `peer-sync-b2a-${label}-${Date.now()}`, done: false })
-      .wait({ tier: "local" }),
+      .wait({ tier: "edge" }),
     10_000,
     `${label} Bob->Alice peer sync insert did not resolve`,
   );
@@ -515,5 +516,6 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === bobToAliceId),
     `${label} Bob->Alice peer sync should reach Alice`,
     20_000,
+    "edge",
   );
 }
