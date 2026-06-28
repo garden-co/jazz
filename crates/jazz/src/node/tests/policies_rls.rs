@@ -191,6 +191,107 @@ fn owner_only_read_narrows_view_updates_per_peer_identity() {
     assert_policy_subscription_rows(&mut reader_a, 42, author_a);
     assert_policy_subscription_rows(&mut reader_b, 43, author_b);
 }
+
+#[test]
+fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "announcements",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("body", ColumnType::String),
+                ColumnSchema::new("owner_id", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
+        ))
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let (_bob_dir, mut bob_node) = open_node_with_schema(node(4), schema.clone());
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    let announcement_row = row(0x11);
+    let private_message_row = row(0x12);
+    let tx_id = core
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("announcements", announcement_row, 10)
+                .made_by(alice)
+                .cells(BTreeMap::from([("title".to_owned(), v("public"))])),
+            MergeableCommit::new("messages", private_message_row, 10)
+                .made_by(alice)
+                .cells(BTreeMap::from([
+                    ("body".to_owned(), v("alice private")),
+                    ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+                ])),
+        ])
+        .unwrap();
+    core.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    let shape = Query::from("announcements").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut bob_peer = PeerState::for_author(bob);
+
+    let update = bob_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    let SyncMessage::ViewUpdate {
+        version_bundles,
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads,
+            },
+        result_row_adds,
+        ..
+    } = &update
+    else {
+        panic!("expected view update");
+    };
+    assert_eq!(result_row_adds, &vec![(
+        groove::Intern::new("announcements".to_owned()),
+        announcement_row,
+        tx_id
+    )]);
+    assert!(complete_tx_payloads.is_empty());
+    assert!(!bob_peer.shipped_complete_tx_payloads().contains(&tx_id));
+    let shipped_rows = version_bundles
+        .iter()
+        .flat_map(|bundle| bundle.versions.iter().map(|version| version.row_uuid()))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(shipped_rows, BTreeSet::from([announcement_row]));
+
+    bob_node.apply_sync_message(update).unwrap();
+    assert_eq!(
+        bob_node
+            .current_rows("announcements", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<Vec<_>>(),
+        vec![(
+            announcement_row,
+            BTreeMap::from([("title".to_owned(), v("public"))])
+        )]
+    );
+    assert!(
+        bob_node
+            .current_rows("messages", DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let schema = owner_policy_schema();
@@ -837,6 +938,147 @@ fn relay_and_edge_peer_identities_drive_policy_composed_reads() {
         &edge_other.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::new(),
     );
+}
+
+#[test]
+fn edge_query_rehydrate_applies_session_user_id_read_policy() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("visibility", ColumnType::String),
+                ColumnSchema::new("owner_id", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("chats")
+                .filter(eq(col("visibility"), lit("public")))
+                .policy_branch(PolicyBranch::from_query(
+                    Query::from("chats").filter(eq(col("owner_id"), claim("user_id"))),
+                )),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("chat_id", ColumnType::Uuid),
+                ColumnSchema::new("body", ColumnType::String),
+                ColumnSchema::new("author_id", ColumnType::String),
+                ColumnSchema::new("owner_id", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
+        ))
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let alice_id = user(0xa1);
+    let bob_id = user(0xb2);
+    let alice_user_id = alice_id.0.to_string();
+    let bob_user_id = bob_id.0.to_string();
+    let alice_private_chat_tx = commit_mergeable_global(
+        &mut alice,
+        &mut core,
+        MergeableCommit::new("chats", row(0x10), 10)
+            .made_by(alice_id)
+            .cells(BTreeMap::from([
+                ("title".to_owned(), v("alice private")),
+                ("visibility".to_owned(), v("private")),
+                ("owner_id".to_owned(), v(alice_user_id.clone())),
+            ])),
+    );
+    core.apply_fate_update(
+        alice_private_chat_tx,
+        Fate::Accepted,
+        None,
+        Some(DurabilityTier::Edge),
+    )
+    .unwrap();
+    let public_chat_tx = commit_mergeable_global(
+        &mut alice,
+        &mut core,
+        MergeableCommit::new("chats", row(0x11), 11)
+            .made_by(alice_id)
+            .cells(BTreeMap::from([
+                ("title".to_owned(), v("public")),
+                ("visibility".to_owned(), v("public")),
+                ("owner_id".to_owned(), v(alice_user_id.clone())),
+            ])),
+    );
+    core.apply_fate_update(public_chat_tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
+        .unwrap();
+    let alice_private_message_tx = commit_mergeable_global(
+        &mut alice,
+        &mut core,
+        MergeableCommit::new("messages", row(0x20), 12)
+            .made_by(alice_id)
+            .cells(BTreeMap::from([
+                ("chat_id".to_owned(), Value::Uuid(row(0x10).0)),
+                ("body".to_owned(), v("alice private message")),
+                ("author_id".to_owned(), v(alice_user_id)),
+                ("owner_id".to_owned(), v(alice_id.0.to_string())),
+            ])),
+    );
+    core.apply_fate_update(
+        alice_private_message_tx,
+        Fate::Accepted,
+        None,
+        Some(DurabilityTier::Edge),
+    )
+    .unwrap();
+    let bob_message_tx = commit_mergeable_global(
+        &mut alice,
+        &mut core,
+        MergeableCommit::new("messages", row(0x21), 13)
+            .made_by(alice_id)
+            .cells(BTreeMap::from([
+                ("chat_id".to_owned(), Value::Uuid(row(0x11).0)),
+                ("body".to_owned(), v("bob message")),
+                ("author_id".to_owned(), v(bob_user_id.clone())),
+                ("owner_id".to_owned(), v(bob_user_id)),
+            ])),
+    );
+    core.apply_fate_update(bob_message_tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
+        .unwrap();
+
+    let mut bob = PeerState::edge_client(bob_id);
+    let chat_shape = Query::from("chats")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let chat_binding = chat_shape.bind(BTreeMap::new()).unwrap();
+    let message_shape = Query::from("messages")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let message_binding = message_shape.bind(BTreeMap::new()).unwrap();
+
+    let chat_update = bob
+        .rehydrate_query_with_opts(
+            &mut core,
+            &chat_shape,
+            &chat_binding,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+            },
+        )
+        .unwrap();
+    assert_view_update_only_references_rows(&chat_update, BTreeSet::from([row(0x11)]));
+    assert_view_update_only_ships_rows(&chat_update, BTreeSet::from([row(0x11)]));
+
+    let message_update = bob
+        .rehydrate_query_with_opts(
+            &mut core,
+            &message_shape,
+            &message_binding,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+            },
+        )
+        .unwrap();
+    assert_view_update_only_references_rows(&message_update, BTreeSet::from([row(0x21)]));
+    assert_view_update_only_ships_rows(&message_update, BTreeSet::from([row(0x21)]));
 }
 
 #[test]

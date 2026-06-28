@@ -160,8 +160,11 @@ where
         }
         self.catalogue
             .catalogue_schemas
-            .entry(schema.id)
-            .or_insert_with(|| schema.clone());
+            .insert(schema.id, schema.clone());
+        if schema.id == self.catalogue.current_schema_version_id {
+            self.catalogue.schema = schema.schema.clone();
+            self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
+        }
         self.persist_catalogue_schema(&schema)?;
         self.ensure_schema_version_alias(schema.id)?;
         if schema.id != self.catalogue.current_schema_version_id
@@ -246,13 +249,18 @@ where
         if applied {
             self.catalogue.current_write_schema = pointer;
             self.persist_catalogue_pointer(pointer)?;
-            let tables = self
+            let active_schema = self
                 .catalogue
                 .catalogue_schemas
                 .get(&pointer.schema)
                 .ok_or(Error::InvalidStoredValue(
                     "current write schema payload missing",
-                ))?
+                ))?;
+            if pointer.schema == self.catalogue.current_schema_version_id {
+                self.catalogue.schema = active_schema.schema.clone();
+                self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
+            }
+            let tables = active_schema
                 .schema
                 .tables
                 .iter()

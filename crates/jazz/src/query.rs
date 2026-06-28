@@ -1061,13 +1061,6 @@ fn validate_query(query: &Query, schema: &JazzSchema) -> Result<ValidatedQuery, 
 
 type ValidatedQueryCanonicalParts = (Query, BTreeMap<String, ColumnType>, Vec<u8>);
 
-pub(crate) fn validated_query_canonical_bytes(
-    query: &Query,
-    schema: &JazzSchema,
-) -> Result<Vec<u8>, QueryError> {
-    validate_query_canonical_parts(query, schema).map(|(_, _, canonical)| canonical)
-}
-
 fn validate_query_canonical_parts(
     query: &Query,
     schema: &JazzSchema,
