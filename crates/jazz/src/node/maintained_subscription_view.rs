@@ -176,15 +176,6 @@ impl MaintainedSubscriptionView {
         self.versions.versions_by_tx(tx_id)
     }
 
-    #[cfg(test)]
-    pub(super) fn active_result_entries(&self) -> BTreeSet<ResultRowEntry> {
-        self.result_weights
-            .iter()
-            .filter(|(_, weight)| **weight > 0)
-            .map(|(entry, _)| *entry)
-            .collect()
-    }
-
     pub(crate) fn replacement_for(
         &self,
         table: &str,
