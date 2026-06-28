@@ -18,7 +18,7 @@ use super::policy::ViewEvaluationContext;
 use crate::protocol::{BindingDelta, ResultRowEntry, ShapeAst, SubscriptionKey};
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, Binding, Include, JoinTarget, JoinVia, Operand,
-    OrderDirection, Predicate, QUERY_NAMESPACE, ShapeId, ValidatedQuery,
+    OrderDirection, PolicyBranch, Predicate, QUERY_NAMESPACE, ShapeId, ValidatedQuery,
 };
 
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
@@ -53,6 +53,7 @@ struct LoweredQueryCore {
     param_types: Vec<groove::schema::ColumnType>,
 }
 
+#[derive(Clone)]
 struct LoweredQueryClauseOptions {
     tier: DurabilityTier,
     output_fields: Vec<String>,
@@ -366,6 +367,9 @@ where
         identity: AuthorId,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        if !include_deleted && !shape.query().policy_branches.is_empty() {
+            return self.query_rows_with_policy_branches(shape, binding, tier, identity);
+        }
         if include_deleted {
             let mut rows =
                 self.query_rows_including_deleted_with_lowered_clauses(shape, binding, tier)?;
@@ -435,6 +439,49 @@ where
                 identity,
             )?;
         }
+        self.finish_query_rows(shape.query(), &mut rows)?;
+        Ok(rows)
+    }
+
+    fn query_rows_with_policy_branches(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut base_query = shape.query().clone();
+        let branches = std::mem::take(&mut base_query.policy_branches);
+        let mut rows_by_id = BTreeMap::new();
+        let base_shape = base_query.validate(&self.catalogue.schema)?;
+        let base_binding = binding_for_shape(&base_shape, binding)?;
+        for row in self.query_rows_with_options_for_identity(
+            &base_shape,
+            &base_binding,
+            tier,
+            None,
+            identity,
+            false,
+        )? {
+            rows_by_id.insert(row.row_uuid(), row);
+        }
+        for branch in branches {
+            let branch_shape = branch
+                .as_query(&shape.query().table)
+                .validate(&self.catalogue.schema)?;
+            let branch_binding = binding_for_shape(&branch_shape, binding)?;
+            for row in self.query_rows_with_options_for_identity(
+                &branch_shape,
+                &branch_binding,
+                tier,
+                None,
+                identity,
+                false,
+            )? {
+                rows_by_id.insert(row.row_uuid(), row);
+            }
+        }
+        let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
         self.finish_query_rows(shape.query(), &mut rows)?;
         Ok(rows)
     }
@@ -2004,6 +2051,50 @@ where
         param_types: &BTreeMap<String, groove::schema::ColumnType>,
         options: LoweredQueryClauseOptions,
     ) -> Result<GraphBuilder, Error> {
+        if !shape.query().policy_branches.is_empty() {
+            let mut base_query = shape.query().clone();
+            let branches = std::mem::take(&mut base_query.policy_branches);
+            let base_shape = base_query.validate(&self.catalogue.schema)?;
+            let key_options = LoweredQueryClauseOptions {
+                output_fields: options.output_fields.clone(),
+                retain_params: false,
+                ..options.clone()
+            };
+            let mut key_graphs = vec![
+                self.apply_lowered_query_clauses(
+                    graph.clone(),
+                    &base_shape,
+                    table,
+                    param_types,
+                    key_options.clone(),
+                )?
+                .project(["row_uuid"]),
+            ];
+            for branch in branches {
+                let branch_shape = branch
+                    .as_query(&shape.query().table)
+                    .validate(&self.catalogue.schema)?;
+                key_graphs.push(
+                    self.apply_lowered_query_clauses(
+                        graph.clone(),
+                        &branch_shape,
+                        table,
+                        param_types,
+                        key_options.clone(),
+                    )?
+                    .project(["row_uuid"]),
+                );
+            }
+            let authorized_keys = GraphBuilder::union(key_graphs);
+            let authorized = GraphBuilder::join(graph, authorized_keys, ["row_uuid"], ["row_uuid"])
+                .project_fields(
+                    options
+                        .output_fields
+                        .iter()
+                        .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                );
+            return attach_retained_params(authorized, param_types, &options);
+        }
         graph = apply_query_filters(graph, table, &shape.query().filters)?;
         let mut carried_params =
             if options.retain_params && !predicate_params(&shape.query().filters).is_empty() {
@@ -2719,6 +2810,12 @@ where
             tables.insert(access_table.name.clone(), access_table);
             let edge_table = self.table(&reachable.edge_table)?.clone();
             tables.insert(edge_table.name.clone(), edge_table);
+        }
+        for branch in &query.policy_branches {
+            self.collect_maintained_view_terminal_tables_for_query(
+                &branch.as_query(&query.table),
+                tables,
+            )?;
         }
         Ok(())
     }
@@ -3532,6 +3629,29 @@ where
         table: &TableSchema,
         output_fields: Vec<String>,
     ) -> Result<GraphBuilder, Error> {
+        if !shape.query().policy_branches.is_empty() {
+            let mut base_query = shape.query().clone();
+            let branches = std::mem::take(&mut base_query.policy_branches);
+            let base_shape = base_query.validate(&self.catalogue.schema)?;
+            let mut graphs = vec![self.apply_maintained_view_filters(
+                graph.clone(),
+                &base_shape,
+                table,
+                output_fields.clone(),
+            )?];
+            for branch in branches {
+                let branch_shape = branch
+                    .as_query(&shape.query().table)
+                    .validate(&self.catalogue.schema)?;
+                graphs.push(self.apply_maintained_view_filters(
+                    graph.clone(),
+                    &branch_shape,
+                    table,
+                    output_fields.clone(),
+                )?);
+            }
+            return Ok(GraphBuilder::union(graphs));
+        }
         let param_types = graph_param_types(shape, &self.catalogue.schema)?;
         self.apply_lowered_query_clauses(
             graph,
@@ -3771,6 +3891,9 @@ where
         };
         let claims = self.session_claims.get(&identity);
         let mut query = shape.query().clone();
+        let base_filters = query.filters.clone();
+        let base_joins = query.joins.clone();
+        let base_reachable = query.reachable.clone();
         query.filters.extend(
             policy
                 .filters
@@ -3809,6 +3932,11 @@ where
                 reachable
             }));
         query.includes.extend(policy.includes);
+        query
+            .policy_branches
+            .extend(policy.policy_branches.into_iter().map(|branch| {
+                compose_policy_branch(branch, &base_filters, &base_joins, &base_reachable, claims)
+            }));
         let composed = query.validate(&self.catalogue.schema)?;
         let mut values = binding.values().clone();
         // Claim bindings are derived from the authenticated peer identity on
@@ -3879,7 +4007,6 @@ where
 
 fn maintained_view_query_slice_supported(query: &crate::query::Query) -> bool {
     query.aggregate.is_none()
-        && query.policy_branches.is_empty()
         && maintained_view_window_supported(query)
         && !query_has_unsupported_param_disjunction(query)
 }
@@ -3974,6 +4101,78 @@ where
         }
         self.node.query_rows_at(shape, binding, self.position)
     }
+}
+
+fn compose_policy_branch(
+    branch: PolicyBranch,
+    base_filters: &[Predicate],
+    base_joins: &[JoinVia],
+    base_reachable: &[crate::query::ReachableVia],
+    claims: Option<&BTreeMap<String, Value>>,
+) -> PolicyBranch {
+    let mut filters = base_filters.to_vec();
+    filters.extend(
+        branch
+            .filters
+            .into_iter()
+            .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims)),
+    );
+    let mut joins = base_joins.to_vec();
+    joins.extend(
+        branch
+            .joins
+            .into_iter()
+            .map(|join| rewrite_claim_join_for_binding(join, claims)),
+    );
+    let mut reachable = base_reachable.to_vec();
+    reachable.extend(
+        branch
+            .reachable
+            .into_iter()
+            .map(|reachable| rewrite_claim_reachable_for_binding(reachable, claims)),
+    );
+    PolicyBranch {
+        filters,
+        joins,
+        reachable,
+    }
+}
+
+fn rewrite_claim_join_for_binding(
+    join: JoinVia,
+    claims: Option<&BTreeMap<String, Value>>,
+) -> JoinVia {
+    JoinVia {
+        table: join.table,
+        on_column: join.on_column,
+        target: join.target,
+        source_column: join.source_column,
+        source_lookup: join.source_lookup,
+        filters: join
+            .filters
+            .into_iter()
+            .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+            .collect(),
+        nested_joins: join.nested_joins,
+    }
+}
+
+fn rewrite_claim_reachable_for_binding(
+    mut reachable: crate::query::ReachableVia,
+    claims: Option<&BTreeMap<String, Value>>,
+) -> crate::query::ReachableVia {
+    reachable.from = rewrite_claim_operand_for_binding(reachable.from);
+    reachable.access_filters = reachable
+        .access_filters
+        .into_iter()
+        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+        .collect();
+    reachable.edge_filters = reachable
+        .edge_filters
+        .into_iter()
+        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+        .collect();
+    reachable
 }
 
 fn rewrite_claim_predicate_for_binding(
@@ -4487,6 +4686,56 @@ pub(super) fn binding_for_shape(
     Ok(shape.bind(values)?)
 }
 
+fn attach_retained_params(
+    graph: GraphBuilder,
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    options: &LoweredQueryClauseOptions,
+) -> Result<GraphBuilder, Error> {
+    if !options.retain_params || param_types.is_empty() {
+        return Ok(graph);
+    }
+    const PARAM_ROUTING_JOIN: &str = "__jazz_param_binding_join";
+    let graph = graph.project_fields(
+        options
+            .output_fields
+            .iter()
+            .cloned()
+            .map(ProjectField::named)
+            .chain([ProjectField::literal(PARAM_ROUTING_JOIN, Value::U8(0))]),
+    );
+    let binding = GraphBuilder::binding_source(
+        options.binding_source_shape.clone(),
+        RecordDescriptor::new(
+            param_types
+                .iter()
+                .map(|(name, column_type)| (name.clone(), column_type.value_type())),
+        ),
+    )
+    .project_fields(
+        param_types
+            .keys()
+            .cloned()
+            .map(ProjectField::named)
+            .chain([ProjectField::literal(PARAM_ROUTING_JOIN, Value::U8(0))]),
+    );
+    Ok(
+        GraphBuilder::join(binding, graph, [PARAM_ROUTING_JOIN], [PARAM_ROUTING_JOIN])
+            .project_fields(
+                options
+                    .output_fields
+                    .iter()
+                    .cloned()
+                    .map(|field| ProjectField::renamed(format!("right.{field}"), field))
+                    .chain(
+                        param_types
+                            .keys()
+                            .cloned()
+                            .map(|param| ProjectField::renamed(format!("left.{param}"), param)),
+                    ),
+            ),
+    )
+}
+
 fn join_params_if_needed(
     graph: GraphBuilder,
     _shape: &ValidatedQuery,
@@ -4700,6 +4949,51 @@ fn maintained_view_bind_filter_literals(
                 .map(|predicate| maintained_view_bind_predicate(predicate, binding))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(reachable)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    query.policy_branches = query
+        .policy_branches
+        .into_iter()
+        .map(|mut branch| {
+            branch.filters = branch
+                .filters
+                .into_iter()
+                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .collect::<Result<Vec<_>, _>>()?;
+            branch.joins = branch
+                .joins
+                .into_iter()
+                .map(|mut join| {
+                    join.filters = join
+                        .filters
+                        .into_iter()
+                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(join)
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            branch.reachable = branch
+                .reachable
+                .into_iter()
+                .map(|mut reachable| {
+                    if matches!(&reachable.from, Operand::Param(name) if name.starts_with(CLAIM_PARAM_PREFIX))
+                    {
+                        reachable.from = maintained_view_bind_operand(reachable.from, binding)?;
+                    }
+                    reachable.access_filters = reachable
+                        .access_filters
+                        .into_iter()
+                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    reachable.edge_filters = reachable
+                        .edge_filters
+                        .into_iter()
+                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(reachable)
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(branch)
         })
         .collect::<Result<Vec<_>, Error>>()?;
     let rebound = query.validate(schema)?;

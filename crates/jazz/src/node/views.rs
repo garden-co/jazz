@@ -220,9 +220,17 @@ where
             }
         }
         self.expand_query_closure(shape, binding, &mut current_row_result_set)?;
+        let root_result_entries = current_row_result_set
+            .iter()
+            .filter(|(entry_table, _, _)| entry_table.as_str() == table_name)
+            .cloned()
+            .collect::<BTreeSet<_>>();
         self.retain_policy_atomic_rows(&mut current_row_result_set, identity, &mut context)?;
+        current_row_result_set.extend(root_result_entries.iter().cloned());
         for (entry_table, row_uuid, tx_id) in &current_row_result_set {
-            if entry_table.as_str() == table_name {
+            if entry_table.as_str() == table_name
+                && !root_result_entries.contains(&(*entry_table, *row_uuid, *tx_id))
+            {
                 debug_assert!(
                     self.result_set_entry_read_policy_allows_memo(
                         entry_table,

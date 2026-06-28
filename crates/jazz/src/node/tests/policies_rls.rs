@@ -661,6 +661,94 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
         }
     ));
 }
+
+#[test]
+fn read_policy_branch_or_join_allows_public_or_membership_reads() {
+    let member = user(0xa1);
+    let other = user(0xb2);
+    let public_chat = row(0x18);
+    let private_chat = row(0x19);
+    let membership = row(0x1a);
+    let policy = Policy::shape(
+        Query::from("chats")
+            .filter(eq(col("isPublic"), lit(true)))
+            .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via(
+                "chatMembers",
+                "chatId",
+                [eq(col("userId"), claim("user_id"))],
+            ))),
+    );
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("isPublic", ColumnType::Bool),
+                ColumnSchema::new("createdBy", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(policy)
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "chatMembers",
+            [
+                ColumnSchema::new("chatId", ColumnType::Uuid),
+                ColumnSchema::new("userId", ColumnType::String),
+            ],
+        )
+        .with_reference("chatId", "chats")
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let (_member_dir, _member_reader) = open_node_with_schema(node(3), schema.clone());
+    let (_other_dir, _other_reader) = open_node_with_schema(node(4), schema);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("chats", public_chat, 10)
+            .made_by(member)
+            .cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("public".to_owned())),
+                ("isPublic".to_owned(), Value::Bool(true)),
+                ("createdBy".to_owned(), Value::Uuid(member.0)),
+            ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("chats", private_chat, 11)
+            .made_by(member)
+            .cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("private".to_owned())),
+                ("isPublic".to_owned(), Value::Bool(false)),
+                ("createdBy".to_owned(), Value::Uuid(member.0)),
+            ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("chatMembers", membership, 12).cells(BTreeMap::from([
+            ("chatId".to_owned(), Value::Uuid(private_chat.0)),
+            ("userId".to_owned(), Value::String(member.0.to_string())),
+        ])),
+    );
+    let shape = Query::from("chats").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([public_chat, private_chat])
+    );
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, other)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([public_chat])
+    );
+}
 #[test]
 fn composed_read_policy_grants_and_revokes_incrementally() {
     let invited = user(0xa1);
