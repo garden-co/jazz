@@ -169,6 +169,7 @@ where
         self.prepared_query_plan(&shape, DurabilityTier::Local)?;
         self.prepared_query_plan(&shape, DurabilityTier::Global)?;
         self.query.registered_shapes.insert(shape_id, shape);
+        self.drain_parked_binding_deltas_for_shape(shape_id)?;
         Ok(())
     }
 
@@ -194,8 +195,35 @@ where
 
     pub(super) fn apply_binding_delta(&mut self, delta: BindingDelta) -> Result<(), Error> {
         let Some(shape) = self.query.registered_shapes.get(&delta.shape_id).cloned() else {
-            return Err(Error::InvalidStoredValue("binding delta for unknown shape"));
+            self.parking
+                .parked_binding_deltas
+                .entry(delta.shape_id)
+                .or_default()
+                .push(delta);
+            return Ok(());
         };
+        self.apply_known_shape_binding_delta(&shape, delta)
+    }
+
+    fn drain_parked_binding_deltas_for_shape(&mut self, shape_id: ShapeId) -> Result<(), Error> {
+        let Some(deltas) = self.parking.parked_binding_deltas.remove(&shape_id) else {
+            return Ok(());
+        };
+        let Some(shape) = self.query.registered_shapes.get(&shape_id).cloned() else {
+            self.parking.parked_binding_deltas.insert(shape_id, deltas);
+            return Ok(());
+        };
+        for delta in deltas {
+            self.apply_known_shape_binding_delta(&shape, delta)?;
+        }
+        Ok(())
+    }
+
+    fn apply_known_shape_binding_delta(
+        &mut self,
+        shape: &ValidatedQuery,
+        delta: BindingDelta,
+    ) -> Result<(), Error> {
         for (binding_id, values) in delta.adds {
             if values.len() != shape.params().len() {
                 return Err(Error::InvalidStoredValue("binding arity mismatch"));
@@ -3755,11 +3783,13 @@ where
                 on_column: join.on_column,
                 target: join.target,
                 source_column: join.source_column,
+                source_lookup: join.source_lookup,
                 filters: join
                     .filters
                     .into_iter()
                     .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
                     .collect(),
+                nested_joins: join.nested_joins,
             }
         }));
         query
@@ -3812,11 +3842,13 @@ where
                 on_column: join.on_column,
                 target: join.target,
                 source_column: join.source_column,
+                source_lookup: join.source_lookup,
                 filters: join
                     .filters
                     .into_iter()
                     .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
                     .collect(),
+                nested_joins: join.nested_joins,
             })
             .collect();
         query.reachable = query
@@ -3847,6 +3879,7 @@ where
 
 fn maintained_view_query_slice_supported(query: &crate::query::Query) -> bool {
     query.aggregate.is_none()
+        && query.policy_branches.is_empty()
         && maintained_view_window_supported(query)
         && !query_has_unsupported_param_disjunction(query)
 }

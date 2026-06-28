@@ -55,10 +55,12 @@ describe("NativeRuntimeAdapter server transport", () => {
         Uint8Array.from([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]),
       ),
     );
-    const helloBatch = decodeWebSocketFrameBatch(sockets[0]!.sent[1]!);
+    const helloBatch = decodeWebSocketFrameBatch(sockets[0]!.sent[1]! as Uint8Array);
     expect(helloBatch).toHaveLength(1);
     expect(isWireHello(helloBatch[0]!)).toBe(true);
-    expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]!)).toEqual([Uint8Array.from([1, 2, 3])]);
+    expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]! as Uint8Array)).toEqual([
+      Uint8Array.from([1, 2, 3]),
+    ]);
     expect(transport.closed).toBe(false);
 
     runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
@@ -67,9 +69,14 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(sockets).toHaveLength(2);
     expect(sockets[0]!.closed).toBe(true);
-    expect(JSON.parse(new TextDecoder().decode(sockets[1]!.sent[0]))).toEqual({
+    expect(JSON.parse(sockets[1]!.sent[0] as string)).toEqual({
       peer_identity: "01010101010101010101010101010101",
-      auth: { jwt_token: "fresh.jwt" },
+      auth: {
+        sub: "01010101010101010101010101010101",
+        jwt_token: "fresh.jwt",
+      },
+      sub: "01010101010101010101010101010101",
+      jwt_token: "fresh.jwt",
     });
 
     runtime.disconnect();
@@ -2125,13 +2132,13 @@ class FakeTransport implements Transport {
 class FakeWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
-  readonly sent: Uint8Array[] = [];
+  readonly sent: Array<Uint8Array | string> = [];
   private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
   closed = false;
 
   constructor(readonly url: string) {}
 
-  send(data: Uint8Array): void {
+  send(data: Uint8Array | string): void {
     this.sent.push(data);
   }
 

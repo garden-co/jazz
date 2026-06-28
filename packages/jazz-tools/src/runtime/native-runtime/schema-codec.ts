@@ -86,6 +86,7 @@ function writePolicyQuery(writer: PostcardWriter, table: string, expr: PolicyExp
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
   writer.none();
   writer.vec(() => undefined, 0);
   writer.none();

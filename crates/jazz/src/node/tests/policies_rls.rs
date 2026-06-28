@@ -1,4 +1,4 @@
-use crate::query::{Include, JoinMode, OrderDirection};
+use crate::query::{Include, JoinMode, OrderDirection, PolicyBranch};
 
 #[test]
 fn write_policy_rejection_cleans_up_client() {
@@ -438,6 +438,127 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     );
     // Closure-row policy revocation is still checked at emission; C2 composes
     // output-row policies into the subscription graph.
+}
+
+#[test]
+fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join() {
+    let invited = user(0xa1);
+    let uninvited = user(0xb2);
+    let public_canvas = row(8);
+    let private_canvas = row(9);
+    let blocked_canvas = row(11);
+    let invite_row = row(10);
+    let policy = Policy::shape(
+        Query::from("canvases")
+            .filter(eq(col("isPublic"), lit(true)))
+            .policy_branch(PolicyBranch::from_query(Query::from("canvases").join_via(
+                "canvasInvites",
+                "canvas",
+                [eq(col("userID"), claim("sub"))],
+            ))),
+    );
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "canvases",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("isPublic", ColumnType::Bool),
+            ],
+        )
+        .with_write_policy(policy),
+        TableSchema::new(
+            "canvasInvites",
+            [
+                ColumnSchema::new("canvas", ColumnType::Uuid),
+                ColumnSchema::new("userID", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("canvas", "canvases"),
+    ]);
+    let (_invited_dir, mut invited_writer) = open_node_with_schema(node(1), schema.clone());
+    let (_uninvited_dir, mut uninvited_writer) = open_node_with_schema(node(2), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+
+    let invite_tx = core
+        .commit_mergeable(MergeableCommit::new("canvasInvites", invite_row, 3).cells(
+            BTreeMap::from([
+                ("canvas".to_owned(), Value::Uuid(private_canvas.0)),
+                ("userID".to_owned(), Value::Uuid(invited.0)),
+            ]),
+        ))
+        .unwrap();
+    core.apply_fate_update(
+        invite_tx,
+        Fate::Accepted,
+        Some(GlobalSeq(0)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    let public_tx = uninvited_writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("canvases", public_canvas, 14)
+                .made_by(uninvited)
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("public".to_owned())),
+                    ("isPublic".to_owned(), Value::Bool(true)),
+                ])),
+        )
+        .unwrap();
+    let [public_fate] = core.apply_sync_message(public_tx.1).unwrap().try_into().unwrap();
+    assert!(matches!(
+        public_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+
+    let private_tx = invited_writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("canvases", private_canvas, 15)
+                .made_by(invited)
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("private".to_owned())),
+                    ("isPublic".to_owned(), Value::Bool(false)),
+                ])),
+        )
+        .unwrap();
+    let [private_fate] = core
+        .apply_sync_message(private_tx.1)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        private_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+
+    let blocked_tx = uninvited_writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("canvases", blocked_canvas, 16)
+                .made_by(uninvited)
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("blocked".to_owned())),
+                    ("isPublic".to_owned(), Value::Bool(false)),
+                ])),
+        )
+        .unwrap();
+    let [blocked_fate] = core
+        .apply_sync_message(blocked_tx.1)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        blocked_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        }
+    ));
 }
 #[test]
 fn composed_read_policy_grants_and_revokes_incrementally() {
@@ -3234,6 +3355,66 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
     assert!(core.dry_run_write_current_allows("docs", direct_doc, reader).unwrap());
     assert!(core.dry_run_write_current_allows("docs", closure_doc, reader).unwrap());
     assert!(!core.dry_run_write_current_allows("docs", hidden_doc, reader).unwrap());
+}
+
+#[test]
+fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
+    let schema = JazzSchema::new([
+        TableSchema::new("files", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::shape(Query::from("files").join_via(
+                "attachments",
+                "fileId",
+                [eq(col("ownerId"), claim("user_id"))],
+            )))
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "attachments",
+            [
+                ColumnSchema::new("fileId", ColumnType::Uuid),
+                ColumnSchema::new("ownerId", ColumnType::String),
+            ],
+        )
+        .with_reference("fileId", "files")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    let alice_file = row(0xf1);
+    let unlinked_file = row(0xf2);
+
+    for (file, name) in [(alice_file, "alice"), (unlinked_file, "unlinked")] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("files", file, 10).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String(name.to_owned()),
+            )])),
+        );
+    }
+    accept_global(
+        &mut core,
+        MergeableCommit::new("attachments", row(0xa7), 20).cells(BTreeMap::from([
+            ("fileId".to_owned(), Value::Uuid(alice_file.0)),
+            ("ownerId".to_owned(), Value::String(alice.0.to_string())),
+        ])),
+    );
+
+    assert!(
+        core.dry_run_read_current_allows("files", alice_file, alice)
+            .unwrap()
+    );
+    assert!(
+        !core
+            .dry_run_read_current_allows("files", alice_file, bob)
+            .unwrap()
+    );
+    assert!(
+        !core
+            .dry_run_read_current_allows("files", unlinked_file, alice)
+            .unwrap()
+    );
 }
 
 #[test]

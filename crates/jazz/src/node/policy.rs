@@ -234,12 +234,13 @@ where
                     cells.get(column).cloned()
                 })?
             } else {
+                let mut projected_column_value = |column: &str| cells.get(column).cloned();
                 self.policy_allows_memo(
                     &table,
                     &policy,
                     version.row_uuid(),
                     identity,
-                    |column| cells.get(column).cloned(),
+                    &mut projected_column_value,
                     context,
                 )?
             }
@@ -460,16 +461,83 @@ where
         identity: AuthorId,
         mut column_value: impl FnMut(&str) -> Option<Value>,
     ) -> Result<bool, Error> {
-        if !self.policy_filters_allow(table, policy, identity, &mut column_value)? {
+        if !policy.policy_branches.is_empty() {
+            if self.policy_base_allows(table, policy, row_uuid, identity, &mut column_value)? {
+                return Ok(true);
+            }
+            for branch in &policy.policy_branches {
+                let branch_policy = branch.as_query(&policy.table);
+                if self.policy_base_allows(
+                    table,
+                    &branch_policy,
+                    row_uuid,
+                    identity,
+                    &mut column_value,
+                )? {
+                    return Ok(true);
+                }
+            }
             return Ok(false);
         }
-        if !self.policy_joins_allow(table, policy, row_uuid, identity, &mut column_value)? {
+        self.policy_base_allows(table, policy, row_uuid, identity, &mut column_value)
+    }
+
+    fn policy_base_allows(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        identity: AuthorId,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
+    ) -> Result<bool, Error> {
+        if !self.policy_filters_allow(table, policy, identity, &mut *column_value)? {
+            return Ok(false);
+        }
+        if !self.policy_joins_allow(table, policy, row_uuid, identity, column_value)? {
             return Ok(false);
         }
         self.policy_reachable_allow(table, policy, row_uuid, identity, column_value)
     }
 
     fn policy_allows_memo(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        identity: AuthorId,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
+        context: &mut ViewEvaluationContext,
+    ) -> Result<bool, Error> {
+        if !policy.policy_branches.is_empty() {
+            if self.policy_base_allows_memo(
+                table,
+                policy,
+                row_uuid,
+                identity,
+                &mut *column_value,
+                context,
+            )? {
+                return Ok(true);
+            }
+            for branch in &policy.policy_branches {
+                let branch_policy = branch.as_query(&policy.table);
+                if self.policy_base_allows_memo(
+                    table,
+                    &branch_policy,
+                    row_uuid,
+                    identity,
+                    &mut *column_value,
+                    context,
+                )? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        self.policy_base_allows_memo(table, policy, row_uuid, identity, column_value, context)
+    }
+
+    fn policy_base_allows_memo(
         &mut self,
         table: &TableSchema,
         policy: &crate::query::Query,
@@ -524,17 +592,12 @@ where
         table: &TableSchema,
         predicate: &crate::query::Predicate,
         identity: AuthorId,
-        mut column_value: &mut dyn FnMut(&str) -> Option<Value>,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
     ) -> Result<bool, Error> {
         match predicate {
             crate::query::Predicate::All(predicates) => {
                 for predicate in predicates {
-                    if !self.policy_predicate_matches(
-                        table,
-                        predicate,
-                        identity,
-                        &mut column_value,
-                    )? {
+                    if !self.policy_predicate_matches(table, predicate, identity, column_value)? {
                         return Ok(false);
                     }
                 }
@@ -542,12 +605,7 @@ where
             }
             crate::query::Predicate::Any(predicates) => {
                 for predicate in predicates {
-                    if self.policy_predicate_matches(
-                        table,
-                        predicate,
-                        identity,
-                        &mut column_value,
-                    )? {
+                    if self.policy_predicate_matches(table, predicate, identity, column_value)? {
                         return Ok(true);
                     }
                 }
@@ -613,17 +671,26 @@ where
         policy: &crate::query::Query,
         row_uuid: RowUuid,
         identity: AuthorId,
-        mut column_value: impl FnMut(&str) -> Option<Value>,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
     ) -> Result<bool, Error> {
         for join in &policy.joins {
             let join_table = self.table(&join.table)?.clone();
-            let target = if let Some(source_column) = &join.source_column {
-                column_value(source_column)
-            } else {
-                Some(Value::Uuid(row_uuid.0))
-            };
+            let target = self.policy_join_target_value(table, join, row_uuid, column_value)?;
             let Some(target) = target else {
                 return Ok(false);
+            };
+            let join_policy = crate::query::Query {
+                table: join.table.clone(),
+                filters: join.filters.clone(),
+                joins: join.nested_joins.clone(),
+                policy_branches: Vec::new(),
+                reachable: Vec::new(),
+                includes: Vec::new(),
+                select: None,
+                order_by: Vec::new(),
+                aggregate: None,
+                limit: None,
+                offset: 0,
             };
             let mut found = false;
             for row in self.current_rows_for_schema(
@@ -631,25 +698,10 @@ where
                 self.catalogue.current_schema_version_id,
                 DurabilityTier::Global,
             )? {
-                let reaches_row = row.cell(&join_table, &join.on_column) == Some(target.clone());
+                let reaches_row = policy_join_row_value(&row, &join_table, &join.on_column)
+                    == Some(target.clone());
                 if reaches_row
-                    && self.policy_filters_allow_current_row(
-                        &join_table,
-                        &crate::query::Query {
-                            table: join.table.clone(),
-                            filters: join.filters.clone(),
-                            joins: Vec::new(),
-                            reachable: Vec::new(),
-                            includes: Vec::new(),
-                            select: None,
-                            order_by: Vec::new(),
-                            aggregate: None,
-                            limit: None,
-                            offset: 0,
-                        },
-                        &row,
-                        identity,
-                    )?
+                    && self.policy_allows_current_row(&join_table, &join_policy, &row, identity)?
                 {
                     found = true;
                     break;
@@ -661,6 +713,39 @@ where
         }
         let _ = table;
         Ok(true)
+    }
+
+    fn policy_join_target_value(
+        &mut self,
+        table: &TableSchema,
+        join: &crate::query::JoinVia,
+        row_uuid: RowUuid,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
+    ) -> Result<Option<Value>, Error> {
+        if let Some(lookup) = &join.source_lookup {
+            let Some(Value::Uuid(parent_row_uuid)) = column_value(&lookup.row_id_source_column)
+            else {
+                return Ok(None);
+            };
+            let lookup_table = self.table(&lookup.table)?.clone();
+            let Some(parent_row) =
+                self.policy_current_row(&lookup_table, RowUuid(parent_row_uuid))?
+            else {
+                return Ok(None);
+            };
+            if lookup.value_column == "id" {
+                return Ok(Some(Value::Uuid(parent_row.row_uuid().0)));
+            }
+            return Ok(parent_row.cell(&lookup_table, &lookup.value_column));
+        }
+        if let Some(source_column) = &join.source_column {
+            if source_column == "id" {
+                return Ok(Some(Value::Uuid(row_uuid.0)));
+            }
+            return Ok(column_value(source_column));
+        }
+        let _ = table;
+        Ok(Some(Value::Uuid(row_uuid.0)))
     }
 
     fn policy_reachable_allow(
@@ -683,6 +768,7 @@ where
                 table: reachable.edge_table.clone(),
                 filters: reachable.edge_filters.clone(),
                 joins: Vec::new(),
+                policy_branches: Vec::new(),
                 reachable: Vec::new(),
                 includes: Vec::new(),
                 select: None,
@@ -732,6 +818,7 @@ where
                 table: reachable.access_table.clone(),
                 filters: reachable.access_filters.clone(),
                 joins: Vec::new(),
+                policy_branches: Vec::new(),
                 reachable: Vec::new(),
                 includes: Vec::new(),
                 select: None,
@@ -790,11 +877,7 @@ where
     ) -> Result<bool, Error> {
         for join in &policy.joins {
             let join_table = self.table(&join.table)?.clone();
-            let target = if let Some(source_column) = &join.source_column {
-                column_value(source_column)
-            } else {
-                Some(Value::Uuid(row_uuid.0))
-            };
+            let target = self.policy_join_target_value(table, join, row_uuid, &mut column_value)?;
             let Some(target) = target else {
                 return Ok(false);
             };
@@ -804,7 +887,8 @@ where
             let join_policy = crate::query::Query {
                 table: join.table.clone(),
                 filters: join.filters.clone(),
-                joins: Vec::new(),
+                joins: join.nested_joins.clone(),
+                policy_branches: Vec::new(),
                 reachable: Vec::new(),
                 includes: Vec::new(),
                 select: None,
@@ -814,15 +898,14 @@ where
                 offset: 0,
             };
             let mut found = false;
-            let candidates = self.policy_join_rows_by_target_memo(&join_table, join, context)?;
-            if let Some(rows) = candidates.get(&target_key) {
+            let rows = {
+                let candidates =
+                    self.policy_join_rows_by_target_memo(&join_table, join, context)?;
+                candidates.get(&target_key).cloned()
+            };
+            if let Some(rows) = rows {
                 for row in rows {
-                    if self.policy_filters_allow_current_row(
-                        &join_table,
-                        &join_policy,
-                        row,
-                        identity,
-                    )? {
+                    if self.policy_allows_current_row(&join_table, &join_policy, &row, identity)? {
                         found = true;
                         break;
                     }
@@ -854,7 +937,7 @@ where
                 self.catalogue.current_schema_version_id,
                 DurabilityTier::Global,
             )? {
-                if let Some(value) = row.cell(join_table, &join.on_column)
+                if let Some(value) = policy_join_row_value(&row, join_table, &join.on_column)
                     && let Some(key) = policy_value_key(&value)
                 {
                     rows_by_target.entry(key).or_default().push(row);
@@ -988,6 +1071,18 @@ fn policy_values_equal(left: &Value, right: &Value) -> bool {
         (Value::Uuid(left), Value::String(right)) => uuid::Uuid::parse_str(right) == Ok(*left),
         (Value::String(left), Value::Uuid(right)) => uuid::Uuid::parse_str(left) == Ok(*right),
         _ => left == right,
+    }
+}
+
+pub(super) fn policy_join_row_value(
+    row: &CurrentRow,
+    table: &TableSchema,
+    column: &str,
+) -> Option<Value> {
+    if column == "id" {
+        Some(Value::Uuid(row.row_uuid().0))
+    } else {
+        row.cell(table, column)
     }
 }
 

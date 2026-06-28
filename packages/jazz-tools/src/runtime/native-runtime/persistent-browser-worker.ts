@@ -47,6 +47,24 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         postResult(message.id, result);
         return;
       }
+      case "beginTransaction": {
+        const [kind] = message.args;
+        const result = getRuntime().beginTransaction(kind);
+        postResult(message.id, result);
+        return;
+      }
+      case "commitTransaction": {
+        const [transactionId] = message.args;
+        const result = getRuntime().commitTransaction(transactionId);
+        postResult(message.id, result);
+        return;
+      }
+      case "rollbackTransaction": {
+        const [transactionId] = message.args;
+        const result = getRuntime().rollbackTransaction(transactionId);
+        postResult(message.id, result);
+        return;
+      }
       case "query": {
         const result = await getRuntime().query(...message.args);
         postResult(message.id, result);
@@ -77,7 +95,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         return;
       }
       case "connect": {
-        getRuntime().connect(...message.args);
+        await getRuntime().connect(...message.args);
         postResult(message.id, undefined);
         return;
       }

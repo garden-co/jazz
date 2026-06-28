@@ -72,6 +72,22 @@ describe("auto-join race on first message send", () => {
     return { container, root };
   }
 
+  async function mountApp(config: {
+    appId: string;
+    dbName: string;
+    serverUrl: string;
+    secret: string;
+  }): Promise<{ container: HTMLDivElement; root: Root }> {
+    const mounted = makeMount();
+    mounted.root.render(<App config={config} />);
+    await waitFor(
+      () => mounted.container.childNodes.length > 0,
+      10_000,
+      `App should commit initial DOM; hash=${window.location.hash}`,
+    );
+    return mounted;
+  }
+
   afterEach(async () => {
     resetProfileGuard();
     for (const { root, container } of mounts) {
@@ -104,24 +120,22 @@ describe("auto-join race on first message send", () => {
 
     try {
       // ── Alice: create a public chat ────────────────────────────────────────
-      const { container: aliceContainer, root: aliceRoot } = makeMount();
-      aliceRoot.render(
-        <App
-          config={{
-            appId: APP_ID,
-            dbName: uniqueDbName("autojoin-alice"),
-            serverUrl,
-            secret: await testSecret(`autojoin-alice-${runId}`),
-          }}
-        />,
-      );
+      const { container: aliceContainer } = await mountApp({
+        appId: APP_ID,
+        dbName: uniqueDbName("autojoin-alice"),
+        serverUrl,
+        secret: await testSecret(`autojoin-alice-${runId}`),
+      });
 
       // The app redirects from / to /#/chat/:id once it has created the seed
       // public chat.  Wait for the hash to settle.
       await waitFor(
         () => /\/#\/chat\//.test(window.location.href),
         20_000,
-        "Alice should land on a chat URL after the seed chat is created",
+        `Alice should land on a chat URL after the seed chat is created; text=${aliceContainer.textContent?.slice(
+          0,
+          500,
+        )}; consoleErrors=${JSON.stringify(consoleErrors)}`,
       );
 
       // Wait for Alice's editor to be enabled, so we know the chat is fully
@@ -147,7 +161,7 @@ describe("auto-join race on first message send", () => {
       // before render is essential — by the time render() returns, the editor
       // is mounted asynchronously after data loads, so a polling installer
       // catches the very first contenteditable value.
-      const { container: bobContainer, root: bobRoot } = makeMount();
+      const { container: bobContainer } = makeMount();
 
       const editorHistory: string[] = [];
       const poll = setInterval(() => {
@@ -172,15 +186,19 @@ describe("auto-join race on first message send", () => {
       // URL so addInitScript fires before any client-side routing).
       window.location.hash = `#/chat/${chatId}`;
 
-      bobRoot.render(
-        <App
-          config={{
-            appId: APP_ID,
-            dbName: uniqueDbName("autojoin-bob"),
-            serverUrl,
-            secret: await testSecret(`autojoin-bob-${runId}`),
-          }}
-        />,
+      const bobConfig = {
+        appId: APP_ID,
+        dbName: uniqueDbName("autojoin-bob"),
+        serverUrl,
+        secret: await testSecret(`autojoin-bob-${runId}`),
+      };
+      mounts[mounts.length - 1]?.root.render(<App config={bobConfig} />);
+      await waitFor(
+        () => bobContainer.childNodes.length > 0,
+        10_000,
+        `Bob app should commit initial DOM; hash=${window.location.hash}; consoleErrors=${JSON.stringify(
+          consoleErrors,
+        )}`,
       );
 
       // ── Assert A: composer must transition through disabled before enabling ─
@@ -196,7 +214,10 @@ describe("auto-join race on first message send", () => {
           return !!editor && editor.getAttribute("contenteditable") !== "false";
         },
         20_000,
-        "Bob's composer should eventually become enabled",
+        `Bob's composer should eventually become enabled; hash=${window.location.hash}; text=${bobContainer.textContent?.slice(
+          0,
+          500,
+        )}; editorHistory=${JSON.stringify(editorHistory)}; consoleErrors=${JSON.stringify(consoleErrors)}`,
       );
 
       clearInterval(poll); // belt-and-braces; the polling installer already cleared it

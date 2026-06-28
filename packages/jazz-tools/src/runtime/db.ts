@@ -192,7 +192,7 @@ type DbRuntimeOperationContext = {
 };
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
-  return { localUpdates: "deferred", ...options };
+  return options ?? {};
 }
 
 function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -1556,25 +1556,18 @@ export class Db {
       builtQuery.table,
       queryOptions,
     );
+    startNativeSubscription();
     if (this.config.serverUrl && queryOptions.propagation !== "local-only") {
-      const subscriptionTier =
-        queryOptions.tier === undefined || queryOptions.tier === "local"
-          ? "edge"
-          : queryOptions.tier;
-      void this.all(query, { ...queryOptions, tier: subscriptionTier })
+      void this.all(query, { ...queryOptions, tier: "local", propagation: "local-only" })
         .then((rows) => {
           if (unsubscribed) return;
           callback(manager.seed(rows));
-          startNativeSubscription();
         })
         .catch((error: unknown) => {
-          startNativeSubscription();
           setTimeout(() => {
             throw error;
           }, 0);
         });
-    } else {
-      startNativeSubscription();
     }
 
     // Return unsubscribe function

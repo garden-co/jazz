@@ -128,6 +128,116 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
+  it("waits for the worker connect command before edge durability waits", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-connect-before-edge-wait-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    const insert = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "connect before wait" } },
+      undefined,
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+
+    const connectMessage = worker.messages.find((message) => message.method === "connect");
+    const insertMessage = worker.messages.find((message) => message.method === "insert");
+    expect(connectMessage).toBeDefined();
+    expect(insertMessage).toBeDefined();
+    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+
+    const waitPromise = runtime.waitForTransaction(insert.transactionId, "edge");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(false);
+
+    worker.respond(connectMessage!.id, undefined);
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
+    });
+    const waitMessage = worker.messages.find((message) => message.method === "waitForTransaction");
+    expect(waitMessage?.args).toEqual(["native-runtime-transaction", "edge"]);
+    worker.respond(waitMessage!.id, undefined);
+
+    await expect(waitPromise).resolves.toBeUndefined();
+    await runtime.close();
+  });
+
+  it("waits for the worker connect command before server-backed reads subscribe", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-connect-before-edge-read-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    const queryPromise = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+    const subscriptionHandle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "edge",
+      null,
+    );
+    runtime.executeSubscription(subscriptionHandle, () => undefined);
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(worker.messages.some((message) => message.method === "query")).toBe(false);
+    expect(worker.messages.some((message) => message.method === "createSubscription")).toBe(false);
+
+    const connectMessage = worker.messages.find((message) => message.method === "connect");
+    worker.respond(connectMessage!.id, undefined);
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+      expect(worker.messages.some((message) => message.method === "createSubscription")).toBe(true);
+    });
+
+    const queryMessage = worker.messages.find((message) => message.method === "query");
+    const createSubscriptionMessage = worker.messages.find(
+      (message) => message.method === "createSubscription",
+    );
+    worker.respond(queryMessage!.id, []);
+    worker.respond(createSubscriptionMessage!.id, 7);
+
+    await expect(queryPromise).resolves.toEqual([]);
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "executeSubscription")).toBe(
+        true,
+      );
+    });
+
+    const executeSubscriptionMessage = worker.messages.find(
+      (message) => message.method === "executeSubscription",
+    );
+    expect(executeSubscriptionMessage?.args).toEqual([7]);
+    worker.respond(executeSubscriptionMessage!.id, undefined);
+
+    await runtime.close();
+  });
+
   it("terminates locally on close without sending an OPFS owner close command", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
