@@ -838,7 +838,17 @@ where
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlan), Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
-        let shape = maintained_view_bind_filter_literals(&shape, &binding, &self.catalogue.schema)?;
+        let claim_params = if tier == DurabilityTier::Global {
+            ParamBindingMode::RetainClaimParams
+        } else {
+            ParamBindingMode::InlineAllReachableSeeds
+        };
+        let shape = maintained_view_bind_filter_literals_with_mode(
+            &shape,
+            &binding,
+            &self.catalogue.schema,
+            claim_params,
+        )?;
         let binding = binding_for_shape(&shape, &binding)?;
         let plan = self.prepared_query_plan(&shape, tier)?;
         Ok((shape, binding, plan))
@@ -2741,8 +2751,7 @@ where
                     .map(|column_type| column_type.value_type()),
             ),
         );
-        let binding_source_shape = maintained_view_binding_source_shape(shape, binding);
-        let graph = rewrite_binding_sources(graph, &binding_source_shape, binding_descriptor);
+        let binding_source_shape = maintained_view_binding_source_shape(shape);
         let prepared = self.database.prepare(
             graph,
             binding_source_shape,
@@ -2761,10 +2770,14 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, GraphBuilder), Error> {
-        self.ensure_maintained_view_query_slice(shape.query())?;
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
+        let shape = maintained_view_bind_filter_literals_with_mode(
+            &shape,
+            &binding,
+            &self.catalogue.schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
         self.ensure_maintained_view_query_slice(shape.query())?;
-        let shape = maintained_view_bind_filter_literals(&shape, &binding, &self.catalogue.schema)?;
         let terminal_tables = self.maintained_view_terminal_tables(&shape)?;
         let result_current =
             self.maintained_view_result_closure_graph(&shape, identity, &terminal_tables)?;
@@ -3898,35 +3911,10 @@ where
                 ProjectField::renamed(param.clone(), "team"),
                 ProjectField::renamed(param.clone(), "reachable_team"),
             ]),
-            Operand::Literal(Value::Uuid(seed)) => {
-                let access_seed = current_source_graph(access_table, tier, source_overrides)
-                    .unwrap_nullable(query_field(&reachable.access_team_column))
-                    .filter(PredicateExpr::eq(
-                        query_field(&reachable.access_team_column),
-                        Value::Uuid(*seed),
-                    ))
-                    .project_fields([
-                        ProjectField::renamed(query_field(&reachable.access_team_column), "team"),
-                        ProjectField::renamed(
-                            query_field(&reachable.access_team_column),
-                            "reachable_team",
-                        ),
-                    ]);
-                let edge_seed = current_source_graph(edge_table, tier, source_overrides)
-                    .unwrap_nullable(query_field(&reachable.edge_member_column))
-                    .filter(PredicateExpr::eq(
-                        query_field(&reachable.edge_member_column),
-                        Value::Uuid(*seed),
-                    ))
-                    .project_fields([
-                        ProjectField::renamed(query_field(&reachable.edge_member_column), "team"),
-                        ProjectField::renamed(
-                            query_field(&reachable.edge_member_column),
-                            "reachable_team",
-                        ),
-                    ]);
-                GraphBuilder::union([access_seed, edge_seed])
-            }
+            Operand::Literal(Value::Uuid(seed)) => GraphBuilder::values(
+                team_desc.clone(),
+                [[Value::Uuid(*seed), Value::Uuid(*seed)]],
+            )?,
             Operand::Claim(_) => {
                 return Err(Error::InvalidStoredValue(
                     "query claims must be rewritten to params before lowering",
@@ -5036,11 +5024,31 @@ fn maintained_view_bind_filter_literals(
     binding: &Binding,
     schema: &JazzSchema,
 ) -> Result<ValidatedQuery, Error> {
+    maintained_view_bind_filter_literals_with_mode(
+        shape,
+        binding,
+        schema,
+        ParamBindingMode::InlineAllReachableSeeds,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ParamBindingMode {
+    InlineAllReachableSeeds,
+    RetainClaimParams,
+}
+
+fn maintained_view_bind_filter_literals_with_mode(
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    schema: &JazzSchema,
+    mode: ParamBindingMode,
+) -> Result<ValidatedQuery, Error> {
     let mut query = shape.query().clone();
     query.filters = query
         .filters
         .into_iter()
-        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
         .collect::<Result<Vec<_>, _>>()?;
     query.joins = query
         .joins
@@ -5049,7 +5057,7 @@ fn maintained_view_bind_filter_literals(
             join.filters = join
                 .filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(join)
         })
@@ -5058,19 +5066,18 @@ fn maintained_view_bind_filter_literals(
         .reachable
         .into_iter()
         .map(|mut reachable| {
-            if matches!(&reachable.from, Operand::Param(name) if name.starts_with(CLAIM_PARAM_PREFIX))
-            {
-                reachable.from = maintained_view_bind_operand(reachable.from, binding)?;
+            if should_inline_reachable_seed(&reachable.from, mode) {
+                reachable.from = maintained_view_bind_operand(reachable.from, binding, mode)?;
             }
             reachable.access_filters = reachable
                 .access_filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             reachable.edge_filters = reachable
                 .edge_filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(reachable)
         })
@@ -5082,7 +5089,7 @@ fn maintained_view_bind_filter_literals(
             branch.filters = branch
                 .filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             branch.joins = branch
                 .joins
@@ -5091,7 +5098,7 @@ fn maintained_view_bind_filter_literals(
                     join.filters = join
                         .filters
                         .into_iter()
-                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(join)
                 })
@@ -5100,19 +5107,19 @@ fn maintained_view_bind_filter_literals(
                 .reachable
                 .into_iter()
                 .map(|mut reachable| {
-                    if matches!(&reachable.from, Operand::Param(name) if name.starts_with(CLAIM_PARAM_PREFIX))
-                    {
-                        reachable.from = maintained_view_bind_operand(reachable.from, binding)?;
+                    if should_inline_reachable_seed(&reachable.from, mode) {
+                        reachable.from =
+                            maintained_view_bind_operand(reachable.from, binding, mode)?;
                     }
                     reachable.access_filters = reachable
                         .access_filters
                         .into_iter()
-                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                         .collect::<Result<Vec<_>, _>>()?;
                     reachable.edge_filters = reachable
                         .edge_filters
                         .into_iter()
-                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(reachable)
                 })
@@ -5138,7 +5145,13 @@ fn inline_snapshot_bind_filter_literals(
     query.filters = query
         .filters
         .into_iter()
-        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+        .map(|predicate| {
+            maintained_view_bind_predicate(
+                predicate,
+                binding,
+                ParamBindingMode::InlineAllReachableSeeds,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     query.joins = query
         .joins
@@ -5147,7 +5160,13 @@ fn inline_snapshot_bind_filter_literals(
             join.filters = join
                 .filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| {
+                    maintained_view_bind_predicate(
+                        predicate,
+                        binding,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(join)
         })
@@ -5156,16 +5175,32 @@ fn inline_snapshot_bind_filter_literals(
         .reachable
         .into_iter()
         .map(|mut reachable| {
-            reachable.from = maintained_view_bind_operand(reachable.from, binding)?;
+            reachable.from = maintained_view_bind_operand(
+                reachable.from,
+                binding,
+                ParamBindingMode::InlineAllReachableSeeds,
+            )?;
             reachable.access_filters = reachable
                 .access_filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| {
+                    maintained_view_bind_predicate(
+                        predicate,
+                        binding,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             reachable.edge_filters = reachable
                 .edge_filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| {
+                    maintained_view_bind_predicate(
+                        predicate,
+                        binding,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(reachable)
         })
@@ -5177,7 +5212,13 @@ fn inline_snapshot_bind_filter_literals(
             branch.filters = branch
                 .filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| {
+                    maintained_view_bind_predicate(
+                        predicate,
+                        binding,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             branch.joins = branch
                 .joins
@@ -5186,7 +5227,13 @@ fn inline_snapshot_bind_filter_literals(
                     join.filters = join
                         .filters
                         .into_iter()
-                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .map(|predicate| {
+                            maintained_view_bind_predicate(
+                                predicate,
+                                binding,
+                                ParamBindingMode::InlineAllReachableSeeds,
+                            )
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(join)
                 })
@@ -5195,16 +5242,32 @@ fn inline_snapshot_bind_filter_literals(
                 .reachable
                 .into_iter()
                 .map(|mut reachable| {
-                    reachable.from = maintained_view_bind_operand(reachable.from, binding)?;
+                    reachable.from = maintained_view_bind_operand(
+                        reachable.from,
+                        binding,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                    )?;
                     reachable.access_filters = reachable
                         .access_filters
                         .into_iter()
-                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .map(|predicate| {
+                            maintained_view_bind_predicate(
+                                predicate,
+                                binding,
+                                ParamBindingMode::InlineAllReachableSeeds,
+                            )
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     reachable.edge_filters = reachable
                         .edge_filters
                         .into_iter()
-                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .map(|predicate| {
+                            maintained_view_bind_predicate(
+                                predicate,
+                                binding,
+                                ParamBindingMode::InlineAllReachableSeeds,
+                            )
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(reachable)
                 })
@@ -5224,66 +5287,87 @@ fn inline_snapshot_bind_filter_literals(
 fn maintained_view_bind_predicate(
     predicate: Predicate,
     binding: &Binding,
+    mode: ParamBindingMode,
 ) -> Result<Predicate, Error> {
     Ok(match predicate {
         Predicate::All(predicates) => Predicate::All(
             predicates
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Predicate::Any(predicates) => Predicate::Any(
             predicates
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Predicate::Not(predicate) => Predicate::Not(Box::new(maintained_view_bind_predicate(
-            *predicate, binding,
+            *predicate, binding, mode,
         )?)),
         Predicate::Eq(left, right) => Predicate::Eq(
-            maintained_view_bind_operand(left, binding)?,
-            maintained_view_bind_operand(right, binding)?,
+            maintained_view_bind_operand(left, binding, mode)?,
+            maintained_view_bind_operand(right, binding, mode)?,
         ),
         Predicate::Ne(left, right) => Predicate::Ne(
-            maintained_view_bind_operand(left, binding)?,
-            maintained_view_bind_operand(right, binding)?,
+            maintained_view_bind_operand(left, binding, mode)?,
+            maintained_view_bind_operand(right, binding, mode)?,
         ),
         Predicate::In(left, values) => Predicate::In(
-            maintained_view_bind_operand(left, binding)?,
+            maintained_view_bind_operand(left, binding, mode)?,
             values
                 .into_iter()
-                .map(|operand| maintained_view_bind_operand(operand, binding))
+                .map(|operand| maintained_view_bind_operand(operand, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Predicate::Gt(left, right) => Predicate::Gt(
-            maintained_view_bind_operand(left, binding)?,
-            maintained_view_bind_operand(right, binding)?,
+            maintained_view_bind_operand(left, binding, mode)?,
+            maintained_view_bind_operand(right, binding, mode)?,
         ),
         Predicate::Gte(left, right) => Predicate::Gte(
-            maintained_view_bind_operand(left, binding)?,
-            maintained_view_bind_operand(right, binding)?,
+            maintained_view_bind_operand(left, binding, mode)?,
+            maintained_view_bind_operand(right, binding, mode)?,
         ),
         Predicate::Lt(left, right) => Predicate::Lt(
-            maintained_view_bind_operand(left, binding)?,
-            maintained_view_bind_operand(right, binding)?,
+            maintained_view_bind_operand(left, binding, mode)?,
+            maintained_view_bind_operand(right, binding, mode)?,
         ),
         Predicate::Lte(left, right) => Predicate::Lte(
-            maintained_view_bind_operand(left, binding)?,
-            maintained_view_bind_operand(right, binding)?,
+            maintained_view_bind_operand(left, binding, mode)?,
+            maintained_view_bind_operand(right, binding, mode)?,
         ),
         Predicate::Contains(left, right) => Predicate::Contains(
-            maintained_view_bind_operand(left, binding)?,
-            maintained_view_bind_operand(right, binding)?,
+            maintained_view_bind_operand(left, binding, mode)?,
+            maintained_view_bind_operand(right, binding, mode)?,
         ),
         Predicate::IsNull(operand) => {
-            Predicate::IsNull(maintained_view_bind_operand(operand, binding)?)
+            Predicate::IsNull(maintained_view_bind_operand(operand, binding, mode)?)
         }
     })
 }
 
-fn maintained_view_bind_operand(operand: Operand, binding: &Binding) -> Result<Operand, Error> {
+fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bool {
+    match (operand, mode) {
+        (Operand::Param(_), ParamBindingMode::InlineAllReachableSeeds) => true,
+        (Operand::Param(name), ParamBindingMode::RetainClaimParams) => {
+            !name.starts_with(CLAIM_PARAM_PREFIX)
+        }
+        _ => false,
+    }
+}
+
+fn maintained_view_bind_operand(
+    operand: Operand,
+    binding: &Binding,
+    mode: ParamBindingMode,
+) -> Result<Operand, Error> {
     Ok(match operand {
+        Operand::Param(name)
+            if matches!(mode, ParamBindingMode::RetainClaimParams)
+                && name.starts_with(CLAIM_PARAM_PREFIX) =>
+        {
+            Operand::Param(name)
+        }
         Operand::Param(name) => Operand::Literal(
             binding
                 .values()
@@ -5367,12 +5451,8 @@ fn include_deleted_query_binding_source_shape(
     )
 }
 
-fn maintained_view_binding_source_shape(shape: &ValidatedQuery, binding: &Binding) -> String {
-    format!(
-        "jazz-maintained-view:{}:{}",
-        shape.shape_id().0,
-        binding.binding_id().0
-    )
+fn maintained_view_binding_source_shape(shape: &ValidatedQuery) -> String {
+    query_binding_source_shape(shape)
 }
 
 fn append_maintained_view_binding_params_for_routing<'a>(
@@ -5394,7 +5474,7 @@ fn append_maintained_view_binding_params_for_routing<'a>(
             .chain([ProjectField::literal(ROUTING_JOIN, Value::U8(0))]),
     );
     let binding = GraphBuilder::binding_source(
-        query_binding_source_shape(shape),
+        maintained_view_binding_source_shape(shape),
         RecordDescriptor::new(param_types.keys().map(|name| {
             (
                 name.clone(),
@@ -5423,79 +5503,6 @@ fn append_maintained_view_binding_params_for_routing<'a>(
                     .map(|param| ProjectField::renamed(format!("right.{param}"), param)),
             ),
     )
-}
-
-fn rewrite_binding_sources(
-    graph: GraphBuilder,
-    new_shape: &str,
-    output: RecordDescriptor,
-) -> GraphBuilder {
-    match graph {
-        GraphBuilder::BindingSource { .. } => {
-            GraphBuilder::binding_source(new_shape.to_owned(), output)
-        }
-        GraphBuilder::Recursive {
-            seed,
-            step,
-            frontier,
-            max_iters,
-        } => GraphBuilder::Recursive {
-            seed: Box::new(rewrite_binding_sources(*seed, new_shape, output)),
-            step: Box::new(rewrite_binding_sources(*step, new_shape, output)),
-            frontier,
-            max_iters,
-        },
-        GraphBuilder::Filter { input, predicate } => GraphBuilder::Filter {
-            input: Box::new(rewrite_binding_sources(*input, new_shape, output)),
-            predicate,
-        },
-        GraphBuilder::UnwrapNullable { input, field } => GraphBuilder::UnwrapNullable {
-            input: Box::new(rewrite_binding_sources(*input, new_shape, output)),
-            field,
-        },
-        GraphBuilder::Project { input, fields } => GraphBuilder::Project {
-            input: Box::new(rewrite_binding_sources(*input, new_shape, output)),
-            fields,
-        },
-        GraphBuilder::Union { inputs } => GraphBuilder::Union {
-            inputs: inputs
-                .into_iter()
-                .map(|input| rewrite_binding_sources(input, new_shape, output))
-                .collect(),
-        },
-        GraphBuilder::Join {
-            left,
-            right,
-            left_on,
-            right_on,
-        } => GraphBuilder::Join {
-            left: Box::new(rewrite_binding_sources(*left, new_shape, output)),
-            right: Box::new(rewrite_binding_sources(*right, new_shape, output)),
-            left_on,
-            right_on,
-        },
-        GraphBuilder::AntiJoin {
-            left,
-            right,
-            left_on,
-            right_on,
-        } => GraphBuilder::AntiJoin {
-            left: Box::new(rewrite_binding_sources(*left, new_shape, output)),
-            right: Box::new(rewrite_binding_sources(*right, new_shape, output)),
-            left_on,
-            right_on,
-        },
-        GraphBuilder::ArgMaxBy {
-            input,
-            group_cols,
-            order_cols,
-        } => GraphBuilder::ArgMaxBy {
-            input: Box::new(rewrite_binding_sources(*input, new_shape, output)),
-            group_cols,
-            order_cols,
-        },
-        other => other,
-    }
 }
 
 fn collect_nullable_param_types(

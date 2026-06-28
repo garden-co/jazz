@@ -275,7 +275,12 @@ where
     /// ```
     pub fn prepare_query(&mut self, query: Query) -> Result<PreparedShape, Error> {
         let planned = plan_prepared_shape(&query, self.ivm_runtime.schema())?;
-        let output = planned.planned.output_descriptor();
+        let output = RecordDescriptor::new(
+            planned
+                .public_output
+                .iter()
+                .map(|field| (field.name.clone(), field.value_type.clone())),
+        );
         let shape = self.prepare(
             planned.planned.graph,
             planned.shape,
@@ -318,7 +323,6 @@ where
     ///             Value::U64(1),
     ///             Value::String("Kind of Blue".into()),
     ///             Value::U64(1959),
-    ///             Value::U64(1959),
     ///         ],
     ///         1,
     ///     )]
@@ -351,7 +355,10 @@ where
                 return Err(Error::UnknownParameter((*name).to_owned()));
             }
         }
-        self.bind_shape(prepared.id, &values)
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.ivm_runtime
+            .bind_shape_with_output(prepared.id, &values, prepared.output, &storage)
+            .map_err(Error::IvmRuntime)
     }
 
     /// Prepare a graph-level shape directly. Most callers should prefer

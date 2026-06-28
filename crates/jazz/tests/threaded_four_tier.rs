@@ -387,16 +387,18 @@ fn row_cells(row: &CurrentRow, table: &TableSchema) -> BTreeMap<String, Value> {
 }
 
 fn assert_link_dedup(summary: LinkSummary) {
-    // Maintained table-filtered current-row deltas may intentionally re-bundle
-    // a complete tx payload that is already known to the peer when that tx is
-    // not in the previous filtered result set. Keep those safety re-bundles
-    // visible in the metric instead of treating every complete bundle as newly
-    // shipped.
-    assert_eq!(
-        summary.metrics.version_bundles_out,
-        summary.shipped_complete_tx_payloads as u64 + summary.metrics.duplicate_version_bundles_out
-    );
     assert!(summary.metrics.view_updates_out > 0);
+    assert_eq!(summary.metrics.full_diff_recomputes_out, 0);
+    assert_eq!(
+        summary
+            .metrics
+            .maintained_subscription_view
+            .full_recomputes_out,
+        0
+    );
+    assert_eq!(summary.metrics.duplicate_version_bundles_out, 0);
+    assert_eq!(summary.metrics.complete_tx_payload_refs_out, 0);
+    assert_eq!(summary.shipped_complete_tx_payloads, 0);
 }
 
 #[test]

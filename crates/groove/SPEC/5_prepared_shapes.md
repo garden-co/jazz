@@ -62,10 +62,12 @@ order (`INV-SHAPE-14`). The supplied values must conform to the shape's
 
 _Further invariants._ `INV-SHAPE-2` — `prepare_query` rejects parameter-free
 queries and lowers only equality `column = parameter` predicates into binding
-joins. `INV-SHAPE-3` — a prepared-query output includes every binding key column
-not already projected, rejecting output-name collisions with parameter names.
-`INV-SHAPE-4` — graph-level `prepare` rejects an `output_key_fields` entry absent
-from the graph output descriptor (`ShapeKeyFieldNotFound`).
+joins. `INV-SHAPE-3` — a prepared-query's internal graph output includes every
+binding key column needed for routing, rejecting output-name collisions with
+parameter names, but `PreparedShape::output` and bound subscription
+notifications expose only the public query projection. `INV-SHAPE-4` —
+graph-level `prepare` rejects an `output_key_fields` entry absent from the graph
+output descriptor (`ShapeKeyFieldNotFound`).
 
 ## 5.3 The binding lifecycle
 
@@ -96,8 +98,11 @@ The shared graph computes rows for all active bindings, so each output delta
 must be routed back to the binding that owns it. Each shape output row is
 projected through `output_key_fields` into a `BindingKey`; that key's
 materialized multiset is updated, and the delta is sent only to subscribers
-registered for that key (`INV-SHAPE-8`). A shape commit tick therefore delivers
-to each bound subscriber exactly the changes to _its_ parameterized result.
+registered for that key (`INV-SHAPE-8`). Prepared-query subscribers receive a
+notification projection over that internal row, so hidden binding fields can
+route the delta without appearing in public rows. A shape commit tick therefore
+delivers to each bound subscriber exactly the changes to _its_ parameterized
+result.
 
 _Further invariants._ `INV-SHAPE-9` — the per-key materialized snapshot is a
 weighted multiset; a delta bringing a record to weight zero removes it.
