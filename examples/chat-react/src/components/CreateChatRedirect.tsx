@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useDb, useSession } from "jazz-tools/react";
 import { useRouter } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
@@ -10,9 +10,10 @@ export const CreateChatRedirect = () => {
   const session = useSession();
   const { navigate } = useRouter();
   const initialized = useRef(false);
-  const sharedWriteOptions: { tier: DurabilityTier } = {
-    tier: db.getConfig().serverUrl ? "edge" : "local",
-  };
+  const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
+    () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),
+    [db],
+  );
 
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
@@ -22,29 +23,23 @@ export const CreateChatRedirect = () => {
     initialized.current = true;
 
     void (async () => {
-      const seeded = db.transaction((tx) => {
-        const chat = tx.insert(app.chats, {
-          isPublic: true,
-          createdBy: userId,
-        });
+      const chatWrite = db.insert(app.chats, {
+        isPublic: true,
+        createdBy: userId,
+      });
+      const chat = chatWrite.value;
+      await chatWrite.wait(sharedWriteOptions);
 
-        tx.insert(app.chatMembers, { chatId: chat.id, userId });
+      await db.insert(app.chatMembers, { chatId: chat.id, userId }).wait(sharedWriteOptions);
 
-        tx.insert(app.messages, {
+      await db
+        .insert(app.messages, {
           chatId: chat.id,
           text: "Hello world",
           senderId: myProfile.id,
           createdAt: new Date(),
-        });
-
-        return chat;
-      });
-      const chat = seeded.value;
-      await seeded.wait({ tier: "local" });
-
-      void seeded.wait(sharedWriteOptions).catch((error) => {
-        console.error("failed to persist initial chat", error);
-      });
+        })
+        .wait(sharedWriteOptions);
 
       navigate(`/#/chat/${chat.id}`);
     })().catch((error) => {

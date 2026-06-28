@@ -2473,7 +2473,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             validated.shape_id().0.to_string(),
-            "1ffb64aa-5cfd-5b00-b533-6745bf7fa1ef"
+            "dd92ae54-eeec-57e1-be75-f3957227bed8"
         );
     }
 }

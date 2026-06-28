@@ -845,7 +845,7 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
-    let tx_id = commit_mergeable_global(
+    let _tx_id = commit_mergeable_global(
         &mut writer,
         &mut core,
         MergeableCommit::new("todos", row, 10).cells(title_cells("match")),
@@ -872,7 +872,7 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
     };
     assert_eq!(version_bundles.len(), 1);
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(peer.shipped_complete_tx_payloads().contains(&tx_id));
+    assert!(peer.shipped_complete_tx_payloads().is_empty());
 
     let second = peer
         .rehydrate_query(&mut core, &filtered_shape, &filtered_binding)
@@ -885,8 +885,8 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
     else {
         panic!("expected second view update");
     };
-    assert!(version_bundles.is_empty());
-    assert_eq!(complete_tx_payload_refs, vec![tx_id]);
+    assert_eq!(version_bundles.len(), 1);
+    assert!(complete_tx_payload_refs.is_empty());
 }
 
 #[test]

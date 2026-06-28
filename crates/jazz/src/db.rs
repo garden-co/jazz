@@ -1837,10 +1837,11 @@ where
         let maybe_rows = {
             let mut state_ref = state.borrow_mut();
             if let Some(maintained) = state_ref.maintained_subscription.as_mut() {
-                if let Some(update) = node
-                    .borrow_mut()
-                    .drain_local_maintained_view_subscription(maintained)?
-                {
+                let update = {
+                    node.borrow_mut()
+                        .drain_local_maintained_view_subscription(maintained)?
+                };
+                if let Some(update) = update {
                     let mut rows_by_id = previous
                         .iter()
                         .cloned()

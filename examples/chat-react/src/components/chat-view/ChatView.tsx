@@ -37,6 +37,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   // chatMember row so they appear in the member list and can send messages.
   const myMembershipsResult = useAll(
     app.chatMembers.where({ chatId, userId: userId ?? "__none__" }),
+    sharedWriteOptions,
   );
   const myMemberships = myMembershipsResult ?? [];
   const membershipKnown = myMembershipsResult !== undefined;
@@ -53,11 +54,13 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   // joined in a previous session); otherwise becomes true only after the
   // auto-join insert is durably persisted at edge tier.
   const [membershipReady, setMembershipReady] = useState(false);
+  const [autoJoinFailed, setAutoJoinFailed] = useState(false);
 
   useEffect(() => {
     autoJoined.current = false;
     autoJoinPending.current = false;
     setMembershipReady(false);
+    setAutoJoinFailed(false);
   }, [chatId]);
 
   useEffect(() => {
@@ -69,17 +72,13 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
       return;
     }
 
-    if (
-      !userId ||
-      !chatKnown ||
-      !chat?.isPublic ||
-      !membershipKnown ||
-      isMember ||
-      autoJoined.current
-    )
+    const canRequestMembership = chatKnown && chat?.isPublic;
+
+    if (!userId || !canRequestMembership || !membershipKnown || isMember || autoJoined.current)
       return;
     autoJoined.current = true;
     autoJoinPending.current = true;
+    setAutoJoinFailed(false);
 
     db.insert(app.chatMembers, { chatId, userId })
       .wait(sharedWriteOptions)
@@ -91,6 +90,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
         console.error("auto-join failed", error);
         autoJoined.current = false;
         autoJoinPending.current = false;
+        setAutoJoinFailed(true);
       });
   }, [
     userId,
@@ -121,10 +121,12 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     }
   }, []);
 
+  const canRenderChat = chatKnown || membershipKnown;
+  const canReadChatContents = chatKnown || membershipReady;
   const messages =
     useAll(
       app.messages
-        .where({ chatId: chatKnown ? chatId : "00000000-0000-0000-0000-000000000000" })
+        .where({ chatId: canReadChatContents ? chatId : "00000000-0000-0000-0000-000000000000" })
         .include({ sender: true })
         .orderBy("createdAt", "desc")
         .limit(showNLastMessages + 1),
@@ -136,7 +138,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     db.delete(app.messages, messageId);
   };
 
-  if (chatRowsResult !== undefined && !chatKnown && userId) {
+  if (chatRowsResult !== undefined && !chatKnown && userId && autoJoinFailed) {
     return (
       <div className="flex-1 flex items-center justify-center p-8 text-center text-muted-foreground">
         <p>You don't have permission to access this chat.</p>
@@ -144,7 +146,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     );
   }
 
-  if (!chatKnown) {
+  if (!canRenderChat) {
     return (
       <div className="flex-1 grid place-items-center p-8 text-center text-muted-foreground italic">
         <div className="flex gap-2">
@@ -155,7 +157,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     );
   }
 
-  if (!chat.isPublic && membershipKnown && !isMember) {
+  if (chat && !chat.isPublic && membershipKnown && !isMember) {
     return (
       <div className="flex-1 flex items-center justify-center p-8 text-center text-muted-foreground">
         <p>You don't have permission to access this chat.</p>

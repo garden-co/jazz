@@ -218,7 +218,11 @@ function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
 }
 
 function queryUsesRelationTraversal(builtQuery: NormalizedBuiltQuery): boolean {
-  return builtQuery.hops.length > 0 || builtQuery.gather !== undefined;
+  return (
+    builtQuery.hops.length > 0 ||
+    builtQuery.gather !== undefined ||
+    Object.keys(builtQuery.includes).length > 0
+  );
 }
 
 export interface ActiveQuerySubscriptionTrace {
@@ -1558,7 +1562,11 @@ export class Db {
     );
     callback(manager.seed([]));
     startNativeSubscription();
-    if (this.config.serverUrl && queryOptions.propagation !== "local-only") {
+    if (
+      this.config.serverUrl &&
+      queryOptions.propagation !== "local-only" &&
+      !queryUsesRelationTraversal(builtQuery)
+    ) {
       void this.all(query, { ...queryOptions, tier: "local", propagation: "local-only" })
         .then((rows) => {
           if (unsubscribed) return;

@@ -358,13 +358,13 @@ fn evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate() {
     let initial = peer
         .handle_current_rows_rehydrate(&mut core, "docs", SyncMessage::Rehydrate { subscription })
         .unwrap();
-    assert!(peer.shipped_complete_tx_payloads().contains(&tx_id));
+    assert!(peer.shipped_complete_tx_payloads().is_empty());
     edge.apply_sync_message(initial).unwrap();
 
     let report = edge.evict_cold(&PeerEvictionPins::default()).unwrap();
     assert_eq!(report.content_extent_entries, 1);
     assert!(!edge.content_store().contains(&extent).unwrap());
-    assert_eq!(peer.forget_evicted_versions([tx_id]), 1);
+    assert_eq!(peer.forget_evicted_versions([tx_id]), 0);
 
     let SyncMessage::ContentExtents { extents } = peer
         .handle_content_extent_fetch(

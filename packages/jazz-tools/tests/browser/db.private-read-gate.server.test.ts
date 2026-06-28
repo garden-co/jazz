@@ -6,6 +6,7 @@ import {
   schema,
   type CompiledPermissions,
   type Db,
+  type QueryBuilder,
   type RowOf,
 } from "../../src/index.js";
 import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
@@ -37,6 +38,48 @@ const app = schema.defineApp({
   }),
   announcements: schema.table({
     title: schema.string(),
+  }),
+});
+
+const camelChatApp = schema.defineApp({
+  chats: schema.table({
+    name: schema.string().optional(),
+    isPublic: schema.boolean(),
+    createdBy: schema.string(),
+    joinCode: schema.string().optional(),
+  }),
+  profiles: schema.table({
+    userId: schema.string(),
+    name: schema.string(),
+    avatar: schema.string().optional(),
+  }),
+  chatMembers: schema.table({
+    chatId: schema.ref("chats"),
+    userId: schema.string(),
+    joinCode: schema.string().optional(),
+  }),
+  messages: schema.table({
+    chatId: schema.ref("chats"),
+    senderId: schema.ref("profiles"),
+    text: schema.string(),
+    createdAt: schema.timestamp(),
+  }),
+  reactions: schema.table({
+    messageId: schema.ref("messages"),
+    userId: schema.string(),
+    emoji: schema.string(),
+  }),
+  attachments: schema.table({
+    messageId: schema.ref("messages"),
+    type: schema.string(),
+    name: schema.string(),
+    fileId: schema.ref("files"),
+    size: schema.int(),
+  }),
+  files: schema.table({
+    name: schema.string().optional(),
+    mime_type: schema.string(),
+    data: schema.bytes(),
   }),
 });
 
@@ -108,6 +151,70 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
   policy.announcements.allowDelete.always(),
 ]);
 
+const camelChatStyleMessagePermissions = schema.definePermissions(
+  camelChatApp,
+  ({ policy, anyOf, allowedTo, session }) => [
+    policy.profiles.allowRead.where({}),
+    policy.profiles.allowInsert.where({ userId: session.user_id }),
+    policy.profiles.allowUpdate.where({ userId: session.user_id }),
+
+    policy.chats.allowRead.where((chat) =>
+      anyOf([
+        { isPublic: true },
+        policy.chatMembers.exists.where({
+          chatId: chat.id,
+          userId: session.user_id,
+        }),
+        { joinCode: session["claims.join_code"] },
+      ]),
+    ),
+    policy.chats.allowInsert.where({ createdBy: session.user_id }),
+    policy.chats.allowUpdate.where({ createdBy: session.user_id }),
+    policy.chats.allowDelete.where({ createdBy: session.user_id }),
+
+    policy.chatMembers.allowRead.where((member) =>
+      anyOf([
+        { userId: session.user_id },
+        policy.chatMembers.exists.where({
+          chatId: member.chatId,
+          userId: session.user_id,
+        }),
+      ]),
+    ),
+    policy.chatMembers.allowInsert.where({ userId: session.user_id }),
+    policy.chatMembers.allowUpdate.always(),
+    policy.chatMembers.allowDelete.where({ userId: session.user_id }),
+
+    policy.messages.allowRead.where((message) =>
+      anyOf([
+        policy.chats.exists.where({ id: message.chatId, isPublic: true }),
+        policy.chatMembers.exists.where({
+          chatId: message.chatId,
+          userId: session.user_id,
+        }),
+      ]),
+    ),
+    policy.messages.allowInsert.where((message) =>
+      policy.chatMembers.exists.where({
+        chatId: message.chatId,
+        userId: session.user_id,
+      }),
+    ),
+    policy.messages.allowDelete.where({ senderId: session.user_id }),
+
+    policy.reactions.allowRead.where(allowedTo.read("messageId")),
+    policy.reactions.allowInsert.where({ userId: session.user_id }),
+    policy.reactions.allowDelete.where({ userId: session.user_id }),
+
+    policy.attachments.allowRead.where(allowedTo.read("messageId")),
+    policy.attachments.allowInsert.where(allowedTo.read("messageId")),
+
+    policy.files.allowInsert.where({}),
+    policy.files.allowRead.where(allowedTo.readReferencing(policy.attachments, "fileId")),
+    policy.files.allowDelete.where(allowedTo.deleteReferencing(policy.attachments, "fileId")),
+  ],
+);
+
 type Chat = RowOf<typeof app.chats>;
 type Message = RowOf<typeof app.messages>;
 
@@ -126,6 +233,253 @@ afterEach(async () => {
 });
 
 describe("raw websocket private read gate", () => {
+  it("lets Bob insert a camelCase chat message after edge-confirmed membership", async () => {
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
+      uniqueDbName("camel-chat-member-message-insert"),
+    );
+    await publishSchemaAndPermissions(
+      appId,
+      serverUrl,
+      adminSecret,
+      camelChatStyleMessagePermissions,
+      camelChatApp,
+    );
+
+    const alice = await openUserDb(appId, serverUrl, "camel-chat-insert-alice");
+    const bob = await openUserDb(appId, serverUrl, "camel-chat-insert-bob");
+    const aliceUserId = requireUserId(alice, "Alice");
+    const bobUserId = requireUserId(bob, "Bob");
+    await withTimeout(
+      alice
+        .insert(camelChatApp.profiles, {
+          userId: aliceUserId,
+          name: "Alice",
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice profile edge wait",
+    );
+    const bobProfile = await withTimeout(
+      bob
+        .insert(camelChatApp.profiles, {
+          userId: bobUserId,
+          name: "Bob",
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Bob profile edge wait",
+    );
+
+    const chat = await withTimeout(
+      alice
+        .insert(camelChatApp.chats, {
+          name: `camel-chat-${Date.now()}`,
+          isPublic: true,
+          createdBy: aliceUserId,
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice chat edge wait",
+    );
+    await withTimeout(
+      alice
+        .insert(camelChatApp.chatMembers, {
+          chatId: chat.id,
+          userId: aliceUserId,
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice membership edge wait",
+    );
+    await withTimeout(
+      alice
+        .insert(camelChatApp.messages, {
+          chatId: chat.id,
+          senderId: bobProfile.id,
+          text: "hello from seed chat",
+          createdAt: new Date(),
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice seed message edge wait",
+    );
+    await withTimeout(
+      bob
+        .insert(camelChatApp.chatMembers, {
+          chatId: chat.id,
+          userId: bobUserId,
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Bob membership edge wait",
+    );
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.chatMembers.where({ chatId: chat.id }),
+        (rows) => rows.some((row) => row.userId === bobUserId),
+        "Bob should read the camelCase chat member list after joining",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    const bobMessage = await withTimeout(
+      bob
+        .insert(camelChatApp.messages, {
+          chatId: chat.id,
+          senderId: bobProfile.id,
+          text: "bob member message",
+          createdAt: new Date(),
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Bob message edge wait",
+    );
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.messages
+          .where({ chatId: chat.id })
+          .include({ sender: true })
+          .orderBy("createdAt", "desc")
+          .limit(21),
+        (rows) => rows.some((row) => row.id === bobMessage.id),
+        "Bob should read his camelCase member message after edge-confirmed membership",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.reactions.where({ messageId: bobMessage.id }),
+        (rows) => rows.length === 0,
+        "Bob should settle reaction reads that inherit through camelCase message membership",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.attachments.where({ messageId: bobMessage.id }),
+        (rows) => rows.length === 0,
+        "Bob should settle attachment reads that inherit through camelCase message membership",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.profiles.where({ id: bobProfile.id }),
+        (rows) => rows.some((row) => row.id === bobProfile.id),
+        "Bob should read the sender profile mounted by rendered chat messages",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.files,
+        (rows) => rows.length === 0,
+        "Bob should settle file reads that inherit through referencing attachments",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    const subscriptionQueries = [
+      {
+        label: "chat list memberships with included chat",
+        query: camelChatApp.chatMembers.where({ userId: bobUserId }).include({ chat: true }),
+        predicate: (rows: Array<{ id: string }>) => rows.some((row) => row.id !== undefined),
+      },
+      {
+        label: "chat header members",
+        query: camelChatApp.chatMembers.where({ chatId: chat.id }),
+        predicate: (rows: Array<{ userId?: string }>) =>
+          rows.some((row) => row.userId === bobUserId),
+      },
+      {
+        label: "chat display first message",
+        query: camelChatApp.messages
+          .where({ chatId: chat.id })
+          .orderBy("createdAt", "asc")
+          .limit(1),
+        predicate: (rows: Array<{ id: string }>) => rows.some((row) => row.id === bobMessage.id),
+      },
+      {
+        label: "rendered message attachments",
+        query: camelChatApp.attachments.where({ messageId: bobMessage.id }),
+        predicate: (rows: unknown[]) => rows.length === 0,
+      },
+      {
+        label: "rendered message reactions",
+        query: camelChatApp.reactions.where({ messageId: bobMessage.id }),
+        predicate: (rows: unknown[]) => rows.length === 0,
+      },
+    ] as const;
+
+    const unsubscribeSubscriptions: Array<() => void> = [];
+    try {
+      await Promise.all(
+        subscriptionQueries.map(({ label, query, predicate }) =>
+          waitForSubscription(
+            bob,
+            query,
+            predicate as (rows: unknown[]) => boolean,
+            `Bob subscription should settle: ${label}`,
+            15_000,
+            { tier: "edge" },
+          ).then((unsubscribe) => {
+            unsubscribeSubscriptions.push(unsubscribe);
+          }),
+        ),
+      );
+    } finally {
+      for (const unsubscribe of unsubscribeSubscriptions.splice(0)) unsubscribe();
+    }
+
+    const bobPendingMessage = bob.insert(camelChatApp.messages, {
+      chatId: chat.id,
+      senderId: bobProfile.id,
+      text: "bob local-first message before alice reconnects",
+      createdAt: new Date(),
+    });
+    const bobPendingMessageEdgeWait = withTimeout(
+      bobPendingMessage.wait({ tier: "edge" }),
+      15_000,
+      "Bob fire-and-forget message edge wait",
+    );
+
+    const aliceAgain = await openUserDb(appId, serverUrl, "camel-chat-insert-alice-again");
+    const aliceAgainUnsubscribe = await Promise.all([
+      waitForSubscription(
+        aliceAgain,
+        camelChatApp.messages
+          .where({ chatId: chat.id })
+          .include({ sender: true })
+          .orderBy("createdAt", "desc")
+          .limit(21),
+        (rows) => rows.some((row) => row.id === bobPendingMessage.value.id),
+        "Alice should receive Bob's fire-and-forget member message through websocket sync",
+        15_000,
+        { tier: "edge" },
+      ),
+      bobPendingMessageEdgeWait,
+    ]).then(([unsubscribe]) => unsubscribe);
+    aliceAgainUnsubscribe();
+  }, 60_000);
+
   it("reads messages through public-chat or membership read policy after edge writes", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("chat-style-message-read"),
@@ -391,11 +745,12 @@ async function publishSchemaAndPermissions(
   serverUrl: string,
   adminSecret: string,
   permissions: CompiledPermissions,
+  appSchema: { wasmSchema: typeof app.wasmSchema } = app,
 ): Promise<void> {
   const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
     appId,
     adminSecret,
-    schema: app.wasmSchema,
+    schema: appSchema.wasmSchema,
   });
   const { head } = await fetchPermissionsHead(serverUrl, {
     appId,
@@ -416,6 +771,43 @@ function requireUserId(db: Db, label: string): string {
     throw new Error(`${label} Db did not initialize a local-first session`);
   }
   return userId;
+}
+
+async function waitForSubscription<T extends { id: string }>(
+  db: Db,
+  query: QueryBuilder<T>,
+  predicate: (rows: T[]) => boolean,
+  label: string,
+  timeoutMs = 15_000,
+  options?: { tier?: "local" | "edge" },
+): Promise<() => void> {
+  return await new Promise<() => void>((resolve, reject) => {
+    let settled = false;
+    let lastRows: T[] = [];
+    let unsubscribe: () => void = () => {};
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      reject(
+        new Error(
+          `${label}: timed out after ${timeoutMs}ms; lastRows=${JSON.stringify(lastRows.slice(0, 10))}`,
+        ),
+      );
+    }, timeoutMs);
+    unsubscribe = db.subscribeAll(
+      query,
+      (delta) => {
+        if (settled) return;
+        lastRows = delta.all;
+        if (!predicate(delta.all)) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(unsubscribe);
+      },
+      options,
+    );
+  });
 }
 
 async function snapshotBobLocalExposure(

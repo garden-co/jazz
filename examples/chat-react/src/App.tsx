@@ -10,6 +10,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { InviteHandler } from "@/components/InviteHandler";
 import { NavBar } from "@/components/navbar/NavBar";
 import Router from "@/components/Router";
+import { RouterScope } from "@/hooks/useRouter";
 
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
@@ -25,8 +26,18 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
   };
 }
 
-export function App({ config }: { config?: Partial<DbConfig> } = {}) {
-  return <AppInner config={config} />;
+interface AppProps {
+  config?: Partial<DbConfig>;
+  initialPath?: string;
+}
+
+export function App({ config, initialPath }: AppProps = {}) {
+  const app = <AppInner config={config} />;
+  return initialPath === undefined ? (
+    app
+  ) : (
+    <RouterScope initialPath={initialPath}>{app}</RouterScope>
+  );
 }
 
 function AppInner({ config }: { config?: Partial<DbConfig> }) {
