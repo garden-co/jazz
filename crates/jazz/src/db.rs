@@ -552,6 +552,14 @@ where
 
     /// Ask connected upstreams to cover this query shape at `opts`' effective tier.
     pub fn propagate_query_with_opts(&self, prepared: &PreparedQuery, opts: ReadOpts) {
+        let subscription = SubscriptionKey {
+            shape_id: prepared.shape.shape_id(),
+            binding_id: prepared.binding.binding_id(),
+        };
+        self.node
+            .node
+            .borrow_mut()
+            .invalidate_settled_result_set(subscription);
         self.node
             .upstream_subscriptions
             .borrow_mut()
@@ -2216,6 +2224,9 @@ where
                         binding_id: binding.binding_id(),
                     };
                     if !announced.insert(key) {
+                        self.transport
+                            .send(SyncMessage::Rehydrate { subscription: key })
+                            .map_err(transport_error)?;
                         pending.remove(pending_index);
                         continue;
                     }
@@ -2354,6 +2365,27 @@ where
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 scheduled_immediate = true;
+                            }
+                        }
+                        SyncMessage::Rehydrate { subscription } => {
+                            if let Some((shape, binding)) = served.get(&subscription).cloned() {
+                                let update = {
+                                    let mut node = self.node.borrow_mut();
+                                    let opts = registered_shape_opts
+                                        .get(&subscription.shape_id)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    peer.rehydrate_query_with_opts(
+                                        &mut node, &shape, &binding, opts,
+                                    )?
+                                };
+                                self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    update,
+                                )?;
                             }
                         }
                         other => {

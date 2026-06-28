@@ -46,7 +46,6 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
         joinCode: code,
       })
       .wait(sharedWriteOptions)
-      .then(() => db.all(app.messages.where({ chatId }), { tier: sharedWriteOptions.tier }))
       .then(() => {
         navigate(`/#/chat/${chatId}`);
       })

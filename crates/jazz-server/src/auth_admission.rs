@@ -381,6 +381,17 @@ fn jwt_json_claims_to_policy_claims(
         ) {
             continue;
         }
+        if name == "claims" {
+            let serde_json::Value::Object(nested) = value else {
+                continue;
+            };
+            for (nested_name, nested_value) in nested {
+                if let Some(nested_value) = json_claim_to_policy_claim(nested_value) {
+                    claims.insert(nested_name, nested_value?);
+                }
+            }
+            continue;
+        }
         if let Some(value) = json_claim_to_policy_claim(value) {
             claims.insert(name, value?);
         }

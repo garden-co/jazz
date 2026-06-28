@@ -378,6 +378,14 @@ impl WasmDbInner {
         }
     }
 
+    fn set_identity_claims(&self, author: AuthorId, claims: BTreeMap<String, Value>) {
+        match self {
+            Self::Memory(db) => db.set_identity_claims(author, claims),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.set_identity_claims(author, claims),
+        }
+    }
+
     fn subscribe(
         &self,
         query: &PreparedQuery,
@@ -768,6 +776,14 @@ impl WasmDb {
         let mut rows = self.inner.all(&query.inner, opts).map_err(to_js_error)?;
         rows.truncate(1);
         encode_rows(&rows).map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = setIdentityClaims)]
+    pub fn set_identity_claims(&self, author: Vec<u8>, claims: JsValue) -> Result<(), JsValue> {
+        let author = author_id_from_bytes(&author)?;
+        let claims = claims_from_js(author, claims)?;
+        self.inner.set_identity_claims(author, claims);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = allForIdentity)]
@@ -1440,6 +1456,49 @@ where
             ("user_id".to_owned(), Value::String(subject)),
         ]),
     );
+}
+
+fn claims_from_js(author: AuthorId, claims: JsValue) -> Result<BTreeMap<String, Value>, JsValue> {
+    let raw: serde_json::Value = serde_wasm_bindgen::from_value(claims).map_err(to_js_error)?;
+    let mut claims = match raw {
+        serde_json::Value::Null => BTreeMap::new(),
+        serde_json::Value::Object(map) => map
+            .into_iter()
+            .map(|(key, value)| Ok((key, claim_value_from_json(value)?)))
+            .collect::<Result<BTreeMap<_, _>, JsValue>>()?,
+        _ => return Err(JsValue::from_str("identity claims must be an object")),
+    };
+    let subject = author.0.to_string();
+    claims.insert("subject".to_owned(), Value::String(subject.clone()));
+    claims.insert("sub".to_owned(), Value::String(subject.clone()));
+    claims.insert("user_id".to_owned(), Value::String(subject));
+    Ok(claims)
+}
+
+fn claim_value_from_json(value: serde_json::Value) -> Result<Value, JsValue> {
+    Ok(match value {
+        serde_json::Value::Null => Value::Nullable(None),
+        serde_json::Value::Bool(value) => Value::Bool(value),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                Value::U64(value)
+            } else if let Some(value) = value.as_f64() {
+                Value::F64(value)
+            } else {
+                return Err(JsValue::from_str("unsupported numeric claim value"));
+            }
+        }
+        serde_json::Value::String(value) => Value::String(value),
+        serde_json::Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(claim_value_from_json)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        serde_json::Value::Object(_) => {
+            return Err(JsValue::from_str("nested object claims are not supported"));
+        }
+    })
 }
 
 fn wasm_write_memory(

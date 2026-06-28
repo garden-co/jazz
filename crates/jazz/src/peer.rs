@@ -520,6 +520,36 @@ impl PeerState {
                 None,
             );
         }
+        let prepared_tier = state
+            .prepared_query
+            .as_ref()
+            .map(|prepared| prepared.tier)
+            .unwrap_or(DurabilityTier::Global);
+        if prepared_tier != DurabilityTier::Global {
+            let previous_row_result_set = state.row_result_set();
+            let previous_tx_ids = state.previous_tx_ids();
+            let prepared_plan = state.prepared_query.as_ref().map(|prepared| {
+                (
+                    Some((&prepared.shape, &prepared.binding, &prepared.plan)),
+                    prepared.tier,
+                )
+            });
+            let (prepared_plan, tier) = prepared_plan.unwrap_or((None, DurabilityTier::Global));
+            let update = node
+                .view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+                    shape,
+                    binding,
+                    subscription,
+                    self.acknowledged_complete_tx_payloads(),
+                    previous_tx_ids,
+                    previous_row_result_set,
+                    self.identity(),
+                    prepared_plan,
+                    tier,
+                )?;
+            self.record_outgoing_view_update(&update);
+            return Ok(update);
+        }
         if let Some(receiver) = state.query_subscription.as_ref() {
             let mut drained = Vec::new();
             loop {
