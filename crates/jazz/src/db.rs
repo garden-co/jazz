@@ -679,6 +679,7 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
+        let mut cleanup = None;
         if opts.propagation == Propagation::Full {
             // If this Db is attached to upstreams, ask them to carry this shape so
             // the subscription fills from synced rows, not just local writes. The consumer
@@ -701,10 +702,25 @@ where
                 upstream_subscription,
             );
             self.node.schedule_tick(TickUrgency::Immediate);
+            let node = Rc::clone(&self.node.node);
+            let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
+            let upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
+            let scheduler = Rc::clone(&self.node.scheduler);
+            cleanup = Some(Box::new(move || {
+                node.borrow_mut().apply_unsubscribe(upstream_subscription);
+                latest_coverage_subscriptions
+                    .borrow_mut()
+                    .retain(|_, subscription| *subscription != upstream_subscription);
+                upstream_subscriptions
+                    .borrow_mut()
+                    .push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
+                schedule_tick_in(&scheduler, TickUrgency::Immediate);
+            }) as Box<dyn FnOnce()>);
         }
         Ok(SubscriptionStream {
             receiver,
             _state: state,
+            cleanup,
         })
     }
 
@@ -3597,6 +3613,7 @@ impl SubscriptionEvent {
 pub struct SubscriptionStream {
     receiver: UnboundedReceiver<SubscriptionEvent>,
     _state: Rc<RefCell<SubscriptionState>>,
+    cleanup: Option<Box<dyn FnOnce()>>,
 }
 
 impl SubscriptionStream {
@@ -3617,6 +3634,14 @@ impl Stream for SubscriptionStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         Pin::new(&mut this.receiver).poll_next(cx)
+    }
+}
+
+impl Drop for SubscriptionStream {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
     }
 }
 

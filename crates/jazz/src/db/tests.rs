@@ -2381,6 +2381,83 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
 }
 
 #[test]
+fn dropping_live_subscriptions_detaches_usage_subscriptions() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    seed(&server, "todos", cells("first", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let mut first_subscription =
+        prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut second_subscription =
+        prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(first_subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(second_subscription.next_event()).unwrap()).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let subscriber_ref = subscriber.borrow();
+    let ConnectionLink::Subscriber {
+        served,
+        coverage_groups,
+        ..
+    } = &subscriber_ref.link
+    else {
+        panic!("expected subscriber connection");
+    };
+    assert_eq!(served.len(), 2);
+    assert_eq!(coverage_groups.len(), 1);
+    let group = coverage_groups
+        .values()
+        .next()
+        .expect("subscriptions should share one coverage group");
+    assert_eq!(group.subscribers.len(), 2);
+    drop(subscriber_ref);
+
+    drop(first_subscription);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let subscriber_ref = subscriber.borrow();
+    let ConnectionLink::Subscriber {
+        served,
+        coverage_groups,
+        ..
+    } = &subscriber_ref.link
+    else {
+        panic!("expected subscriber connection");
+    };
+    assert_eq!(served.len(), 1);
+    assert_eq!(coverage_groups.len(), 1);
+    drop(subscriber_ref);
+
+    drop(second_subscription);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let subscriber_ref = subscriber.borrow();
+    let ConnectionLink::Subscriber {
+        served,
+        coverage_groups,
+        ..
+    } = &subscriber_ref.link
+    else {
+        panic!("expected subscriber connection");
+    };
+    assert!(served.is_empty());
+    assert!(coverage_groups.is_empty());
+}
+
+#[test]
 fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
