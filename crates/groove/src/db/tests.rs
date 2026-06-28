@@ -1705,6 +1705,65 @@ fn subscription_reports_incremental_contains_filter_deltas() {
 }
 
 #[test]
+fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
+    let storage = MemoryStorage::new(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let routing_field = "__routing";
+    let binding = GraphBuilder::binding_source("title_eq_param", binding_descriptor)
+        .project_fields([
+            ProjectField::named("wanted"),
+            ProjectField::literal(routing_field, Value::U8(0)),
+        ]);
+    let albums = GraphBuilder::table("albums").project_fields([
+        ProjectField::named("id"),
+        ProjectField::named("title"),
+        ProjectField::literal(routing_field, Value::U8(0)),
+    ]);
+    let graph = GraphBuilder::join(binding, albums, [routing_field], [routing_field])
+        .project_fields([
+            ProjectField::renamed("right.id", "id"),
+            ProjectField::renamed("right.title", "title"),
+            ProjectField::renamed("left.wanted", "wanted"),
+        ])
+        .filter(PredicateExpr::EqField {
+            field: "title".to_owned(),
+            value_field: "wanted".to_owned(),
+        });
+    let shape = database
+        .prepare(graph, "title_eq_param", binding_descriptor, ["wanted"])
+        .unwrap();
+    let subscription = database
+        .bind_shape(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .unwrap();
+
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Out of Scope".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(11), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(
+            vec![
+                11_u64.into(),
+                "Blue Train".into(),
+                Value::String("Blue Train".to_owned()),
+            ],
+            1,
+        )]
+    );
+}
+
+#[test]
 fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();

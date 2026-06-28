@@ -699,7 +699,6 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<(LocalMaintainedViewSubscription, Vec<CurrentRow>), Error> {
-        self.maintained_view_support(shape, binding, identity)?;
         let (subscription, maintained, transitions, tables) =
             self.maintained_subscription_view_from_cold_snapshot(shape, binding, identity)?;
         let mut local = LocalMaintainedViewSubscription {
@@ -838,16 +837,11 @@ where
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlan), Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
-        let claim_params = if tier == DurabilityTier::Global {
-            ParamBindingMode::RetainClaimParams
-        } else {
-            ParamBindingMode::InlineAllReachableSeeds
-        };
         let shape = maintained_view_bind_filter_literals_with_mode(
             &shape,
             &binding,
             &self.catalogue.schema,
-            claim_params,
+            ParamBindingMode::RetainAllParams,
         )?;
         let binding = binding_for_shape(&shape, &binding)?;
         let plan = self.prepared_query_plan(&shape, tier)?;
@@ -2091,7 +2085,6 @@ where
             let base_shape = base_query.validate(&self.catalogue.schema)?;
             let key_options = LoweredQueryClauseOptions {
                 output_fields: options.output_fields.clone(),
-                retain_params: false,
                 ..options.clone()
             };
             let mut key_graphs = vec![
@@ -2129,22 +2122,19 @@ where
                 );
             return attach_retained_params(authorized, param_types, &options);
         }
-        graph = apply_query_filters(graph, table, &shape.query().filters)?;
-        let mut carried_params =
-            if options.retain_params && !predicate_params(&shape.query().filters).is_empty() {
-                shape.params().keys().cloned().collect()
-            } else {
-                BTreeSet::new()
-            };
-        graph = join_params_if_needed(
+        let mut carried_params = BTreeSet::new();
+        graph = apply_filters_with_predicate_params(
             graph,
-            shape,
+            table,
             param_types,
             &shape.query().filters,
             options.output_fields.clone(),
             options.retain_params,
             &options.binding_source_shape,
         )?;
+        if options.retain_params && !predicate_params(&shape.query().filters).is_empty() {
+            carried_params.extend(param_types.keys().cloned());
+        }
         for join in &shape.query().joins {
             if let Some(lookup) = &join.source_lookup {
                 let lookup_table = self.lowered_related_table(&lookup.table, &options)?;
@@ -2201,16 +2191,15 @@ where
                     field: join_key.clone(),
                 });
             }
-            join_graph = apply_query_filters(join_graph, join_table, &join.filters)?;
             let join_params =
                 if options.retain_params && !predicate_params(&join.filters).is_empty() {
                     shape.params().keys().cloned().collect()
                 } else {
                     BTreeSet::new()
                 };
-            join_graph = join_params_if_needed(
+            join_graph = apply_filters_with_predicate_params(
                 join_graph,
-                shape,
+                join_table,
                 param_types,
                 &join.filters,
                 current_row_fields(join_table),
@@ -2891,33 +2880,6 @@ where
                 tables,
             )?;
         }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn supported_maintained_view(
-        &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-    ) -> bool {
-        self.maintained_view_support(shape, binding, identity)
-            .is_ok()
-    }
-
-    pub(crate) fn maintained_view_support(
-        &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-    ) -> Result<(), Error> {
-        self.ensure_maintained_view_query_slice(shape.query())?;
-        let tables = self.maintained_view_terminal_tables(shape)?;
-        for table in tables.values() {
-            let policy_shape = self.maintained_view_table_policy_shape(table, identity)?;
-            self.ensure_maintained_view_query_slice(policy_shape.query())?;
-        }
-        self.maintained_view_tagged_terminal_graph(shape, binding, identity)?;
         Ok(())
     }
 
@@ -3868,7 +3830,7 @@ where
 
     fn lower_reachable_graph_parts_with_binding_source(
         &self,
-        shape: &ValidatedQuery,
+        _shape: &ValidatedQuery,
         param_types: &BTreeMap<String, groove::schema::ColumnType>,
         reachable: &crate::query::ReachableVia,
         access_table: &TableSchema,
@@ -3930,10 +3892,9 @@ where
         let mut edge_graph = current_source_graph(edge_table, tier, source_overrides)
             .unwrap_nullable(query_field(&reachable.edge_member_column))
             .unwrap_nullable(query_field(&reachable.edge_parent_column));
-        edge_graph = apply_query_filters(edge_graph, edge_table, &reachable.edge_filters)?;
-        edge_graph = join_params_if_needed(
+        edge_graph = apply_filters_with_predicate_params(
             edge_graph,
-            shape,
+            edge_table,
             param_types,
             &reachable.edge_filters,
             current_row_fields(edge_table),
@@ -3958,7 +3919,15 @@ where
         let mut access_graph = current_source_graph(access_table, tier, source_overrides)
             .unwrap_nullable(query_field(&reachable.access_row_column))
             .unwrap_nullable(query_field(&reachable.access_team_column));
-        access_graph = apply_query_filters(access_graph, access_table, &reachable.access_filters)?;
+        access_graph = apply_filters_with_predicate_params(
+            access_graph,
+            access_table,
+            param_types,
+            &reachable.access_filters,
+            current_row_fields(access_table),
+            true,
+            binding_source_shape,
+        )?;
         Ok(ReachableGraphs {
             closure,
             edge_current: edge_graph,
@@ -4762,13 +4731,34 @@ fn lower_maintained_residual_predicate(
                 },
             ))
         }
-        Predicate::Contains(Operand::Column(column), Operand::Param(_))
-        | Predicate::Eq(Operand::Column(column), Operand::Param(_))
-        | Predicate::Eq(Operand::Param(_), Operand::Column(column))
-        | Predicate::Ne(Operand::Column(column), Operand::Param(_))
-        | Predicate::Ne(Operand::Param(_), Operand::Column(column)) => {
+        Predicate::Eq(Operand::Column(column), Operand::Param(param))
+        | Predicate::Eq(Operand::Param(param), Operand::Column(column)) => {
             let _ = table_column_type(table, column)?;
-            Ok(LoweredMaintainedPredicate::AlwaysTrue)
+            Ok(LoweredMaintainedPredicate::Residual(
+                PredicateExpr::EqField {
+                    field: query_field(column),
+                    value_field: param.clone(),
+                },
+            ))
+        }
+        Predicate::Contains(Operand::Column(column), Operand::Param(param)) => {
+            let _ = table_column_type(table, column)?;
+            Ok(LoweredMaintainedPredicate::Residual(
+                PredicateExpr::ContainsField {
+                    field: query_field(column),
+                    needle_field: param.clone(),
+                },
+            ))
+        }
+        Predicate::Ne(Operand::Column(column), Operand::Param(param))
+        | Predicate::Ne(Operand::Param(param), Operand::Column(column)) => {
+            let _ = table_column_type(table, column)?;
+            Ok(LoweredMaintainedPredicate::Residual(
+                PredicateExpr::NeqField {
+                    field: query_field(column),
+                    value_field: param.clone(),
+                },
+            ))
         }
         _ => Err(Error::InvalidStoredValue(
             "unsupported query predicate shape",
@@ -4803,17 +4793,70 @@ fn attach_retained_params(
     if !options.retain_params || param_types.is_empty() {
         return Ok(graph);
     }
+    attach_params_to_graph(
+        graph,
+        param_types,
+        options.output_fields.clone(),
+        true,
+        &options.binding_source_shape,
+    )
+}
+
+fn apply_filters_with_predicate_params(
+    graph: GraphBuilder,
+    table: &TableSchema,
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    predicates: &[Predicate],
+    output_fields: Vec<String>,
+    keep_params: bool,
+    binding_source_shape: &str,
+) -> Result<GraphBuilder, Error> {
+    if predicate_params(predicates).is_empty() {
+        return apply_query_filters(graph, table, predicates);
+    }
+    let graph = attach_params_to_graph(
+        graph,
+        param_types,
+        output_fields.clone(),
+        keep_params,
+        binding_source_shape,
+    )?;
+    let graph = apply_query_filters(graph, table, predicates)?;
+    Ok(
+        graph.project_fields(output_fields.into_iter().map(ProjectField::named).chain(
+            if keep_params {
+                param_types
+                    .keys()
+                    .cloned()
+                    .map(ProjectField::named)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            },
+        )),
+    )
+}
+
+fn attach_params_to_graph(
+    graph: GraphBuilder,
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    output_fields: Vec<String>,
+    keep_params: bool,
+    binding_source_shape: &str,
+) -> Result<GraphBuilder, Error> {
+    if param_types.is_empty() {
+        return Ok(graph);
+    }
     const PARAM_ROUTING_JOIN: &str = "__jazz_param_binding_join";
     let graph = graph.project_fields(
-        options
-            .output_fields
+        output_fields
             .iter()
             .cloned()
             .map(ProjectField::named)
             .chain([ProjectField::literal(PARAM_ROUTING_JOIN, Value::U8(0))]),
     );
     let binding = GraphBuilder::binding_source(
-        options.binding_source_shape.clone(),
+        binding_source_shape.to_owned(),
         RecordDescriptor::new(
             param_types
                 .iter()
@@ -4830,180 +4873,21 @@ fn attach_retained_params(
     Ok(
         GraphBuilder::join(binding, graph, [PARAM_ROUTING_JOIN], [PARAM_ROUTING_JOIN])
             .project_fields(
-                options
-                    .output_fields
+                output_fields
                     .iter()
                     .cloned()
                     .map(|field| ProjectField::renamed(format!("right.{field}"), field))
-                    .chain(
+                    .chain(if keep_params {
                         param_types
                             .keys()
                             .cloned()
-                            .map(|param| ProjectField::renamed(format!("left.{param}"), param)),
-                    ),
+                            .map(|param| ProjectField::renamed(format!("left.{param}"), param))
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    }),
             ),
     )
-}
-
-fn join_params_if_needed(
-    graph: GraphBuilder,
-    _shape: &ValidatedQuery,
-    param_types: &BTreeMap<String, groove::schema::ColumnType>,
-    predicates: &[Predicate],
-    output_fields: Vec<String>,
-    keep_params: bool,
-    binding_source_shape: &str,
-) -> Result<GraphBuilder, Error> {
-    let mut pairs = BTreeSet::new();
-    let mut contains_params = BTreeSet::new();
-    let mut neq_params = BTreeSet::new();
-    for predicate in predicates {
-        collect_param_join(predicate, &mut pairs, &mut contains_params, &mut neq_params)?;
-    }
-    if pairs.is_empty() && contains_params.is_empty() && neq_params.is_empty() {
-        return Ok(graph);
-    }
-    const PARAM_ROUTING_JOIN: &str = "__jazz_param_binding_join";
-    let uses_routing_join = pairs.is_empty();
-    let (left_on, right_on): (Vec<_>, Vec<_>) = if uses_routing_join {
-        (
-            vec![PARAM_ROUTING_JOIN.to_owned()],
-            vec![PARAM_ROUTING_JOIN.to_owned()],
-        )
-    } else {
-        pairs.into_iter().unzip()
-    };
-    let graph = if uses_routing_join {
-        graph.project_fields(
-            output_fields
-                .iter()
-                .cloned()
-                .map(ProjectField::named)
-                .chain([ProjectField::literal(PARAM_ROUTING_JOIN, Value::U8(0))]),
-        )
-    } else {
-        graph
-    };
-    let mut binding = GraphBuilder::binding_source(
-        binding_source_shape.to_owned(),
-        RecordDescriptor::new(
-            param_types
-                .iter()
-                .map(|(name, column_type)| (name.clone(), column_type.value_type())),
-        ),
-    );
-    if uses_routing_join {
-        binding = binding.project_fields(
-            param_types
-                .keys()
-                .cloned()
-                .map(ProjectField::named)
-                .chain([ProjectField::literal(PARAM_ROUTING_JOIN, Value::U8(0))]),
-        );
-    }
-    let mut joined = GraphBuilder::join(binding, graph, left_on, right_on).project_fields(
-        output_fields
-            .iter()
-            .cloned()
-            .map(|field| ProjectField::renamed(format!("right.{field}"), field))
-            .chain(
-                param_types
-                    .keys()
-                    .cloned()
-                    .map(|param| ProjectField::renamed(format!("left.{param}"), param)),
-            ),
-    );
-    if !contains_params.is_empty() || !neq_params.is_empty() {
-        joined =
-            joined.filter(
-                PredicateExpr::And(
-                    contains_params
-                        .into_iter()
-                        .map(|(field, param)| PredicateExpr::ContainsField {
-                            field,
-                            needle_field: param,
-                        })
-                        .chain(neq_params.into_iter().map(|(field, param)| {
-                            PredicateExpr::NeqField {
-                                field,
-                                value_field: param,
-                            }
-                        }))
-                        .collect(),
-                )
-                .canonicalize(),
-            );
-    }
-    Ok(
-        joined.project_fields(output_fields.into_iter().map(ProjectField::named).chain(
-            if keep_params {
-                param_types
-                    .keys()
-                    .cloned()
-                    .map(ProjectField::named)
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            },
-        )),
-    )
-}
-
-fn collect_param_join(
-    predicate: &Predicate,
-    pairs: &mut BTreeSet<(String, String)>,
-    contains_params: &mut BTreeSet<(String, String)>,
-    neq_params: &mut BTreeSet<(String, String)>,
-) -> Result<(), Error> {
-    match predicate {
-        Predicate::All(predicates) => {
-            for predicate in predicates {
-                collect_param_join(predicate, pairs, contains_params, neq_params)?;
-            }
-        }
-        Predicate::Any(predicates) if predicates.len() == 1 => {
-            collect_param_join(&predicates[0], pairs, contains_params, neq_params)?;
-        }
-        Predicate::Any(predicates) if predicate_has_param(predicate) && predicates.len() != 1 => {
-            return Err(Error::InvalidStoredValue(
-                "unsupported query predicate shape",
-            ));
-        }
-        Predicate::Any(predicates) => {
-            for predicate in predicates {
-                collect_param_join(predicate, pairs, contains_params, neq_params)?;
-            }
-        }
-        Predicate::Not(predicate) => {
-            collect_param_join(predicate, pairs, contains_params, neq_params)?
-        }
-        Predicate::In(_, _) if predicate_has_param(predicate) => {
-            return Err(Error::InvalidStoredValue(
-                "unsupported query predicate shape",
-            ));
-        }
-        Predicate::Eq(Operand::Column(column), Operand::Param(param))
-        | Predicate::Eq(Operand::Param(param), Operand::Column(column)) => {
-            pairs.insert((param.clone(), query_field(column)));
-        }
-        Predicate::Ne(Operand::Column(column), Operand::Param(param))
-        | Predicate::Ne(Operand::Param(param), Operand::Column(column)) => {
-            neq_params.insert((query_field(column), param.clone()));
-        }
-        Predicate::Contains(Operand::Column(column), Operand::Param(param)) => {
-            contains_params.insert((query_field(column), param.clone()));
-        }
-        Predicate::Eq(_, _)
-        | Predicate::Ne(_, _)
-        | Predicate::In(_, _)
-        | Predicate::Gt(_, _)
-        | Predicate::Gte(_, _)
-        | Predicate::Lt(_, _)
-        | Predicate::Lte(_, _)
-        | Predicate::Contains(_, _)
-        | Predicate::IsNull(_) => {}
-    }
-    Ok(())
 }
 
 fn reachable_seed_param(reachable: &crate::query::ReachableVia) -> Result<String, Error> {
@@ -5035,7 +4919,7 @@ fn maintained_view_bind_filter_literals(
 #[derive(Clone, Copy)]
 enum ParamBindingMode {
     InlineAllReachableSeeds,
-    RetainClaimParams,
+    RetainAllParams,
 }
 
 fn maintained_view_bind_filter_literals_with_mode(
@@ -5349,9 +5233,7 @@ fn maintained_view_bind_predicate(
 fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bool {
     match (operand, mode) {
         (Operand::Param(_), ParamBindingMode::InlineAllReachableSeeds) => true,
-        (Operand::Param(name), ParamBindingMode::RetainClaimParams) => {
-            !name.starts_with(CLAIM_PARAM_PREFIX)
-        }
+        (Operand::Param(_), ParamBindingMode::RetainAllParams) => false,
         _ => false,
     }
 }
@@ -5362,10 +5244,7 @@ fn maintained_view_bind_operand(
     mode: ParamBindingMode,
 ) -> Result<Operand, Error> {
     Ok(match operand {
-        Operand::Param(name)
-            if matches!(mode, ParamBindingMode::RetainClaimParams)
-                && name.starts_with(CLAIM_PARAM_PREFIX) =>
-        {
+        Operand::Param(name) if matches!(mode, ParamBindingMode::RetainAllParams) => {
             Operand::Param(name)
         }
         Operand::Param(name) => Operand::Literal(
