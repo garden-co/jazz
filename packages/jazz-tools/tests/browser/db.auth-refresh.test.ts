@@ -64,12 +64,13 @@ describe("Db auth refresh browser integration", () => {
 
     const dbNameA = uniqueDbName("auth-refresh-a");
     const dbNameB = uniqueDbName("auth-refresh-b");
+    const userId = "00000000-0000-0000-0000-00000000a111";
     const invalidJwt = makeFakeJwt({
-      sub: "alice",
+      sub: userId,
       claims: { role: "member" },
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
-    const validJwt = await getJazzServerJwtForUser("alice", { role: "member" });
+    const validJwt = await getJazzServerJwtForUser(userId, { role: "member" });
 
     const writer = ctx.track(
       await createDb({
@@ -140,7 +141,7 @@ describe("Db auth refresh browser integration", () => {
     expect(writer.getAuthState()).toMatchObject({
       error: "invalid",
       session: {
-        user_id: "alice",
+        user_id: userId,
       },
     });
 
@@ -158,7 +159,7 @@ describe("Db auth refresh browser integration", () => {
       (rows) => rows.some((row) => row.title === marker),
       "queued write should flush after auth refresh",
       20_000,
-      "local",
+      "edge",
     );
   });
 });
