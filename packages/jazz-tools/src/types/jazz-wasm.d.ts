@@ -18,6 +18,7 @@ declare module "jazz-wasm" {
   ): string;
 
   export class WasmPreparedQuery {}
+  export class QueryAttachment {}
 
   export class WasmWrite {
     readonly payload: Uint8Array;
@@ -53,8 +54,9 @@ declare module "jazz-wasm" {
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
-    propagateQuery(query: WasmPreparedQuery, opts: unknown): void;
-    queryIsCovered(query: WasmPreparedQuery): boolean;
+    attachQuery(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
+    queryAttachmentIsCovered(attachment: QueryAttachment): boolean;
+    detachQuery(attachment: QueryAttachment): void;
     subscribe(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
 
     insertEncoded(table: string, cells: Uint8Array): WasmWrite;

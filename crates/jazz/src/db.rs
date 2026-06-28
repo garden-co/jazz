@@ -91,7 +91,7 @@ where
 /// [`PeerConnection`], so an inbound sync update can push subscription events
 /// through the same path a local write does.
 type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
-type PendingUpstreamSubscriptions = Rc<RefCell<Vec<PendingUpstreamSubscription>>>;
+type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
@@ -104,6 +104,12 @@ struct WriteStateWaiter {
 enum WriteStateWaiterNotify {
     Future(oneshot::Sender<()>),
     Callback(Box<dyn FnOnce()>),
+}
+
+#[derive(Clone)]
+enum PendingUpstreamCommand {
+    Subscribe(PendingUpstreamSubscription),
+    Unsubscribe(SubscriptionKey),
 }
 
 #[derive(Clone)]
@@ -137,6 +143,19 @@ pub struct WriteState {
     pub fate: Fate,
     /// Highest durability tier observed by this `Db`.
     pub durability: DurabilityTier,
+}
+
+/// Usage-site query coverage attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryAttachment {
+    subscription: SubscriptionKey,
+}
+
+impl QueryAttachment {
+    /// Wire subscription id owned by this attachment.
+    pub fn subscription(&self) -> SubscriptionKey {
+        self.subscription
+    }
 }
 
 /// Future that resolves when a database observes a write-state change.
@@ -540,36 +559,16 @@ where
         self.open_subscription(prepared, opts, author).await
     }
 
-    /// Ask connected upstreams to cover this query shape.
+    /// Attach a one-shot usage-site query coverage request.
     ///
-    /// This is the one-shot query counterpart to subscription registration:
-    /// bindings call it before an edge/global read with full propagation, then
-    /// drive [`Db::tick`] until the resulting reset view update has been
-    /// applied locally.
-    pub fn propagate_query(&self, prepared: &PreparedQuery) {
-        let subscription = self.node.next_subscription_key(&prepared.shape);
-        self.node
-            .upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamSubscription {
-                subscription,
-                shape: prepared.shape.clone(),
-                binding: prepared.binding.clone(),
-                opts: RegisterShapeOptions::default(),
-            });
-        self.node.latest_coverage_subscriptions.borrow_mut().insert(
-            coverage_key(
-                &prepared.shape,
-                &prepared.binding,
-                RegisterShapeOptions::default(),
-            ),
-            subscription,
-        );
-        self.node.schedule_tick(TickUrgency::Immediate);
-    }
-
-    /// Ask connected upstreams to cover this query shape at `opts`' effective tier.
-    pub fn propagate_query_with_opts(&self, prepared: &PreparedQuery, opts: ReadOpts) {
+    /// Bindings call this before an edge/global one-shot read, drive
+    /// [`Db::tick`] until [`Db::query_attachment_is_covered`] is true, read, then
+    /// call [`Db::detach_query`].
+    pub fn attach_query_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> QueryAttachment {
         let subscription = self.node.next_subscription_key(&prepared.shape);
         let opts = RegisterShapeOptions {
             tier: effective_read_tier(opts),
@@ -577,36 +576,50 @@ where
         self.node
             .upstream_subscriptions
             .borrow_mut()
-            .push(PendingUpstreamSubscription {
-                subscription,
-                shape: prepared.shape.clone(),
-                binding: prepared.binding.clone(),
-                opts: opts.clone(),
-            });
+            .push(PendingUpstreamCommand::Subscribe(
+                PendingUpstreamSubscription {
+                    subscription,
+                    shape: prepared.shape.clone(),
+                    binding: prepared.binding.clone(),
+                    opts: opts.clone(),
+                },
+            ));
         self.node.latest_coverage_subscriptions.borrow_mut().insert(
             coverage_key(&prepared.shape, &prepared.binding, opts),
             subscription,
         );
         self.node.schedule_tick(TickUrgency::Immediate);
+        QueryAttachment { subscription }
     }
 
-    /// Return whether a propagated query has received at least one upstream view update.
-    pub fn query_is_covered(&self, prepared: &PreparedQuery) -> bool {
-        let Some(subscription) = self
+    /// Attach a one-shot usage-site query coverage request at the default tier.
+    pub fn attach_query(&self, prepared: &PreparedQuery) -> QueryAttachment {
+        self.attach_query_with_opts(prepared, ReadOpts::default())
+    }
+
+    /// Return whether a query attachment has received at least one upstream view update.
+    pub fn query_attachment_is_covered(&self, attachment: QueryAttachment) -> bool {
+        self.node
             .node
-            .latest_coverage_subscriptions
             .borrow()
-            .iter()
-            .rev()
-            .find_map(|(coverage, subscription)| {
-                (coverage.shape_id == prepared.shape.shape_id()
-                    && coverage.binding_id == prepared.binding.binding_id())
-                .then_some(*subscription)
-            })
-        else {
-            return false;
-        };
-        self.node.node.borrow().has_settled_result_set(subscription)
+            .has_settled_result_set(attachment.subscription)
+    }
+
+    /// Detach a one-shot query coverage request.
+    pub fn detach_query(&self, attachment: QueryAttachment) {
+        self.node
+            .node
+            .borrow_mut()
+            .apply_unsubscribe(attachment.subscription);
+        self.node
+            .latest_coverage_subscriptions
+            .borrow_mut()
+            .retain(|_, subscription| *subscription != attachment.subscription);
+        self.node
+            .upstream_subscriptions
+            .borrow_mut()
+            .push(PendingUpstreamCommand::Unsubscribe(attachment.subscription));
+        self.node.schedule_tick(TickUrgency::Immediate);
     }
 
     async fn open_subscription(
@@ -675,12 +688,14 @@ where
             self.node
                 .upstream_subscriptions
                 .borrow_mut()
-                .push(PendingUpstreamSubscription {
-                    subscription: upstream_subscription,
-                    shape: prepared.shape.clone(),
-                    binding: prepared.binding.clone(),
-                    opts: upstream_opts.clone(),
-                });
+                .push(PendingUpstreamCommand::Subscribe(
+                    PendingUpstreamSubscription {
+                        subscription: upstream_subscription,
+                        shape: prepared.shape.clone(),
+                        binding: prepared.binding.clone(),
+                        opts: upstream_opts.clone(),
+                    },
+                ));
             self.node.latest_coverage_subscriptions.borrow_mut().insert(
                 coverage_key(&prepared.shape, &prepared.binding, upstream_opts),
                 upstream_subscription,
@@ -1602,7 +1617,7 @@ where
     node: Rc<RefCell<NodeState<S>>>,
     subscriptions: SubscriptionList,
     outbox: Outbox,
-    upstream_subscriptions: PendingUpstreamSubscriptions,
+    upstream_subscriptions: PendingUpstreamCommands,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
@@ -1713,12 +1728,15 @@ where
             .collect::<Vec<_>>();
         let mut pending_coverage = pending
             .iter()
-            .map(|subscription| {
-                coverage_key(
+            .filter_map(|command| {
+                let PendingUpstreamCommand::Subscribe(subscription) = command else {
+                    return None;
+                };
+                Some(coverage_key(
                     &subscription.shape,
                     &subscription.binding,
                     subscription.opts.clone(),
-                )
+                ))
             })
             .collect::<BTreeSet<_>>();
         for state in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
@@ -1735,12 +1753,14 @@ where
                 self.latest_coverage_subscriptions
                     .borrow_mut()
                     .insert(coverage, subscription);
-                pending.push(PendingUpstreamSubscription {
-                    subscription,
-                    shape: state.shape.clone(),
-                    binding: state.binding.clone(),
-                    opts,
-                });
+                pending.push(PendingUpstreamCommand::Subscribe(
+                    PendingUpstreamSubscription {
+                        subscription,
+                        shape: state.shape.clone(),
+                        binding: state.binding.clone(),
+                        opts,
+                    },
+                ));
             }
         }
         let connection = Rc::new(RefCell::new(PeerConnection {
@@ -2185,9 +2205,9 @@ enum ConnectionLink {
     /// up, apply view updates and fates that come back.
     Upstream {
         /// Shapes registered locally but not yet announced upstream.
-        pending: Vec<PendingUpstreamSubscription>,
+        pending: Vec<PendingUpstreamCommand>,
         /// Shapes registered through downstream subscribers.
-        upstream_subscriptions: PendingUpstreamSubscriptions,
+        upstream_subscriptions: PendingUpstreamCommands,
         /// Shapes already registered on this connection.
         announced_shapes: BTreeSet<ShapeId>,
         /// Locally-authored transactions to upload (shared with the `Db`).
@@ -2203,7 +2223,7 @@ enum ConnectionLink {
         /// Accepted subscriber commit units awaiting upstream relay.
         outbox: Outbox,
         /// Subscriber-maintained views that must be announced upstream.
-        upstream_subscriptions: PendingUpstreamSubscriptions,
+        upstream_subscriptions: PendingUpstreamCommands,
         /// Usage-site subscriptions this subscriber registered.
         served: BTreeMap<SubscriptionKey, CoverageKey>,
         /// Shared maintained views keyed by query shape, binding, and options.
@@ -2288,37 +2308,52 @@ where
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let pending_index = 0;
                 while pending_index < pending.len() {
-                    let pending_subscription = &pending[pending_index];
-                    let shape = &pending_subscription.shape;
-                    let binding = &pending_subscription.binding;
-                    if announced_shapes.insert(shape.shape_id()) {
-                        self.node
-                            .borrow_mut()
-                            .apply_sync_message(SyncMessage::RegisterShape {
+                    match &pending[pending_index] {
+                        PendingUpstreamCommand::Subscribe(pending_subscription) => {
+                            let shape = &pending_subscription.shape;
+                            let binding = &pending_subscription.binding;
+                            if announced_shapes.insert(shape.shape_id()) {
+                                self.node.borrow_mut().apply_sync_message(
+                                    SyncMessage::RegisterShape {
+                                        shape_id: shape.shape_id(),
+                                        ast: ShapeAst::from_validated(shape),
+                                        opts: RegisterShapeOptions::default(),
+                                    },
+                                )?;
+                                if let Err(error) =
+                                    self.transport.send(SyncMessage::RegisterShape {
+                                        shape_id: shape.shape_id(),
+                                        ast: ShapeAst::from_validated(shape),
+                                        opts: pending_subscription.opts.clone(),
+                                    })
+                                {
+                                    announced_shapes.remove(&shape.shape_id());
+                                    return Err(transport_error(error));
+                                }
+                            }
+                            let values = binding_values_in_param_order(shape, binding);
+                            let subscribe = Subscribe {
                                 shape_id: shape.shape_id(),
-                                ast: ShapeAst::from_validated(shape),
-                                opts: RegisterShapeOptions::default(),
-                            })?;
-                        if let Err(error) = self.transport.send(SyncMessage::RegisterShape {
-                            shape_id: shape.shape_id(),
-                            ast: ShapeAst::from_validated(shape),
-                            opts: pending_subscription.opts.clone(),
-                        }) {
-                            announced_shapes.remove(&shape.shape_id());
-                            return Err(transport_error(error));
+                                subscription: pending_subscription.subscription,
+                                values,
+                            };
+                            self.node
+                                .borrow_mut()
+                                .apply_sync_message(SyncMessage::Subscribe(subscribe.clone()))?;
+                            if let Err(error) =
+                                self.transport.send(SyncMessage::Subscribe(subscribe))
+                            {
+                                return Err(transport_error(error));
+                            }
                         }
-                    }
-                    let values = binding_values_in_param_order(shape, binding);
-                    let subscribe = Subscribe {
-                        shape_id: shape.shape_id(),
-                        subscription: pending_subscription.subscription,
-                        values,
-                    };
-                    self.node
-                        .borrow_mut()
-                        .apply_sync_message(SyncMessage::Subscribe(subscribe.clone()))?;
-                    if let Err(error) = self.transport.send(SyncMessage::Subscribe(subscribe)) {
-                        return Err(transport_error(error));
+                        PendingUpstreamCommand::Unsubscribe(subscription) => {
+                            self.node.borrow_mut().apply_unsubscribe(*subscription);
+                            if let Err(error) = self.transport.send(SyncMessage::Unsubscribe {
+                                subscription: *subscription,
+                            }) {
+                                return Err(transport_error(error));
+                            }
+                        }
                     }
                     pending.remove(pending_index);
                 }
@@ -2454,12 +2489,14 @@ where
                             served.insert(subscription, coverage);
                             if first_subscriber {
                                 upstream_subscriptions.borrow_mut().push(
-                                    PendingUpstreamSubscription {
-                                        subscription,
-                                        shape: shape.clone(),
-                                        binding,
-                                        opts,
-                                    },
+                                    PendingUpstreamCommand::Subscribe(
+                                        PendingUpstreamSubscription {
+                                            subscription,
+                                            shape: shape.clone(),
+                                            binding,
+                                            opts,
+                                        },
+                                    ),
                                 );
                             }
                             schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
@@ -2478,6 +2515,9 @@ where
                                     };
                                     peer.forget_subscription(group_subscription);
                                     coverage_groups.remove(&coverage);
+                                    upstream_subscriptions
+                                        .borrow_mut()
+                                        .push(PendingUpstreamCommand::Unsubscribe(subscription));
                                 }
                             }
                         }

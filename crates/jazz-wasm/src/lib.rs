@@ -8,8 +8,8 @@ use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use jazz::db::{
     block_on, Db, DbConfig, DbIdentity, LocalUpdates, PeerConnection, PreparedQuery, Propagation,
-    ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency,
-    WireTransportAdapter, WriteHandle,
+    QueryAttachment, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent, TickScheduler,
+    TickUrgency, WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
@@ -153,6 +153,11 @@ pub struct WasmWriteResult {
 #[wasm_bindgen]
 pub struct WasmPreparedQuery {
     inner: PreparedQuery,
+}
+
+#[wasm_bindgen(js_name = QueryAttachment)]
+pub struct WasmQueryAttachment {
+    inner: QueryAttachment,
 }
 
 #[wasm_bindgen]
@@ -415,19 +420,27 @@ impl WasmDbInner {
         }
     }
 
-    fn propagate_query(&self, query: &PreparedQuery, opts: ReadOpts) {
+    fn attach_query(&self, query: &PreparedQuery, opts: ReadOpts) -> QueryAttachment {
         match self {
-            Self::Memory(db) => db.propagate_query_with_opts(query, opts),
+            Self::Memory(db) => db.attach_query_with_opts(query, opts),
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.propagate_query_with_opts(query, opts),
+            Self::Browser(db) => db.attach_query_with_opts(query, opts),
         }
     }
 
-    fn query_is_covered(&self, query: &PreparedQuery) -> bool {
+    fn query_attachment_is_covered(&self, attachment: QueryAttachment) -> bool {
         match self {
-            Self::Memory(db) => db.query_is_covered(query),
+            Self::Memory(db) => db.query_attachment_is_covered(attachment),
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.query_is_covered(query),
+            Self::Browser(db) => db.query_attachment_is_covered(attachment),
+        }
+    }
+
+    fn detach_query(&self, attachment: QueryAttachment) {
+        match self {
+            Self::Memory(db) => db.detach_query(attachment),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.detach_query(attachment),
         }
     }
 
@@ -828,16 +841,26 @@ impl WasmDb {
         readable_stream_from_stream(stream.map(subscription_chunk_to_js))
     }
 
-    #[wasm_bindgen(js_name = propagateQuery)]
-    pub fn propagate_query(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<(), JsValue> {
+    #[wasm_bindgen(js_name = attachQuery)]
+    pub fn attach_query(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<WasmQueryAttachment, JsValue> {
         let opts = read_opts_from_js(opts)?;
-        self.inner.propagate_query(&query.inner, opts);
-        Ok(())
+        Ok(WasmQueryAttachment {
+            inner: self.inner.attach_query(&query.inner, opts),
+        })
     }
 
-    #[wasm_bindgen(js_name = queryIsCovered)]
-    pub fn query_is_covered(&self, query: &WasmPreparedQuery) -> bool {
-        self.inner.query_is_covered(&query.inner)
+    #[wasm_bindgen(js_name = queryAttachmentIsCovered)]
+    pub fn query_attachment_is_covered(&self, attachment: &WasmQueryAttachment) -> bool {
+        self.inner.query_attachment_is_covered(attachment.inner)
+    }
+
+    #[wasm_bindgen(js_name = detachQuery)]
+    pub fn detach_query(&self, attachment: &WasmQueryAttachment) {
+        self.inner.detach_query(attachment.inner);
     }
 
     #[wasm_bindgen(js_name = setTickScheduler)]
