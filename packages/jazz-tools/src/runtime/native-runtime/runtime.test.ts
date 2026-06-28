@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
 import { createRecord, PostcardReader, PostcardWriter, writeDescriptor } from "./native-codec.js";
 import {
@@ -131,6 +131,77 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(transport.tickCount).toBeGreaterThan(1);
     expect(dbTicks).toBe(0);
+  });
+
+  it("resolves connect only after the owned native transport has pumped", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([Uint8Array.from([9])]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+
+    expect(transport.tickCount).toBeGreaterThan(0);
+    expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]! as Uint8Array)).toEqual([
+      Uint8Array.from([9]),
+    ]);
+  });
+
+  it("pumps the newly owned transport before auth-refresh reconnect readiness", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transports = [new FakeTransport([]), new FakeTransport([Uint8Array.from([4, 5, 6])])];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transports.shift()!,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+
+    expect(sockets).toHaveLength(2);
+    expect(decodeWebSocketFrameBatch(sockets[1]!.sent[2]! as Uint8Array)).toEqual([
+      Uint8Array.from([4, 5, 6]),
+    ]);
   });
 
   it("requires native db bindings to expose a tick scheduler", () => {
@@ -1210,6 +1281,55 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).resolves.toEqual([]);
 
     expect(readOptions).toEqual([{ tier: "edge", include_deleted: true }]);
+  });
+
+  it("does not let edge reads run before server query coverage is observed", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    vi.useFakeTimers();
+    try {
+      const transport = new FakeTransport([]);
+      let covered = false;
+      let allCalls = 0;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              all: () => {
+                allCalls += 1;
+                return new Uint8Array([0]);
+              },
+              connectUpstream: () => transport,
+              prepareQuery: () => ({}),
+              propagateQuery: () => undefined,
+              queryIsCovered: () => covered,
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        new Uint8Array(16),
+        1,
+        true,
+      );
+      await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+
+      const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+      await vi.advanceTimersByTimeAsync(40);
+
+      expect(transport.tickCount).toBeGreaterThan(0);
+      expect(allCalls).toBe(0);
+
+      covered = true;
+      await vi.advanceTimersByTimeAsync(10);
+
+      await expect(query).resolves.toEqual([]);
+      expect(allCalls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("passes supported subscription read tiers through", () => {

@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -451,7 +451,7 @@ describe("Chat App E2E", () => {
   async function setupPrivateChatAccess(): Promise<{
     bobContainer: HTMLDivElement;
   }> {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = TEST_SERVER_URL;
 
     // --- User A: create a private chat with a secret message ----------------
     const aliceContainer = await mountApp({
