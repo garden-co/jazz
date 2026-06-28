@@ -45,9 +45,8 @@ use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
     LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
     PreparedQuery as PreparedQueryInner, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
-    RemovedRow as CoreRemovedRowInner, RowCells as CoreRowCells,
-    SeededRowIdSource as CoreSeededRowIdSource, SubscriptionEvent, SubscriptionStream,
-    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
+    RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource, SubscriptionEvent,
+    SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
 use jazz::groove::records::{
@@ -110,19 +109,6 @@ struct CoreRow<'a> {
 struct WriteResult {
     row_id: CoreRowUuid,
     tx_id: TxId,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRemovedRow<'a> {
-    table: &'a str,
-    row_id: CoreRowUuid,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct SubscriptionDelta<'a> {
-    added: Vec<CoreRowBatch<'a>>,
-    updated: Vec<CoreRowBatch<'a>>,
-    removed: Vec<CoreRemovedRow<'a>>,
 }
 
 type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
@@ -1433,27 +1419,6 @@ fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {
     }
 }
 
-fn core_removed_rows(rows: &[CoreRemovedRowInner]) -> Vec<CoreRemovedRow<'_>> {
-    rows.iter()
-        .map(|row| CoreRemovedRow {
-            table: row.table.as_str(),
-            row_id: row.row_uuid,
-        })
-        .collect()
-}
-
-fn encode_core_subscription_delta(
-    added: &[jazz::node::CurrentRow],
-    updated: &[jazz::node::CurrentRow],
-    removed: &[CoreRemovedRowInner],
-) -> std::result::Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&SubscriptionDelta {
-        added: core_row_batches(added),
-        updated: core_row_batches(updated),
-        removed: core_removed_rows(removed),
-    })
-}
-
 fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<serde_json::Value> {
     match event {
         SubscriptionEvent::Opened {
@@ -1476,17 +1441,16 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             }))
         }
         SubscriptionEvent::Delta {
-            added,
-            updated,
-            removed,
+            current,
             settled,
             tier,
+            ..
         } => {
-            let delta = encode_core_subscription_delta(added, updated, removed)
+            let rows = encode_core_rows(current)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             Ok(serde_json::json!({
-                "type": "delta",
-                "delta": delta,
+                "type": "snapshot",
+                "rows": rows,
                 "settled": settled,
                 "tier": format!("{tier:?}"),
             }))

@@ -1010,7 +1010,7 @@ where
         Ok(output)
     }
 
-    fn apply_query_order(
+    pub(crate) fn apply_query_order(
         &self,
         query: &crate::query::Query,
         rows: &mut [CurrentRow],
@@ -3888,7 +3888,7 @@ fn maintained_view_window_supported(query: &crate::query::Query) -> bool {
     if query.order_by.is_empty() {
         query.offset == 0 && (query.limit.is_none() || query.limit == Some(1))
     } else {
-        query.limit.is_some()
+        true
     }
 }
 
@@ -3931,24 +3931,21 @@ fn apply_maintained_view_result_limit(
     query: &crate::query::Query,
 ) -> GraphBuilder {
     if !query.order_by.is_empty() {
-        if let Some(limit) = query.limit {
-            let order_cols = query.order_by.iter().map(|order| {
-                let field = query_field(&order.column);
-                match order.direction {
-                    OrderDirection::Asc => TopByOrder::asc(field),
-                    OrderDirection::Desc => TopByOrder::desc(field),
-                }
-            });
-            return GraphBuilder::top_by(
-                graph,
-                std::iter::empty::<&str>(),
-                order_cols,
-                ["row_uuid"],
-                query.offset,
-                limit,
-            );
-        }
-        return graph;
+        let order_cols = query.order_by.iter().map(|order| {
+            let field = query_field(&order.column);
+            match order.direction {
+                OrderDirection::Asc => TopByOrder::asc(field),
+                OrderDirection::Desc => TopByOrder::desc(field),
+            }
+        });
+        return GraphBuilder::top_by(
+            graph,
+            std::iter::empty::<&str>(),
+            order_cols,
+            ["row_uuid"],
+            query.offset,
+            query.limit.unwrap_or(usize::MAX),
+        );
     }
 
     if query.limit == Some(1) {

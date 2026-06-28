@@ -368,6 +368,12 @@ describe("PersistentBrowserOpfsRuntime", () => {
       ),
     ).toThrow(`Insert failed: WriteError("transaction ${tx} is already committed")`);
 
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "commitTransaction")).toBe(true);
+    });
+    const commitMessage = worker.messages.find((message) => message.method === "commitTransaction");
+    worker.respond(commitMessage!.id, undefined);
+
     await runtime.close();
   });
 
