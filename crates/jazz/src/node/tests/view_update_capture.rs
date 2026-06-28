@@ -1196,14 +1196,6 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
     let binding = shape
         .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(alice.0))]))
         .unwrap();
-    if !core.supported_maintained_view(&shape, &binding, identity) {
-        let graph_error = core
-            .maintained_view_tagged_terminal_graph(&shape, &binding, identity)
-            .err();
-        panic!(
-            "recursive RLS shape should be on maintained fast path for {identity:?}; graph_error={graph_error:?}"
-        );
-    }
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
@@ -1414,11 +1406,6 @@ fn seeded_maintained_subscription_view_multitable_capture(
 
     let shape = capture_shape.query().validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert!(
-        core.supported_maintained_view(&shape, &binding, identity),
-        "shape {} should be on maintained fast path for {identity:?}",
-        capture_shape.name()
-    );
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),

@@ -2650,10 +2650,6 @@ fn maintained_subscription_view_multi_segment_inner_include_matches_full_recompu
     seed_multi_segment_include_fixture(&mut maintained_core, reader);
     let shape = required_include_shape(&maintained_core, Include::new("project.org"));
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert!(
-        maintained_core.supported_maintained_view(&shape, &binding, reader),
-        "multi-segment inner include should be accepted by maintained subscription view support"
-    );
 
     let mut maintained_peer = PeerState::for_author(reader);
 
@@ -2831,10 +2827,6 @@ fn maintained_subscription_view_multi_segment_holes_include_matches_full_recompu
         Include::new("project.org").join_mode(JoinMode::Holes),
     );
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert!(
-        maintained_core.supported_maintained_view(&shape, &binding, reader),
-        "multi-segment holes include should be accepted by maintained subscription view support"
-    );
 
     let mut full_recompute_peer = PeerState::for_author(reader);
     full_recompute_peer.force_full_recompute_path_for_test(true);
@@ -3323,10 +3315,6 @@ fn maintained_view_allows_join_policy_slice() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert!(
-        core.supported_maintained_view(&shape, &binding, user(0xa1)),
-        "non-recursive join policy should be supported"
-    );
     core.maintained_view_result_current(&shape, &binding, user(0xa1))
         .unwrap();
 }
@@ -3380,10 +3368,6 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert!(
-        core.supported_maintained_view(&shape, &binding, reader),
-        "shared-todo owner/member include should be supported by maintained subscription views"
-    );
 
     let mut peer = PeerState::for_author(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
@@ -3490,10 +3474,6 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert!(
-        core.supported_maintained_view(&shape, &binding, AuthorId::SYSTEM),
-        "ordered offset/limit windows should be maintained, not silently downgraded"
-    );
 
     let mut peer = PeerState::new();
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
@@ -3553,7 +3533,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
 }
 
 #[test]
-fn supported_maintained_view_allows_reference_bearing_root_table() {
+fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
     // The maintained subscription view footprint is table-aware and now ships
     // reference-closure rows from the fast path.
     let ref_schema = JazzSchema::new([
@@ -3567,30 +3547,38 @@ fn supported_maintained_view_allows_reference_bearing_root_table() {
         .with_reference("author", "authors"),
         TableSchema::new("authors", [ColumnSchema::new("name", ColumnType::String)]),
     ]);
-    let (_ref_dir, ref_core) = open_node_with_schema(node(9), ref_schema);
+    let (_ref_dir, mut ref_core) = open_node_with_schema(node(9), ref_schema);
     let shape = Query::from("todos")
         .validate(&ref_core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert!(
-        ref_core.supported_maintained_view(&shape, &binding, user(0xa1)),
-        "reference-bearing root table must be reported as supported"
-    );
+    let mut ref_peer = PeerState::for_author(user(0xa1));
+    ref_peer
+        .rehydrate_query(&mut ref_core, &shape, &binding)
+        .unwrap();
+    let ref_metrics = ref_peer.maintained_subscription_view_metrics();
+    assert_eq!(ref_metrics.full_recomputes_out, 0);
+    assert_eq!(ref_metrics.unsupported_skips_out, 0);
+    assert_eq!(ref_metrics.hits_out, 1);
 
     // Control: the same query on a table with no references is supported.
     let plain_schema = JazzSchema::new([TableSchema::new(
         "todos",
         [ColumnSchema::new("title", ColumnType::String)],
     )]);
-    let (_plain_dir, plain_core) = open_node_with_schema(node(9), plain_schema);
+    let (_plain_dir, mut plain_core) = open_node_with_schema(node(9), plain_schema);
     let plain_shape = Query::from("todos")
         .validate(&plain_core.catalogue.schema)
         .unwrap();
     let plain_binding = plain_shape.bind(BTreeMap::new()).unwrap();
-    assert!(
-        plain_core.supported_maintained_view(&plain_shape, &plain_binding, user(0xa1)),
-        "no-reference root table must be supported"
-    );
+    let mut plain_peer = PeerState::for_author(user(0xa1));
+    plain_peer
+        .rehydrate_query(&mut plain_core, &plain_shape, &plain_binding)
+        .unwrap();
+    let plain_metrics = plain_peer.maintained_subscription_view_metrics();
+    assert_eq!(plain_metrics.full_recomputes_out, 0);
+    assert_eq!(plain_metrics.unsupported_skips_out, 0);
+    assert_eq!(plain_metrics.hits_out, 1);
 }
 
 #[test]

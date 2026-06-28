@@ -614,7 +614,7 @@ fn include_deleted_one_shot_read_join_ignores_deleted_join_rows() {
 }
 
 fn include_deleted_reachable_schema() -> JazzSchema {
-    let schema = JazzSchema::new([
+    JazzSchema::new([
         TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
         TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)]),
         TableSchema::new(
@@ -635,8 +635,7 @@ fn include_deleted_reachable_schema() -> JazzSchema {
         )
         .with_reference("member", "teams")
         .with_reference("parent", "teams"),
-    ]);
-    schema
+    ])
 }
 
 fn include_deleted_reachable_shape(schema: &JazzSchema) -> ValidatedQuery {

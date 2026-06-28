@@ -2237,6 +2237,9 @@ impl PredicateExpr {
                 compare_record_field(record, field, value, |ord| !ord.is_eq())
             }
             Self::Contains { field, value } => contains_record_field(record, field, value),
+            Self::EqField { field, value_field } => {
+                compare_record_fields(record, field, value_field, |ord| ord.is_eq())
+            }
             Self::ContainsField {
                 field,
                 needle_field,

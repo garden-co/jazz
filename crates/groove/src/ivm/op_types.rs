@@ -238,6 +238,7 @@ pub enum PredicateExpr {
     Eq { field: String, value: LiteralValue },
     Neq { field: String, value: LiteralValue },
     Contains { field: String, value: LiteralValue },
+    EqField { field: String, value_field: String },
     ContainsField { field: String, needle_field: String },
     NeqField { field: String, value_field: String },
     Gt { field: String, value: LiteralValue },
