@@ -57,7 +57,7 @@ struct LoweredQueryCore {
 struct LoweredQueryClauseOptions {
     tier: DurabilityTier,
     output_fields: Vec<String>,
-    retain_params: bool,
+    keep_binding_params_in_output: bool,
     binding_source_shape: String,
     source_overrides: BTreeMap<String, GraphBuilder>,
     table_overrides: BTreeMap<String, TableSchema>,
@@ -843,7 +843,14 @@ where
             &self.catalogue.schema,
             ParamBindingMode::RetainAllParams,
         )?;
-        let binding = binding_for_shape(&shape, &binding)?;
+        let mut values = binding.values().clone();
+        insert_claim_bindings(
+            &mut values,
+            shape.params(),
+            identity,
+            self.session_claims.get(&identity),
+        );
+        let binding = shape.bind(values)?;
         let plan = self.prepared_query_plan(&shape, tier)?;
         Ok((shape, binding, plan))
     }
@@ -1754,7 +1761,7 @@ where
             LoweredQueryClauseOptions {
                 tier,
                 output_fields: current_row_fields(table),
-                retain_params: true,
+                keep_binding_params_in_output: true,
                 binding_source_shape: query_binding_source_shape(shape),
                 source_overrides: BTreeMap::new(),
                 table_overrides: BTreeMap::new(),
@@ -1812,7 +1819,7 @@ where
             LoweredQueryClauseOptions {
                 tier: DurabilityTier::Global,
                 output_fields: current_row_fields(&table),
-                retain_params: true,
+                keep_binding_params_in_output: true,
                 binding_source_shape: historical_query_binding_source_shape(shape, position),
                 source_overrides,
                 table_overrides,
@@ -1910,7 +1917,7 @@ where
             LoweredQueryClauseOptions {
                 tier,
                 output_fields,
-                retain_params: true,
+                keep_binding_params_in_output: true,
                 binding_source_shape: include_deleted_query_binding_source_shape(shape, tier),
                 source_overrides,
                 table_overrides,
@@ -1993,7 +2000,7 @@ where
             LoweredQueryClauseOptions {
                 tier,
                 output_fields: current_row_fields(table),
-                retain_params: true,
+                keep_binding_params_in_output: true,
                 binding_source_shape: query_binding_source_shape(shape),
                 source_overrides,
                 table_overrides,
@@ -2087,32 +2094,63 @@ where
                 output_fields: options.output_fields.clone(),
                 ..options.clone()
             };
+            let key_fields = std::iter::once("row_uuid".to_owned())
+                .chain(
+                    options
+                        .keep_binding_params_in_output
+                        .then(|| param_types.keys().cloned())
+                        .into_iter()
+                        .flatten(),
+                )
+                .collect::<Vec<_>>();
             let mut key_graphs = vec![
-                self.apply_lowered_query_clauses(
-                    graph.clone(),
-                    &base_shape,
-                    table,
+                attach_output_binding_params(
+                    self.apply_lowered_query_clauses(
+                        graph.clone(),
+                        &base_shape,
+                        table,
+                        param_types,
+                        key_options.clone(),
+                    )?,
                     param_types,
-                    key_options.clone(),
+                    &key_options,
                 )?
-                .project(["row_uuid"]),
+                .project(key_fields.clone()),
             ];
             for branch in branches {
                 let branch_shape = branch
                     .as_query(&shape.query().table)
                     .validate(&self.catalogue.schema)?;
                 key_graphs.push(
-                    self.apply_lowered_query_clauses(
-                        graph.clone(),
-                        &branch_shape,
-                        table,
+                    attach_output_binding_params(
+                        self.apply_lowered_query_clauses(
+                            graph.clone(),
+                            &branch_shape,
+                            table,
+                            param_types,
+                            key_options.clone(),
+                        )?,
                         param_types,
-                        key_options.clone(),
+                        &key_options,
                     )?
-                    .project(["row_uuid"]),
+                    .project(key_fields.clone()),
                 );
             }
             let authorized_keys = GraphBuilder::union(key_graphs);
+            if options.keep_binding_params_in_output {
+                return Ok(
+                    GraphBuilder::join(graph, authorized_keys, ["row_uuid"], ["row_uuid"])
+                        .project_fields(
+                            options
+                                .output_fields
+                                .iter()
+                                .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                                .chain(param_types.keys().cloned().map(|param| {
+                                    ProjectField::renamed(format!("right.{param}"), param)
+                                })),
+                        ),
+                );
+            }
             let authorized = GraphBuilder::join(graph, authorized_keys, ["row_uuid"], ["row_uuid"])
                 .project_fields(
                     options
@@ -2120,7 +2158,7 @@ where
                         .iter()
                         .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
                 );
-            return attach_retained_params(authorized, param_types, &options);
+            return Ok(authorized);
         }
         let mut carried_params = BTreeSet::new();
         graph = apply_filters_with_predicate_params(
@@ -2129,10 +2167,12 @@ where
             param_types,
             &shape.query().filters,
             options.output_fields.clone(),
-            options.retain_params,
+            options.keep_binding_params_in_output,
             &options.binding_source_shape,
         )?;
-        if options.retain_params && !predicate_params(&shape.query().filters).is_empty() {
+        if options.keep_binding_params_in_output
+            && !predicate_params(&shape.query().filters).is_empty()
+        {
             carried_params.extend(param_types.keys().cloned());
         }
         for join in &shape.query().joins {
@@ -2143,7 +2183,7 @@ where
                     .get(&lookup.table)
                     .cloned()
                     .unwrap_or_else(|| visible_current_graph(lookup_table, options.tier));
-                let lookup_params = options.retain_params.then(|| {
+                let lookup_params = options.keep_binding_params_in_output.then(|| {
                     shape
                         .params()
                         .keys()
@@ -2191,22 +2231,23 @@ where
                     field: join_key.clone(),
                 });
             }
-            let join_params =
-                if options.retain_params && !predicate_params(&join.filters).is_empty() {
-                    shape.params().keys().cloned().collect()
-                } else {
-                    BTreeSet::new()
-                };
+            let join_params = if options.keep_binding_params_in_output
+                && !predicate_params(&join.filters).is_empty()
+            {
+                shape.params().keys().cloned().collect()
+            } else {
+                BTreeSet::new()
+            };
             join_graph = apply_filters_with_predicate_params(
                 join_graph,
                 join_table,
                 param_types,
                 &join.filters,
                 current_row_fields(join_table),
-                options.retain_params,
+                options.keep_binding_params_in_output,
                 &options.binding_source_shape,
             )?;
-            let params = options.retain_params.then(|| {
+            let params = options.keep_binding_params_in_output.then(|| {
                 shape.params().keys().map(|param| {
                     if carried_params.contains(param) {
                         ProjectField::renamed(format!("left.{param}"), param.clone())
@@ -2238,7 +2279,7 @@ where
                 &options.source_overrides,
                 &options.binding_source_shape,
             )?;
-            let params = options.retain_params.then(|| {
+            let params = options.keep_binding_params_in_output.then(|| {
                 param_types.keys().filter_map(|param| {
                     if carried_params.contains(param) {
                         Some(ProjectField::renamed(
@@ -2268,7 +2309,7 @@ where
                     .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone()))
                     .chain(params.into_iter().flatten()),
             );
-            if options.retain_params {
+            if options.keep_binding_params_in_output {
                 carried_params.insert(reachable_seed_param);
             }
         }
@@ -2684,7 +2725,7 @@ where
         let tables = self.maintained_view_terminal_tables(&_shape)?;
         self.database.flush().map_err(Error::Groove)?;
         let subscription =
-            self.subscribe_maintained_view_tagged_graph(&_shape, &_binding, graph)?;
+            self.subscribe_maintained_view_tagged_graph(&_shape, &_binding, identity, graph)?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
         let snapshot = subscription
@@ -2717,6 +2758,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
+        identity: AuthorId,
         graph: GraphBuilder,
     ) -> Result<groove::ivm::Subscription, Error> {
         let param_types = graph_param_types(shape, &self.catalogue.schema)?;
@@ -2747,7 +2789,15 @@ where
             binding_descriptor,
             param_names.iter().cloned(),
         )?;
-        let values = binding_values_for_plan(binding, &param_names, &param_type_list)?;
+        let mut binding_values = binding.values().clone();
+        insert_claim_bindings(
+            &mut binding_values,
+            &param_types,
+            identity,
+            self.session_claims.get(&identity),
+        );
+        let values =
+            binding_values_for_param_names(&binding_values, &param_names, &param_type_list)?;
         self.database
             .bind_shape(prepared.id(), &values)
             .map_err(Error::Groove)
@@ -3229,7 +3279,7 @@ where
         }
         let join_shape = join_query.validate(&self.catalogue.schema)?;
         let join_shape =
-            self.maintained_view_bind_filter_literals_for_empty_binding(&join_shape)?;
+            self.maintained_view_bind_filter_literals_for_empty_binding(&join_shape, identity)?;
         let join_current = self.apply_maintained_view_policy_to_current_graph(
             self.maintained_view_content_current_with_version(&join_table)?,
             &join_table,
@@ -3296,8 +3346,16 @@ where
     fn maintained_view_bind_filter_literals_for_empty_binding(
         &self,
         shape: &ValidatedQuery,
+        identity: AuthorId,
     ) -> Result<ValidatedQuery, Error> {
-        let binding = shape.bind(BTreeMap::new())?;
+        let mut values = BTreeMap::new();
+        insert_claim_bindings(
+            &mut values,
+            shape.params(),
+            identity,
+            self.session_claims.get(&identity),
+        );
+        let binding = shape.bind(values)?;
         maintained_view_bind_filter_literals(shape, &binding, &self.catalogue.schema)
     }
 
@@ -3309,8 +3367,16 @@ where
         identity: AuthorId,
         output_fields: Vec<String>,
     ) -> Result<GraphBuilder, Error> {
+        let mut values = BTreeMap::new();
+        insert_claim_bindings(
+            &mut values,
+            shape.params(),
+            identity,
+            self.session_claims.get(&identity),
+        );
+        let base_binding = shape.bind(values)?;
         let (policy_shape, policy_binding) =
-            self.policy_composed_shape_binding(shape, &shape.bind(BTreeMap::new())?, identity)?;
+            self.policy_composed_shape_binding(shape, &base_binding, identity)?;
         let policy_shape = maintained_view_bind_filter_literals(
             &policy_shape,
             &policy_binding,
@@ -3692,43 +3758,6 @@ where
         table: &TableSchema,
         output_fields: Vec<String>,
     ) -> Result<GraphBuilder, Error> {
-        if !shape.query().policy_branches.is_empty() {
-            let mut base_query = shape.query().clone();
-            let branches = std::mem::take(&mut base_query.policy_branches);
-            let base_shape = base_query.validate(&self.catalogue.schema)?;
-            let mut key_graphs = vec![
-                self.apply_maintained_view_filters(
-                    graph.clone(),
-                    &base_shape,
-                    table,
-                    output_fields.clone(),
-                )?
-                .project(["row_uuid"]),
-            ];
-            for branch in branches {
-                let branch_shape = branch
-                    .as_query(&shape.query().table)
-                    .validate(&self.catalogue.schema)?;
-                key_graphs.push(
-                    self.apply_maintained_view_filters(
-                        graph.clone(),
-                        &branch_shape,
-                        table,
-                        output_fields.clone(),
-                    )?
-                    .project(["row_uuid"]),
-                );
-            }
-            let authorized_keys = GraphBuilder::union(key_graphs);
-            return Ok(
-                GraphBuilder::join(graph, authorized_keys, ["row_uuid"], ["row_uuid"])
-                    .project_fields(
-                        output_fields
-                            .into_iter()
-                            .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
-                    ),
-            );
-        }
         let param_types = graph_param_types(shape, &self.catalogue.schema)?;
         self.apply_lowered_query_clauses(
             graph,
@@ -3738,7 +3767,7 @@ where
             LoweredQueryClauseOptions {
                 tier: DurabilityTier::Global,
                 output_fields,
-                retain_params: false,
+                keep_binding_params_in_output: true,
                 binding_source_shape: query_binding_source_shape(shape),
                 source_overrides: BTreeMap::new(),
                 table_overrides: BTreeMap::new(),
@@ -4065,9 +4094,7 @@ where
 }
 
 fn maintained_view_query_slice_supported(query: &crate::query::Query) -> bool {
-    query.aggregate.is_none()
-        && maintained_view_window_supported(query)
-        && !query_has_unsupported_param_disjunction(query)
+    query.aggregate.is_none() && maintained_view_window_supported(query)
 }
 
 fn maintained_view_window_supported(query: &crate::query::Query) -> bool {
@@ -4075,40 +4102,6 @@ fn maintained_view_window_supported(query: &crate::query::Query) -> bool {
         query.offset == 0 && (query.limit.is_none() || query.limit == Some(1))
     } else {
         true
-    }
-}
-
-fn query_has_unsupported_param_disjunction(query: &crate::query::Query) -> bool {
-    query
-        .filters
-        .iter()
-        .any(predicate_has_unsupported_param_disjunction)
-        || query.joins.iter().any(|join| {
-            join.filters
-                .iter()
-                .any(predicate_has_unsupported_param_disjunction)
-        })
-        || query.reachable.iter().any(|reachable| {
-            reachable
-                .access_filters
-                .iter()
-                .any(predicate_has_unsupported_param_disjunction)
-                || reachable
-                    .edge_filters
-                    .iter()
-                    .any(predicate_has_unsupported_param_disjunction)
-        })
-}
-
-fn predicate_has_unsupported_param_disjunction(predicate: &Predicate) -> bool {
-    match predicate {
-        Predicate::Any(_) if predicate_has_param(predicate) => true,
-        Predicate::In(_, _) if predicate_has_param(predicate) => true,
-        Predicate::All(predicates) | Predicate::Any(predicates) => predicates
-            .iter()
-            .any(predicate_has_unsupported_param_disjunction),
-        Predicate::Not(predicate) => predicate_has_unsupported_param_disjunction(predicate),
-        _ => false,
     }
 }
 
@@ -4785,12 +4778,12 @@ pub(super) fn binding_for_shape(
     Ok(shape.bind(values)?)
 }
 
-fn attach_retained_params(
+fn attach_output_binding_params(
     graph: GraphBuilder,
     param_types: &BTreeMap<String, groove::schema::ColumnType>,
     options: &LoweredQueryClauseOptions,
 ) -> Result<GraphBuilder, Error> {
-    if !options.retain_params || param_types.is_empty() {
+    if !options.keep_binding_params_in_output || param_types.is_empty() {
         return Ok(graph);
     }
     attach_params_to_graph(
@@ -5423,12 +5416,19 @@ fn binding_values_for_plan(
     param_names: &[String],
     param_types: &[groove::schema::ColumnType],
 ) -> Result<Vec<Value>, Error> {
+    binding_values_for_param_names(binding.values(), param_names, param_types)
+}
+
+fn binding_values_for_param_names(
+    values: &BTreeMap<String, Value>,
+    param_names: &[String],
+    param_types: &[groove::schema::ColumnType],
+) -> Result<Vec<Value>, Error> {
     param_names
         .iter()
         .zip(param_types)
         .map(|(name, column_type)| {
-            let value = binding
-                .values()
+            let value = values
                 .get(name)
                 .cloned()
                 .ok_or_else(|| QueryError::MissingParam(name.clone()))?;
@@ -5722,30 +5722,6 @@ fn predicate_params(predicates: &[Predicate]) -> BTreeSet<String> {
         }
     }
     params
-}
-
-fn predicate_has_param(predicate: &Predicate) -> bool {
-    match predicate {
-        Predicate::All(predicates) | Predicate::Any(predicates) => {
-            predicates.iter().any(predicate_has_param)
-        }
-        Predicate::Not(predicate) => predicate_has_param(predicate),
-        Predicate::Eq(left, right)
-        | Predicate::Ne(left, right)
-        | Predicate::Gt(left, right)
-        | Predicate::Gte(left, right)
-        | Predicate::Lt(left, right)
-        | Predicate::Lte(left, right)
-        | Predicate::Contains(left, right) => operand_has_param(left) || operand_has_param(right),
-        Predicate::In(left, values) => {
-            operand_has_param(left) || values.iter().any(operand_has_param)
-        }
-        Predicate::IsNull(operand) => operand_has_param(operand),
-    }
-}
-
-fn operand_has_param(operand: &Operand) -> bool {
-    matches!(operand, Operand::Param(_) | Operand::Claim(_))
 }
 
 fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
