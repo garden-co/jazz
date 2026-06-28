@@ -49,6 +49,7 @@ pub struct PlannedPreparedShape {
     pub parameters: Vec<QueryParameter>,
     pub binding_descriptor: crate::records::RecordDescriptor,
     pub output_key_fields: Vec<String>,
+    pub public_output: Vec<LogicalField>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -185,12 +186,20 @@ pub fn plan_prepared_shape(
         .iter()
         .map(|parameter| parameter.name.clone())
         .collect();
+    let public_output = planned
+        .planned
+        .output
+        .iter()
+        .filter(|field| field.qualifier.as_deref() != Some(BINDING_QUALIFIER))
+        .cloned()
+        .collect();
     Ok(PlannedPreparedShape {
         planned: planned.planned,
         shape: planned.shape,
         parameters: planned.parameters,
         binding_descriptor,
         output_key_fields,
+        public_output,
     })
 }
 
