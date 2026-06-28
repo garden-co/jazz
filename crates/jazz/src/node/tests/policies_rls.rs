@@ -3320,8 +3320,194 @@ fn maintained_view_allows_join_policy_slice() {
 }
 
 #[test]
+fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
+    // This is intentionally close to the maintained-view lowering internals:
+    // the public query result cannot tell whether the retained claim param was
+    // evaluated by the prepared graph binding or inlined before lowering.
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author = user(0xa1);
+    let other = user(0xb2);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa0), 10).cells(owner_cells(author, "owned")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xb0), 11).cells(owner_cells(other, "other")),
+    );
+
+    let retained_shape = Query::from("todos")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let retained_binding = retained_shape.bind(BTreeMap::new()).unwrap();
+    let literal_shape = Query::from("todos")
+        .filter(eq(col("owner"), lit(author.0)))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let literal_binding = literal_shape.bind(BTreeMap::new()).unwrap();
+
+    let literal_rows = core
+        .query_rows_for_link(
+            &literal_shape,
+            &literal_binding,
+            DurabilityTier::Global,
+            author,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(literal_rows, BTreeSet::from([row(0xa0)]));
+
+    let full_recompute_rows = core
+        .query_rows_for_link(
+            &retained_shape,
+            &retained_binding,
+            DurabilityTier::Global,
+            author,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(full_recompute_rows, literal_rows);
+
+    let (prepared_shape, prepared_binding, prepared_plan) = core
+        .prepare_query_binding_for_link(
+            &retained_shape,
+            &retained_binding,
+            DurabilityTier::Global,
+            author,
+        )
+        .unwrap();
+    let prepared_rows = core
+        .query_rows_with_prepared_plan_for_identity(
+            &prepared_shape,
+            &prepared_binding,
+            DurabilityTier::Global,
+            Some(&prepared_plan),
+            author,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(prepared_rows, literal_rows);
+
+    let maintained_rows = core
+        .maintained_view_result_current(&retained_shape, &retained_binding, author)
+        .unwrap();
+    assert_eq!(
+        maintained_view_result_keys(&maintained_rows)
+            .into_iter()
+            .map(|(row_uuid, _, _)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        literal_rows
+    );
+
+    let mut peer = PeerState::for_author(author);
+    let update = peer
+        .rehydrate_query(&mut core, &retained_shape, &retained_binding)
+        .unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert_eq!(
+        adds.into_iter()
+            .map(|(_table, row_uuid, _tx_id)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        literal_rows
+    );
+    assert!(removes.is_empty());
+    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
+}
+
+#[test]
+fn maintained_view_join_policy_retained_claim_param_matches_full_recompute() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::shape(Query::from("todos").join_via(
+            "members",
+            "owner",
+            [eq(col("user"), claim("sub"))],
+        ))),
+        TableSchema::new(
+            "members",
+            [
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("user", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("owner", "todos"),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author = user(0xa1);
+    let other = user(0xb2);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa0), 10).cells(owner_cells(author, "owned")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xb0), 11).cells(owner_cells(other, "other")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("members", row(0xa1), 12).cells(BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(row(0xa0).0)),
+            ("user".to_owned(), Value::Uuid(author.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("members", row(0xb1), 13).cells(BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(row(0xb0).0)),
+            ("user".to_owned(), Value::Uuid(other.0)),
+        ])),
+    );
+
+    let shape = Query::from("todos")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let full_recompute_rows = core
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, author)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(full_recompute_rows, BTreeSet::from([row(0xa0)]));
+
+    let mut peer = PeerState::for_author(author);
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert_eq!(
+        adds.into_iter()
+            .map(|(_table, row_uuid, _tx_id)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        full_recompute_rows
+    );
+    assert!(removes.is_empty());
+    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
+}
+
+#[test]
 fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas_without_full_recompute()
- {
+{
     let schema = JazzSchema::new([
         TableSchema::new(
             "sharedTodos",
@@ -3608,6 +3794,108 @@ fn reachable_closure_helper_yields_seed_reachable_team_set() {
     seed_recursive_reachable_fixture(&mut core);
     let rows = drain_reachable_test_rows(&subscription);
     assert_eq!(uuid_field_set(&rows, "reachable_team"), team_set([1, 2, 3]));
+}
+
+#[test]
+fn retained_user_param_filter_graph_matches_literal_filter() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "docs",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("docs").filter(eq(col("owner"), claim("sub"))),
+    ))
+    .with_write_policy(Policy::public())]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner = user(0xa1);
+    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+    accept_global(
+        &mut core,
+        MergeableCommit::new("docs", row(0xd1), 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("owned")),
+            ("owner".to_owned(), Value::Uuid(owner.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("docs", row(0xd2), 11).cells(BTreeMap::from([
+            ("title".to_owned(), v("other")),
+            ("owner".to_owned(), Value::Uuid(user(0xb2).0)),
+        ])),
+    );
+
+    let shape = Query::from("docs")
+        .filter(eq(col("owner"), param("owner")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.0))]))
+        .unwrap();
+    let (shape, binding, plan) = core
+        .prepare_query_binding_for_link(&shape, &binding, DurabilityTier::Global, owner)
+        .unwrap();
+    let rows = core
+        .query_rows_with_prepared_plan_for_identity(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            Some(&plan),
+            owner,
+        )
+        .unwrap();
+
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0xd1)])
+    );
+    assert!(shape.params().contains_key("owner"));
+    assert!(binding.values().contains_key("owner"));
+}
+
+#[test]
+fn retained_param_used_as_filter_and_reachable_seed_matches_literal_query() {
+    let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
+    seed_recursive_reachable_fixture(&mut core);
+    let shape = Query::from("docs")
+        .reachable_via_with_access_filters(
+            "teamAccess",
+            "doc",
+            "team",
+            param("team"),
+            [eq(col("team"), param("team"))],
+            "teamEdges",
+            "member",
+            "parent",
+            [],
+        )
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team(1)))]))
+        .unwrap();
+
+    let (prepared_shape, prepared_binding, prepared_plan) = core
+        .prepare_query_binding_for_link(&shape, &binding, DurabilityTier::Global, user(0xa1))
+        .unwrap();
+    let prepared_rows = core
+        .query_rows_with_prepared_plan_for_identity(
+            &prepared_shape,
+            &prepared_binding,
+            DurabilityTier::Global,
+            Some(&prepared_plan),
+            user(0xa1),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(prepared_rows, BTreeSet::from([row(0xd1)]));
 }
 
 #[test]
