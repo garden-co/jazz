@@ -184,6 +184,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly pendingTxs = new Map<string, PendingTx>();
   private readonly completedTxs = new Map<string, CompletedTx>();
   private readonly writes = new Map<string, Write>();
+  private readonly serverPumpObservedWrites = new WeakSet<Write>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private serverTransport: Transport | null = null;
@@ -403,6 +404,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTxs.delete(transactionId);
     this.completedTxs.set(transactionId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
+    this.observeWriteForServerPump(write);
   }
 
   async waitForTransaction(transactionId: string, tier: string): Promise<void> {
@@ -593,13 +595,43 @@ export class NativeRuntimeAdapter implements Runtime {
   ): InsertResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
+    this.observeWriteForServerPump(write);
     return this.resultForRow(table, rowId, transactionId, identity);
   }
 
   private finishMutation(write: Write): MutationResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
+    this.observeWriteForServerPump(write);
     return { transactionId };
+  }
+
+  private observeWriteForServerPump(write: Write): void {
+    if (this.serverPumpObservedWrites.has(write)) return;
+    this.serverPumpObservedWrites.add(write);
+    this.scheduleServerPump();
+
+    const pumpUntilSettled = async () => {
+      for (;;) {
+        if (this.closed) return;
+        try {
+          write.wait("edge");
+          this.scheduleServerPump();
+          return;
+        } catch (error) {
+          if (!isPendingWaitError(error)) return;
+        }
+
+        try {
+          await write.nextWriteStateChange();
+        } catch {
+          return;
+        }
+        this.scheduleServerPump();
+      }
+    };
+
+    void pumpUntilSettled();
   }
 
   private resultForRow(
@@ -927,6 +959,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private handleServerTransportError(error: unknown): void {
     const message = errorMessage(error);
+    if (this.serverTransportError && message === "websocket closed") return;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
   }

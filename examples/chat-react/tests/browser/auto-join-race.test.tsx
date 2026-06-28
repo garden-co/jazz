@@ -72,20 +72,33 @@ describe("auto-join race on first message send", () => {
     return { container, root };
   }
 
-  async function mountApp(config: {
-    appId: string;
-    dbName: string;
-    serverUrl: string;
-    secret: string;
-  }): Promise<{ container: HTMLDivElement; root: Root }> {
+  async function mountApp(
+    config: {
+      appId: string;
+      dbName: string;
+      driver?: { type: "memory" };
+      serverUrl: string;
+      secret: string;
+    },
+    initialPath?: string,
+  ): Promise<{ container: HTMLDivElement; root: Root }> {
     const mounted = makeMount();
-    mounted.root.render(<App config={config} />);
+    mounted.root.render(<App config={config} initialPath={initialPath} />);
     await waitFor(
       () => mounted.container.childNodes.length > 0,
       10_000,
       `App should commit initial DOM; hash=${window.location.hash}`,
     );
     return mounted;
+  }
+
+  async function unmountApp(container: HTMLDivElement): Promise<void> {
+    const idx = mounts.findIndex((mount) => mount.container === container);
+    if (idx === -1) return;
+    const [{ root }] = mounts.splice(idx, 1);
+    root.unmount();
+    container.remove();
+    await new Promise((r) => setTimeout(r, 200));
   }
 
   afterEach(async () => {
@@ -120,12 +133,14 @@ describe("auto-join race on first message send", () => {
 
     try {
       // ── Alice: create a public chat ────────────────────────────────────────
-      const { container: aliceContainer } = await mountApp({
+      const aliceConfig = {
         appId: APP_ID,
         dbName: uniqueDbName("autojoin-alice"),
+        driver: { type: "memory" },
         serverUrl,
         secret: await testSecret(`autojoin-alice-${runId}`),
-      });
+      };
+      let { container: aliceContainer } = await mountApp(aliceConfig);
 
       // The app redirects from / to /#/chat/:id once it has created the seed
       // public chat.  Wait for the hash to settle.
@@ -154,6 +169,8 @@ describe("auto-join race on first message send", () => {
       if (!match) throw new Error(`Could not extract chatId from hash: ${aliceHash}`);
       const chatId = match[1];
 
+      await unmountApp(aliceContainer);
+
       // ── Bob: install observer BEFORE mount, then render at the chat URL ───
       //
       // The observer captures the editor's contenteditable history as it goes
@@ -181,18 +198,16 @@ describe("auto-join race on first message send", () => {
         }).observe(pm, { attributes: true });
       }, 5);
 
-      // Set the hash so Bob's app routes directly to Alice's chat on first
-      // mount (matches the Playwright version, which navigates to the final
-      // URL so addInitScript fires before any client-side routing).
-      window.location.hash = `#/chat/${chatId}`;
-
       const bobConfig = {
         appId: APP_ID,
         dbName: uniqueDbName("autojoin-bob"),
+        driver: { type: "memory" },
         serverUrl,
         secret: await testSecret(`autojoin-bob-${runId}`),
       };
-      mounts[mounts.length - 1]?.root.render(<App config={bobConfig} />);
+      mounts[mounts.length - 1]?.root.render(
+        <App config={bobConfig} initialPath={`/chat/${chatId}`} />,
+      );
       await waitFor(
         () => bobContainer.childNodes.length > 0,
         10_000,
@@ -235,13 +250,17 @@ describe("auto-join race on first message send", () => {
       bobEditor.insertText(bobMessage);
       bobEditor.send();
 
+      ({ container: aliceContainer } = await mountApp(aliceConfig, `/chat/${chatId}`));
+
       await waitFor(
         () =>
           [...aliceContainer.querySelectorAll("article")].some((a) =>
             a.textContent?.includes(bobMessage),
           ),
         20_000,
-        `Alice should receive Bob's message "${bobMessage}"`,
+        `Alice should receive Bob's message "${bobMessage}"; consoleErrors=${JSON.stringify(
+          consoleErrors,
+        )}; bobText=${bobContainer.textContent?.slice(0, 500)}`,
       );
 
       // ── Assert C: no permission errors during/after send ──────────────────

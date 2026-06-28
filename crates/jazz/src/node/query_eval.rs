@@ -2123,6 +2123,37 @@ where
             &options.binding_source_shape,
         )?;
         for join in &shape.query().joins {
+            if let Some(lookup) = &join.source_lookup {
+                let lookup_table = self.lowered_related_table(&lookup.table, &options)?;
+                let lookup_graph = options
+                    .source_overrides
+                    .get(&lookup.table)
+                    .cloned()
+                    .unwrap_or_else(|| visible_current_graph(lookup_table, options.tier));
+                let lookup_params = options.retain_params.then(|| {
+                    shape
+                        .params()
+                        .keys()
+                        .map(|param| ProjectField::renamed(format!("left.{param}"), param.clone()))
+                });
+                graph = GraphBuilder::join(
+                    graph.unwrap_nullable(query_field(&lookup.row_id_source_column)),
+                    lookup_graph,
+                    [query_field(&lookup.row_id_source_column)],
+                    ["row_uuid".to_owned()],
+                )
+                .project_fields(
+                    options
+                        .output_fields
+                        .iter()
+                        .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone()))
+                        .chain(std::iter::once(ProjectField::renamed(
+                            format!("right.{}", query_field(&lookup.value_column)),
+                            query_field(&lookup.value_column),
+                        )))
+                        .chain(lookup_params.into_iter().flatten()),
+                );
+            }
             let join_table = self.lowered_related_table(&join.table, &options)?;
             let join_key = join_key(join);
             let left_key = if let Some(source_column) = &join.source_column {
@@ -3199,7 +3230,7 @@ where
     fn maintained_view_join_closure_current_graph(
         &self,
         root: GraphBuilder,
-        _root_table: &TableSchema,
+        root_table: &TableSchema,
         join: &JoinVia,
         identity: AuthorId,
     ) -> Result<GraphBuilder, Error> {
@@ -3218,6 +3249,26 @@ where
             identity,
             maintained_view_version_fields(&join_table),
         )?;
+        let root = if let Some(lookup) = &join.source_lookup {
+            let lookup_table = self.table(&lookup.table)?.clone();
+            GraphBuilder::join(
+                root.unwrap_nullable(query_field(&lookup.row_id_source_column)),
+                self.maintained_view_content_current_with_version(&lookup_table)?,
+                [query_field(&lookup.row_id_source_column)],
+                ["row_uuid".to_owned()],
+            )
+            .project_fields(
+                maintained_view_version_fields(root_table)
+                    .into_iter()
+                    .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                    .chain(std::iter::once(ProjectField::renamed(
+                        format!("right.{}", query_field(&lookup.value_column)),
+                        query_field(&lookup.value_column),
+                    ))),
+            )
+        } else {
+            root
+        };
         let left_key = join
             .source_column
             .as_ref()
@@ -3657,24 +3708,38 @@ where
             let mut base_query = shape.query().clone();
             let branches = std::mem::take(&mut base_query.policy_branches);
             let base_shape = base_query.validate(&self.catalogue.schema)?;
-            let mut graphs = vec![self.apply_maintained_view_filters(
-                graph.clone(),
-                &base_shape,
-                table,
-                output_fields.clone(),
-            )?];
+            let mut key_graphs = vec![
+                self.apply_maintained_view_filters(
+                    graph.clone(),
+                    &base_shape,
+                    table,
+                    output_fields.clone(),
+                )?
+                .project(["row_uuid"]),
+            ];
             for branch in branches {
                 let branch_shape = branch
                     .as_query(&shape.query().table)
                     .validate(&self.catalogue.schema)?;
-                graphs.push(self.apply_maintained_view_filters(
-                    graph.clone(),
-                    &branch_shape,
-                    table,
-                    output_fields.clone(),
-                )?);
+                key_graphs.push(
+                    self.apply_maintained_view_filters(
+                        graph.clone(),
+                        &branch_shape,
+                        table,
+                        output_fields.clone(),
+                    )?
+                    .project(["row_uuid"]),
+                );
             }
-            return Ok(GraphBuilder::union(graphs));
+            let authorized_keys = GraphBuilder::union(key_graphs);
+            return Ok(
+                GraphBuilder::join(graph, authorized_keys, ["row_uuid"], ["row_uuid"])
+                    .project_fields(
+                        output_fields
+                            .into_iter()
+                            .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                    ),
+            );
         }
         let param_types = graph_param_types(shape, &self.catalogue.schema)?;
         self.apply_lowered_query_clauses(
