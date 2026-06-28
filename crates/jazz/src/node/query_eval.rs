@@ -2865,7 +2865,7 @@ where
             }
         }
         let graph = GraphBuilder::union(graphs);
-        let routing_graph = append_maintained_view_binding_params_for_routing(
+        let routing_graph = maintained_view_internal_routing_graph(
             graph.clone(),
             &shape,
             &graph_param_types(&shape, &self.catalogue.schema)?,
@@ -5322,7 +5322,7 @@ fn maintained_view_binding_source_shape(shape: &ValidatedQuery) -> String {
     query_binding_source_shape(shape)
 }
 
-fn append_maintained_view_binding_params_for_routing<'a>(
+fn maintained_view_internal_routing_graph<'a>(
     graph: GraphBuilder,
     shape: &ValidatedQuery,
     param_types: &BTreeMap<String, groove::schema::ColumnType>,
@@ -5331,6 +5331,8 @@ fn append_maintained_view_binding_params_for_routing<'a>(
     if param_types.is_empty() {
         return graph;
     }
+    // This graph is consumed only by Groove prepared-shape routing. Subscriber
+    // rows come from the clean maintained terminal graph paired with it.
     const ROUTING_JOIN: &str = "__jazz_maintained_view_binding_join";
     let output_fields = maintained_view_tagged_field_names(terminal_tables);
     let graph = graph.project_fields(
