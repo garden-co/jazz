@@ -42,6 +42,7 @@ type NativeDbConstructor = {
 type NativeDb = {
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+  setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   propagateQuery?(query: PreparedQuery, opts: unknown): void;
   queryIsCovered?(query: PreparedQuery): boolean;
   prepareQuery(query: Uint8Array): PreparedQuery;
@@ -138,6 +139,12 @@ type PendingTx = {
 type CompletedTx = {
   kind: TransactionKind;
   state: "committed" | "rolled_back";
+};
+
+type RuntimeSession = {
+  user_id: string;
+  claims: Record<string, unknown>;
+  identity: Uint8Array;
 };
 
 type SubscriptionState = {
@@ -286,7 +293,9 @@ export class NativeRuntimeAdapter implements Runtime {
   ): InsertResult {
     const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
     const cells = encodeCellsForRow(this.table(table), values);
-    const writeIdentity = identityFromWriteContext(_writeContext);
+    const writeSession = sessionFromWriteContext(_writeContext);
+    this.applySessionClaims(writeSession);
+    const writeIdentity = writeSession?.identity;
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells);
@@ -309,7 +318,9 @@ export class NativeRuntimeAdapter implements Runtime {
   ): InsertResult {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
-    const writeIdentity = identityFromWriteContext(writeContext);
+    const writeSession = sessionFromWriteContext(writeContext);
+    this.applySessionClaims(writeSession);
+    const writeIdentity = writeSession?.identity;
     const tx = this.currentTx(writeContext, "Insert");
     if (tx) {
       this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells);
@@ -332,7 +343,9 @@ export class NativeRuntimeAdapter implements Runtime {
   ): MutationResult {
     const rowId = parseUuid(objectId);
     const patch = encodeCellsForPatch(this.table(table), values);
-    const writeIdentity = identityFromWriteContext(writeContext);
+    const writeSession = sessionFromWriteContext(writeContext);
+    this.applySessionClaims(writeSession);
+    const writeIdentity = writeSession?.identity;
     const tx = this.currentTx(writeContext, "Insert");
     if (tx) {
       this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch);
@@ -355,7 +368,9 @@ export class NativeRuntimeAdapter implements Runtime {
   ): MutationResult {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
-    const writeIdentity = identityFromWriteContext(writeContext);
+    const writeSession = sessionFromWriteContext(writeContext);
+    this.applySessionClaims(writeSession);
+    const writeIdentity = writeSession?.identity;
     const tx = this.currentTx(writeContext, "Insert");
     if (tx) {
       this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells);
@@ -373,7 +388,9 @@ export class NativeRuntimeAdapter implements Runtime {
   delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
     this.table(table);
     const rowId = parseUuid(objectId);
-    const writeIdentity = identityFromWriteContext(writeContext);
+    const writeSession = sessionFromWriteContext(writeContext);
+    this.applySessionClaims(writeSession);
+    const writeIdentity = writeSession?.identity;
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
       this.txForWrite(tx, writeIdentity).delete(table, rowId);
@@ -462,10 +479,11 @@ export class NativeRuntimeAdapter implements Runtime {
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const query = this.prepareQuery(queryJson);
     const session = readSession(sessionJson);
+    this.applySessionClaims(session);
     const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
     await this.propagateQueryIfNeeded(tier, optionsJson, query, session);
     const rows = session
-      ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
+      ? this.db.allForIdentity(query, session.identity, opts)
       : this.db.all(query, opts);
     return rowsFromBatches(readRowBatches(rows), this.schema);
   }
@@ -478,6 +496,7 @@ export class NativeRuntimeAdapter implements Runtime {
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
     const session = readSession(sessionJson);
+    this.applySessionClaims(session);
     if (!this.db.subscribe) {
       throw new Error("Native runtime does not support subscriptions");
     }
@@ -486,7 +505,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
-    const identity = session ? parseUuid(session.user_id) : undefined;
+    const identity = session?.identity;
     const query = this.prepareQuery(queryJson);
     let nativeSubscription: ReadableStream<unknown> | Subscription;
     try {
@@ -673,7 +692,7 @@ export class NativeRuntimeAdapter implements Runtime {
     tier: string | null | undefined,
     optionsJson: string | null | undefined,
     query: PreparedQuery,
-    session: { user_id: string } | null,
+    session: RuntimeSession | null,
   ): Promise<void> {
     if (tier == null || tier === "local") return;
     const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
@@ -684,8 +703,13 @@ export class NativeRuntimeAdapter implements Runtime {
     await this.waitForQueryCoverage(
       query,
       readOptions(tier, false, optionsJson),
-      session ? parseUuid(session.user_id) : undefined,
+      session?.identity,
     );
+  }
+
+  private applySessionClaims(session: RuntimeSession | null | undefined): void {
+    if (!session || !this.db.setIdentityClaims) return;
+    this.db.setIdentityClaims(session.identity, session.claims);
   }
 
   private propagateSubscriptionQueryIfNeeded(
@@ -708,20 +732,26 @@ export class NativeRuntimeAdapter implements Runtime {
     identity?: Uint8Array,
   ): Promise<void> {
     const deadline = Date.now() + 15_000;
+    const tier = (opts as { tier?: string }).tier ?? "";
     while (Date.now() < deadline) {
+      this.throwServerTransportErrorForTier(tier);
       this.pumpServerTransport();
-      if (this.db.queryIsCovered?.(query)) return;
+      this.throwServerTransportErrorForTier(tier);
+      if (this.db.queryIsCovered) {
+        if (this.db.queryIsCovered(query)) return;
+      }
       try {
         if (identity) {
           this.db.allForIdentity(query, identity, opts);
         } else {
           this.db.all(query, opts);
         }
-        return;
+        if (!this.db.queryIsCovered) return;
       } catch (error) {
         if (!isPendingCoverageError(error)) throw error;
       }
-      await sleep(10);
+      const transportError = this.waitForServerTransportError(tier);
+      await (transportError ? Promise.race([sleep(10), transportError]) : sleep(10));
     }
     this.scheduleServerPump();
     throw new Error("Timed out waiting for edge query coverage");
@@ -1007,13 +1037,13 @@ function txIdFromContext(writeContext?: string | null): string | undefined {
   }
 }
 
-function identityFromWriteContext(writeContext?: string | null): Uint8Array | undefined {
-  if (!writeContext) return undefined;
+function sessionFromWriteContext(writeContext?: string | null): RuntimeSession | null {
+  if (!writeContext) return null;
   try {
     const parsed = JSON.parse(writeContext) as {
       user_id?: unknown;
       attribution?: unknown;
-      session?: { user_id?: unknown };
+      session?: { user_id?: unknown; claims?: unknown };
     };
     const userId =
       typeof parsed.user_id === "string"
@@ -1023,9 +1053,11 @@ function identityFromWriteContext(writeContext?: string | null): Uint8Array | un
           : parsed.attribution === SYSTEM_AUTHOR_ID
             ? SYSTEM_AUTHOR_ID
             : undefined;
-    return userId ? parseUuid(userId) : undefined;
+    if (!userId) return null;
+    const claims = parsed.session && isRecord(parsed.session.claims) ? parsed.session.claims : {};
+    return { user_id: userId, claims, identity: parseUuid(userId) };
   } catch {
-    return undefined;
+    return null;
   }
 }
 
@@ -1101,13 +1133,18 @@ function assertSupportedReadOptions(tier?: string | null, optionsJson?: string |
   if (optionsJson != null) readSupportedReadOptions(optionsJson);
 }
 
-function readSession(sessionJson?: string | null): { user_id: string } | null {
+function readSession(sessionJson?: string | null): RuntimeSession | null {
   if (sessionJson == null) return null;
-  const parsed = JSON.parse(sessionJson) as { user_id?: unknown };
+  const parsed = JSON.parse(sessionJson) as { user_id?: unknown; claims?: unknown };
   if (typeof parsed.user_id !== "string") {
     throw new Error("Native runtime session is missing user_id");
   }
-  return { user_id: parsed.user_id };
+  const claims = isRecord(parsed.claims) ? parsed.claims : {};
+  return { user_id: parsed.user_id, claims, identity: parseUuid(parsed.user_id) };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function closeSubscriptionSource(source: SubscriptionSourceState["source"]): void {

@@ -18,7 +18,7 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
 
 const app = schema.defineApp({
   chats: schema.table({
@@ -269,7 +269,6 @@ describe("raw websocket private read gate", () => {
       15_000,
       "Bob profile edge wait",
     );
-
     const chat = await withTimeout(
       alice
         .insert(camelChatApp.chats, {
@@ -415,7 +414,7 @@ describe("raw websocket private read gate", () => {
           .where({ chatId: chat.id })
           .orderBy("createdAt", "asc")
           .limit(1),
-        predicate: (rows: Array<{ id: string }>) => rows.some((row) => row.id === bobMessage.id),
+        predicate: (rows: Array<{ id: string }>) => rows.length === 1,
       },
       {
         label: "rendered message attachments",
@@ -478,6 +477,214 @@ describe("raw websocket private read gate", () => {
       bobPendingMessageEdgeWait,
     ]).then(([unsubscribe]) => unsubscribe);
     aliceAgainUnsubscribe();
+  }, 60_000);
+
+  it("converts a private chat invite code into normal membership visibility", async () => {
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
+      uniqueDbName("camel-chat-private-invite"),
+    );
+    await publishSchemaAndPermissions(
+      appId,
+      serverUrl,
+      adminSecret,
+      camelChatStyleMessagePermissions,
+      camelChatApp,
+    );
+
+    const alice = await openUserDb(appId, serverUrl, "camel-chat-invite-alice");
+    const bobSecret = generateAuthSecret();
+    const bob = await openUserDb(appId, serverUrl, "camel-chat-invite-bob", bobSecret);
+    const aliceUserId = requireUserId(alice, "Alice");
+    const bobUserId = requireUserId(bob, "Bob");
+    const joinCode = `join-${Date.now()}`;
+
+    const aliceProfile = await withTimeout(
+      alice
+        .insert(camelChatApp.profiles, {
+          userId: aliceUserId,
+          name: "Alice",
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice profile edge wait",
+    );
+    const bobProfile = await withTimeout(
+      bob
+        .insert(camelChatApp.profiles, {
+          userId: bobUserId,
+          name: "Bob",
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Bob profile edge wait",
+    );
+
+    const chat = await withTimeout(
+      alice
+        .insert(camelChatApp.chats, {
+          name: `private-invite-${Date.now()}`,
+          isPublic: false,
+          createdBy: aliceUserId,
+          joinCode,
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice private invite chat edge wait",
+    );
+    await withTimeout(
+      alice
+        .insert(camelChatApp.chatMembers, {
+          chatId: chat.id,
+          userId: aliceUserId,
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice private chat membership edge wait",
+    );
+    const seedMessage = await withTimeout(
+      alice
+        .insert(camelChatApp.messages, {
+          chatId: chat.id,
+          senderId: aliceProfile.id,
+          text: "invite-only seed",
+          createdAt: new Date(),
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice private seed message edge wait",
+    );
+
+    const inviteSession = {
+      user_id: bobUserId,
+      claims: { join_code: joinCode },
+      authMode: "external" as const,
+    };
+    const inviteBob = await openJwtUserDb(
+      appId,
+      serverUrl,
+      "camel-chat-invite-bob-scoped",
+      await getJazzServerJwtForUser(bobUserId, { join_code: joinCode }, appId),
+      bobSecret,
+    );
+
+    await expect(
+      waitForQuery(
+        inviteBob,
+        camelChatApp.chats.where({ id: chat.id }),
+        (rows) => rows.some((row) => row.id === chat.id),
+        "Bob should query the private chat through the invite-authenticated connection",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    const unsubscribeInviteRead = await waitForSubscription(
+      inviteBob,
+      camelChatApp.chats.where({ id: chat.id }),
+      (rows) => rows.some((row) => row.id === chat.id),
+      "Bob should subscribe to the private chat through the invite claim",
+      15_000,
+      { tier: "edge" },
+      inviteSession,
+    );
+    unsubscribeInviteRead();
+
+    await withTimeout(
+      inviteBob
+        .insert(camelChatApp.chatMembers, {
+          chatId: chat.id,
+          userId: bobUserId,
+          joinCode,
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Bob invite membership edge wait",
+    );
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.chats.where({ id: chat.id }),
+        (rows) => rows.some((row) => row.id === chat.id),
+        "Bob should read the private chat through normal membership after accepting invite",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.chatMembers.where({ chatId: chat.id }),
+        (rows) => rows.some((row) => row.userId === bobUserId),
+        "Bob should read his confirmed private chat membership",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.messages.where({ chatId: chat.id }),
+        (rows) => rows.some((row) => row.id === seedMessage.id),
+        "Bob should read private seed messages without include/order after accepting invite",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.messages
+          .where({ chatId: chat.id })
+          .include({ sender: true })
+          .orderBy("createdAt", "asc"),
+        (rows) => rows.some((row) => row.id === seedMessage.id),
+        "Bob should read private seed messages through normal membership after accepting invite",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    const bobMessage = await withTimeout(
+      bob
+        .insert(camelChatApp.messages, {
+          chatId: chat.id,
+          senderId: bobProfile.id,
+          text: "bob accepted invite",
+          createdAt: new Date(),
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Bob private invite message edge wait",
+    );
+
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.messages.where({ chatId: chat.id }),
+        (rows) => rows.some((row) => row.id === bobMessage.id),
+        "Bob should read his own private invite message after edge wait",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await expect(
+      waitForQuery(
+        alice,
+        camelChatApp.messages
+          .where({ chatId: chat.id })
+          .include({ sender: true })
+          .orderBy("createdAt", "desc"),
+        (rows) => rows.some((row) => row.id === bobMessage.id),
+        "Alice should receive Bob's private invite message",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
   }, 60_000);
 
   it("reads messages through public-chat or membership read policy after edge writes", async () => {
@@ -729,12 +936,35 @@ describe("raw websocket private read gate", () => {
   }, 60_000);
 });
 
-async function openUserDb(appId: string, serverUrl: string, label: string): Promise<Db> {
+async function openUserDb(
+  appId: string,
+  serverUrl: string,
+  label: string,
+  secret = generateAuthSecret(),
+): Promise<Db> {
   return ctx.track(
     await createDb({
       appId,
       serverUrl,
-      secret: generateAuthSecret(),
+      secret,
+      driver: { type: "persistent", dbName: uniqueDbName(label) },
+    }),
+  );
+}
+
+async function openJwtUserDb(
+  appId: string,
+  serverUrl: string,
+  label: string,
+  jwtToken: string,
+  secret?: string,
+): Promise<Db> {
+  return ctx.track(
+    await createDb({
+      appId,
+      serverUrl,
+      jwtToken,
+      secret,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
     }),
   );
@@ -780,6 +1010,7 @@ async function waitForSubscription<T extends { id: string }>(
   label: string,
   timeoutMs = 15_000,
   options?: { tier?: "local" | "edge" },
+  session?: { user_id: string; claims: Record<string, unknown>; authMode: "external" },
 ): Promise<() => void> {
   return await new Promise<() => void>((resolve, reject) => {
     let settled = false;
@@ -806,6 +1037,7 @@ async function waitForSubscription<T extends { id: string }>(
         resolve(unsubscribe);
       },
       options,
+      session,
     );
   });
 }

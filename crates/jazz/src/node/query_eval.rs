@@ -264,6 +264,10 @@ where
         self.query.settled_result_sets.contains_key(&subscription)
     }
 
+    pub(crate) fn invalidate_settled_result_set(&mut self, subscription: SubscriptionKey) {
+        self.query.settled_result_sets.remove(&subscription);
+    }
+
     /// Evaluate a validated query shape against this node's local knowledge.
     ///
     /// Phase B step 2 returns output-relation rows only. Provenance-closure
@@ -839,6 +843,8 @@ where
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlan), Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
+        let shape = maintained_view_bind_filter_literals(&shape, &binding, &self.catalogue.schema)?;
+        let binding = binding_for_shape(&shape, &binding)?;
         let plan = self.prepared_query_plan(&shape, tier)?;
         Ok((shape, binding, plan))
     }
@@ -850,17 +856,6 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if matches!(tier, DurabilityTier::Edge | DurabilityTier::Global)
-            && !self.uses_partitioned_or_schema_projected_read(shape)
-        {
-            let subscription = SubscriptionKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
-            };
-            if self.query.settled_result_sets.contains_key(&subscription) {
-                return self.query_rows_from_result_set(shape, subscription);
-            }
-        }
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
         self.query_rows_with_prepared_plan_for_identity(&shape, &binding, tier, None, identity)
     }
@@ -2032,26 +2027,49 @@ where
     ) -> Result<BTreeMap<String, groove::schema::ColumnType>, Error> {
         let mut param_types = shape.params().clone();
         let query = shape.query();
-        collect_nullable_param_types(table, &query.filters, &mut param_types)?;
+        self.collect_query_nullable_param_types(
+            query,
+            table,
+            shape.schema_version(),
+            &mut param_types,
+        )?;
+        Ok(param_types)
+    }
+
+    fn collect_query_nullable_param_types(
+        &self,
+        query: &crate::query::Query,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        param_types: &mut BTreeMap<String, groove::schema::ColumnType>,
+    ) -> Result<(), Error> {
+        collect_nullable_param_types(table, &query.filters, param_types)?;
         for join in &query.joins {
-            let join_table = self.table_in_schema(&join.table, shape.schema_version())?;
-            collect_nullable_param_types(&join_table, &join.filters, &mut param_types)?;
+            let join_table = self.table_in_schema(&join.table, schema_version)?;
+            collect_nullable_param_types(&join_table, &join.filters, param_types)?;
         }
         for reachable in &query.reachable {
             if let Operand::Param(param) = &reachable.from {
                 param_types.insert(param.clone(), groove::schema::ColumnType::Uuid);
             }
-            let access_table =
-                self.table_in_schema(&reachable.access_table, shape.schema_version())?;
-            collect_nullable_param_types(
-                &access_table,
-                &reachable.access_filters,
-                &mut param_types,
-            )?;
-            let edge_table = self.table_in_schema(&reachable.edge_table, shape.schema_version())?;
-            collect_nullable_param_types(&edge_table, &reachable.edge_filters, &mut param_types)?;
+            let access_table = self.table_in_schema(&reachable.access_table, schema_version)?;
+            collect_nullable_param_types(&access_table, &reachable.access_filters, param_types)?;
+            let edge_table = self.table_in_schema(&reachable.edge_table, schema_version)?;
+            collect_nullable_param_types(&edge_table, &reachable.edge_filters, param_types)?;
         }
-        Ok(param_types)
+        for branch in &query.policy_branches {
+            let branch_query = branch
+                .as_query(&query.table)
+                .validate(&self.catalogue.schema)?;
+            let branch_table = self.table_in_schema(&branch_query.query().table, schema_version)?;
+            self.collect_query_nullable_param_types(
+                branch_query.query(),
+                &branch_table,
+                schema_version,
+                param_types,
+            )?;
+        }
+        Ok(())
     }
 
     fn apply_lowered_query_clauses(
@@ -4442,30 +4460,39 @@ fn insert_claim_bindings(
     if params.contains_key(&sub) {
         values.insert(
             sub.clone(),
-            claims
-                .and_then(|claims| claims.get("sub"))
-                .cloned()
-                .unwrap_or(Value::Uuid(identity.0)),
+            claim_binding_value(
+                params.get(&sub),
+                claims
+                    .and_then(|claims| claims.get("sub"))
+                    .cloned()
+                    .unwrap_or(Value::Uuid(identity.0)),
+            ),
         );
     }
     let user_id = claim_param_name("user_id");
     if params.contains_key(&user_id) {
         values.insert(
             user_id.clone(),
-            claims
-                .and_then(|claims| claims.get("user_id"))
-                .cloned()
-                .unwrap_or_else(|| Value::String(identity.0.to_string())),
+            claim_binding_value(
+                params.get(&user_id),
+                claims
+                    .and_then(|claims| claims.get("user_id"))
+                    .cloned()
+                    .unwrap_or_else(|| Value::String(identity.0.to_string())),
+            ),
         );
     }
     let is_admin = claim_param_name("isAdmin");
     if params.contains_key(&is_admin) {
         values.insert(
             is_admin.clone(),
-            claims
-                .and_then(|claims| claims.get("isAdmin"))
-                .cloned()
-                .unwrap_or(Value::Bool(false)),
+            claim_binding_value(
+                params.get(&is_admin),
+                claims
+                    .and_then(|claims| claims.get("isAdmin"))
+                    .cloned()
+                    .unwrap_or(Value::Bool(false)),
+            ),
         );
     }
     if let Some(claims) = claims {
@@ -4473,9 +4500,21 @@ fn insert_claim_bindings(
             let param = claim_param_name(name);
             if params.contains_key(&param) && param != sub && param != user_id && param != is_admin
             {
-                values.insert(param, value.clone());
+                values.insert(
+                    param.clone(),
+                    claim_binding_value(params.get(&param), value.clone()),
+                );
             }
         }
+    }
+}
+
+fn claim_binding_value(column_type: Option<&ColumnType>, value: Value) -> Value {
+    match column_type {
+        Some(ColumnType::Nullable(_)) if !matches!(value, Value::Nullable(_)) => {
+            Value::Nullable(Some(Box::new(value)))
+        }
+        _ => value,
     }
 }
 
@@ -4579,12 +4618,10 @@ fn lower_maintained_residual_predicate(
                 )),
             }
         }
+        Predicate::Any(predicates) if predicates.len() == 1 => {
+            lower_maintained_residual_predicate(table, &predicates[0])
+        }
         Predicate::Any(predicates) => {
-            if predicate_has_param(predicate) {
-                return Err(Error::InvalidStoredValue(
-                    "unsupported query predicate shape",
-                ));
-            }
             let mut residual = Vec::new();
             for predicate in predicates {
                 match lower_maintained_residual_predicate(table, predicate)? {
@@ -4941,7 +4978,10 @@ fn collect_param_join(
                 collect_param_join(predicate, pairs, contains_params, neq_params)?;
             }
         }
-        Predicate::Any(_) if predicate_has_param(predicate) => {
+        Predicate::Any(predicates) if predicates.len() == 1 => {
+            collect_param_join(&predicates[0], pairs, contains_params, neq_params)?;
+        }
+        Predicate::Any(predicates) if predicate_has_param(predicate) && predicates.len() != 1 => {
             return Err(Error::InvalidStoredValue(
                 "unsupported query predicate shape",
             ));
@@ -5135,6 +5175,48 @@ fn inline_snapshot_bind_filter_literals(
             Ok(reachable)
         })
         .collect::<Result<Vec<_>, Error>>()?;
+    query.policy_branches = query
+        .policy_branches
+        .into_iter()
+        .map(|mut branch| {
+            branch.filters = branch
+                .filters
+                .into_iter()
+                .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                .collect::<Result<Vec<_>, _>>()?;
+            branch.joins = branch
+                .joins
+                .into_iter()
+                .map(|mut join| {
+                    join.filters = join
+                        .filters
+                        .into_iter()
+                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(join)
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            branch.reachable = branch
+                .reachable
+                .into_iter()
+                .map(|mut reachable| {
+                    reachable.from = maintained_view_bind_operand(reachable.from, binding)?;
+                    reachable.access_filters = reachable
+                        .access_filters
+                        .into_iter()
+                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    reachable.edge_filters = reachable
+                        .edge_filters
+                        .into_iter()
+                        .map(|predicate| maintained_view_bind_predicate(predicate, binding))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(reachable)
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(branch)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
     let rebound = query.validate(schema)?;
     if rebound.schema_version() != shape.schema_version() {
         return Err(Error::InvalidStoredValue(
@@ -5224,19 +5306,28 @@ fn graph_param_types(
 ) -> Result<BTreeMap<String, groove::schema::ColumnType>, Error> {
     let mut param_types = shape.params().clone();
     let query = shape.query();
+    collect_query_nullable_param_types_from_schema(query, schema, &mut param_types)?;
+    Ok(param_types)
+}
+
+fn collect_query_nullable_param_types_from_schema(
+    query: &crate::query::Query,
+    schema: &JazzSchema,
+    param_types: &mut BTreeMap<String, groove::schema::ColumnType>,
+) -> Result<(), Error> {
     let table = schema
         .tables
         .iter()
         .find(|table| table.name == query.table)
         .ok_or_else(|| Error::TableNotFound(query.table.clone()))?;
-    collect_nullable_param_types(table, &query.filters, &mut param_types)?;
+    collect_nullable_param_types(table, &query.filters, param_types)?;
     for join in &query.joins {
         let join_table = schema
             .tables
             .iter()
             .find(|table| table.name == join.table)
             .ok_or_else(|| Error::TableNotFound(join.table.clone()))?;
-        collect_nullable_param_types(join_table, &join.filters, &mut param_types)?;
+        collect_nullable_param_types(join_table, &join.filters, param_types)?;
     }
     for reachable in &query.reachable {
         if let Operand::Param(param) = &reachable.from {
@@ -5247,15 +5338,19 @@ fn graph_param_types(
             .iter()
             .find(|table| table.name == reachable.access_table)
             .ok_or_else(|| Error::TableNotFound(reachable.access_table.clone()))?;
-        collect_nullable_param_types(access_table, &reachable.access_filters, &mut param_types)?;
+        collect_nullable_param_types(access_table, &reachable.access_filters, param_types)?;
         let edge_table = schema
             .tables
             .iter()
             .find(|table| table.name == reachable.edge_table)
             .ok_or_else(|| Error::TableNotFound(reachable.edge_table.clone()))?;
-        collect_nullable_param_types(edge_table, &reachable.edge_filters, &mut param_types)?;
+        collect_nullable_param_types(edge_table, &reachable.edge_filters, param_types)?;
     }
-    Ok(param_types)
+    for branch in &query.policy_branches {
+        let branch_query = branch.as_query(&query.table).validate(schema)?;
+        collect_query_nullable_param_types_from_schema(branch_query.query(), schema, param_types)?;
+    }
+    Ok(())
 }
 
 fn query_binding_source_shape(shape: &ValidatedQuery) -> String {
@@ -5427,12 +5522,19 @@ fn collect_nullable_param_types(
             | Predicate::Ne(Operand::Param(param), Operand::Column(column))
             | Predicate::Contains(Operand::Column(column), Operand::Param(param)) => {
                 let column_type = table_column_type(table, column)?;
-                param_types.insert(param.clone(), column_type.clone().nullable());
+                param_types.insert(param.clone(), nullable_param_type(column_type));
             }
             _ => {}
         }
     }
     Ok(())
+}
+
+fn nullable_param_type(column_type: &groove::schema::ColumnType) -> groove::schema::ColumnType {
+    match column_type {
+        groove::schema::ColumnType::Nullable(_) => column_type.clone(),
+        other => other.clone().nullable(),
+    }
 }
 
 fn binding_values_for_plan(
@@ -5688,6 +5790,9 @@ fn nullable_cell_value(table: &TableSchema, column: &str, value: Value) -> Resul
         return Ok(value);
     }
     let _ = table_column_type(table, column)?;
+    if matches!(value, Value::Nullable(_)) {
+        return Ok(value);
+    }
     Ok(Value::Nullable(Some(Box::new(value))))
 }
 

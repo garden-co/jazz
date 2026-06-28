@@ -911,10 +911,12 @@ export class Db {
     this.authStateStore = createAuthStateStore(config, authStateOptions);
   }
 
-  /** @internal Store the seed used for local-first auth and schedule token refresh. */
-  initLocalFirstAuth(seed: string, ttlSeconds: number): void {
+  /** @internal Store the seed used for local-first auth and optionally schedule token refresh. */
+  initLocalFirstAuth(seed: string, ttlSeconds: number, refresh = true): void {
     this._localFirstSecret = seed;
-    this.scheduleLocalFirstRefresh(ttlSeconds);
+    if (refresh) {
+      this.scheduleLocalFirstRefresh(ttlSeconds);
+    }
   }
 
   private scheduleLocalFirstRefresh(ttlSeconds: number): void {
@@ -1382,7 +1384,9 @@ export class Db {
     const queryOptions = ordinaryDbQueryOptions(options);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
-    const runtimeQueryOptions = usesRelationTraversal
+    const shouldBypassRuntimeSettledTier =
+      usesRelationTraversal && queryOptions.tier !== "edge" && queryOptions.tier !== "global";
+    const runtimeQueryOptions = shouldBypassRuntimeSettledTier
       ? { ...queryOptions, runtimeSettledTier: null }
       : queryOptions;
     const context = this.getRuntimeOperationContext();
@@ -1749,8 +1753,8 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeSource: RuntimeSource<RuntimeConfig>,
 ): Promise<Db> {
-  if (config.secret && (config.jwtToken || config.cookieSession)) {
-    throw new Error("DbConfig error: secret, jwtToken, and cookieSession are mutually exclusive");
+  if (config.secret && config.cookieSession) {
+    throw new Error("DbConfig error: secret and cookieSession are mutually exclusive");
   }
   if (config.jwtToken && config.cookieSession) {
     throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");
@@ -1765,10 +1769,12 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     const secret = config.secret;
     localFirstSecret = secret;
 
-    const jwtToken = runtimeSource.mintLocalFirstToken(
-      createRuntimeTokenOptions(secret, config.appId, 3600),
-    );
-    resolvedConfig = { ...resolvedConfig, jwtToken };
+    if (!config.jwtToken) {
+      const jwtToken = runtimeSource.mintLocalFirstToken(
+        createRuntimeTokenOptions(secret, config.appId, 3600),
+      );
+      resolvedConfig = { ...resolvedConfig, jwtToken };
+    }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     // Admin-secret clients intentionally stay sessionless so local policy
@@ -1789,7 +1795,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   const db = Db.create(resolvedConfig, runtimeSource as AnyRuntimeSource);
 
   if (localFirstSecret) {
-    db.initLocalFirstAuth(localFirstSecret, 3600);
+    db.initLocalFirstAuth(localFirstSecret, 3600, !config.jwtToken);
   }
 
   return db;
