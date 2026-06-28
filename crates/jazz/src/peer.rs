@@ -644,7 +644,7 @@ impl PeerState {
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,
-        binding: &Binding,
+        _binding: &Binding,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
     ) -> Result<SyncMessage, Error>
@@ -656,7 +656,6 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::row_result_set)
             .unwrap_or_default();
-        self.maintained_subscription_view_support(node, shape, binding)?;
         let output_tables = node.maintained_view_terminal_tables(shape)?;
         let mut states = BTreeMap::<ResultRowEntry, (bool, bool)>::new();
         {
@@ -1019,7 +1018,6 @@ impl PeerState {
                 opts.tier,
             );
         }
-        self.maintained_subscription_view_support(node, shape, binding)?;
         self.rehydrate_query_maintained_subscription_view(
             node,
             MaintainedRehydrateRequest {
@@ -3992,7 +3990,7 @@ mod tests {
     }
 
     #[test]
-    fn maintained_subscription_view_any_with_param_is_unsupported() {
+    fn maintained_subscription_view_any_with_bound_param_stays_maintained() {
         let (_dir, mut core) = open_node_with_uuid(node(0xa7));
         let shape = Query::from("todos")
             .filter(crate::query::any_of([
@@ -4010,19 +4008,33 @@ mod tests {
         let subscription = subscription_key(&shape, &binding);
         let mut peer = PeerState::new();
 
-        assert!(matches!(
-            core.maintained_view_support(&shape, &binding, AuthorId::SYSTEM),
-            Err(Error::InvalidStoredValue(
-                "maintained subscription view subscription does not support this query shape"
-            ))
-        ));
-        assert!(matches!(
-            peer.rehydrate_query(&mut core, &shape, &binding),
-            Err(Error::InvalidStoredValue(
-                "unsupported query predicate shape"
-            ))
-        ));
-        assert!(maintained_subscription_id(&peer, subscription).is_none());
+        peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        assert!(maintained_subscription_id(&peer, subscription).is_some());
+
+        let matched_row = row(0xa8);
+        let matched = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", matched_row, 1_000).cells(title_cells("beta")),
+            )
+            .unwrap();
+        accept_global(&mut core, matched, 1);
+        let excluded = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(0xa9), 1_001).cells(title_cells("gamma")),
+            )
+            .unwrap();
+        accept_global(&mut core, excluded, 2);
+
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        assert_eq!(
+            view_update_added_rows(update),
+            BTreeSet::from([matched_row])
+        );
+        assert_eq!(
+            peer.maintained_subscription_view_metrics()
+                .full_recomputes_out,
+            0
+        );
     }
 
     #[test]

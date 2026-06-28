@@ -5280,20 +5280,37 @@ fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
             .iter()
             .filter_map(|field| field.name.as_deref())
             .collect::<Vec<_>>(),
-        vec!["id", "title", "artist"]
+        vec!["id", "title"]
     );
     let sub = database
         .bind(&prepared, &[("artist", Value::U64(7))])
         .unwrap();
+    let other = database
+        .bind(&prepared, &[("artist", Value::U64(8))])
+        .unwrap();
+    assert_eq!(
+        database
+            .ivm_runtime
+            .subscription_output(sub.id())
+            .unwrap()
+            .fields()
+            .iter()
+            .filter_map(|field| field.name.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["id", "title"]
+    );
 
     assert_eq!(
         expect_try_recv_vals(&sub),
         vec![(
-            vec![
-                Value::U64(1),
-                Value::String("Blue Train".to_owned()),
-                Value::U64(7),
-            ],
+            vec![Value::U64(1), Value::String("Blue Train".to_owned())],
+            1
+        )]
+    );
+    assert_eq!(
+        expect_try_recv_vals(&other),
+        vec![(
+            vec![Value::U64(2), Value::String("Kind of Blue".to_owned())],
             1
         )]
     );
@@ -5307,15 +5324,26 @@ fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
             Value::String("Giant Steps".to_owned()),
         ],
     );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(4),
+            Value::U64(8),
+            Value::String("Milestones".to_owned()),
+        ],
+    );
     database.commit_batch(batch).unwrap();
     assert_eq!(
         expect_try_recv_vals(&sub),
         vec![(
-            vec![
-                Value::U64(3),
-                Value::String("Giant Steps".to_owned()),
-                Value::U64(7),
-            ],
+            vec![Value::U64(3), Value::String("Giant Steps".to_owned())],
+            1
+        )]
+    );
+    assert_eq!(
+        expect_try_recv_vals(&other),
+        vec![(
+            vec![Value::U64(4), Value::String("Milestones".to_owned())],
             1
         )]
     );
@@ -5581,7 +5609,7 @@ fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
 }
 
 #[test]
-fn prepared_subscription_matches_literal_subscription_modulo_param_columns() {
+fn prepared_subscription_matches_literal_subscription_without_param_columns() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
@@ -5627,7 +5655,7 @@ fn prepared_subscription_matches_literal_subscription_modulo_param_columns() {
     let literal_sub = database.subscribe_query(literal_query).unwrap();
 
     assert_eq!(
-        strip_artist_param(expect_try_recv_vals(&param_sub)),
+        expect_try_recv_vals(&param_sub),
         expect_try_recv_vals(&literal_sub)
     );
 
@@ -5643,7 +5671,7 @@ fn prepared_subscription_matches_literal_subscription_modulo_param_columns() {
     database.commit_batch(batch).unwrap();
 
     assert_eq!(
-        strip_artist_param(expect_try_recv_vals(&param_sub)),
+        expect_try_recv_vals(&param_sub),
         expect_try_recv_vals(&literal_sub)
     );
 }
@@ -5749,8 +5777,7 @@ fn drain_prepared_album_rows(
 ) {
     while let Ok(deltas) = subscription.try_recv() {
         for (values, weight) in deltas.to_values().unwrap() {
-            let [Value::U64(id), Value::String(title), Value::U64(_artist)] = values.as_slice()
-            else {
+            let [Value::U64(id), Value::String(title)] = values.as_slice() else {
                 panic!("unexpected prepared album row: {values:?}");
             };
             *rows.entry((*id, title.clone())).or_default() += weight;
@@ -5772,17 +5799,6 @@ fn drain_literal_album_rows(
         }
     }
     rows.retain(|_, weight| *weight != 0);
-}
-
-fn strip_artist_param(rows: Vec<(Vec<Value>, i64)>) -> Vec<(Vec<Value>, i64)> {
-    rows.into_iter()
-        .map(|(values, weight)| {
-            let [id, title, Value::U64(_artist)] = values.as_slice() else {
-                panic!("unexpected prepared row shape: {values:?}");
-            };
-            (vec![id.clone(), title.clone()], weight)
-        })
-        .collect()
 }
 
 #[test]

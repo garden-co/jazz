@@ -544,6 +544,20 @@ impl IvmRuntime {
         self.bind_shape_projected(shape_id, binding_values, None, storage)
     }
 
+    pub(crate) fn bind_shape_with_output<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        public_output: RecordDescriptor,
+        storage: &S,
+    ) -> Result<Subscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let projection = self.shape_notification_projection(shape_id, public_output)?;
+        self.bind_shape_projected(shape_id, binding_values, Some(projection), storage)
+    }
+
     fn bind_shape_projected<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -706,11 +720,53 @@ impl IvmRuntime {
     ) -> Option<&RecordDescriptor> {
         match &self.subscriptions.get(&subscription_id)?.target {
             SubscriptionTarget::Direct { output } => Some(&output.output),
-            SubscriptionTarget::Shape { shape_id, .. } => self
-                .prepared_shapes
-                .get(shape_id)
-                .map(|shape| &shape.output.output),
+            SubscriptionTarget::Shape {
+                shape_id,
+                binding_key,
+            } => self.prepared_shapes.get(shape_id).and_then(|shape| {
+                shape
+                    .bindings
+                    .get(binding_key)
+                    .and_then(|binding| binding.senders.get(&subscription_id))
+                    .and_then(|sender| sender.projection.as_ref())
+                    .map(|projection| &projection.descriptor)
+                    .or(Some(&shape.output.output))
+            }),
         }
+    }
+
+    fn shape_notification_projection(
+        &self,
+        shape_id: PreparedShapeId,
+        descriptor: RecordDescriptor,
+    ) -> Result<ShapeNotificationProjection, IvmRuntimeError> {
+        let shape = self
+            .prepared_shapes
+            .get(&shape_id)
+            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
+        let mut expressions = Vec::with_capacity(descriptor.fields().len());
+        let mut mapping = Vec::with_capacity(descriptor.fields().len());
+        for field in descriptor.fields() {
+            let name = field
+                .name
+                .clone()
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+            let index = shape
+                .output
+                .output
+                .field_index(&name)
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone()))?;
+            expressions.push(ProjectionExpr {
+                expression: PlanExpr::field(name),
+                output_name: field.name.clone(),
+            });
+            mapping.push((0, index));
+        }
+        Ok(ShapeNotificationProjection {
+            descriptor,
+            expressions,
+            mapping,
+        })
     }
 
     fn plan_auto_direct_family(
