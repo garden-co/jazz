@@ -25,6 +25,8 @@ type WorkerResponse =
   | { subscription: number; args: unknown[] }
   | { event: "authFailure"; reason: string };
 
+type CompletedTxState = "committed" | "rolled_back";
+
 export type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-protocol.js";
 
 export class PersistentBrowserOpfsRuntime implements Runtime {
@@ -36,6 +38,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly writes = new Map<string, Promise<string>>();
   private readonly transactionRemoteIds = new Map<string, Promise<string>>();
   private readonly transactionWrites = new Map<string, Promise<string>[]>();
+  private readonly completedTxs = new Map<string, CompletedTxState>();
   private readonly subscriptions = new Map<number, Function>();
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
   private readonly subscriptionLocalHandles = new Map<number, number>();
@@ -156,9 +159,12 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   commitTransaction(transactionId: string): void {
+    if (this.completedTxs.has(transactionId)) {
+      throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
+    }
     const workerTransactionId = this.writes.get(transactionId);
     if (!workerTransactionId) {
-      throw new Error(`unknown persistent browser transaction ${transactionId}`);
+      throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
     }
     const committed = workerTransactionId.then(async (remote) => {
       await Promise.all(this.transactionWrites.get(transactionId) ?? []);
@@ -168,18 +174,25 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       return remote;
     });
     this.writes.set(transactionId, committed);
+    this.completedTxs.set(transactionId, "committed");
     void committed.catch(() => undefined);
   }
 
   rollbackTransaction(transactionId: string): void {
+    if (this.completedTxs.has(transactionId)) {
+      throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
+    }
     const workerTransactionId = this.writes.get(transactionId);
-    if (!workerTransactionId) return;
+    if (!workerTransactionId) {
+      throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
+    }
     this.transactionWrites.delete(transactionId);
     this.transactionRemoteIds.delete(transactionId);
     void workerTransactionId
       .then((remote) => this.send("rollbackTransaction", [remote]))
       .catch(ignoreExpectedShutdown);
     this.writes.delete(transactionId);
+    this.completedTxs.set(transactionId, "rolled_back");
   }
 
   async query(
@@ -189,10 +202,13 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     optionsJson?: string | null,
   ): Promise<unknown> {
     await this.opened;
+    this.assertReadTransactionOpen(optionsJson);
+    await this.settleWritesForRead(optionsJson);
+    const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
     if (requiresServerPropagation(tier, optionsJson)) {
       await this.connectionReady;
     }
-    return this.send("query", [queryJson, sessionJson, tier, optionsJson]);
+    return this.send("query", [queryJson, sessionJson, tier, translatedOptionsJson]);
   }
 
   createSubscription(
@@ -203,6 +219,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   ): number {
     const localHandle = this.nextSubscriptionId++;
     const remoteHandle = this.opened.then(async () => {
+      this.assertReadTransactionOpen(optionsJson);
+      await this.settleWritesForRead(optionsJson);
+      const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
       if (requiresServerPropagation(tier, optionsJson)) {
         await this.connectionReady;
       }
@@ -210,7 +229,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         queryJson,
         sessionJson,
         tier,
-        optionsJson,
+        translatedOptionsJson,
       ]) as Promise<number>;
     });
     void remoteHandle
@@ -327,6 +346,12 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     method: Method,
     ...args: PersistentBrowserRequestArgs<Method>
   ): void {
+    const batchId = this.batchIdFromWriteArgs(method, args);
+    if (batchId && this.completedTxs.has(batchId)) {
+      throw new Error(
+        `${writeOperationName(method)} failed: WriteError("${txStateMessage(batchId, this.completedTxs)}")`,
+      );
+    }
     // The worker owns the real NativeRuntimeAdapter, so durability waits must use the
     // worker's transaction id. The public Runtime API is synchronous, so the
     // result returned from insert/update/etc. is only a pending handle.
@@ -342,7 +367,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       return result.transactionId;
     });
     this.writes.set(transactionId, write);
-    const batchId = this.batchIdFromWriteArgs(method, args);
     if (batchId) {
       const writes = this.transactionWrites.get(batchId) ?? [];
       writes.push(write);
@@ -392,6 +416,39 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const workerTransactionId = this.transactionRemoteIds.get(parsed.batch_id);
     if (!workerTransactionId) return writeContext;
     return JSON.stringify({ ...parsed, batch_id: await workerTransactionId });
+  }
+
+  private async prepareReadOptions(
+    optionsJson: string | null | undefined,
+  ): Promise<string | null | undefined> {
+    if (!optionsJson) return optionsJson;
+    let parsed: { transaction_batch_id?: unknown };
+    try {
+      parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
+    } catch {
+      return optionsJson;
+    }
+    if (typeof parsed.transaction_batch_id !== "string") return optionsJson;
+    const workerTransactionId = this.transactionRemoteIds.get(parsed.transaction_batch_id);
+    if (!workerTransactionId) return optionsJson;
+    return JSON.stringify({ ...parsed, transaction_batch_id: await workerTransactionId });
+  }
+
+  private async settleWritesForRead(optionsJson: string | null | undefined): Promise<void> {
+    const transactionId = transactionIdFromReadOptions(optionsJson);
+    if (transactionId) {
+      await Promise.all(this.transactionWrites.get(transactionId) ?? []);
+      return;
+    }
+    await Promise.all(this.writes.values());
+  }
+
+  private assertReadTransactionOpen(optionsJson: string | null | undefined): void {
+    const transactionId = transactionIdFromReadOptions(optionsJson);
+    if (!transactionId || !this.completedTxs.has(transactionId)) return;
+    throw new Error(
+      `Query setup failed: Write error: ${txStateMessage(transactionId, this.completedTxs)}`,
+    );
   }
 
   private handleWorkerMessage(message: WorkerResponse): void {
@@ -458,6 +515,61 @@ function requiresServerPropagation(tier?: string | null, optionsJson?: string | 
     return options.propagation === "full";
   } catch {
     return false;
+  }
+}
+
+function transactionIdFromReadOptions(optionsJson: string | null | undefined): string | undefined {
+  if (!optionsJson) return undefined;
+  try {
+    const parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
+    return typeof parsed.transaction_batch_id === "string"
+      ? parsed.transaction_batch_id
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function txStateMessage(
+  transactionId: string,
+  completedTxs: Map<string, CompletedTxState>,
+): string {
+  if (completedTxs.get(transactionId) === "committed") {
+    return `transaction ${transactionId} is already committed`;
+  }
+  return `transaction ${transactionId} has already been completed or was never opened`;
+}
+
+function commitTransactionMessage(
+  transactionId: string,
+  completedTxs: Map<string, CompletedTxState>,
+): string {
+  const message = txStateMessage(transactionId, completedTxs);
+  return completedTxs.get(transactionId) === "committed"
+    ? `Write error: ${message}`
+    : `Commit transaction failed: Write error: ${message}`;
+}
+
+function rollbackTransactionMessage(
+  transactionId: string,
+  completedTxs: Map<string, CompletedTxState>,
+): string {
+  const message = txStateMessage(transactionId, completedTxs);
+  return completedTxs.get(transactionId) === "committed"
+    ? `Write error: ${message}`
+    : `Rollback transaction failed: Write error: ${message}`;
+}
+
+function writeOperationName(method: PersistentBrowserWriteRequest["method"]): string {
+  switch (method) {
+    case "insert":
+    case "restore":
+      return "Insert";
+    case "update":
+    case "upsert":
+      return "Update";
+    case "delete":
+      return "Delete";
   }
 }
 
