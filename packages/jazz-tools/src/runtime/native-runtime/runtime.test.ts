@@ -441,8 +441,9 @@ describe("NativeRuntimeAdapter server transport", () => {
                 ])
               : encodeRows([]),
           prepareQuery: () => ({}),
-          propagateQuery: () => undefined,
-          queryIsCovered: () => true,
+          attachQuery: () => ({}),
+          queryAttachmentIsCovered: () => true,
+          detachQuery: () => undefined,
           subscribe: () => ({
             readAll: () => {
               if (!ticked || subscriptionDrained) return [];
@@ -1294,7 +1295,9 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("passes supported read tiers and propagation through native read options", async () => {
     const readOptions: unknown[] = [];
-    const propagated: unknown[] = [];
+    const attachments: unknown[] = [];
+    const detached: unknown[] = [];
+    const attachment = {};
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -1303,9 +1306,12 @@ describe("NativeRuntimeAdapter server transport", () => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
-            propagateQuery: (_query: unknown, opts: unknown) => {
-              propagated.push(opts);
+            attachQuery: (_query: unknown, opts: unknown) => {
+              attachments.push(opts);
+              return attachment;
             },
+            queryAttachmentIsCovered: () => true,
+            detachQuery: (handle: unknown) => detached.push(handle),
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -1330,7 +1336,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).resolves.toEqual([]);
 
     expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
-    expect(propagated).toEqual([]);
+    expect(attachments).toEqual([]);
+    expect(detached).toEqual([]);
   });
 
   it("passes supported read tiers through and fails fast for unsupported read options", async () => {
@@ -1362,7 +1369,9 @@ describe("NativeRuntimeAdapter server transport", () => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
-            propagateQuery: () => undefined,
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: () => undefined,
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -1406,8 +1415,9 @@ describe("NativeRuntimeAdapter server transport", () => {
               },
               connectUpstream: () => transport,
               prepareQuery: () => ({}),
-              propagateQuery: () => undefined,
-              queryIsCovered: () => covered,
+              attachQuery: () => ({}),
+              queryAttachmentIsCovered: () => covered,
+              detachQuery: () => undefined,
               tick: () => undefined,
             }),
           openBrowser: async () => {
@@ -1457,8 +1467,9 @@ describe("NativeRuntimeAdapter server transport", () => {
             },
             connectUpstream: () => transport,
             prepareQuery: () => ({}),
-            propagateQuery: () => undefined,
-            queryIsCovered: () => false,
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => false,
+            detachQuery: () => undefined,
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -1493,7 +1504,6 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("passes local-only subscription propagation through native read options", () => {
     const readOptions: unknown[] = [];
-    const propagated: unknown[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -1502,9 +1512,6 @@ describe("NativeRuntimeAdapter server transport", () => {
             subscribe: (_query: unknown, opts: unknown) => {
               readOptions.push(opts);
               return new ReadableStream();
-            },
-            propagateQuery: (_query: unknown, opts: unknown) => {
-              propagated.push(opts);
             },
             tick: () => undefined,
           }),
@@ -1529,7 +1536,6 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).not.toThrow();
 
     expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
-    expect(propagated).toEqual([]);
   });
 
   it("accepts well-formed subscription sessions and rejects malformed sessions", () => {
@@ -2193,7 +2199,9 @@ function emptyNativeRuntime(): NativeRuntimeAdapter {
       openMemory: () =>
         fakeDb({
           all: () => new Uint8Array([0]),
-          propagateQuery: () => undefined,
+          attachQuery: () => ({}),
+          queryAttachmentIsCovered: () => true,
+          detachQuery: () => undefined,
           prepareQuery: () => ({}),
           subscribe: () => new ReadableStream(),
           subscribeForIdentity: () => new ReadableStream(),

@@ -19,8 +19,9 @@ export declare class NapiDb {
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  propagateQuery(query: PreparedQuery, opts?: any | undefined | null): void
-  queryIsCovered(query: PreparedQuery): boolean
+  attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
+  queryAttachmentIsCovered(attachment: QueryAttachment): boolean
+  detachQuery(attachment: QueryAttachment): void
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write
@@ -40,6 +41,10 @@ export declare class NapiDb {
 }
 
 export declare class PreparedQuery {
+
+}
+
+export declare class QueryAttachment {
 
 }
 

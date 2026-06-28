@@ -1112,14 +1112,14 @@ fn local_write_notifies_subscription_synchronously_without_running_tick() {
 }
 
 #[test]
-fn db_facade_schedules_immediate_tick_for_propagated_query_coverage() {
+fn db_facade_schedules_immediate_tick_for_attached_query_coverage() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let scheduler = Rc::new(RecordingScheduler::default());
     db.set_tick_scheduler(Some(scheduler.clone()));
     let query = db.table("todos");
     let prepared_query = prepared(&db, &query);
 
-    db.propagate_query_with_opts(
+    db.attach_query_with_opts(
         &prepared_query,
         ReadOpts {
             tier: DurabilityTier::Global,
@@ -2268,15 +2268,16 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
-    assert!(!client.query_is_covered(&prepared));
 
-    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
+    let attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
+    assert!(!client.query_attachment_is_covered(attachment));
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert!(client.query_is_covered(&prepared));
+    assert!(client.query_attachment_is_covered(attachment));
     assert!(prepared_read(&client, &query).is_empty());
+    client.detach_query(attachment);
 }
 
 #[test]
@@ -2296,22 +2297,25 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
-    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
+    let first_attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(client.query_is_covered(&prepared));
+    assert!(client.query_attachment_is_covered(first_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 1);
 
     seed(&server, "todos", cells("second", false, owner));
-    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
-    assert!(!client.query_is_covered(&prepared));
+    let second_attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
+    assert!(client.query_attachment_is_covered(first_attachment));
+    assert!(!client.query_attachment_is_covered(second_attachment));
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert!(client.query_is_covered(&prepared));
+    assert!(client.query_attachment_is_covered(second_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 2);
+    client.detach_query(first_attachment);
+    client.detach_query(second_attachment);
 }
 
 #[test]
@@ -2331,22 +2335,22 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
-    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
+    let first_attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
+    let second_attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let subscriber = subscriber.borrow();
+    let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber {
         served,
         coverage_groups,
         ..
-    } = &subscriber.link
+    } = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };
@@ -2358,6 +2362,22 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
         .expect("duplicate usage subscriptions should share one coverage group");
     assert_eq!(group.subscribers.len(), 2);
     assert_eq!(prepared_read(&client, &query).len(), 1);
+    drop(subscriber_ref);
+    client.detach_query(first_attachment);
+    client.detach_query(second_attachment);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let subscriber_ref = subscriber.borrow();
+    let ConnectionLink::Subscriber {
+        served,
+        coverage_groups,
+        ..
+    } = &subscriber_ref.link
+    else {
+        panic!("expected subscriber connection");
+    };
+    assert!(served.is_empty());
+    assert!(coverage_groups.is_empty());
 }
 
 #[test]
@@ -2377,22 +2397,25 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
-    client.propagate_query_with_opts(&prepared, edge_subscribe_opts());
+    let first_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(client.query_is_covered(&prepared));
+    assert!(client.query_attachment_is_covered(first_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 1);
 
     seed(&server, "todos", cells("second", false, owner));
-    client.propagate_query_with_opts(&prepared, edge_subscribe_opts());
-    assert!(!client.query_is_covered(&prepared));
+    let second_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
+    assert!(client.query_attachment_is_covered(first_attachment));
+    assert!(!client.query_attachment_is_covered(second_attachment));
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert!(client.query_is_covered(&prepared));
+    assert!(client.query_attachment_is_covered(second_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 2);
+    client.detach_query(first_attachment);
+    client.detach_query(second_attachment);
 }
 
 #[test]
@@ -2443,11 +2466,11 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
 
     let query = Query::from("chats");
     let prepared = prepared(&client, &query);
-    client.propagate_query_with_opts(&prepared, edge_subscribe_opts());
+    let first_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(client.query_is_covered(&prepared));
+    assert!(client.query_attachment_is_covered(first_attachment));
     assert_eq!(
         row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
         vec![first]
@@ -2464,17 +2487,20 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
             ),
         ]),
     );
-    client.propagate_query_with_opts(&prepared, edge_subscribe_opts());
-    assert!(!client.query_is_covered(&prepared));
+    let second_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
+    assert!(client.query_attachment_is_covered(first_attachment));
+    assert!(!client.query_attachment_is_covered(second_attachment));
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert!(client.query_is_covered(&prepared));
+    assert!(client.query_attachment_is_covered(second_attachment));
     assert_eq!(
         row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
         vec![first, second]
     );
+    client.detach_query(first_attachment);
+    client.detach_query(second_attachment);
 }
 
 #[test]
