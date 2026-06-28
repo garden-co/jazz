@@ -5393,19 +5393,12 @@ fn collect_nullable_param_types(
             | Predicate::Ne(Operand::Param(param), Operand::Column(column))
             | Predicate::Contains(Operand::Column(column), Operand::Param(param)) => {
                 let column_type = table_column_type(table, column)?;
-                param_types.insert(param.clone(), nullable_param_type(column_type));
+                param_types.insert(param.clone(), column_type.clone());
             }
             _ => {}
         }
     }
     Ok(())
-}
-
-fn nullable_param_type(column_type: &groove::schema::ColumnType) -> groove::schema::ColumnType {
-    match column_type {
-        groove::schema::ColumnType::Nullable(_) => column_type.clone(),
-        other => other.clone().nullable(),
-    }
 }
 
 fn binding_values_for_plan(
