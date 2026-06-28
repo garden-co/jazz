@@ -199,11 +199,6 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    #[cfg(test)]
-    pub(crate) fn commit_unit_for_test(&self, tx_id: TxId) -> Result<SyncMessage, Error> {
-        Ok(self.node.node.borrow_mut().commit_unit_for(tx_id)?)
-    }
-
     /// Open a database over the supplied storage and recover local state.
     ///
     /// ```rust

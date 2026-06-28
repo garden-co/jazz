@@ -352,25 +352,21 @@ impl PeerState {
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .is_none()
+            && !self.full_recompute_oracle_enabled()
         {
-            match self.maintained_subscription_view_support(node, &shape, &binding) {
-                Ok(()) => {
-                    match self.rehydrate_query_maintained_subscription_view(
-                        node,
-                        MaintainedRehydrateRequest {
-                            shape: &shape,
-                            binding: &binding,
-                            subscription,
-                            previous_row_result_set: &previous_row_result_set,
-                            reset_result_set: false,
-                            result_table_filter: Some(table),
-                            tier: DurabilityTier::Global,
-                        },
-                    ) {
-                        Ok(update) => return Ok(update),
-                        Err(err) => return Err(err),
-                    }
-                }
+            match self.rehydrate_query_maintained_subscription_view(
+                node,
+                MaintainedRehydrateRequest {
+                    shape: &shape,
+                    binding: &binding,
+                    subscription,
+                    previous_row_result_set: &previous_row_result_set,
+                    reset_result_set: false,
+                    result_table_filter: Some(table),
+                    tier: DurabilityTier::Global,
+                },
+            ) {
+                Ok(update) => return Ok(update),
                 Err(err) if self.full_recompute_oracle_enabled() => {
                     self.metrics
                         .maintained_subscription_view
@@ -768,23 +764,6 @@ impl PeerState {
         self.refresh_maintained_subscription_view_footprint(subscription);
         self.record_outgoing_view_update(&update);
         Ok(update)
-    }
-
-    fn maintained_subscription_view_support<S>(
-        &self,
-        node: &NodeState<S>,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-    ) -> Result<(), Error>
-    where
-        S: OrderedKvStorage,
-    {
-        if self.force_full_recompute_path() {
-            return Err(Error::InvalidStoredValue(
-                "maintained subscription view disabled for this peer",
-            ));
-        }
-        node.maintained_view_support(shape, binding, self.identity())
     }
 
     fn rehydrate_query_maintained_subscription_view<S>(
@@ -2801,7 +2780,6 @@ mod tests {
                 &binding,
                 RegisterShapeOptions {
                     tier: DurabilityTier::Local,
-                    ..RegisterShapeOptions::default()
                 },
             )
             .unwrap();
@@ -2882,7 +2860,6 @@ mod tests {
                 &binding,
                 RegisterShapeOptions {
                     tier: DurabilityTier::Local,
-                    ..RegisterShapeOptions::default()
                 },
             )
             .unwrap();
@@ -3044,8 +3021,6 @@ mod tests {
         let subscription = subscription_key(&shape, &binding);
         let mut peer = PeerState::new();
 
-        core.maintained_view_support(&shape, &binding, AuthorId::SYSTEM)
-            .unwrap();
         let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
         assert!(maintained_subscription_id(&peer, subscription).is_some());
@@ -3478,12 +3453,6 @@ mod tests {
             let binding = shape.bind(BTreeMap::new()).unwrap();
             let subscription = subscription_key(&shape, &binding);
 
-            assert!(matches!(
-                core.maintained_view_support(&shape, &binding, AuthorId::SYSTEM),
-                Err(Error::InvalidStoredValue(
-                    "maintained subscription view subscription does not support this query shape"
-                ))
-            ));
             assert_unsupported_maintained_subscription_error(
                 peer.rehydrate_query(&mut core, &shape, &binding),
             );
@@ -3516,12 +3485,6 @@ mod tests {
         let aggregate_subscription = subscription_key(&aggregate_shape, &aggregate_binding);
         let mut peer = PeerState::new();
 
-        assert!(matches!(
-            core.maintained_view_support(&aggregate_shape, &aggregate_binding, AuthorId::SYSTEM),
-            Err(Error::InvalidStoredValue(
-                "maintained subscription view subscription does not support this query shape"
-            ))
-        ));
         assert_unsupported_maintained_subscription_error(peer.rehydrate_query(
             &mut core,
             &aggregate_shape,
