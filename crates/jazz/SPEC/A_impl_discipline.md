@@ -26,8 +26,8 @@ abstraction before a second concrete use exists. Cross-node concepts travel
 through exhaustive, serializable message enums with a wire version field from
 day one (ch. 8), and every concept is reachable through a protocol message,
 node storage, or both (`INV-DISC-2`). The `SyncMessage` set is `CommitUnit`,
-`FateUpdate`, `RegisterShape`, `BindingDelta`, `PublishSchema`, `PublishLens`,
-`SetCurrentWriteSchema`, `CatalogueAck`, `ViewUpdate`, `Rehydrate`,
+`FateUpdate`, `RegisterShape`, `Subscribe`, `Unsubscribe`, `PublishSchema`,
+`PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`, `ViewUpdate`,
 `FetchContentExtent`, and `ContentExtents`.
 
 ## A.3 Roles, not separate implementations

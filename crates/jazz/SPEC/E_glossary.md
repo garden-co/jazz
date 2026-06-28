@@ -75,7 +75,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
 ## Sync & topology (ch. 8–9)
 
 - **`SyncMessage`** — the one wire vocabulary (`CommitUnit`, `FateUpdate`,
-  `RegisterShape`, `BindingDelta`, `ViewUpdate`, `Rehydrate`, catalogue + content
+  `RegisterShape`, `Subscribe`, `Unsubscribe`, `ViewUpdate`, catalogue + content
   messages).
 - **`PeerState` / `PeerRole::{Relay, EdgeClient}`** — link-local sync state and
   role; **relay** (uses `AuthorId::SYSTEM`, no fate), **edge** (terminates a

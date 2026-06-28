@@ -2201,7 +2201,7 @@ fn db_sync_surface_round_trips_subscription_to_client() {
     assert!(opened_rows(opened).is_empty());
 
     // Drive: client announces the shape -> server serves -> client applies.
-    client.tick().unwrap(); // RegisterShape + BindingDelta upstream
+    client.tick().unwrap(); // RegisterShape + Subscribe upstream
     server.tick().unwrap(); // ViewUpdate downstream
     client.tick().unwrap(); // apply, push the subscription event
 
@@ -2280,7 +2280,7 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
 }
 
 #[test]
-fn one_shot_propagated_query_rehydrates_already_covered_binding() {
+fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let client_author = AuthorId::from_bytes([0xc1; 16]);
@@ -2315,7 +2315,53 @@ fn one_shot_propagated_query_rehydrates_already_covered_binding() {
 }
 
 #[test]
-fn one_shot_edge_query_rehydrates_already_covered_binding() {
+fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    seed(&server, "todos", cells("first", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    client.propagate_query_with_opts(&prepared, global_subscribe_opts());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let subscriber = subscriber.borrow();
+    let ConnectionLink::Subscriber {
+        served,
+        coverage_groups,
+        ..
+    } = &subscriber.link
+    else {
+        panic!("expected subscriber connection");
+    };
+    assert_eq!(served.len(), 2);
+    assert_eq!(coverage_groups.len(), 1);
+    let group = coverage_groups
+        .values()
+        .next()
+        .expect("duplicate usage subscriptions should share one coverage group");
+    assert_eq!(group.subscribers.len(), 2);
+    assert_eq!(prepared_read(&client, &query).len(), 1);
+}
+
+#[test]
+fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let client_author = AuthorId::from_bytes([0xc1; 16]);
@@ -2350,7 +2396,7 @@ fn one_shot_edge_query_rehydrates_already_covered_binding() {
 }
 
 #[test]
-fn one_shot_edge_query_rehydrates_claim_bound_already_covered_binding() {
+fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered_binding() {
     let schema = JazzSchema::new([TableSchema::new(
         "chats",
         [
@@ -2772,7 +2818,7 @@ fn byte_wire_round_trips_subscription_to_client() {
     {
         let queued = server_inbound.borrow();
         let first = queued.front().expect("register shape frame");
-        let second = queued.get(1).expect("binding delta frame");
+        let second = queued.get(1).expect("subscribe frame");
         let first = match decode_frame(first).unwrap() {
             WireFrame::Message(envelope) => decode_sync_message(&envelope.payload).unwrap(),
             other => panic!("expected message frame, got {other:?}"),
@@ -2784,10 +2830,11 @@ fn byte_wire_round_trips_subscription_to_client() {
         let SyncMessage::RegisterShape { shape_id, .. } = first else {
             panic!("expected RegisterShape, got {first:?}");
         };
-        let SyncMessage::BindingDelta(delta) = second else {
-            panic!("expected BindingDelta, got {second:?}");
+        let SyncMessage::Subscribe(subscribe) = second else {
+            panic!("expected Subscribe, got {second:?}");
         };
-        assert_eq!(delta.shape_id, shape_id);
+        assert_eq!(subscribe.shape_id, shape_id);
+        assert_eq!(subscribe.subscription.shape_id, shape_id);
     }
     server.tick().unwrap();
     client.tick().unwrap();
@@ -2953,12 +3000,11 @@ fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
     let SyncMessage::RegisterShape { shape_id, .. } = first else {
         panic!("expected existing subscription shape to be registered upstream first");
     };
-    let SyncMessage::BindingDelta(delta) = second else {
-        panic!("expected existing subscription binding to be announced upstream second");
+    let SyncMessage::Subscribe(subscribe) = second else {
+        panic!("expected existing subscription to be announced upstream second");
     };
-    assert_eq!(delta.shape_id, shape_id);
-    assert_eq!(delta.adds.len(), 1);
-    assert!(delta.removes.is_empty());
+    assert_eq!(subscribe.shape_id, shape_id);
+    assert_eq!(subscribe.subscription.shape_id, shape_id);
 }
 
 #[test]

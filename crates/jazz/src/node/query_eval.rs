@@ -15,7 +15,7 @@ use groove::schema::ColumnType;
 
 use super::maintained_subscription_view::MaintainedSubscriptionView;
 use super::policy::ViewEvaluationContext;
-use crate::protocol::{BindingDelta, ResultRowEntry, ShapeAst, SubscriptionKey};
+use crate::protocol::{ResultRowEntry, ShapeAst, Subscribe, SubscriptionKey};
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, Binding, Include, JoinTarget, JoinVia, Operand,
     OrderDirection, PolicyBranch, Predicate, QUERY_NAMESPACE, ShapeId, ValidatedQuery,
@@ -147,7 +147,7 @@ where
     /// Resolve a registered shape id back to its validated query, if known.
     ///
     /// Used by the `Db` sync surface to reconstruct `(shape, binding)` from the
-    /// `RegisterShape` / `BindingDelta` a subscriber sent over a connection.
+    /// `RegisterShape` / `Subscribe` a subscriber sent over a connection.
     pub(crate) fn registered_shape(&self, shape_id: ShapeId) -> Option<ValidatedQuery> {
         self.query.registered_shapes.get(&shape_id).cloned()
     }
@@ -194,16 +194,21 @@ where
         Ok(())
     }
 
-    pub(super) fn apply_binding_delta(&mut self, delta: BindingDelta) -> Result<(), Error> {
-        let Some(shape) = self.query.registered_shapes.get(&delta.shape_id).cloned() else {
+    pub(super) fn apply_subscribe(&mut self, subscribe: Subscribe) -> Result<(), Error> {
+        let Some(shape) = self
+            .query
+            .registered_shapes
+            .get(&subscribe.shape_id)
+            .cloned()
+        else {
             self.parking
                 .parked_binding_deltas
-                .entry(delta.shape_id)
+                .entry(subscribe.shape_id)
                 .or_default()
-                .push(delta);
+                .push(subscribe);
             return Ok(());
         };
-        self.apply_known_shape_binding_delta(&shape, delta)
+        self.apply_known_shape_subscribe(&shape, subscribe)
     }
 
     fn drain_parked_binding_deltas_for_shape(&mut self, shape_id: ShapeId) -> Result<(), Error> {
@@ -214,58 +219,48 @@ where
             self.parking.parked_binding_deltas.insert(shape_id, deltas);
             return Ok(());
         };
-        for delta in deltas {
-            self.apply_known_shape_binding_delta(&shape, delta)?;
+        for subscribe in deltas {
+            self.apply_known_shape_subscribe(&shape, subscribe)?;
         }
         Ok(())
     }
 
-    fn apply_known_shape_binding_delta(
+    fn apply_known_shape_subscribe(
         &mut self,
         shape: &ValidatedQuery,
-        delta: BindingDelta,
+        subscribe: Subscribe,
     ) -> Result<(), Error> {
-        for (binding_id, values) in delta.adds {
-            if values.len() != shape.params().len() {
-                return Err(Error::InvalidStoredValue("binding arity mismatch"));
-            }
-            let value_map = shape
-                .params()
-                .keys()
-                .cloned()
-                .zip(values.iter().cloned())
-                .collect::<BTreeMap<_, _>>();
-            let binding = shape.bind(value_map)?;
-            if binding.binding_id() != binding_id {
-                return Err(Error::InvalidStoredValue(
-                    "binding id does not match values",
-                ));
-            }
-            self.query
-                .registered_bindings
-                .entry(delta.shape_id)
-                .or_default()
-                .insert(binding_id, values);
+        if subscribe.values.len() != shape.params().len() {
+            return Err(Error::InvalidStoredValue("binding arity mismatch"));
         }
-        for binding_id in delta.removes {
-            if let Some(bindings) = self.query.registered_bindings.get_mut(&delta.shape_id) {
-                bindings.remove(&binding_id);
-            }
-            let subscription = SubscriptionKey {
-                shape_id: delta.shape_id,
-                binding_id,
-            };
-            self.query.settled_result_sets.remove(&subscription);
-        }
+        let value_map = shape
+            .params()
+            .keys()
+            .cloned()
+            .zip(subscribe.values.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
+        let _binding = shape.bind(value_map)?;
+        self.query
+            .registered_bindings
+            .entry(subscribe.shape_id)
+            .or_default()
+            .insert(subscribe.subscription.binding_id, subscribe.values);
         Ok(())
+    }
+
+    pub(crate) fn apply_unsubscribe(&mut self, subscription: SubscriptionKey) {
+        if let Some(bindings) = self
+            .query
+            .registered_bindings
+            .get_mut(&subscription.shape_id)
+        {
+            bindings.remove(&subscription.binding_id);
+        }
+        self.query.settled_result_sets.remove(&subscription);
     }
 
     pub(crate) fn has_settled_result_set(&self, subscription: SubscriptionKey) -> bool {
         self.query.settled_result_sets.contains_key(&subscription)
-    }
-
-    pub(crate) fn invalidate_settled_result_set(&mut self, subscription: SubscriptionKey) {
-        self.query.settled_result_sets.remove(&subscription);
     }
 
     /// Evaluate a validated query shape against this node's local knowledge.
@@ -7538,19 +7533,23 @@ mod tests {
             })
             .unwrap();
         server
-            .apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
+            .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
                 shape_id: shape.shape_id(),
-                adds: vec![
-                    (
-                        alice_binding.binding_id(),
-                        alice_binding.values().values().cloned().collect(),
-                    ),
-                    (
-                        bob_binding.binding_id(),
-                        bob_binding.values().values().cloned().collect(),
-                    ),
-                ],
-                removes: Vec::new(),
+                subscription: SubscriptionKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: alice_binding.binding_id(),
+                },
+                values: alice_binding.values().values().cloned().collect(),
+            }))
+            .unwrap();
+        server
+            .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+                shape_id: shape.shape_id(),
+                subscription: SubscriptionKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: bob_binding.binding_id(),
+                },
+                values: bob_binding.values().values().cloned().collect(),
             }))
             .unwrap();
 
@@ -7605,11 +7604,12 @@ mod tests {
         );
 
         server
-            .apply_sync_message(SyncMessage::BindingDelta(crate::protocol::BindingDelta {
-                shape_id: shape.shape_id(),
-                adds: Vec::new(),
-                removes: vec![alice_binding.binding_id()],
-            }))
+            .apply_sync_message(SyncMessage::Unsubscribe {
+                subscription: SubscriptionKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: alice_binding.binding_id(),
+                },
+            })
             .unwrap();
         peer.forget_query_binding(&shape, &alice_binding);
         commit_global_issue(&mut server, 3, "open", alice, 4);
