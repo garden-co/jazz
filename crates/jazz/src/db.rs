@@ -23,6 +23,7 @@ pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlan,
+    RelationSnapshot,
 };
 use crate::peer::PeerState;
 use crate::protocol::{
@@ -507,6 +508,37 @@ where
             node.query_rows_for_link(&prepared.shape, &prepared.binding, tier, author)
         }
         .map_err(Into::into)
+    }
+
+    /// Tier-gated one-shot relation read evaluated as the database identity.
+    pub async fn all_relation_snapshot(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.all_relation_snapshot_for_identity(prepared, opts, self.identity.author)
+            .await
+    }
+
+    /// Tier-gated one-shot relation read evaluated as `author`.
+    pub async fn all_relation_snapshot_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<RelationSnapshot, Error> {
+        if opts.include_deleted {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation snapshots do not support include_deleted yet",
+            ));
+        }
+        let tier = effective_read_tier(opts);
+        self.node
+            .node
+            .borrow_mut()
+            .query_relation_snapshot_for_link(&prepared.shape, &prepared.binding, tier, author)
+            .map_err(Into::into)
     }
 
     /// Subscribe to a query and return a stream of materialized subscription events.

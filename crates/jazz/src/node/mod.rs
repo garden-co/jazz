@@ -2790,6 +2790,30 @@ pub struct CurrentRow {
     deleted: bool,
 }
 
+/// Directed relation edge emitted for an array-subquery payload.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RelationEdge {
+    /// Source row table.
+    pub source_table: String,
+    /// Source row id.
+    pub source_row: RowUuid,
+    /// Relation/output column name.
+    pub relation: String,
+    /// Target row table.
+    pub target_table: String,
+    /// Target row id.
+    pub target_row: RowUuid,
+}
+
+/// One-shot relation read payload: row material plus array-subquery edges.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RelationSnapshot {
+    /// Root and related rows referenced by `edges`.
+    pub rows: Vec<CurrentRow>,
+    /// Relation edges between rows.
+    pub edges: Vec<RelationEdge>,
+}
+
 impl CurrentRow {
     /// Construct a current row from an encoded projection record.
     pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {

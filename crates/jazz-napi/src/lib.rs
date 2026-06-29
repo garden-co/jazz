@@ -107,6 +107,22 @@ struct CoreRow<'a> {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+struct CoreRelationSnapshot<'a> {
+    cursor: u64,
+    rows: Vec<CoreRowBatch<'a>>,
+    edges: Vec<CoreRelationEdge>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct CoreRelationEdge {
+    source_table: String,
+    source_row_id: CoreRowUuid,
+    relation: String,
+    target_table: String,
+    target_row_id: CoreRowUuid,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
 struct WriteResult {
     row_id: CoreRowUuid,
     tx_id: TxId,
@@ -638,6 +654,64 @@ impl NapiDb {
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         encode_core_rows(&rows)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "allRelationSnapshot")]
+    pub fn all_relation_snapshot(
+        &self,
+        query: &PreparedQuery,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Uint8Array> {
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let snapshot = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.all_relation_snapshot(&query.inner, opts))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.all_relation_snapshot(&query.inner, opts))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        encode_core_relation_snapshot(&snapshot)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "allRelationSnapshotForIdentity")]
+    pub fn all_relation_snapshot_for_identity(
+        &self,
+        query: &PreparedQuery,
+        author: Uint8Array,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Uint8Array> {
+        let author = core_author_id_from_bytes(&author)?;
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let snapshot = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.all_relation_snapshot_for_identity(&query.inner, opts, author))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.all_relation_snapshot_for_identity(&query.inner, opts, author))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        encode_core_relation_snapshot(&snapshot)
             .map(Uint8Array::new)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
@@ -1493,6 +1567,16 @@ fn encode_core_rows(
     postcard::to_allocvec(&core_row_batches(rows))
 }
 
+fn encode_core_relation_snapshot(
+    snapshot: &jazz::node::RelationSnapshot,
+) -> std::result::Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&CoreRelationSnapshot {
+        cursor: 0,
+        rows: core_row_batches(&snapshot.rows),
+        edges: snapshot.edges.iter().map(core_relation_edge).collect(),
+    })
+}
+
 fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
     let mut batches: Vec<CoreRowBatch<'_>> = Vec::new();
     for row in rows {
@@ -1509,6 +1593,16 @@ fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
         }
     }
     batches
+}
+
+fn core_relation_edge(edge: &jazz::node::RelationEdge) -> CoreRelationEdge {
+    CoreRelationEdge {
+        source_table: edge.source_table.clone(),
+        source_row_id: edge.source_row,
+        relation: edge.relation.clone(),
+        target_table: edge.target_table.clone(),
+        target_row_id: edge.target_row,
+    }
 }
 
 fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {
