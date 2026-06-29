@@ -843,7 +843,7 @@ describe("alpha public package flow", () => {
         tier: "edge",
       }),
       20_000,
-      "file blob chunks were not accepted at the server",
+      "file blob row was not accepted at the server",
     );
 
     expect(file.name).toBe("probe.bin");
