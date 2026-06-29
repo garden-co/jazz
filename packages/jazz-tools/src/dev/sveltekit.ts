@@ -164,7 +164,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
           resolvedRuntime.telemetryCollectorUrl;
       }
 
-      wireInspectorOverlay(viteServer);
+      if (options.inspector !== false) wireInspectorOverlay(viteServer);
     },
   };
 }

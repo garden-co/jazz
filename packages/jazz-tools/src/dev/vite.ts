@@ -61,6 +61,11 @@ export interface JazzPluginOptions {
   schemaDir?: string;
   appId?: string;
   telemetry?: TelemetryOptions;
+  /**
+   * The in-app inspector overlay (a floating toggle that opens the embedded
+   * inspector) is served during dev by default. Set to `false` to disable it.
+   */
+  inspector?: boolean;
 }
 
 const LOG_PREFIX = "[jazz]";
@@ -147,7 +152,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       if (managed.telemetryCollectorUrl) {
         viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
       }
-      wireInspectorOverlay(viteServer);
+      if (options.inspector !== false) wireInspectorOverlay(viteServer);
 
       viteServer.httpServer?.once("close", async () => {
         await runtime.dispose();

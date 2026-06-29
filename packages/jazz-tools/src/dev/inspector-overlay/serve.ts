@@ -112,26 +112,22 @@ export async function startOverlayAssetServer(): Promise<OverlayAssetServer> {
 }
 
 export function createOverlayHandler() {
-  let warnedMissing = false;
-  // The embedded dir is fixed for the process lifetime, so resolve it once
-  // (require.resolve walks node_modules and hits disk) instead of per request.
-  let dirCache: string | null | undefined;
-  const embeddedDir = (): string | null =>
-    dirCache !== undefined ? dirCache : (dirCache = resolveEmbeddedDir());
+  // Resolve the embedded dir once at startup (require.resolve walks node_modules
+  // and hits disk). It ships with jazz-tools, so a miss means a broken install —
+  // say so once here rather than re-checking per request.
+  const dir = resolveEmbeddedDir();
+  if (!dir) {
+    console.log(
+      `[jazz] Inspector overlay: couldn't find the \`${INSPECTOR_PACKAGE}\` build. ` +
+        "It ships with jazz-tools — try reinstalling dependencies.",
+    );
+  }
   return async function handle(req: { url?: string }, res: OverlayResponse): Promise<boolean> {
     const url = (req.url ?? "").split("?")[0];
     if (url !== OVERLAY_EMBEDDED_PREFIX && !url.startsWith(OVERLAY_EMBEDDED_PREFIX + "/")) {
       return false;
     }
-    const dir = embeddedDir();
     if (!dir) {
-      if (!warnedMissing) {
-        warnedMissing = true;
-        console.log(
-          `[jazz] Inspector overlay: couldn't find the \`${INSPECTOR_PACKAGE}\` build. ` +
-            "It ships with jazz-tools — try reinstalling dependencies.",
-        );
-      }
       res.statusCode = 404;
       res.end("Inspector not installed");
       return true;

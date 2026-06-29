@@ -166,7 +166,7 @@ export function withJazz(
     // public flag so the client provider mounts the toggle (the signal that the
     // jazz dev plugin is active). It leaves no trace in production builds (no
     // rewrite, no env, no server).
-    const overlayInDev = phase === DEVELOPMENT_PHASE;
+    const overlayInDev = options.inspector !== false && phase === DEVELOPMENT_PHASE;
     let overlayRewrites: NextRewritesFn | undefined;
     if (overlayInDev) {
       const firstStart = overlayAssetServer === null;
