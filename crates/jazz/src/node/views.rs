@@ -805,40 +805,7 @@ where
             replacement_for,
         } = inputs;
         let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
-        let mut policy_atomic_result_row_adds = Vec::with_capacity(result_row_adds.len());
         let mut tx_versions_cache = BTreeMap::<TxId, Vec<VersionRow>>::new();
-        for entry in result_row_adds {
-            let tx_versions = tx_versions_cache
-                .entry(entry.2)
-                .or_insert_with(|| versions_by_tx(entry.2));
-            let version = if let Some(version) =
-                maintained_view_find_content_witness(tx_versions, entry.0.as_str(), entry.1)
-            {
-                version
-            } else {
-                let (content_winner, _) = replacement_for(entry.0.to_string(), entry.1);
-                let Some(content_winner) = content_winner else {
-                    continue;
-                };
-                if self.version_tx_id(&content_winner)? != entry.2 {
-                    continue;
-                }
-                tx_versions.push(content_winner);
-                tx_versions
-                    .last()
-                    .ok_or(Error::MissingTransaction(entry.2))?
-            };
-            let table_schema = self.table(entry.0.as_str())?.clone();
-            if self.read_policy_allows_version_memo(
-                &table_schema,
-                version,
-                identity,
-                &mut context,
-            )? {
-                policy_atomic_result_row_adds.push(entry);
-            }
-        }
-        let result_row_adds = policy_atomic_result_row_adds;
         let wanted_add_rows_by_tx = result_row_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (*tx_id, (table.to_string(), *row_uuid)))
@@ -852,7 +819,7 @@ where
         let mut version_bundles = Vec::with_capacity(result_row_adds.len());
         let mut peer_payload_inventory_refs = Vec::new();
         let mut emitted_versions = BTreeSet::new();
-        for (entry_table, row_uuid, tx_id) in &result_row_adds {
+        for (tx_id, wanted_rows) in &wanted_add_rows_by_tx {
             if peer_complete_tx_payloads.contains(tx_id) {
                 peer_payload_inventory_refs.push(*tx_id);
                 continue;
@@ -860,28 +827,27 @@ where
             if !emitted_versions.insert(*tx_id) {
                 continue;
             }
-            let table_schema = self.table(entry_table.as_str())?.clone();
             let tx_versions = tx_versions_cache
                 .entry(*tx_id)
                 .or_insert_with(|| versions_by_tx(*tx_id));
-            if maintained_view_find_content_witness(tx_versions, entry_table.as_str(), *row_uuid)
-                .is_none()
-            {
-                let (content_winner, _) = replacement_for(entry_table.to_string(), *row_uuid);
-                if let Some(content_winner) = content_winner {
-                    if self.version_tx_id(&content_winner)? == *tx_id {
-                        tx_versions.push(content_winner);
+            for (entry_table, row_uuid) in wanted_rows {
+                if maintained_view_find_content_witness(tx_versions, entry_table, *row_uuid)
+                    .is_none()
+                {
+                    let (content_winner, _) = replacement_for(entry_table.clone(), *row_uuid);
+                    if let Some(content_winner) = content_winner {
+                        if self.version_tx_id(&content_winner)? == *tx_id {
+                            tx_versions.push(content_winner);
+                        }
                     }
                 }
             }
-            if maintained_view_find_content_witness(tx_versions, entry_table.as_str(), *row_uuid)
-                .is_some()
-            {
+            if tx_versions.iter().any(|version| {
+                version.deletion().is_none()
+                    && wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
+            }) {
                 let stored_tx = self
                     .query_transaction_memo(*tx_id, &mut context)?
-                    .ok_or(Error::MissingTransaction(*tx_id))?;
-                let wanted_rows = wanted_add_rows_by_tx
-                    .get(tx_id)
                     .ok_or(Error::MissingTransaction(*tx_id))?;
                 let filtered_tx_versions = if complete_exclusive_payloads
                     && stored_tx.tx.kind == TxKind::Exclusive
@@ -913,20 +879,17 @@ where
             let version = tx_versions
                 .iter()
                 .find(|version| {
-                    version.table() == entry_table.as_str()
-                        && version.row_uuid() == *row_uuid
-                        && version.deletion().is_none()
+                    version.deletion().is_none()
+                        && wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
                 })
                 .ok_or(Error::MissingTransaction(*tx_id))?;
+            let table_schema = self.table(version.table())?.clone();
             if self.read_policy_allows_version_memo(
                 &table_schema,
                 version,
                 identity,
                 &mut context,
             )? {
-                let wanted_rows = wanted_add_rows_by_tx
-                    .get(tx_id)
-                    .ok_or(Error::MissingTransaction(*tx_id))?;
                 let bundle_versions = if complete_exclusive_payloads {
                     tx_versions.clone()
                 } else {
@@ -1109,6 +1072,60 @@ where
                         }
                     }
                 }
+            } else if let Some(version) =
+                self.visible_global_content_version_now(entry_table, *row_uuid)
+            {
+                let tx_id = self.version_tx_id(&version)?;
+                if tx_id != *old_tx_id && !emitted_versions.contains(&tx_id) {
+                    if peer_complete_tx_payloads.contains(&tx_id) {
+                        peer_payload_inventory_refs.push(tx_id);
+                        record_maintained_view_removal_stream_bundle();
+                    } else {
+                        let table_schema = self.table(entry_table)?.clone();
+                        if self.read_policy_allows_version_memo(
+                            &table_schema,
+                            &version,
+                            identity,
+                            &mut context,
+                        )? {
+                            emitted_versions.insert(tx_id);
+                            version_bundles.push(self.version_bundle_for_view_memo(
+                                &table_schema,
+                                &version,
+                                identity,
+                                &mut context,
+                            )?);
+                            record_maintained_view_removal_bundle_fallback();
+                        }
+                    }
+                }
+            } else if let Some(version) =
+                self.query_global_layer_winner(entry_table, *row_uuid, VersionLayer::Deletion)?
+            {
+                let tx_id = self.version_tx_id(&version)?;
+                if tx_id != *old_tx_id && !emitted_versions.contains(&tx_id) {
+                    if peer_complete_tx_payloads.contains(&tx_id) {
+                        peer_payload_inventory_refs.push(tx_id);
+                        record_maintained_view_removal_stream_bundle();
+                    } else {
+                        let table_schema = self.table(entry_table)?.clone();
+                        if self.read_policy_allows_deletion_version_memo(
+                            &table_schema,
+                            &version,
+                            identity,
+                            &mut context,
+                        )? {
+                            emitted_versions.insert(tx_id);
+                            version_bundles.push(self.version_bundle_for_view_memo(
+                                &table_schema,
+                                &version,
+                                identity,
+                                &mut context,
+                            )?);
+                            record_maintained_view_removal_bundle_fallback();
+                        }
+                    }
+                }
             }
         }
         for bundle in &mut version_bundles {
@@ -1169,6 +1186,28 @@ where
             }
         }
         Ok(entries)
+    }
+
+    pub(crate) fn expand_maintained_view_result_rows(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        rows: impl IntoIterator<Item = ResultRowEntry>,
+        identity: AuthorId,
+        tier: DurabilityTier,
+    ) -> Result<BTreeSet<ResultRowEntry>, Error> {
+        let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
+        let mut set = rows.into_iter().collect::<BTreeSet<_>>();
+        let root_table = shape.query().table.clone();
+        let root_result_entries = set
+            .iter()
+            .filter(|(entry_table, _, _)| entry_table.as_str() == root_table)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        self.expand_query_closure(shape, binding, &mut set, tier)?;
+        self.retain_policy_atomic_rows(&mut set, identity, &mut context)?;
+        set.extend(root_result_entries);
+        Ok(set)
     }
 
     /// Apply a downstream current-row view update.

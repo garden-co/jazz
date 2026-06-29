@@ -3172,6 +3172,75 @@ fn maintained_view_tagged_terminal_matches_one_shot_streams_and_reconstructs_ver
 }
 
 #[test]
+fn maintained_view_tagged_terminal_clean_owner_policy_claim_params_match_one_shot() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author = user(0xa1);
+    let other = user(0xb2);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa0), 10).cells(owner_cells(author, "owned")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xb0), 11).cells(owner_cells(other, "hidden")),
+    );
+
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), param("title")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("owned".to_owned()),
+        )]))
+        .unwrap();
+    let table = core.table("todos").unwrap().clone();
+
+    let tagged = core
+        .maintained_view_tagged_terminal(&shape, &binding, author)
+        .unwrap();
+    let one_shot = core
+        .maintained_view_result_current(&shape, &binding, author)
+        .unwrap();
+
+    assert_eq!(
+        tagged_result_current_rows(&tagged, &table),
+        result_current_rows(&one_shot, &table, "version_tx_time", "version_tx_node_id"),
+        "tagged terminal result_current rows should match one-shot with retained policy claim params"
+    );
+    assert_eq!(
+        maintained_view_result_keys(&one_shot)
+            .into_iter()
+            .map(|(row_uuid, _, _)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0xa0)])
+    );
+
+    let mut peer = PeerState::for_author(author);
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert_eq!(
+        adds.into_iter()
+            .map(|(_table, row_uuid, _tx_id)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0xa0)]),
+        "clean tagged terminal rows should route by retained query and policy claim params"
+    );
+    assert!(removes.is_empty());
+    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
+}
+
+#[test]
 fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
     let schema = JazzSchema::new([TableSchema::new(
         "todos",

@@ -14,7 +14,7 @@ use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
     UnaryOp, WithQuery,
 };
-use crate::records::{EnumSchema, RecordDescriptor};
+use crate::records::{EnumSchema, RecordDescriptor, ValueType};
 use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKey, PrimaryKeyColumn,
@@ -221,6 +221,19 @@ fn uuid_docs_schema() -> DatabaseSchema {
     )
     .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("id")]))
     .with_index(IndexSchema::new("docs_by_owner", ["owner", "id"]))])
+}
+
+fn nullable_routed_docs_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "docs",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("owner", ColumnType::Uuid.nullable()),
+            ColumnSchema::new("tag", ColumnType::String.nullable()),
+            ColumnSchema::new("title", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
 fn enum_tasks_schema() -> DatabaseSchema {
@@ -1927,6 +1940,197 @@ fn prepared_subscription_can_route_with_separate_clean_output_projection() {
 }
 
 #[test]
+fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
+    let storage = MemoryStorage::new(&["docs"]);
+    let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();
+    let owner = uuid(0x100);
+    let other_owner = uuid(0x200);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "docs",
+        vec![
+            Value::U64(1),
+            Value::Nullable(Some(Box::new(Value::Uuid(owner)))),
+            Value::Nullable(Some(Box::new(Value::String("open".to_owned())))),
+            Value::String("wanted".to_owned()),
+        ],
+    );
+    batch.insert(
+        "docs",
+        vec![
+            Value::U64(2),
+            Value::Nullable(Some(Box::new(Value::Uuid(other_owner)))),
+            Value::Nullable(Some(Box::new(Value::String("open".to_owned())))),
+            Value::String("other owner".to_owned()),
+        ],
+    );
+    batch.insert(
+        "docs",
+        vec![
+            Value::U64(3),
+            Value::Nullable(Some(Box::new(Value::Uuid(owner)))),
+            Value::Nullable(Some(Box::new(Value::String("done".to_owned())))),
+            Value::String("other tag".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([
+        (
+            "owner",
+            ValueType::Nullable(Box::new(ColumnType::Uuid.value_type())),
+        ),
+        (
+            "tag",
+            ValueType::Nullable(Box::new(ColumnType::String.value_type())),
+        ),
+    ]);
+    let output_graph = GraphBuilder::table("docs")
+        .project_fields([ProjectField::named("id"), ProjectField::named("title")]);
+    let routed_docs = GraphBuilder::table("docs")
+        .unwrap_nullable("owner")
+        .unwrap_nullable("tag")
+        .project_fields([
+            ProjectField::named("id"),
+            ProjectField::named("title"),
+            ProjectField::nullable("owner", "owner"),
+            ProjectField::nullable("tag", "tag"),
+        ]);
+    let routing_graph = GraphBuilder::join(
+        GraphBuilder::binding_source("nullable_doc_route", binding_descriptor),
+        routed_docs,
+        ["owner", "tag"],
+        ["owner", "tag"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+        ProjectField::renamed("right.owner", "__routing_owner"),
+        ProjectField::renamed("right.tag", "__routing_tag"),
+    ]);
+
+    let shape = database
+        .prepare_with_routing(
+            output_graph,
+            routing_graph,
+            "nullable_doc_route",
+            binding_descriptor,
+            ["__routing_owner", "__routing_tag"],
+        )
+        .unwrap();
+    let subscription = database
+        .bind_shape(
+            shape.id(),
+            &[
+                Value::Nullable(Some(Box::new(Value::Uuid(owner)))),
+                Value::Nullable(Some(Box::new(Value::String("open".to_owned())))),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(1), Value::String("wanted".to_owned())], 1)]
+    );
+}
+
+#[test]
+fn prepared_subscription_routes_null_nullable_binding_keys() {
+    let storage = MemoryStorage::new(&["docs"]);
+    let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "docs",
+        vec![
+            Value::U64(1),
+            Value::Nullable(None),
+            Value::Nullable(None),
+            Value::String("null route".to_owned()),
+        ],
+    );
+    batch.insert(
+        "docs",
+        vec![
+            Value::U64(2),
+            Value::Nullable(None),
+            Value::Nullable(Some(Box::new(Value::String("open".to_owned())))),
+            Value::String("partial null".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([
+        (
+            "owner",
+            ValueType::Nullable(Box::new(ColumnType::Uuid.value_type())),
+        ),
+        (
+            "tag",
+            ValueType::Nullable(Box::new(ColumnType::String.value_type())),
+        ),
+    ]);
+    let output_graph = GraphBuilder::table("docs")
+        .project_fields([ProjectField::named("id"), ProjectField::named("title")]);
+    let binding = GraphBuilder::binding_source("nullable_doc_null_route", binding_descriptor)
+        .project_fields([
+            ProjectField::named("owner"),
+            ProjectField::named("tag"),
+            ProjectField::literal("__join", Value::U8(0)),
+        ]);
+    let null_routing_graph = GraphBuilder::table("docs")
+        .filter(PredicateExpr::is_null("owner"))
+        .filter(PredicateExpr::is_null("tag"))
+        .project_fields([
+            ProjectField::named("id"),
+            ProjectField::named("title"),
+            ProjectField::literal("__join", Value::U8(0)),
+            ProjectField::null_typed(
+                "__routing_owner",
+                ValueType::Nullable(Box::new(ValueType::Uuid)),
+            ),
+            ProjectField::null_typed(
+                "__routing_tag",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            ),
+        ]);
+    let null_routing_graph = GraphBuilder::join(
+        binding,
+        null_routing_graph,
+        ["owner", "tag", "__join"],
+        ["__routing_owner", "__routing_tag", "__join"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+        ProjectField::renamed("right.__routing_owner", "__routing_owner"),
+        ProjectField::renamed("right.__routing_tag", "__routing_tag"),
+    ]);
+
+    let shape = database
+        .prepare_with_routing(
+            output_graph,
+            null_routing_graph,
+            "nullable_doc_null_route",
+            binding_descriptor,
+            ["__routing_owner", "__routing_tag"],
+        )
+        .unwrap();
+    let subscription = database
+        .bind_shape(shape.id(), &[Value::Nullable(None), Value::Nullable(None)])
+        .unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(
+            vec![Value::U64(1), Value::String("null route".to_owned())],
+            1
+        )]
+    );
+}
+
+#[test]
 fn prepared_subscription_rejects_routing_graph_missing_clean_output_fields() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
@@ -2527,6 +2731,104 @@ fn unwrap_nullable_retractions_flow_symmetrically() {
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [(vec![Value::U64(1), Value::U64(1)], -1)]
+    );
+}
+
+#[test]
+fn project_nullable_wraps_uuid_and_string_fields() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["docs", "indices"]).unwrap();
+    let mut database = Database::new(uuid_docs_schema(), storage).unwrap();
+    let id = uuid(1);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "docs",
+        vec![
+            Value::Uuid(id),
+            Value::Nullable(None),
+            Value::String("draft".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let result = database
+        .query_graph(GraphBuilder::table("docs").project_fields([
+            ProjectField::nullable("id", "maybe_id"),
+            ProjectField::nullable("title", "maybe_title"),
+        ]))
+        .unwrap();
+
+    assert_eq!(
+        result.to_values().unwrap(),
+        [(
+            vec![
+                Value::Nullable(Some(Box::new(Value::Uuid(id)))),
+                Value::Nullable(Some(Box::new(Value::String("draft".to_owned())))),
+            ],
+            1,
+        )]
+    );
+}
+
+#[test]
+fn project_nullable_can_union_with_typed_null_projection() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["docs", "indices"]).unwrap();
+    let mut database = Database::new(uuid_docs_schema(), storage).unwrap();
+    let id = uuid(2);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "docs",
+        vec![
+            Value::Uuid(id),
+            Value::Nullable(None),
+            Value::String("published".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let mut values = database
+        .query_graph(GraphBuilder::union([
+            GraphBuilder::table("docs").project_fields([
+                ProjectField::nullable("id", "maybe_id"),
+                ProjectField::nullable("title", "maybe_title"),
+            ]),
+            GraphBuilder::table("docs").project_fields([
+                ProjectField::null_typed(
+                    "maybe_id",
+                    ValueType::Nullable(Box::new(ValueType::Uuid)),
+                ),
+                ProjectField::null_typed(
+                    "maybe_title",
+                    ValueType::Nullable(Box::new(ValueType::String)),
+                ),
+            ]),
+        ]))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    values.sort_by_key(|(values, _)| {
+        if matches!(values[0], Value::Nullable(None)) {
+            0
+        } else {
+            1
+        }
+    });
+
+    assert_eq!(
+        values,
+        [
+            (vec![Value::Nullable(None), Value::Nullable(None),], 1,),
+            (
+                vec![
+                    Value::Nullable(Some(Box::new(Value::Uuid(id)))),
+                    Value::Nullable(Some(Box::new(Value::String("published".to_owned())))),
+                ],
+                1,
+            ),
+        ]
     );
 }
 

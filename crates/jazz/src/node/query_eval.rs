@@ -1774,6 +1774,8 @@ where
                 &query.includes,
                 identity,
                 current_row_fields_with_params(table, &param_types),
+                ParamBindingMode::InlineAllReachableSeeds,
+                &BTreeMap::new(),
             )?;
         }
         let param_names = param_types.keys().cloned().collect::<Vec<_>>();
@@ -2138,18 +2140,26 @@ where
             }
             let authorized_keys = GraphBuilder::union(key_graphs);
             if options.keep_binding_params_in_output {
-                return Ok(
-                    GraphBuilder::join(graph, authorized_keys, ["row_uuid"], ["row_uuid"])
-                        .project_fields(
-                            options
-                                .output_fields
-                                .iter()
-                                .map(|field| ProjectField::renamed(format!("left.{field}"), field))
-                                .chain(param_types.keys().cloned().map(|param| {
-                                    ProjectField::renamed(format!("right.{param}"), param)
-                                })),
+                let graph_with_params =
+                    attach_output_binding_params(graph, param_types, &key_options)?;
+                return Ok(GraphBuilder::join(
+                    graph_with_params,
+                    authorized_keys,
+                    key_fields.clone(),
+                    key_fields,
+                )
+                .project_fields(
+                    options
+                        .output_fields
+                        .iter()
+                        .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                        .chain(
+                            param_types
+                                .keys()
+                                .cloned()
+                                .map(|param| ProjectField::renamed(format!("left.{param}"), param)),
                         ),
-                );
+                ));
             }
             let authorized = GraphBuilder::join(graph, authorized_keys, ["row_uuid"], ["row_uuid"])
                 .project_fields(
@@ -2173,7 +2183,7 @@ where
         if options.keep_binding_params_in_output
             && !predicate_params(&shape.query().filters).is_empty()
         {
-            carried_params.extend(param_types.keys().cloned());
+            carried_params.extend(predicate_params(&shape.query().filters));
         }
         for join in &shape.query().joins {
             if let Some(lookup) = &join.source_lookup {
@@ -2184,10 +2194,10 @@ where
                     .cloned()
                     .unwrap_or_else(|| visible_current_graph(lookup_table, options.tier));
                 let lookup_params = options.keep_binding_params_in_output.then(|| {
-                    shape
-                        .params()
-                        .keys()
+                    carried_params
+                        .iter()
                         .map(|param| ProjectField::renamed(format!("left.{param}"), param.clone()))
+                        .collect::<Vec<_>>()
                 });
                 graph = GraphBuilder::join(
                     graph.unwrap_nullable(query_field(&lookup.row_id_source_column)),
@@ -2234,7 +2244,7 @@ where
             let join_params = if options.keep_binding_params_in_output
                 && !predicate_params(&join.filters).is_empty()
             {
-                shape.params().keys().cloned().collect()
+                predicate_params(&join.filters)
             } else {
                 BTreeSet::new()
             };
@@ -2248,13 +2258,25 @@ where
                 &options.binding_source_shape,
             )?;
             let params = options.keep_binding_params_in_output.then(|| {
-                shape.params().keys().map(|param| {
-                    if carried_params.contains(param) {
-                        ProjectField::renamed(format!("left.{param}"), param.clone())
-                    } else {
-                        ProjectField::renamed(format!("right.{param}"), param.clone())
-                    }
-                })
+                shape
+                    .params()
+                    .keys()
+                    .filter_map(|param| {
+                        if carried_params.contains(param) {
+                            Some(ProjectField::renamed(
+                                format!("left.{param}"),
+                                param.clone(),
+                            ))
+                        } else if join_params.contains(param) {
+                            Some(ProjectField::renamed(
+                                format!("right.{param}"),
+                                param.clone(),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
             });
             graph = GraphBuilder::join(graph, join_graph, [left_key], [join_key]).project_fields(
                 options
@@ -2280,21 +2302,25 @@ where
                 &options.binding_source_shape,
             )?;
             let params = options.keep_binding_params_in_output.then(|| {
-                param_types.keys().filter_map(|param| {
-                    if carried_params.contains(param) {
-                        Some(ProjectField::renamed(
-                            format!("left.{param}"),
-                            param.clone(),
-                        ))
-                    } else if *param == reachable_seed_param {
-                        Some(ProjectField::renamed(
-                            format!("right.{param}"),
-                            param.clone(),
-                        ))
-                    } else {
-                        None
-                    }
-                })
+                let reachable_param_idx = options.output_fields.len() + carried_params.len() + 1;
+                param_types
+                    .keys()
+                    .filter_map(|param| {
+                        if carried_params.contains(param) {
+                            Some(ProjectField::renamed(
+                                format!("left.{param}"),
+                                param.clone(),
+                            ))
+                        } else if *param == reachable_seed_param {
+                            Some(ProjectField::renamed_resolved(
+                                reachable_param_idx,
+                                param.clone(),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
             });
             graph = GraphBuilder::join(
                 graph,
@@ -2689,8 +2715,19 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<groove::ivm::RecordDeltas, Error> {
-        let (shape, _binding, graph, _routing_graph) =
-            self.maintained_view_tagged_terminal_graph(shape, binding, identity)?;
+        let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
+        let shape = maintained_view_bind_filter_literals_with_mode(
+            &shape,
+            &binding,
+            &self.catalogue.schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        self.ensure_maintained_view_query_slice(shape.query())?;
+        let graph = self.maintained_view_tagged_terminal_graph_for_shape(
+            &shape,
+            identity,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
         self.materialize_maintained_view_graph(graph, &shape)
     }
 
@@ -2708,12 +2745,12 @@ where
         ),
         Error,
     > {
-        let (_shape, _binding, graph, routing_graph) =
+        let (_shape, routing_shape, _binding, graph, routing_graph) =
             self.maintained_view_tagged_terminal_graph(shape, binding, identity)?;
         let tables = self.maintained_view_terminal_tables(&_shape)?;
         self.database.flush().map_err(Error::Groove)?;
         let subscription = self.subscribe_maintained_view_tagged_graph(
-            &_shape,
+            &routing_shape,
             &_binding,
             identity,
             graph,
@@ -2755,7 +2792,11 @@ where
         graph: GraphBuilder,
         routing_graph: GraphBuilder,
     ) -> Result<groove::ivm::Subscription, Error> {
-        let param_types = graph_param_types(shape, &self.catalogue.schema)?;
+        let param_types = self.maintained_view_hidden_param_types_for_shape(
+            shape,
+            identity,
+            ParamBindingMode::RetainAllParams,
+        )?;
         if param_types.is_empty() {
             return self.database.subscribe(graph).map_err(Error::Groove);
         }
@@ -2803,32 +2844,133 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
-    ) -> Result<(ValidatedQuery, Binding, GraphBuilder, GraphBuilder), Error> {
-        let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
-        let shape = maintained_view_bind_filter_literals_with_mode(
-            &shape,
-            &binding,
+    ) -> Result<
+        (
+            ValidatedQuery,
+            ValidatedQuery,
+            Binding,
+            GraphBuilder,
+            GraphBuilder,
+        ),
+        Error,
+    > {
+        let (composed_shape, composed_binding) =
+            self.policy_composed_shape_binding(shape, binding, identity)?;
+        let clean_shape = maintained_view_bind_filter_literals_with_mode(
+            &composed_shape,
+            &composed_binding,
             &self.catalogue.schema,
             ParamBindingMode::InlineAllReachableSeeds,
         )?;
-        self.ensure_maintained_view_query_slice(shape.query())?;
-        let terminal_tables = self.maintained_view_terminal_tables(&shape)?;
-        let result_current =
-            self.maintained_view_result_closure_graph(&shape, identity, &terminal_tables)?;
+        let retained_shape = maintained_view_bind_filter_literals_with_mode(
+            &composed_shape,
+            &composed_binding,
+            &self.catalogue.schema,
+            ParamBindingMode::RetainAllParams,
+        )?;
+        self.ensure_maintained_view_query_slice(clean_shape.query())?;
+        self.ensure_maintained_view_query_slice(retained_shape.query())?;
+        let terminal_tables = self.maintained_view_terminal_tables(&retained_shape)?;
+        let clean_graph = self.maintained_view_tagged_terminal_graph_for_shape(
+            &clean_shape,
+            identity,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        let retained_param_types = self.maintained_view_hidden_param_types_for_shape(
+            &retained_shape,
+            identity,
+            ParamBindingMode::RetainAllParams,
+        )?;
+        let output_fields = maintained_view_tagged_field_names(terminal_tables.values());
+        let (graph, routing_graph) =
+            if maintained_view_has_binding_dependent_reachable(&retained_shape) {
+                let retained_graph = self.maintained_view_tagged_terminal_graph_for_shape(
+                    &retained_shape,
+                    identity,
+                    ParamBindingMode::RetainAllParams,
+                )?;
+                let graph = retained_graph
+                    .clone()
+                    .project_fields(output_fields.iter().cloned().map(ProjectField::named));
+                let routing_graph = retained_graph.project_fields(
+                    output_fields
+                        .iter()
+                        .cloned()
+                        .map(ProjectField::named)
+                        .chain(
+                            retained_param_types
+                                .keys()
+                                .cloned()
+                                .map(ProjectField::named),
+                        ),
+                );
+                (graph, routing_graph)
+            } else {
+                let graph = maintained_view_public_terminal_graph_with_bound_params(
+                    clean_graph.clone(),
+                    terminal_tables.values(),
+                    &retained_param_types,
+                    &maintained_view_binding_source_shape(&retained_shape),
+                )?;
+                let routing_graph = attach_params_to_graph(
+                    clean_graph,
+                    &retained_param_types,
+                    output_fields,
+                    true,
+                    &maintained_view_binding_source_shape(&retained_shape),
+                )?;
+                (graph, routing_graph)
+            };
+        Ok((
+            clean_shape,
+            retained_shape,
+            composed_binding,
+            graph,
+            routing_graph,
+        ))
+    }
+
+    fn maintained_view_tagged_terminal_graph_for_shape(
+        &self,
+        shape: &ValidatedQuery,
+        identity: AuthorId,
+        policy_param_binding_mode: ParamBindingMode,
+    ) -> Result<GraphBuilder, Error> {
+        let terminal_tables = self.maintained_view_terminal_tables(shape)?;
+        let hidden_param_types = self.maintained_view_hidden_param_types_for_shape(
+            shape,
+            identity,
+            policy_param_binding_mode,
+        )?;
+        let result_current = self.maintained_view_result_closure_graph(
+            shape,
+            identity,
+            &terminal_tables,
+            policy_param_binding_mode,
+            &hidden_param_types,
+        )?;
         let mut graphs = vec![result_current];
         for table in terminal_tables.values() {
-            let policy_shape = self.maintained_view_table_policy_shape(table, identity)?;
+            let policy_shape = self.maintained_view_table_policy_shape_with_mode(
+                table,
+                identity,
+                policy_param_binding_mode,
+            )?;
             let (version_content, version_deletion) = self
                 .maintained_view_policy_readable_version_tagged_graphs(
                     table,
                     &policy_shape,
                     terminal_tables.values(),
+                    policy_param_binding_mode,
+                    &hidden_param_types,
                 )?;
             let (replacement_content, replacement_deletion) = self
                 .maintained_view_replacement_tagged_graphs(
                     table,
                     &policy_shape,
                     terminal_tables.values(),
+                    policy_param_binding_mode,
+                    &hidden_param_types,
                 )?;
             graphs.extend([
                 version_content,
@@ -2848,6 +2990,8 @@ where
                         reachable,
                         table,
                         terminal_tables.values(),
+                        policy_param_binding_mode,
+                        &hidden_param_types,
                     )?;
                 let (replacement_content, replacement_deletion) = self
                     .reachable_replacement_tagged_graphs(
@@ -2855,6 +2999,8 @@ where
                         reachable,
                         table,
                         terminal_tables.values(),
+                        policy_param_binding_mode,
+                        &hidden_param_types,
                     )?;
                 graphs.extend([
                     version_content,
@@ -2864,14 +3010,7 @@ where
                 ]);
             }
         }
-        let graph = GraphBuilder::union(graphs);
-        let routing_graph = maintained_view_internal_routing_graph(
-            graph.clone(),
-            &shape,
-            &graph_param_types(&shape, &self.catalogue.schema)?,
-            terminal_tables.values(),
-        );
-        Ok((shape, binding, graph, routing_graph))
+        Ok(GraphBuilder::union(graphs))
     }
 
     pub(crate) fn maintained_view_terminal_tables(
@@ -2928,10 +3067,24 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
     fn maintained_view_table_policy_shape(
         &self,
         table: &TableSchema,
         identity: AuthorId,
+    ) -> Result<ValidatedQuery, Error> {
+        self.maintained_view_table_policy_shape_with_mode(
+            table,
+            identity,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )
+    }
+
+    fn maintained_view_table_policy_shape_with_mode(
+        &self,
+        table: &TableSchema,
+        identity: AuthorId,
+        param_binding_mode: ParamBindingMode,
     ) -> Result<ValidatedQuery, Error> {
         let policy_shape =
             crate::query::Query::from(table.name.as_str()).validate(&self.catalogue.schema)?;
@@ -2944,12 +3097,42 @@ where
             ));
         }
         self.ensure_maintained_view_query_slice(policy_shape.query())?;
-        let policy_shape = maintained_view_bind_filter_literals(
+        let policy_shape = maintained_view_bind_filter_literals_with_mode(
             &policy_shape,
             &policy_binding,
             &self.catalogue.schema,
+            param_binding_mode,
         )?;
         Ok(policy_shape)
+    }
+
+    fn maintained_view_hidden_param_types_for_shape(
+        &self,
+        shape: &ValidatedQuery,
+        identity: AuthorId,
+        param_binding_mode: ParamBindingMode,
+    ) -> Result<BTreeMap<String, groove::schema::ColumnType>, Error> {
+        if matches!(
+            param_binding_mode,
+            ParamBindingMode::InlineAllReachableSeeds
+        ) {
+            return Ok(BTreeMap::new());
+        }
+        let mut param_types = maintained_view_hidden_param_column_types(&graph_param_types(
+            shape,
+            &self.catalogue.schema,
+        )?);
+        for table in self.maintained_view_terminal_tables(shape)?.values() {
+            let policy_shape = self.maintained_view_table_policy_shape_with_mode(
+                table,
+                identity,
+                param_binding_mode,
+            )?;
+            param_types.extend(maintained_view_hidden_param_column_types(
+                &graph_param_types(&policy_shape, &self.catalogue.schema)?,
+            ));
+        }
+        Ok(param_types)
     }
 
     fn maintained_view_policy_readable_version_tagged_graphs<'a>(
@@ -2957,7 +3140,12 @@ where
         table: &TableSchema,
         policy_shape: &ValidatedQuery,
         terminal_tables: impl IntoIterator<Item = &'a TableSchema> + Clone,
+        param_binding_mode: ParamBindingMode,
+        output_hidden_param_types: &BTreeMap<String, groove::schema::ColumnType>,
     ) -> Result<(GraphBuilder, GraphBuilder), Error> {
+        let filter_param_types = graph_param_types(policy_shape, &self.catalogue.schema)?;
+        let available_hidden_param_types =
+            hidden_maintained_view_param_types(&filter_param_types, param_binding_mode);
         let content = self.apply_maintained_view_filters(
             GraphBuilder::table(history_table_name(&table.name)),
             policy_shape,
@@ -2969,6 +3157,9 @@ where
             "version_content",
             "",
             terminal_tables.clone(),
+            output_hidden_param_types,
+            available_hidden_param_types,
+            "",
         ));
 
         let readable_current = self
@@ -2979,7 +3170,11 @@ where
                 table,
                 current_row_fields(table),
             )?
-            .project(["row_uuid"]);
+            .project(
+                std::iter::once("row_uuid".to_owned())
+                    .chain(available_hidden_param_types.keys().cloned())
+                    .collect::<Vec<_>>(),
+            );
         let deleted = GraphBuilder::table(register_table_name(&table.name))
             .filter(PredicateExpr::eq("_deletion", Value::Enum(0)));
         let deletion = GraphBuilder::join(deleted, readable_current, ["row_uuid"], ["row_uuid"])
@@ -2988,6 +3183,9 @@ where
                 "version_deletion",
                 "left.",
                 terminal_tables,
+                output_hidden_param_types,
+                available_hidden_param_types,
+                "right.",
             ));
 
         Ok((content, deletion))
@@ -2998,6 +3196,8 @@ where
         shape: &ValidatedQuery,
         identity: AuthorId,
         terminal_tables: &BTreeMap<String, TableSchema>,
+        param_binding_mode: ParamBindingMode,
+        output_hidden_param_types: &BTreeMap<String, groove::schema::ColumnType>,
     ) -> Result<GraphBuilder, Error> {
         let root_table = self.table(&shape.query().table)?.clone();
         let root_current = self.maintained_view_bound_query_current_graph(shape)?;
@@ -3006,8 +3206,23 @@ where
             &root_table,
             shape,
             identity,
+            param_binding_mode,
         )?;
         let result_current = apply_maintained_view_result_limit(result_current, shape.query());
+        let param_types = maintained_view_hidden_param_column_types(&graph_param_types(
+            shape,
+            &self.catalogue.schema,
+        )?);
+        let hidden_param_types =
+            hidden_maintained_view_param_types(&param_types, param_binding_mode);
+        let mut result_current_param_types = hidden_param_types.clone();
+        result_current_param_types.extend(self.include_policy_hidden_param_types(
+            &root_table,
+            &shape.query().includes,
+            identity,
+            param_binding_mode,
+            true,
+        )?);
         let mut graphs =
             vec![
                 result_current
@@ -3017,6 +3232,9 @@ where
                         "result_current",
                         "",
                         terminal_tables.values(),
+                        output_hidden_param_types,
+                        &result_current_param_types,
+                        "",
                     )),
             ];
 
@@ -3029,6 +3247,9 @@ where
                 identity,
                 terminal_tables,
                 true,
+                output_hidden_param_types,
+                hidden_param_types,
+                param_binding_mode,
             )?);
         }
 
@@ -3039,6 +3260,9 @@ where
                 include,
                 identity,
                 terminal_tables,
+                output_hidden_param_types,
+                &result_current_param_types,
+                param_binding_mode,
             )?);
         }
 
@@ -3049,6 +3273,7 @@ where
                 &root_table,
                 join,
                 identity,
+                param_binding_mode,
             )?;
             graphs.push(join_current.clone().project_fields(
                 maintained_view_tagged_content_fields(
@@ -3056,6 +3281,9 @@ where
                     "result_current",
                     "",
                     terminal_tables.values(),
+                    output_hidden_param_types,
+                    hidden_param_types,
+                    "",
                 ),
             ));
             for (column, target_table_name) in &join_table.references {
@@ -3067,6 +3295,9 @@ where
                     identity,
                     terminal_tables,
                     true,
+                    output_hidden_param_types,
+                    hidden_param_types,
+                    param_binding_mode,
                 )?);
             }
         }
@@ -3080,6 +3311,7 @@ where
         root_table: &TableSchema,
         shape: &ValidatedQuery,
         identity: AuthorId,
+        param_binding_mode: ParamBindingMode,
     ) -> Result<GraphBuilder, Error> {
         self.filter_root_current_by_required_include_modes(
             root,
@@ -3087,6 +3319,11 @@ where
             &shape.query().includes,
             identity,
             maintained_view_version_fields(root_table),
+            param_binding_mode,
+            hidden_maintained_view_param_types(
+                &graph_param_types(shape, &self.catalogue.schema)?,
+                param_binding_mode,
+            ),
         )
     }
 
@@ -3097,6 +3334,8 @@ where
         includes: &[Include],
         identity: AuthorId,
         root_fields: Vec<String>,
+        param_binding_mode: ParamBindingMode,
+        preserved_param_types: &BTreeMap<String, groove::schema::ColumnType>,
     ) -> Result<GraphBuilder, Error> {
         let mut graph = root;
         for include in includes {
@@ -3109,6 +3348,8 @@ where
                 include,
                 identity,
                 root_fields.clone(),
+                param_binding_mode,
+                preserved_param_types,
             )?;
         }
         Ok(graph)
@@ -3121,10 +3362,13 @@ where
         include: &Include,
         identity: AuthorId,
         root_fields: Vec<String>,
+        param_binding_mode: ParamBindingMode,
+        preserved_param_types: &BTreeMap<String, groove::schema::ColumnType>,
     ) -> Result<GraphBuilder, Error> {
         let segments = include.path.split('.').collect::<Vec<_>>();
         let mut current = root.clone();
         let mut current_table = root_table.clone();
+        let mut current_param_types = preserved_param_types.clone();
         for (idx, segment) in segments.iter().enumerate() {
             let target_table_name = current_table
                 .references
@@ -3132,8 +3376,22 @@ where
                 .ok_or(Error::InvalidStoredValue("include path was not validated"))?
                 .clone();
             let target_table = self.table(&target_table_name)?.clone();
-            let target =
-                self.maintained_view_policy_readable_current_graph(&target_table, identity)?;
+            let target_policy_shape = self.maintained_view_table_policy_shape_with_mode(
+                &target_table,
+                identity,
+                param_binding_mode,
+            )?;
+            let mut target_param_types = hidden_maintained_view_param_types(
+                &graph_param_types(&target_policy_shape, &self.catalogue.schema)?,
+                param_binding_mode,
+            )
+            .clone();
+            target_param_types.retain(|param, _| !current_param_types.contains_key(param));
+            let target = self.maintained_view_policy_readable_current_graph(
+                &target_table,
+                identity,
+                param_binding_mode,
+            )?;
             let source_key = format!("user_{segment}");
             let source = current.unwrap_nullable(source_key.clone());
             let mut fields = root_fields
@@ -3147,15 +3405,29 @@ where
                     format!("user_{next_segment}"),
                 ));
             }
+            fields.extend(
+                current_param_types
+                    .keys()
+                    .map(|param| ProjectField::renamed(format!("left.{param}"), param.clone())),
+            );
+            fields.extend(
+                target_param_types
+                    .keys()
+                    .map(|param| ProjectField::renamed(format!("right.{param}"), param.clone())),
+            );
             current = GraphBuilder::join(source, target, [source_key], ["row_uuid"])
                 .project_fields(fields);
+            current_param_types.extend(target_param_types);
             current_table = target_table;
         }
         Ok(
             GraphBuilder::join(root, current, ["row_uuid"], ["row_uuid"]).project_fields(
                 root_fields
                     .into_iter()
-                    .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                    .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                    .chain(current_param_types.keys().map(|param| {
+                        ProjectField::renamed(format!("right.{param}"), param.clone())
+                    })),
             ),
         )
     }
@@ -3178,8 +3450,10 @@ where
         &self,
         table: &TableSchema,
         identity: AuthorId,
+        param_binding_mode: ParamBindingMode,
     ) -> Result<GraphBuilder, Error> {
-        let policy_shape = self.maintained_view_table_policy_shape(table, identity)?;
+        let policy_shape =
+            self.maintained_view_table_policy_shape_with_mode(table, identity, param_binding_mode)?;
         let graph = self.maintained_view_content_current_with_version(table)?;
         self.apply_maintained_view_filters(
             graph,
@@ -3187,6 +3461,45 @@ where
             table,
             maintained_view_version_fields(table),
         )
+    }
+
+    fn include_policy_hidden_param_types(
+        &self,
+        root_table: &TableSchema,
+        includes: &[Include],
+        identity: AuthorId,
+        param_binding_mode: ParamBindingMode,
+        required_only: bool,
+    ) -> Result<BTreeMap<String, groove::schema::ColumnType>, Error> {
+        let mut param_types = BTreeMap::new();
+        for include in includes {
+            if required_only
+                && !include.require
+                && include.join_mode != crate::query::JoinMode::Inner
+            {
+                continue;
+            }
+            let mut current_table = root_table.clone();
+            for segment in include.path.split('.') {
+                let target_table_name = current_table
+                    .references
+                    .get(segment)
+                    .ok_or(Error::InvalidStoredValue("include path was not validated"))?
+                    .clone();
+                let target_table = self.table(&target_table_name)?.clone();
+                let policy_shape = self.maintained_view_table_policy_shape_with_mode(
+                    &target_table,
+                    identity,
+                    param_binding_mode,
+                )?;
+                let policy_param_types = graph_param_types(&policy_shape, &self.catalogue.schema)?;
+                param_types.extend(maintained_view_hidden_param_column_types(
+                    hidden_maintained_view_param_types(&policy_param_types, param_binding_mode),
+                ));
+                current_table = target_table;
+            }
+        }
+        Ok(param_types)
     }
 
     fn maintained_view_reference_result_graph(
@@ -3197,24 +3510,57 @@ where
         identity: AuthorId,
         terminal_tables: &BTreeMap<String, TableSchema>,
         unwrap_source: bool,
+        output_param_types: &BTreeMap<String, groove::schema::ColumnType>,
+        source_param_types: &BTreeMap<String, groove::schema::ColumnType>,
+        param_binding_mode: ParamBindingMode,
     ) -> Result<GraphBuilder, Error> {
-        let target = self.maintained_view_policy_readable_current_graph(target_table, identity)?;
+        let target_policy_shape = self.maintained_view_table_policy_shape_with_mode(
+            target_table,
+            identity,
+            param_binding_mode,
+        )?;
+        let mut target_param_types = hidden_maintained_view_param_types(
+            &graph_param_types(&target_policy_shape, &self.catalogue.schema)?,
+            param_binding_mode,
+        )
+        .clone();
+        target_param_types.retain(|param, _| !source_param_types.contains_key(param));
+        let mut available_param_types = source_param_types.clone();
+        available_param_types.extend(target_param_types.clone());
+        let target = self.maintained_view_policy_readable_current_graph(
+            target_table,
+            identity,
+            param_binding_mode,
+        )?;
         let source_key = format!("user_{source_column}");
         let source = if unwrap_source {
             source.unwrap_nullable(source_key.clone())
         } else {
             source
         };
-        Ok(
+        let joined =
             GraphBuilder::join(source, target, [source_key], ["row_uuid"]).project_fields(
-                maintained_view_tagged_content_fields(
-                    target_table,
-                    "result_current",
-                    "right.",
-                    terminal_tables.values(),
-                ),
-            ),
-        )
+                maintained_view_version_fields(target_table)
+                    .into_iter()
+                    .map(|field| ProjectField::renamed(format!("right.{field}"), field))
+                    .chain(
+                        source_param_types.keys().map(|param| {
+                            ProjectField::renamed(format!("left.{param}"), param.clone())
+                        }),
+                    )
+                    .chain(target_param_types.keys().map(|param| {
+                        ProjectField::renamed(format!("right.{param}"), param.clone())
+                    })),
+            );
+        Ok(joined.project_fields(maintained_view_tagged_content_fields(
+            target_table,
+            "result_current",
+            "",
+            terminal_tables.values(),
+            output_param_types,
+            &available_param_types,
+            "",
+        )))
     }
 
     fn maintained_view_include_result_graphs(
@@ -3224,10 +3570,14 @@ where
         include: &Include,
         identity: AuthorId,
         terminal_tables: &BTreeMap<String, TableSchema>,
+        output_param_types: &BTreeMap<String, groove::schema::ColumnType>,
+        initial_available_param_types: &BTreeMap<String, groove::schema::ColumnType>,
+        param_binding_mode: ParamBindingMode,
     ) -> Result<Vec<GraphBuilder>, Error> {
         let mut graphs = Vec::new();
         let mut current = root;
         let mut current_table = root_table.clone();
+        let mut available_param_types = initial_available_param_types.clone();
         for segment in include.path.split('.') {
             let target_table_name = current_table
                 .references
@@ -3235,16 +3585,37 @@ where
                 .ok_or(Error::InvalidStoredValue("include path was not validated"))?
                 .clone();
             let target_table = self.table(&target_table_name)?.clone();
-            let target =
-                self.maintained_view_policy_readable_current_graph(&target_table, identity)?;
+            let target_policy_shape = self.maintained_view_table_policy_shape_with_mode(
+                &target_table,
+                identity,
+                param_binding_mode,
+            )?;
+            let mut target_param_types = hidden_maintained_view_param_types(
+                &graph_param_types(&target_policy_shape, &self.catalogue.schema)?,
+                param_binding_mode,
+            )
+            .clone();
+            target_param_types.retain(|param, _| !available_param_types.contains_key(param));
+            let target = self.maintained_view_policy_readable_current_graph(
+                &target_table,
+                identity,
+                param_binding_mode,
+            )?;
             let source_key = format!("user_{segment}");
             let source = current.unwrap_nullable(source_key.clone());
             current = GraphBuilder::join(source, target, [source_key], ["row_uuid"])
                 .project_fields(
                     maintained_view_version_fields(&target_table)
                         .into_iter()
-                        .map(|field| ProjectField::renamed(format!("right.{field}"), field)),
+                        .map(|field| ProjectField::renamed(format!("right.{field}"), field))
+                        .chain(available_param_types.keys().map(|param| {
+                            ProjectField::renamed(format!("left.{param}"), param.clone())
+                        }))
+                        .chain(target_param_types.keys().map(|param| {
+                            ProjectField::renamed(format!("right.{param}"), param.clone())
+                        })),
                 );
+            available_param_types.extend(target_param_types);
             graphs.push(
                 current
                     .clone()
@@ -3253,6 +3624,9 @@ where
                         "result_current",
                         "",
                         terminal_tables.values(),
+                        output_param_types,
+                        &available_param_types,
+                        "",
                     )),
             );
             current_table = target_table;
@@ -3266,6 +3640,7 @@ where
         root_table: &TableSchema,
         join: &JoinVia,
         identity: AuthorId,
+        param_binding_mode: ParamBindingMode,
     ) -> Result<GraphBuilder, Error> {
         let join_table = self.table(&join.table)?.clone();
         let mut join_query = crate::query::Query::from(join.table.as_str());
@@ -3273,14 +3648,21 @@ where
             join_query = join_query.filter(predicate.clone());
         }
         let join_shape = join_query.validate(&self.catalogue.schema)?;
-        let join_shape =
-            self.maintained_view_bind_filter_literals_for_empty_binding(&join_shape, identity)?;
+        let join_shape = self.maintained_view_bind_filter_literals_for_empty_binding_with_mode(
+            &join_shape,
+            identity,
+            param_binding_mode,
+        )?;
+        let join_param_types = graph_param_types(&join_shape, &self.catalogue.schema)?;
+        let join_hidden_param_types =
+            hidden_maintained_view_param_types(&join_param_types, param_binding_mode);
         let join_current = self.apply_maintained_view_policy_to_current_graph(
             self.maintained_view_content_current_with_version(&join_table)?,
             &join_table,
             &join_shape,
             identity,
             maintained_view_version_fields(&join_table),
+            param_binding_mode,
         )?;
         let root = if let Some(lookup) = &join.source_lookup {
             let lookup_table = self.table(&lookup.table)?.clone();
@@ -3326,22 +3708,29 @@ where
             GraphBuilder::join(join_current, eligible, ["row_uuid"], ["row_uuid"]).project_fields(
                 maintained_view_version_fields(&join_table)
                     .into_iter()
-                    .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                    .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                    .chain(join_hidden_param_types.keys().map(|param| {
+                        ProjectField::renamed(format!("left.{param}"), param.clone())
+                    })),
             )
         } else {
             GraphBuilder::join(root, join_current, [left_key], [join_key]).project_fields(
                 maintained_view_version_fields(&join_table)
                     .into_iter()
-                    .map(|field| ProjectField::renamed(format!("right.{field}"), field)),
+                    .map(|field| ProjectField::renamed(format!("right.{field}"), field))
+                    .chain(join_hidden_param_types.keys().map(|param| {
+                        ProjectField::renamed(format!("right.{param}"), param.clone())
+                    })),
             )
         };
         Ok(joined)
     }
 
-    fn maintained_view_bind_filter_literals_for_empty_binding(
+    fn maintained_view_bind_filter_literals_for_empty_binding_with_mode(
         &self,
         shape: &ValidatedQuery,
         identity: AuthorId,
+        mode: ParamBindingMode,
     ) -> Result<ValidatedQuery, Error> {
         let mut values = BTreeMap::new();
         insert_claim_bindings(
@@ -3351,7 +3740,12 @@ where
             self.session_claims.get(&identity),
         );
         let binding = shape.bind(values)?;
-        maintained_view_bind_filter_literals(shape, &binding, &self.catalogue.schema)
+        maintained_view_bind_filter_literals_with_mode(
+            shape,
+            &binding,
+            &self.catalogue.schema,
+            mode,
+        )
     }
 
     fn apply_maintained_view_policy_to_current_graph(
@@ -3361,6 +3755,7 @@ where
         shape: &ValidatedQuery,
         identity: AuthorId,
         output_fields: Vec<String>,
+        param_binding_mode: ParamBindingMode,
     ) -> Result<GraphBuilder, Error> {
         let mut values = BTreeMap::new();
         insert_claim_bindings(
@@ -3372,10 +3767,11 @@ where
         let base_binding = shape.bind(values)?;
         let (policy_shape, policy_binding) =
             self.policy_composed_shape_binding(shape, &base_binding, identity)?;
-        let policy_shape = maintained_view_bind_filter_literals(
+        let policy_shape = maintained_view_bind_filter_literals_with_mode(
             &policy_shape,
             &policy_binding,
             &self.catalogue.schema,
+            param_binding_mode,
         )?;
         self.apply_maintained_view_filters(graph, &policy_shape, table, output_fields)
     }
@@ -3385,7 +3781,12 @@ where
         table: &TableSchema,
         policy_shape: &ValidatedQuery,
         terminal_tables: impl IntoIterator<Item = &'a TableSchema> + Clone,
+        param_binding_mode: ParamBindingMode,
+        output_hidden_param_types: &BTreeMap<String, groove::schema::ColumnType>,
     ) -> Result<(GraphBuilder, GraphBuilder), Error> {
+        let filter_param_types = graph_param_types(policy_shape, &self.catalogue.schema)?;
+        let available_hidden_param_types =
+            hidden_maintained_view_param_types(&filter_param_types, param_binding_mode);
         let visible_content_keys = visible_current_graph(table, DurabilityTier::Global).project([
             "row_uuid",
             "tx_time",
@@ -3409,6 +3810,9 @@ where
             "replacement_content",
             "",
             terminal_tables.clone(),
+            output_hidden_param_types,
+            available_hidden_param_types,
+            "",
         ));
 
         let readable_current = self
@@ -3419,7 +3823,11 @@ where
                 table,
                 current_row_fields(table),
             )?
-            .project(["row_uuid"]);
+            .project(
+                std::iter::once("row_uuid".to_owned())
+                    .chain(available_hidden_param_types.keys().cloned())
+                    .collect::<Vec<_>>(),
+            );
         let deletion_current_keys =
             GraphBuilder::table(register_global_current_table_name(&table.name)).project([
                 "row_uuid",
@@ -3439,6 +3847,9 @@ where
                 "replacement_deletion",
                 "left.",
                 terminal_tables,
+                output_hidden_param_types,
+                available_hidden_param_types,
+                "right.",
             ));
 
         Ok((content, deletion))
@@ -3485,17 +3896,41 @@ where
             [query_field(&reachable.edge_member_column)],
             ["reachable_team".to_owned()],
         )
-        .project_fields([ProjectField::renamed("left.row_uuid", "row_uuid")]);
+        .project_fields([
+            ProjectField::renamed("left.row_uuid", "row_uuid"),
+            ProjectField::renamed_resolved(2, reachable_graphs.seed_param.clone()),
+        ])
+        .project_fields([
+            ProjectField::named("row_uuid"),
+            ProjectField::nullable(
+                reachable_graphs.seed_param.clone(),
+                reachable_graphs.seed_param.clone(),
+            ),
+        ]);
         Ok(GraphBuilder::join(
             edge_current,
             reachable_edge_keys,
             ["row_uuid"],
             ["row_uuid"],
         )
+        .project_fields({
+            let left_fields = maintained_view_version_fields(edge_table);
+            let seed_idx = left_fields.len() + 1;
+            left_fields
+                .into_iter()
+                .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                .chain(
+                    param_types
+                        .keys()
+                        .map(|param| ProjectField::renamed_resolved(seed_idx, param.clone())),
+                )
+                .collect::<Vec<_>>()
+        })
         .project_fields(
             maintained_view_version_fields(edge_table)
                 .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                .map(ProjectField::named)
+                .chain(param_types.keys().cloned().map(ProjectField::named)),
         ))
     }
 
@@ -3533,21 +3968,45 @@ where
         );
         let reachable_access_keys = GraphBuilder::join(
             access_keyed,
-            reachable_graphs.closure.project(["reachable_team"]),
+            reachable_graphs.closure.project(["team", "reachable_team"]),
             [query_field(&reachable.access_team_column)],
             ["reachable_team".to_owned()],
         )
-        .project_fields([ProjectField::renamed("left.row_uuid", "row_uuid")]);
+        .project_fields([
+            ProjectField::renamed("left.row_uuid", "row_uuid"),
+            ProjectField::renamed_resolved(2, reachable_graphs.seed_param.clone()),
+        ])
+        .project_fields([
+            ProjectField::named("row_uuid"),
+            ProjectField::nullable(
+                reachable_graphs.seed_param.clone(),
+                reachable_graphs.seed_param.clone(),
+            ),
+        ]);
         Ok(GraphBuilder::join(
             access_current,
             reachable_access_keys,
             ["row_uuid"],
             ["row_uuid"],
         )
+        .project_fields({
+            let left_fields = maintained_view_version_fields(access_table);
+            let seed_idx = left_fields.len() + 1;
+            left_fields
+                .into_iter()
+                .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                .chain(
+                    param_types
+                        .keys()
+                        .map(|param| ProjectField::renamed_resolved(seed_idx, param.clone())),
+                )
+                .collect::<Vec<_>>()
+        })
         .project_fields(
             maintained_view_version_fields(access_table)
                 .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                .map(ProjectField::named)
+                .chain(param_types.keys().cloned().map(ProjectField::named)),
         ))
     }
 
@@ -3557,8 +4016,13 @@ where
         reachable: &crate::query::ReachableVia,
         table: &TableSchema,
         terminal_tables: impl IntoIterator<Item = &'a TableSchema> + Clone,
+        param_binding_mode: ParamBindingMode,
+        output_hidden_param_types: &BTreeMap<String, groove::schema::ColumnType>,
     ) -> Result<(GraphBuilder, GraphBuilder), Error> {
         self.ensure_reachable_constituent_table(reachable, table)?;
+        let param_types = graph_param_types(shape, &self.catalogue.schema)?;
+        let available_hidden_param_types =
+            hidden_maintained_view_param_types(&param_types, param_binding_mode);
         let readable_current = match table.name.as_str() {
             name if name == reachable.edge_table => {
                 self.reachable_edge_constituent_current_graph(shape, reachable)?
@@ -3568,24 +4032,35 @@ where
             }
             _ => unreachable!("checked above"),
         }
-        .project(["row_uuid"]);
-        let content = GraphBuilder::join(
-            GraphBuilder::table(history_table_name(&table.name)),
-            readable_current.clone(),
-            ["row_uuid"],
-            ["row_uuid"],
-        )
-        .project_fields(
-            maintained_view_version_fields(table)
-                .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
-        )
-        .project_fields(maintained_view_tagged_content_fields(
-            table,
-            "version_content",
-            "",
-            terminal_tables.clone(),
-        ));
+        .project(
+            std::iter::once("row_uuid".to_owned())
+                .chain(available_hidden_param_types.keys().cloned())
+                .collect::<Vec<_>>(),
+        );
+        let content =
+            GraphBuilder::join(
+                GraphBuilder::table(history_table_name(&table.name)),
+                readable_current.clone(),
+                ["row_uuid"],
+                ["row_uuid"],
+            )
+            .project_fields(
+                maintained_view_version_fields(table)
+                    .into_iter()
+                    .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                    .chain(available_hidden_param_types.keys().map(|param| {
+                        ProjectField::renamed(format!("right.{param}"), param.clone())
+                    })),
+            )
+            .project_fields(maintained_view_tagged_content_fields(
+                table,
+                "version_content",
+                "",
+                terminal_tables.clone(),
+                output_hidden_param_types,
+                available_hidden_param_types,
+                "",
+            ));
         let deleted = GraphBuilder::table(register_table_name(&table.name))
             .filter(PredicateExpr::eq("_deletion", Value::Enum(0)));
         let deletion = GraphBuilder::join(deleted, readable_current, ["row_uuid"], ["row_uuid"])
@@ -3594,6 +4069,9 @@ where
                 "version_deletion",
                 "left.",
                 terminal_tables,
+                output_hidden_param_types,
+                available_hidden_param_types,
+                "right.",
             ));
         Ok((content, deletion))
     }
@@ -3604,8 +4082,13 @@ where
         reachable: &crate::query::ReachableVia,
         table: &TableSchema,
         terminal_tables: impl IntoIterator<Item = &'a TableSchema> + Clone,
+        param_binding_mode: ParamBindingMode,
+        output_hidden_param_types: &BTreeMap<String, groove::schema::ColumnType>,
     ) -> Result<(GraphBuilder, GraphBuilder), Error> {
         self.ensure_reachable_constituent_table(reachable, table)?;
+        let param_types = graph_param_types(shape, &self.catalogue.schema)?;
+        let available_hidden_param_types =
+            hidden_maintained_view_param_types(&param_types, param_binding_mode);
         let content = match table.name.as_str() {
             name if name == reachable.edge_table => {
                 self.reachable_edge_constituent_current_graph(shape, reachable)?
@@ -3620,8 +4103,15 @@ where
             "replacement_content",
             "",
             terminal_tables.clone(),
+            output_hidden_param_types,
+            available_hidden_param_types,
+            "",
         ));
-        let readable_current = content.clone().project(["row_uuid"]);
+        let readable_current = content.clone().project(
+            std::iter::once("row_uuid".to_owned())
+                .chain(available_hidden_param_types.keys().cloned())
+                .collect::<Vec<_>>(),
+        );
         let deletion_current_keys =
             GraphBuilder::table(register_global_current_table_name(&table.name)).project([
                 "row_uuid",
@@ -3641,6 +4131,9 @@ where
                 "replacement_deletion",
                 "left.",
                 terminal_tables,
+                output_hidden_param_types,
+                available_hidden_param_types,
+                "right.",
             ));
         Ok((content, deletion))
     }
@@ -3753,7 +4246,10 @@ where
         table: &TableSchema,
         output_fields: Vec<String>,
     ) -> Result<GraphBuilder, Error> {
-        let param_types = graph_param_types(shape, &self.catalogue.schema)?;
+        let param_types = maintained_view_hidden_param_column_types(&graph_param_types(
+            shape,
+            &self.catalogue.schema,
+        )?);
         self.apply_lowered_query_clauses(
             graph,
             shape,
@@ -3763,7 +4259,7 @@ where
                 tier: DurabilityTier::Global,
                 output_fields,
                 keep_binding_params_in_output: true,
-                binding_source_shape: query_binding_source_shape(shape),
+                binding_source_shape: maintained_view_binding_source_shape(shape),
                 source_overrides: BTreeMap::new(),
                 table_overrides: BTreeMap::new(),
             },
@@ -3815,7 +4311,9 @@ where
             source_overrides,
             binding_source_shape,
         )?;
-        Ok(GraphBuilder::join(
+        let seed_param = reachable_graphs.seed_param.clone();
+        let seed_field_idx = current_row_fields(access_table).len();
+        let graph = GraphBuilder::join(
             reachable_graphs.access_current,
             reachable_graphs.closure,
             [query_field(&reachable.access_team_column)],
@@ -3826,8 +4324,19 @@ where
                 format!("left.{}", query_field(&reachable.access_row_column)),
                 "access_row_uuid",
             ),
-            ProjectField::renamed("right.team", reachable_graphs.seed_param),
-        ]))
+            ProjectField::renamed_resolved(seed_field_idx, seed_param.clone()),
+        ]);
+        if param_types
+            .get(&seed_param)
+            .is_some_and(|column_type| matches!(column_type.value_type(), ValueType::Nullable(_)))
+        {
+            Ok(graph.project_fields([
+                ProjectField::named("access_row_uuid"),
+                ProjectField::nullable(seed_param.clone(), seed_param),
+            ]))
+        } else {
+            Ok(graph)
+        }
     }
 
     pub(crate) fn lower_reachable_graph_parts(
@@ -3885,18 +4394,25 @@ where
             }
         };
         let seed = match &reachable.from {
-            Operand::Param(param) => GraphBuilder::binding_source(
-                binding_source_shape.to_owned(),
-                RecordDescriptor::new(
-                    param_types
-                        .iter()
-                        .map(|(name, column_type)| (name.clone(), column_type.value_type())),
-                ),
-            )
-            .project_fields([
-                ProjectField::renamed(param.clone(), "team"),
-                ProjectField::renamed(param.clone(), "reachable_team"),
-            ]),
+            Operand::Param(param) => {
+                let mut seed = GraphBuilder::binding_source(
+                    binding_source_shape.to_owned(),
+                    RecordDescriptor::new(
+                        param_types
+                            .iter()
+                            .map(|(name, column_type)| (name.clone(), column_type.value_type())),
+                    ),
+                );
+                if param_types.get(param).is_some_and(|column_type| {
+                    matches!(column_type.value_type(), ValueType::Nullable(_))
+                }) {
+                    seed = seed.unwrap_nullable(param.clone());
+                }
+                seed.project_fields([
+                    ProjectField::renamed(param.clone(), "team"),
+                    ProjectField::renamed(param.clone(), "reachable_team"),
+                ])
+            }
             Operand::Literal(Value::Uuid(seed)) => GraphBuilder::values(
                 team_desc.clone(),
                 [[Value::Uuid(*seed), Value::Uuid(*seed)]],
@@ -4799,12 +5315,18 @@ fn apply_filters_with_predicate_params(
     keep_params: bool,
     binding_source_shape: &str,
 ) -> Result<GraphBuilder, Error> {
-    if predicate_params(predicates).is_empty() {
+    let predicate_params = predicate_params(predicates);
+    if predicate_params.is_empty() {
         return apply_query_filters(graph, table, predicates);
     }
+    let param_types = param_types
+        .iter()
+        .filter(|(param, _)| predicate_params.contains(*param))
+        .map(|(param, column_type)| (param.clone(), column_type.clone()))
+        .collect::<BTreeMap<_, _>>();
     let graph = attach_params_to_graph(
         graph,
-        param_types,
+        &param_types,
         output_fields.clone(),
         keep_params,
         binding_source_shape,
@@ -4891,6 +5413,7 @@ fn reachable_seed_param(reachable: &crate::query::ReachableVia) -> Result<String
     }
 }
 
+#[cfg(test)]
 fn maintained_view_bind_filter_literals(
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -4905,9 +5428,21 @@ fn maintained_view_bind_filter_literals(
 }
 
 #[derive(Clone, Copy)]
-enum ParamBindingMode {
+pub(crate) enum ParamBindingMode {
     InlineAllReachableSeeds,
     RetainAllParams,
+}
+
+fn hidden_maintained_view_param_types(
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    mode: ParamBindingMode,
+) -> &BTreeMap<String, groove::schema::ColumnType> {
+    static EMPTY: std::sync::LazyLock<BTreeMap<String, groove::schema::ColumnType>> =
+        std::sync::LazyLock::new(BTreeMap::new);
+    match mode {
+        ParamBindingMode::InlineAllReachableSeeds => &EMPTY,
+        ParamBindingMode::RetainAllParams => param_types,
+    }
 }
 
 fn maintained_view_bind_filter_literals_with_mode(
@@ -5226,6 +5761,21 @@ fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bo
     }
 }
 
+fn maintained_view_has_binding_dependent_reachable(shape: &ValidatedQuery) -> bool {
+    fn query_has_binding_dependent_reachable(query: &crate::query::Query) -> bool {
+        query
+            .reachable
+            .iter()
+            .any(|reachable| matches!(reachable.from, Operand::Param(_)))
+            || query
+                .policy_branches
+                .iter()
+                .any(|branch| query_has_binding_dependent_reachable(&branch.as_query(&query.table)))
+    }
+
+    query_has_binding_dependent_reachable(shape.query())
+}
+
 fn maintained_view_bind_operand(
     operand: Operand,
     binding: &Binding,
@@ -5319,58 +5869,23 @@ fn include_deleted_query_binding_source_shape(
 }
 
 fn maintained_view_binding_source_shape(shape: &ValidatedQuery) -> String {
-    query_binding_source_shape(shape)
+    format!("jazz-maintained-query:{}", shape.shape_id().0)
 }
 
-fn maintained_view_internal_routing_graph<'a>(
+fn maintained_view_public_terminal_graph_with_bound_params<'a>(
     graph: GraphBuilder,
-    shape: &ValidatedQuery,
-    param_types: &BTreeMap<String, groove::schema::ColumnType>,
     terminal_tables: impl IntoIterator<Item = &'a TableSchema>,
-) -> GraphBuilder {
-    if param_types.is_empty() {
-        return graph;
-    }
-    // This graph is consumed only by Groove prepared-shape routing. Subscriber
-    // rows come from the clean maintained terminal graph paired with it.
-    const ROUTING_JOIN: &str = "__jazz_maintained_view_binding_join";
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    binding_source_shape: &str,
+) -> Result<GraphBuilder, Error> {
     let output_fields = maintained_view_tagged_field_names(terminal_tables);
-    let graph = graph.project_fields(
-        output_fields
-            .iter()
-            .cloned()
-            .map(ProjectField::named)
-            .chain([ProjectField::literal(ROUTING_JOIN, Value::U8(0))]),
-    );
-    let binding = GraphBuilder::binding_source(
-        maintained_view_binding_source_shape(shape),
-        RecordDescriptor::new(param_types.keys().map(|name| {
-            (
-                name.clone(),
-                param_types
-                    .get(name)
-                    .expect("graph_param_types includes every shape param")
-                    .value_type(),
-            )
-        })),
-    )
-    .project_fields(
-        param_types
-            .keys()
-            .cloned()
-            .map(ProjectField::named)
-            .chain([ProjectField::literal(ROUTING_JOIN, Value::U8(0))]),
-    );
-    GraphBuilder::join(graph, binding, [ROUTING_JOIN], [ROUTING_JOIN]).project_fields(
-        output_fields
-            .into_iter()
-            .map(|field| ProjectField::renamed(format!("left.{field}"), field))
-            .chain(
-                param_types
-                    .keys()
-                    .cloned()
-                    .map(|param| ProjectField::renamed(format!("right.{param}"), param)),
-            ),
+    let graph = graph.project_fields(output_fields.iter().cloned().map(ProjectField::named));
+    attach_params_to_graph(
+        graph,
+        param_types,
+        output_fields,
+        true,
+        binding_source_shape,
     )
 }
 
@@ -6080,6 +6595,9 @@ fn maintained_view_tagged_content_fields<'a>(
     event_kind: &str,
     prefix: &str,
     terminal_tables: impl IntoIterator<Item = &'a TableSchema>,
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    available_param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    param_prefix: &str,
 ) -> Vec<ProjectField> {
     let source = |field: &str| format!("{prefix}{field}");
     let mut fields = vec![
@@ -6115,6 +6633,12 @@ fn maintained_view_tagged_content_fields<'a>(
                 }
             }),
     );
+    append_maintained_view_param_fields(
+        &mut fields,
+        param_types,
+        available_param_types,
+        param_prefix,
+    );
     fields
 }
 
@@ -6149,6 +6673,9 @@ fn maintained_view_tagged_deletion_fields<'a>(
     event_kind: &str,
     prefix: &str,
     terminal_tables: impl IntoIterator<Item = &'a TableSchema>,
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    available_param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    param_prefix: &str,
 ) -> Vec<ProjectField> {
     let source = |field: &str| format!("{prefix}{field}");
     let mut fields = vec![
@@ -6173,7 +6700,53 @@ fn maintained_view_tagged_deletion_fields<'a>(
                 )
             }),
     );
+    append_maintained_view_param_fields(
+        &mut fields,
+        param_types,
+        available_param_types,
+        param_prefix,
+    );
     fields
+}
+
+fn append_maintained_view_param_fields(
+    fields: &mut Vec<ProjectField>,
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    available_param_types: &BTreeMap<String, groove::schema::ColumnType>,
+    prefix: &str,
+) {
+    fields.extend(param_types.iter().map(|(param, column_type)| {
+        if available_param_types.contains_key(param) {
+            ProjectField::renamed(format!("{prefix}{param}"), param.clone())
+        } else {
+            ProjectField::null_typed(
+                param.clone(),
+                maintained_view_hidden_param_value_type(column_type),
+            )
+        }
+    }));
+}
+
+fn maintained_view_hidden_param_value_type(column_type: &groove::schema::ColumnType) -> ValueType {
+    match column_type.value_type() {
+        ValueType::Nullable(_) => column_type.value_type(),
+        value_type => ValueType::Nullable(Box::new(value_type)),
+    }
+}
+
+fn maintained_view_hidden_param_column_types(
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+) -> BTreeMap<String, groove::schema::ColumnType> {
+    param_types
+        .iter()
+        .map(|(name, column_type)| {
+            let column_type = match column_type {
+                groove::schema::ColumnType::Nullable(_) => column_type.clone(),
+                column_type => groove::schema::ColumnType::Nullable(Box::new(column_type.clone())),
+            };
+            (name.clone(), column_type)
+        })
+        .collect()
 }
 
 fn maintained_view_terminal_user_columns<'a>(

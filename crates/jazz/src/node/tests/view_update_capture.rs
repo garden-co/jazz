@@ -323,8 +323,20 @@ impl MaintainedSubscriptionViewSubscription {
             peer_complete_tx_payloads: BTreeSet::new(),
         };
         let output_tables = core.maintained_view_terminal_tables(shape).unwrap();
-        let result_row_adds = transitions
+        let result_row_adds: Vec<ResultRowEntry> = transitions
             .adds
+            .into_iter()
+            .filter(|entry| output_tables.contains_key(entry.0.as_str()))
+            .collect();
+        let result_row_adds = core
+            .expand_maintained_view_result_rows(
+                shape,
+                binding,
+                result_row_adds,
+                identity,
+                DurabilityTier::Global,
+            )
+            .unwrap()
             .into_iter()
             .filter(|entry| output_tables.contains_key(entry.0.as_str()))
             .collect();
