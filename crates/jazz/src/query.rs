@@ -1726,7 +1726,7 @@ fn validate_array_subquery(
     let child = table(schema, &subquery.table)?;
     let parent_type = planner_column_type(parent, &subquery.outer_column)?;
     let child_type = planner_column_type(&child, &subquery.inner_column)?;
-    if !column_types_comparable(parent_type, child_type) {
+    if !in_operand_types_compatible(parent_type, child_type) {
         return Err(QueryError::OperandTypeMismatch);
     }
     for predicate in &subquery.filters {
