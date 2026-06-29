@@ -1347,6 +1347,7 @@ export class Db {
         throw closeError;
       }
       await resetClient!.clearClientStorage();
+      await resetClient!.shutdown();
     } finally {
       this.clients.clear();
       this.clientSchemas.clear();

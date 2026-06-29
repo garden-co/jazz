@@ -65,6 +65,11 @@ export type PersistentBrowserWriteRequest =
 
 export type PersistentBrowserOpfsOwnerRequest =
   | OpenRequest
+  | {
+      id: number;
+      method: "destroyBrowserStorage";
+      args: [runtimeSources: RuntimeSourcesConfig | undefined, dbName: string];
+    }
   | PersistentBrowserWriteRequest
   | {
       id: number;
@@ -108,7 +113,7 @@ export type PersistentBrowserOpfsOwnerRequest =
       ];
     }
   | { id: number; method: "unsubscribe"; args: [handle: number] }
-  | { id: number; method: "clearClientStorage"; args: [] }
+  | { id: number; method: "closeForStorageClear"; args: [] }
   | { id: number; method: "connect"; args: [url: string, authJson: string] }
   | { id: number; method: "disconnect"; args: [] }
   | { id: number; method: "updateAuth"; args: [authJson: string] };
