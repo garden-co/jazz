@@ -2,7 +2,18 @@ name: Promote inspector production
 
 on:
   workflow_dispatch:
+    inputs:
+      deploy-branch:
+        description: "Vercel deployment branch to promote"
+        required: false
+        default: "main"
+        type: string
   workflow_call:
+    inputs:
+      deploy-branch:
+        required: false
+        default: "main"
+        type: string
 
 jobs:
   promote-inspector-production:
@@ -17,6 +28,7 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_INSPECTOR_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
+      VERCEL_DEPLOY_BRANCH: ${{ inputs.deploy-branch }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -44,7 +56,7 @@ jobs:
 
       - name: Promote staged inspector deployment
         if: steps.inspector-deployment.outputs.already_promoted != 'true'
-        run: pnpm dlx vercel@latest promote "${{ steps.inspector-deployment.outputs.deployment_url }}" --yes --timeout=5m --token="${VERCEL_TOKEN}"
+        run: pnpm dlx vercel@latest promote "${{ steps.inspector-deployment.outputs.deployment_url }}" --yes --timeout=5m --token="${VERCEL_TOKEN}" --scope="${VERCEL_ORG_ID}"
 
       - name: Skip already promoted inspector deployment
         if: steps.inspector-deployment.outputs.already_promoted == 'true'
