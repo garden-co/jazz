@@ -236,6 +236,15 @@ pub struct ColumnDescriptor {
     /// Optional per-column merge strategy. Absence means MRCA-relative LWW.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_strategy: Option<ColumnMergeStrategy>,
+    /// Optional Jazz-level large-value behavior for byte columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large_value: Option<LargeValueKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LargeValueKind {
+    Text,
+    Blob,
 }
 
 impl ColumnDescriptor {
@@ -247,6 +256,7 @@ impl ColumnDescriptor {
             references: None,
             default: None,
             merge_strategy: None,
+            large_value: None,
         }
     }
 
@@ -272,6 +282,11 @@ impl ColumnDescriptor {
 
     pub fn merge_strategy(mut self, strategy: ColumnMergeStrategy) -> Self {
         self.merge_strategy = Some(strategy);
+        self
+    }
+
+    pub fn large_value(mut self, kind: LargeValueKind) -> Self {
+        self.large_value = Some(kind);
         self
     }
 

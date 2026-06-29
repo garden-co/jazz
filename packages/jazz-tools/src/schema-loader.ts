@@ -144,7 +144,14 @@ function wasmColumnToAst(column: ColumnDescriptor): Column {
         : wasmValueToDefault(column.default, column.column_type),
     references: column.references,
     mergeStrategy: columnMergeStrategyToAst(column.merge_strategy),
+    largeValue: columnLargeValueToAst(column.large_value),
   };
+}
+
+function columnLargeValueToAst(largeValue: ColumnDescriptor["large_value"]): Column["largeValue"] {
+  if (largeValue === "Blob") return "blob";
+  if (largeValue === "Text") return "text";
+  return undefined;
 }
 
 function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][number] {

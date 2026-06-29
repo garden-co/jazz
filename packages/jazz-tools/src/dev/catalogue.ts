@@ -670,6 +670,7 @@ function tableSchemasRequireRowTransform(
     return (
       leftColumn.nullable !== rightColumn.nullable ||
       leftColumn.references !== rightColumn.references ||
+      leftColumn.large_value !== rightColumn.large_value ||
       columnTypeSignature(leftColumn.column_type) !== columnTypeSignature(rightColumn.column_type)
     );
   });

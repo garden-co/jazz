@@ -68,6 +68,27 @@ describe("bytes DSL API", () => {
     expect(col.add.bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
     expect(col.drop.bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
   });
+
+  it("marks byte columns as binary large values explicitly", () => {
+    resetCollectedState();
+    table("files", {
+      data: col.bytes().large(),
+    });
+
+    const schema = getCollectedSchema();
+    expect(schema.tables[0]?.columns[0]).toEqual({
+      name: "data",
+      sqlType: "BYTEA",
+      nullable: false,
+      largeValue: "blob",
+    });
+    expect(schemaToWasm(schema).files?.columns[0]).toMatchObject({
+      name: "data",
+      column_type: { type: "Bytea" },
+      nullable: false,
+      large_value: "Blob",
+    });
+  });
 });
 
 describe("json DSL API", () => {

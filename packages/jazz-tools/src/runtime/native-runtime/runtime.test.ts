@@ -134,6 +134,27 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(dbTicks).toBe(1);
   });
 
+  it("encodes binary large value columns in native schemas", () => {
+    const schemaBytes = encodeSchema({
+      files: {
+        columns: [
+          { name: "inline", column_type: { type: "Bytea" }, nullable: false },
+          {
+            name: "data",
+            column_type: { type: "Bytea" },
+            nullable: false,
+            large_value: "Blob",
+          },
+        ],
+      },
+    });
+
+    expect(readSchemaColumnLargeValues(schemaBytes, "files")).toEqual([
+      { name: "inline", largeValue: null },
+      { name: "data", largeValue: "Blob" },
+    ]);
+  });
+
   it("resolves connect only after the owned native transport has pumped", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -2868,6 +2889,48 @@ function readSchemaPolicyBranches(
   const policy = tables.find((table) => table.table === tableName)?.policy;
   expect(policy).toBeDefined();
   return policy!;
+}
+
+function readSchemaColumnLargeValues(
+  schemaBytes: Uint8Array,
+  tableName: string,
+): Array<{ name: string; largeValue: "Text" | "Blob" | null }> {
+  const reader = new PostcardReader(schemaBytes);
+  const tables = reader.readVec((tableReader) => {
+    const table = tableReader.string();
+    const columns = tableReader.readVec((columnReader) => {
+      const name = columnReader.string();
+      skipSchemaValueType(columnReader);
+      const largeValue =
+        columnReader.option((kindReader) => {
+          const tag = kindReader.u64();
+          if (tag === 0) return "Text";
+          if (tag === 1) return "Blob";
+          throw new Error(`unsupported large value kind ${tag}`);
+        }) ?? null;
+      return { name, largeValue };
+    });
+    const referenceCount = tableReader.u64();
+    for (let index = 0; index < referenceCount; index += 1) {
+      tableReader.string();
+      tableReader.string();
+    }
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.u64();
+    const indexCount = tableReader.u64();
+    for (let index = 0; index < indexCount; index += 1) {
+      tableReader.string();
+      tableReader.readVec((indexReader) => indexReader.string());
+    }
+    return { table, columns };
+  });
+  reader.option(() => undefined);
+  reader.option(() => undefined);
+  return tables.find((table) => table.table === tableName)?.columns ?? [];
 }
 
 function readPolicyQueryForTest(reader: PostcardReader): {

@@ -158,7 +158,30 @@ fn convert_column(
         column_type_value,
         &format!("{path}.column_type"),
     )?;
-    if object
+    if let Some(kind) = object.get("large_value") {
+        let kind = kind.as_str().ok_or_else(|| {
+            err(
+                format!("{path}.large_value"),
+                "large_value must be a string",
+            )
+        })?;
+        if !matches!(column.column_type, ColumnType::Bytes) {
+            return Err(err(
+                format!("{path}.large_value"),
+                "large_value is only supported on Bytea columns",
+            ));
+        }
+        column.large_value = Some(match kind {
+            "Blob" => LargeValueKind::Blob,
+            "Text" => LargeValueKind::Text,
+            _ => {
+                return Err(err(
+                    format!("{path}.large_value"),
+                    "large_value must be Blob or Text",
+                ));
+            }
+        });
+    } else if object
         .get("large")
         .and_then(Value::as_bool)
         .unwrap_or(false)
@@ -400,6 +423,26 @@ mod tests {
         assert_eq!(table.columns[1].column_type, ColumnType::Bool.nullable());
         assert_eq!(table.columns[3].column_type, ColumnType::String.array_of());
         assert!(matches!(table.columns[4].column_type, ColumnType::Enum(_)));
+    }
+
+    #[test]
+    fn converts_public_large_value_marker() {
+        let schema = convert_admin_schema(&json!({
+            "files": {
+                "columns": [
+                    {
+                        "name": "data",
+                        "column_type": { "type": "Bytea" },
+                        "large_value": "Blob"
+                    }
+                ]
+            }
+        }))
+        .expect("schema converts");
+
+        let column = &schema.tables[0].columns[0];
+        assert_eq!(column.column_type, ColumnType::Bytes);
+        assert_eq!(column.large_value, Some(LargeValueKind::Blob));
     }
 
     #[test]

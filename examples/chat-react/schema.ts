@@ -50,7 +50,7 @@ const schema = {
   files: s.table({
     name: s.string().optional(),
     mime_type: s.string(),
-    data: s.bytes(),
+    data: s.bytes().large(),
   }),
 };
 

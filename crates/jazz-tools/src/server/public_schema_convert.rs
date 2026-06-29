@@ -7,14 +7,14 @@ use jazz::query::{
     JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand, PolicyBranch, Predicate, Query,
 };
 use jazz::schema::{
-    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
-    WritePolicies,
+    ColumnSchema as CoreColumnSchema, JazzSchema, LargeValueKind as CoreLargeValueKind,
+    MergeStrategy, TableSchema as CoreTableSchema, WritePolicies,
 };
 
 use crate::public_api::policy::{CmpOp, PolicyValue};
 use crate::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
-    TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueKind, Operation, PolicyExpr,
+    Schema, TableName, TableSchema, Value,
 };
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
@@ -145,7 +145,20 @@ fn convert_column(
     if column.nullable {
         column_type = column_type.nullable();
     }
-    Ok(CoreColumnSchema::new(column.name.as_str(), column_type))
+    let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
+    if let Some(kind) = column.large_value {
+        if column.column_type != ColumnType::Bytea {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), column.name.as_str()),
+                "large_value is only supported on Bytea columns",
+            ));
+        }
+        converted.large_value = Some(match kind {
+            LargeValueKind::Text => CoreLargeValueKind::Text,
+            LargeValueKind::Blob => CoreLargeValueKind::Blob,
+        });
+    }
+    Ok(converted)
 }
 
 fn convert_column_type(
@@ -921,8 +934,8 @@ mod tests {
     use crate::public_api::policy::{CmpOp, PolicyValue};
     use crate::public_api::types::TableSchemaBuilder;
     use crate::public_schema::{
-        ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, SchemaBuilder, TablePolicies,
-        TableSchema,
+        ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, SchemaBuilder,
+        TablePolicies, TableSchema,
     };
     use jazz::query::{JoinTarget, Operand, Predicate};
     use uuid::Uuid;
@@ -963,6 +976,28 @@ mod tests {
                 .column_type,
             GrooveColumnType::Bool
         );
+    }
+
+    #[test]
+    fn converts_large_value_columns() {
+        let schema = [(
+            TableName::new("files"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
+            ])),
+        )]
+        .into_iter()
+        .collect();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let column = converted.tables[0]
+            .columns
+            .iter()
+            .find(|column| column.name == "data")
+            .unwrap();
+
+        assert_eq!(column.column_type, GrooveColumnType::Bytes);
+        assert_eq!(column.large_value, Some(jazz::schema::LargeValueKind::Blob));
     }
 
     #[test]
