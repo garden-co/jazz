@@ -178,6 +178,20 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
     } else {
         hasher.update(&[0]);
     }
+
+    if let Some(kind) = col.large_value {
+        hasher.update(&[1]);
+        match kind {
+            LargeValueKind::Text => {
+                hasher.update(&[1]);
+            }
+            LargeValueKind::Blob => {
+                hasher.update(&[2]);
+            }
+        }
+    } else {
+        hasher.update(&[0]);
+    }
     hasher.update(&[0]); // delimiter
 }
 

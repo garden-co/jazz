@@ -87,6 +87,7 @@ export interface Column {
   default?: unknown;
   references?: string; // Target table name for foreign key
   mergeStrategy?: ColumnMergeStrategy;
+  largeValue?: "blob" | "text";
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";

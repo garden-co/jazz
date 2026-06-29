@@ -4,6 +4,7 @@
 
 import type {
   Schema,
+  Column,
   ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,
@@ -262,6 +263,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
       if (col.mergeStrategy) {
         descriptor.merge_strategy = columnMergeStrategyToWasm(col.mergeStrategy);
       }
+      if (col.largeValue) {
+        descriptor.large_value = columnLargeValueToWasm(col.largeValue);
+      }
       return descriptor;
     });
 
@@ -273,4 +277,10 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   }
 
   return tables;
+}
+
+function columnLargeValueToWasm(largeValue: Column["largeValue"]): ColumnDescriptor["large_value"] {
+  if (largeValue === "blob") return "Blob";
+  if (largeValue === "text") return "Text";
+  return undefined;
 }

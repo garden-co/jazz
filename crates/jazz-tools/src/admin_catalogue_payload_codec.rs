@@ -10,14 +10,15 @@ use std::collections::HashMap;
 use crate::object::ObjectId;
 use crate::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::public_api::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, RowDescriptor, Schema,
-    SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, LargeValueKind, RowDescriptor,
+    Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use crate::schema_lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 6;
+const SCHEMA_VERSION: u8 = 7;
+const SCHEMA_VERSION_WITHOUT_LARGE_VALUE: u8 = 6;
 const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -101,7 +102,7 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
         });
     }
 
-    if data[0] != SCHEMA_VERSION {
+    if data[0] != SCHEMA_VERSION && data[0] != SCHEMA_VERSION_WITHOUT_LARGE_VALUE {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: data[0],
             expected: SCHEMA_VERSION,
@@ -120,9 +121,10 @@ fn encode_table_entry(buf: &mut Vec<u8>, name: &TableName, schema: &TableSchema)
 fn decode_table_entry(
     data: &[u8],
     offset: &mut usize,
+    schema_version: u8,
 ) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
     let name = read_string(data, offset, "table_name")?;
-    let descriptor = decode_row_descriptor(data, offset)?;
+    let descriptor = decode_row_descriptor(data, offset, schema_version)?;
     let indexed_columns = decode_indexed_columns(data, offset)?;
 
     Ok((
@@ -171,11 +173,12 @@ fn decode_indexed_columns(
 
 fn decode_current_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     let mut offset = 1;
+    let schema_version = data[0];
     let table_count = read_u32(data, &mut offset)?;
 
     let mut schema = HashMap::new();
     for _ in 0..table_count {
-        let (name, table_schema) = decode_table_entry(data, &mut offset)?;
+        let (name, table_schema) = decode_table_entry(data, &mut offset, schema_version)?;
         schema.insert(name, table_schema);
     }
 
@@ -192,12 +195,13 @@ fn encode_row_descriptor(buf: &mut Vec<u8>, desc: &RowDescriptor) {
 fn decode_row_descriptor(
     data: &[u8],
     offset: &mut usize,
+    schema_version: u8,
 ) -> Result<RowDescriptor, CatalogueEncodingError> {
     let count = read_u32(data, offset)?;
     let mut columns = Vec::with_capacity(count as usize);
 
     for _ in 0..count {
-        columns.push(decode_column_descriptor(data, offset)?);
+        columns.push(decode_column_descriptor(data, offset, schema_version)?);
     }
 
     Ok(RowDescriptor::new(columns))
@@ -236,11 +240,23 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
         }
         None => buf.push(0),
     }
+    match col.large_value {
+        Some(LargeValueKind::Text) => {
+            buf.push(1);
+            buf.push(1);
+        }
+        Some(LargeValueKind::Blob) => {
+            buf.push(1);
+            buf.push(2);
+        }
+        None => buf.push(0),
+    }
 }
 
 fn decode_column_descriptor(
     data: &[u8],
     offset: &mut usize,
+    schema_version: u8,
 ) -> Result<ColumnDescriptor, CatalogueEncodingError> {
     let name = read_string(data, offset, "column_name")?;
     let column_type = decode_column_type(data, offset)?;
@@ -272,6 +288,25 @@ fn decode_column_descriptor(
     } else {
         None
     };
+    let large_value = if schema_version >= SCHEMA_VERSION {
+        let has_large_value = read_u8(data, offset)? != 0;
+        if !has_large_value {
+            None
+        } else {
+            match read_u8(data, offset)? {
+                1 => Some(LargeValueKind::Text),
+                2 => Some(LargeValueKind::Blob),
+                tag => {
+                    return Err(CatalogueEncodingError::InvalidTypeTag {
+                        tag,
+                        context: "column_large_value",
+                    });
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     Ok(ColumnDescriptor {
         name: ColumnName::new(name),
@@ -280,6 +315,7 @@ fn decode_column_descriptor(
         references,
         default,
         merge_strategy,
+        large_value,
     })
 }
 
@@ -389,7 +425,7 @@ fn decode_column_type(
             })
         }
         TYPE_ROW => {
-            let desc = decode_row_descriptor(data, offset)?;
+            let desc = decode_row_descriptor(data, offset, SCHEMA_VERSION_WITHOUT_LARGE_VALUE)?;
             Ok(ColumnType::Row {
                 columns: Box::new(desc),
             })
@@ -597,7 +633,7 @@ fn decode_table_schema(
     data: &[u8],
     offset: &mut usize,
 ) -> Result<TableSchema, CatalogueEncodingError> {
-    let descriptor = decode_row_descriptor(data, offset)?;
+    let descriptor = decode_row_descriptor(data, offset, SCHEMA_VERSION_WITHOUT_LARGE_VALUE)?;
     Ok(TableSchema {
         columns: descriptor,
         indexed_columns: None,
@@ -1719,6 +1755,26 @@ mod tests {
         let column = table.columns.column("value").expect("counter column");
 
         assert_eq!(column.merge_strategy, Some(ColumnMergeStrategy::Counter));
+    }
+
+    #[test]
+    fn schema_roundtrip_preserves_large_value_columns() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("files"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
+            ])),
+        );
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).unwrap();
+        let table = decoded
+            .get(&TableName::new("files"))
+            .expect("decoded files table");
+        let column = table.columns.column("data").expect("data column");
+
+        assert_eq!(column.large_value, Some(LargeValueKind::Blob));
     }
 
     #[test]
