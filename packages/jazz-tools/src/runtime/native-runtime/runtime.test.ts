@@ -451,13 +451,16 @@ describe("NativeRuntimeAdapter server transport", () => {
               return [
                 {
                   type: "snapshot",
-                  rows: encodeRows([
-                    {
-                      table: "todos",
-                      rowId,
-                      title: "visible after scheduled tick",
-                    },
-                  ]),
+                  rows: encodeRelationSnapshot(
+                    [
+                      {
+                        table: "todos",
+                        rowId,
+                        title: "visible after scheduled tick",
+                      },
+                    ],
+                    [],
+                  ),
                 },
               ];
             },
@@ -892,18 +895,21 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRows([
-        {
-          table: "todos",
-          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-          title: "keep",
-        },
-        {
-          table: "todos",
-          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-          title: "drop",
-        },
-      ]),
+      rows: encodeRelationSnapshot(
+        [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+            title: "keep",
+          },
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+            title: "drop",
+          },
+        ],
+        [],
+      ),
     });
     await Promise.resolve();
 
@@ -1156,8 +1162,17 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("rejects array subquery subscriptions until core relation payloads exist", () => {
+  it("materializes array subquery relation snapshots for subscriptions", async () => {
     const calls: string[] = [];
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    const relationSchema = {
+      users: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+    } satisfies WasmSchema;
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -1168,7 +1183,11 @@ describe("NativeRuntimeAdapter server transport", () => {
             },
             subscribe: () => {
               calls.push("subscribe");
-              return new ReadableStream();
+              return new ReadableStream({
+                start(streamController) {
+                  controller = streamController;
+                },
+              });
             },
             tick: () => undefined,
           }),
@@ -1176,29 +1195,88 @@ describe("NativeRuntimeAdapter server transport", () => {
           throw new Error("not used");
         },
       } as never,
-      testSchema,
+      relationSchema,
       new Uint8Array(16),
       new Uint8Array(16),
       1,
       true,
     );
 
-    expect(() =>
-      runtime.createSubscription(
-        JSON.stringify({
-          table: "todos",
-          array_subqueries: [
-            {
-              column_name: "children",
-              table: "todos",
-              inner_column: "parent_id",
-              outer_column: "id",
-            },
-          ],
-        }),
+    const handle = runtime.createSubscription(
+      JSON.stringify({
+        table: "users",
+        array_subqueries: [
+          {
+            column_name: "todosViaOwner",
+            table: "todos",
+            inner_column: "owner_id",
+            outer_column: "id",
+          },
+        ],
+      }),
+    );
+    expect(handle).toBe(1);
+
+    const deltas: unknown[] = [];
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      deltas.push(delta);
+    });
+    controller!.enqueue({
+      type: "snapshot",
+      rows: encodeRelationSnapshot(
+        [
+          {
+            table: "users",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+            title: "Ada",
+          },
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+            title: "Ship relation reads",
+          },
+        ],
+        [
+          {
+            sourceTable: "users",
+            sourceRowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+            relation: "todosViaOwner",
+            targetTable: "todos",
+            targetRowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          },
+        ],
       ),
-    ).toThrow('Relation IR operator "array_subqueries" requires a relation-tree lowerer');
-    expect(calls).toEqual([]);
+    });
+    await Promise.resolve();
+
+    expect(calls).toEqual(["prepareQuery", "subscribe"]);
+    expect(deltas).toEqual([
+      [
+        {
+          kind: 0,
+          id: "00000000-0000-0000-0000-000000000001",
+          index: 0,
+          row: {
+            id: "00000000-0000-0000-0000-000000000001",
+            values: [
+              { type: "Text", value: "Ada" },
+              {
+                type: "Array",
+                value: [
+                  {
+                    type: "Row",
+                    value: {
+                      id: "00000000-0000-0000-0000-000000000002",
+                      values: [{ type: "Text", value: "Ship relation reads" }],
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    ]);
   });
 
   it("materializes array subquery relation snapshots for reads", async () => {
@@ -1343,13 +1421,16 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRows([
-        {
-          table: "todos",
-          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-          title: "native",
-        },
-      ]),
+      rows: encodeRelationSnapshot(
+        [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+            title: "native",
+          },
+        ],
+        [],
+      ),
     });
     await Promise.resolve();
 
@@ -1720,18 +1801,21 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRows([
-        {
-          table: "todos",
-          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-          title: "first",
-        },
-        {
-          table: "todos",
-          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-          title: "second",
-        },
-      ]),
+      rows: encodeRelationSnapshot(
+        [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+            title: "first",
+          },
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+            title: "second",
+          },
+        ],
+        [],
+      ),
     });
     await Promise.resolve();
 
@@ -1988,18 +2072,21 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRows([
-        {
-          table: "todos",
-          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-          title: "requested",
-        },
-        {
-          table: "todos",
-          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-          title: "extra from native",
-        },
-      ]),
+      rows: encodeRelationSnapshot(
+        [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+            title: "requested",
+          },
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+            title: "extra from native",
+          },
+        ],
+        [],
+      ),
     });
     await Promise.resolve();
 

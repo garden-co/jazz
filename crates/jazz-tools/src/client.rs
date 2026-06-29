@@ -796,7 +796,7 @@ impl ClientDbInner {
                 match stream.next_event().await {
                     Some(CoreSubscriptionEvent::Opened { current, .. })
                     | Some(CoreSubscriptionEvent::Reset { current, .. }) => {
-                        inner.borrow_mut().remember_rows(&table, &current);
+                        inner.borrow_mut().remember_rows(&table, &current.rows);
                         let _ = tx.send(OrderedRowDelta::default());
                     }
                     Some(CoreSubscriptionEvent::Delta { .. }) => {
