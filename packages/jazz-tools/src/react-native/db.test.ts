@@ -174,52 +174,42 @@ describe("react-native Db", () => {
     );
   });
 
-  it("RNDB-U02 reuses cached clients for same schema key and creates new clients for distinct schemas", async () => {
+  it("RNDB-U02 reuses the cached client for the same schema key and rejects distinct schemas", async () => {
     const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
     const todosApp = makeTodosApp();
     const todosAppClone = makeTodosApp();
     const projectsApp = makeProjectsApp();
 
     const { client: clientA } = makeClientStub();
-    const { client: clientB } = makeClientStub();
 
-    createJazzRnRuntimeMock
-      .mockReturnValueOnce({ id: "runtime-a" } as never)
-      .mockReturnValueOnce({ id: "runtime-b" } as never);
-    connectWithRuntimeSpy.mockReturnValueOnce(clientA).mockReturnValueOnce(clientB);
+    createJazzRnRuntimeMock.mockReturnValueOnce({ id: "runtime-a" } as never);
+    connectWithRuntimeSpy.mockReturnValueOnce(clientA);
 
     const db = await createDb({ appId: "rn-app" });
     db.insert(todosApp.todos, { title: "Buy milk" });
     db.insert(todosAppClone.todos, { title: "Buy milk" });
-    db.insert(projectsApp.projects, { title: "Buy milk" });
+    expect(() => db.insert(projectsApp.projects, { title: "Build app" })).toThrow(
+      "Db is already initialized with a different schema",
+    );
 
     expect(clientA.insert).toHaveBeenCalledTimes(2);
-    expect(clientB.insert).toHaveBeenCalledTimes(1);
-    expect(createJazzRnRuntimeMock).toHaveBeenCalledTimes(2);
-    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(2);
+    expect(createJazzRnRuntimeMock).toHaveBeenCalledTimes(1);
+    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("RNDB-U03 shutdown closes all memoized clients and clears cache", async () => {
+  it("RNDB-U03 shutdown closes the memoized client", async () => {
     const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
     const todosApp = makeTodosApp();
-    const projectsApp = makeProjectsApp();
+    const todosAppClone = makeTodosApp();
 
     const clientA = makeClientStub();
-    const clientB = makeClientStub();
-    const clientAfterShutdown = makeClientStub();
 
-    createJazzRnRuntimeMock
-      .mockReturnValueOnce({ id: "runtime-a" } as never)
-      .mockReturnValueOnce({ id: "runtime-b" } as never)
-      .mockReturnValueOnce({ id: "runtime-c" } as never);
-    connectWithRuntimeSpy
-      .mockReturnValueOnce(clientA.client)
-      .mockReturnValueOnce(clientB.client)
-      .mockReturnValueOnce(clientAfterShutdown.client);
+    createJazzRnRuntimeMock.mockReturnValueOnce({ id: "runtime-a" } as never);
+    connectWithRuntimeSpy.mockReturnValueOnce(clientA.client);
 
     const db = await createDb({ appId: "rn-app" });
     const firstA = db.insert(todosApp.todos, { title: "Buy milk" });
-    const firstB = db.insert(projectsApp.projects, { title: "Buy milk" });
+    const firstB = db.insert(todosAppClone.todos, { title: "Buy milk" });
 
     expect(firstA.value.id).toBe("todo-1");
     expect(firstB.value.id).toBe("todo-1");
@@ -227,11 +217,7 @@ describe("react-native Db", () => {
     await db.shutdown();
 
     expect(clientA.shutdown).toHaveBeenCalledTimes(1);
-    expect(clientB.shutdown).toHaveBeenCalledTimes(1);
-
-    db.insert(todosApp.todos, { title: "Buy milk" });
-    expect(clientAfterShutdown.insert).toHaveBeenCalledTimes(1);
-    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(3);
+    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(1);
   });
 
   it("RNDB-U04 surfaces runtime and client wiring failures", async () => {
@@ -256,29 +242,23 @@ describe("react-native Db", () => {
     expect(() => db.insert(app.todos, { title: "Buy milk" })).toThrow(clientError);
   });
 
-  it("RNDB-U05 forwards updateAuthToken to cached native clients", async () => {
+  it("RNDB-U05 forwards updateAuthToken to the cached native client", async () => {
     const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
     const todosApp = makeTodosApp();
-    const projectsApp = makeProjectsApp();
     const clientA = makeClientStub();
-    const clientB = makeClientStub();
 
-    createJazzRnRuntimeMock
-      .mockReturnValueOnce({ id: "runtime-a" } as never)
-      .mockReturnValueOnce({ id: "runtime-b" } as never);
-    connectWithRuntimeSpy.mockReturnValueOnce(clientA.client).mockReturnValueOnce(clientB.client);
+    createJazzRnRuntimeMock.mockReturnValueOnce({ id: "runtime-a" } as never);
+    connectWithRuntimeSpy.mockReturnValueOnce(clientA.client);
 
     const db = await createDb({ appId: "rn-app", jwtToken: "stale-jwt" });
     db.insert(todosApp.todos, { title: "Buy milk" });
-    db.insert(projectsApp.projects, { title: "Buy milk" });
 
     db.updateAuthToken("fresh-jwt");
 
     expect(clientA.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
-    expect(clientB.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
   });
 
-  it("RNDB-U10 forwards updateCookieSession to cached native clients", async () => {
+  it("RNDB-U10 forwards updateCookieSession to the cached native client", async () => {
     const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
     const app = makeTodosApp();
     const stub = makeClientStub();

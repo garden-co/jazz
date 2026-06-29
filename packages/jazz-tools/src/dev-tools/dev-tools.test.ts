@@ -105,7 +105,7 @@ describe("attachDevTools active query subscription bridge", () => {
       setDevMode: vi.fn(function (this: { config: { devMode?: boolean } }, enabled: boolean) {
         this.config.devMode = enabled;
       }),
-      clients: new Map([["default", {}]]),
+      connection: { client: {} },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
     };
@@ -149,7 +149,7 @@ describe("attachDevTools active query subscription bridge", () => {
         devMode: true,
       },
       setDevMode: vi.fn(),
-      clients: new Map([["default", {}]]),
+      connection: { client: {} },
       getActiveQuerySubscriptions: vi.fn(() => currentSubscriptions),
       onActiveQuerySubscriptionsChange: vi.fn(
         (listener: (subscriptions: readonly ActiveQuerySubscriptionTrace[]) => void) => {
@@ -228,7 +228,7 @@ describe("attachDevTools mutation bridge", () => {
     const fakeDb = {
       config: { appId: "devtools-test" },
       setDevMode: vi.fn(),
-      clients: new Map([["default", fakeClient]]),
+      connection: { client: fakeClient },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
     };
@@ -278,7 +278,7 @@ describe("attachDevTools mutation bridge", () => {
     const fakeDb = {
       config: { appId: "devtools-test" },
       setDevMode: vi.fn(),
-      clients: new Map([["default", fakeClient]]),
+      connection: { client: fakeClient },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
     };
@@ -332,7 +332,7 @@ describe("attachDevTools mutation bridge", () => {
     const fakeDb = {
       config: { appId: "devtools-test" },
       setDevMode: vi.fn(),
-      clients: new Map([["default", fakeClient]]),
+      connection: { client: fakeClient },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
     };
@@ -372,7 +372,7 @@ describe("attachDevTools mutation bridge", () => {
     const fakeDb = {
       config: { appId: "devtools-test" },
       setDevMode: vi.fn(),
-      clients: new Map([["default", fakeClient]]),
+      connection: { client: fakeClient },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
     };

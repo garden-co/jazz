@@ -89,6 +89,7 @@ vi.mock("./leader-lock.js", async (importOriginal) => {
 });
 
 import { Db, type DbConfig } from "./db.js";
+import { BrowserConnectionManager } from "./connection-manager/browser-connection-manager.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 
 const originalWindow = (globalThis as Record<string, unknown>).window;
@@ -100,6 +101,10 @@ async function createWorkerDb(config: DbConfig): Promise<Db> {
   const runtimeModule = new WasmRuntimeModule();
   await runtimeModule.load(config);
   return await Db.createWithWorker(config, runtimeModule);
+}
+
+function browserConnection(db: Db): any {
+  return (db as any).connection;
 }
 
 async function waitFor(
@@ -358,7 +363,7 @@ describe("Db worker runtime bootstrap", () => {
       driver: { type: "persistent", dbName: "worker-bootstrap-fallback-wasm" },
     });
 
-    const options = (db as any).buildWorkerBridgeOptions("{}");
+    const options = browserConnection(db).buildWorkerBridgeOptions("{}");
     await db.shutdown();
 
     expect(options.fallbackWasmUrl).toMatch(/jazz_wasm_bg\.wasm$/);
@@ -395,7 +400,7 @@ describe("Db worker runtime bootstrap", () => {
       telemetryCollectorUrl: "http://127.0.0.1:54418",
     });
 
-    const options = (db as any).buildWorkerBridgeOptions("{}");
+    const options = browserConnection(db).buildWorkerBridgeOptions("{}");
     await db.shutdown();
 
     expect(options.telemetryCollectorUrl).toBe("http://127.0.0.1:54418");
@@ -506,7 +511,7 @@ describe("Db worker runtime bootstrap", () => {
       ]);
       expect(releasedLocks).toEqual([`jazz-leader-tab:${appId}:${dbName}`]);
       expect(terminatedWorkers).toBe(1);
-      expect((db as unknown as { tabRole?: unknown }).tabRole).toBe("follower");
+      expect(browserConnection(db).tabRole).toBe("follower");
     } finally {
       await db?.shutdown();
     }
@@ -561,7 +566,7 @@ describe("Db worker runtime bootstrap", () => {
 
     let db: Db | null = null;
     const shutdownForReset = vi.spyOn(
-      Db.prototype as unknown as {
+      BrowserConnectionManager.prototype as unknown as {
         shutdownWorkerAndClientsForStorageReset: () => Promise<void>;
       },
       "shutdownWorkerAndClientsForStorageReset",
@@ -627,7 +632,7 @@ describe("Db worker runtime bootstrap", () => {
     });
 
     try {
-      const anyDb = db as unknown as {
+      const connection = browserConnection(db) as {
         brokerSchemaFingerprint: string | null;
         currentLeadershipId: number;
         handleBrokerReconnected(client: unknown): void;
@@ -636,22 +641,22 @@ describe("Db worker runtime bootstrap", () => {
       };
       const reportSchemaReady = vi.fn();
 
-      anyDb.tabRole = "follower";
-      anyDb.currentLeadershipId = 42;
-      anyDb.brokerSchemaFingerprint = "schema-a";
+      connection.tabRole = "follower";
+      connection.currentLeadershipId = 42;
+      connection.brokerSchemaFingerprint = "schema-a";
 
-      anyDb.handleBrokerReconnected({
+      connection.handleBrokerReconnected({
         snapshot: () => ({
           brokerInstanceId: "new-broker",
           role: "follower",
-          tabId: anyDb.tabId,
+          tabId: connection.tabId,
           leaderTabId: null,
           leadershipId: 0,
         }),
         reportSchemaReady,
       });
 
-      expect(anyDb.currentLeadershipId).toBe(0);
+      expect(connection.currentLeadershipId).toBe(0);
       expect(reportSchemaReady).toHaveBeenCalledWith("schema-a");
     } finally {
       await db.shutdown();
@@ -720,7 +725,7 @@ describe("Db worker runtime bootstrap", () => {
       expect(FakeBrowserBrokerClient.leaderFailures).toEqual([
         { leadershipId: 1, reason: "tab lock stolen" },
       ]);
-      expect((db as unknown as { tabRole?: unknown }).tabRole).toBe("follower");
+      expect(browserConnection(db).tabRole).toBe("follower");
     } finally {
       await db.shutdown();
     }
