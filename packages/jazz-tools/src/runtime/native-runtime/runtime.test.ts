@@ -161,7 +161,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(transport.tickCount).toBeGreaterThan(0);
     expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]! as Uint8Array)).toEqual([
@@ -196,8 +198,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await Promise.resolve();
+    await Promise.resolve();
     await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(sockets).toHaveLength(2);
     expect(decodeWebSocketFrameBatch(sockets[1]!.sent[2]! as Uint8Array)).toEqual([
@@ -2875,6 +2881,7 @@ function readPolicyQueryForTest(reader: PostcardReader): {
   const joins = reader.readVec(readPolicyJoinForTest);
   const branches = reader.readVec(readPolicyBranchForTest);
   reader.readVec(skipPolicyReachableForTest);
+  reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.option(() => undefined);
   reader.readVec(() => undefined);

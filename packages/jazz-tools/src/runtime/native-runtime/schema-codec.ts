@@ -173,6 +173,7 @@ function writePolicyQuery(
     query.reachable.length,
   );
   writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
   writer.none();
   writer.vec(() => undefined, 0);
   writer.none();

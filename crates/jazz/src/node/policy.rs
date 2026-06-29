@@ -162,7 +162,7 @@ where
         let (table, cells) = self.policy_projection_for_version_record(version)?;
         if version.deletion() == Some(DeletionEvent::Deleted) {
             let Some(policy) = table.write_policies.delete_using.clone() else {
-                return Ok(true);
+                return Ok(false);
             };
             let current = match self.policy_delete_subject_row(&table, version)? {
                 Some(current) => current,
@@ -184,7 +184,7 @@ where
                 }
             }
             let Some(policy) = table.write_policies.update_check.clone() else {
-                return Ok(true);
+                return Ok(false);
             };
             return self.policy_allows(&table, &policy, version.row_uuid(), author, |column| {
                 cells.get(column).cloned()
@@ -248,7 +248,7 @@ where
             return Ok(false);
         };
         let Some(policy) = table.write_policies.update_using.clone() else {
-            return Ok(true);
+            return Ok(false);
         };
         self.policy_allows_current_row(&table, &policy, &row, author)
     }
@@ -515,6 +515,16 @@ where
                 if projected_table.name != table.name {
                     continue;
                 }
+                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+            }
+        }
+
+        if let Some(current_version) =
+            self.query_local_layer_winner(&table.name, version.row_uuid(), VersionLayer::Content)?
+        {
+            let (projected_table, cells) =
+                self.policy_projection_for_version_row(&current_version)?;
+            if projected_table.name == table.name {
                 return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
             }
         }

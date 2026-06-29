@@ -3131,6 +3131,7 @@ impl LargeValueEditCommit {
 }
 
 /// Builder for a local mergeable commit.
+#[derive(Clone)]
 pub struct MergeableCommit {
     /// Target table.
     pub table: String,

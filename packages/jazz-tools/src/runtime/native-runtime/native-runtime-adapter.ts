@@ -623,7 +623,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.subscriptions.delete(handle);
   }
 
-  connect(url: string, authJson: string): Promise<void> {
+  connect(url: string, authJson: string): void {
     this.disconnect();
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
@@ -653,7 +653,6 @@ export class NativeRuntimeAdapter implements Runtime {
       this.handleServerTransportError(error);
     });
     this.scheduleServerPump();
-    return this.serverCarrierPromise.then(() => undefined);
   }
 
   disconnect(): void {

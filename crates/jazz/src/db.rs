@@ -1603,6 +1603,13 @@ where
         parents: Vec<TxId>,
         deletion: Option<DeletionEvent>,
     ) -> Result<WriteHandle<S>, Error> {
+        let operation = if deletion == Some(DeletionEvent::Deleted) {
+            "DELETE"
+        } else if parents.is_empty() {
+            "INSERT"
+        } else {
+            "UPDATE"
+        };
         let mut commit = MergeableCommit::new(table, row, self.next_now_ms())
             .made_by(made_by)
             .parents(parents)
@@ -1612,6 +1619,18 @@ where
         }
         if let Some(deletion) = deletion {
             commit = commit.deletion(deletion);
+        }
+        let allowed = self
+            .node
+            .node
+            .borrow_mut()
+            .dry_run_mergeable_write_allows(commit.clone())
+            .map_err(Error::from)?;
+        if !allowed {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("policy denied {operation} on table {table}"),
+            ));
         }
         let tx_id = self.node.node.borrow_mut().commit_mergeable(commit)?;
         let local_tier = self.finalize_local_commit(tx_id)?;
