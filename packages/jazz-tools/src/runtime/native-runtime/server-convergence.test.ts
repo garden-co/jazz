@@ -22,6 +22,18 @@ const schema = {
   },
 } satisfies WasmSchema;
 
+const writableTodoSchema = {
+  todos: {
+    ...schema.todos,
+    policies: {
+      select: { using: { type: "True" } },
+      insert: { with_check: { type: "True" } },
+      update: { using: { type: "True" }, with_check: { type: "True" } },
+      delete: { using: { type: "True" } },
+    },
+  },
+} satisfies WasmSchema;
+
 const binaryLargeValueSchema = {
   binary_large_values: {
     columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
@@ -316,7 +328,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
         appId,
         inMemory: true,
         adminSecret: "native-runtime-restore-convergence-admin",
-        schema: encodeSchema(schema),
+        schema: encodeSchema(writableTodoSchema),
       });
 
       const writer = await createClient({

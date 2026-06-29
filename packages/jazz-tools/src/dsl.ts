@@ -198,7 +198,12 @@ export type BytesColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Uint8Array,
-> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value>;
+> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value> & {
+  /**
+   * Store this byte column as a Jazz binary large value.
+   */
+  large(): BytesColumn<Optional, HasDefault, Value>;
+};
 export type JsonColumn<
   Output = JsonValue,
   Optional extends boolean = false,
@@ -330,6 +335,7 @@ class ScalarBuilder implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
+  private _largeValue: Column["largeValue"] | undefined;
   _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(public _sqlType: ScalarSqlType) {}
@@ -357,6 +363,14 @@ class ScalarBuilder implements ColumnBuilder {
     return this;
   }
 
+  large(): this {
+    if (this._sqlType !== "BYTEA") {
+      throw new Error("large() is only supported on byte columns.");
+    }
+    this._largeValue = "blob";
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -364,6 +378,7 @@ class ScalarBuilder implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._largeValue === undefined ? {} : { largeValue: this._largeValue }),
     };
   }
 
