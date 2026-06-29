@@ -472,7 +472,7 @@ where
         }
         if version.deletion().is_some() {
             let Some(policy) = table.write_policies.delete_using.clone() else {
-                return Ok(true);
+                return Ok(false);
             };
             let Some(row) = self.branch_delete_subject_row(branch, table, version)? else {
                 return Ok(false);
@@ -507,7 +507,7 @@ where
                 }
             }
             let Some(policy) = table.write_policies.update_check.clone() else {
-                return Ok(true);
+                return Ok(false);
             };
             return self.branch_policy_allows(
                 BranchPolicyRequest {
