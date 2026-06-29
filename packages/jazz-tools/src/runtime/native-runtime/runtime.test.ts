@@ -1201,12 +1201,50 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual([]);
   });
 
-  it("rejects array subquery reads until core relation payloads exist", async () => {
+  it("materializes array subquery relation snapshots for reads", async () => {
     const calls: string[] = [];
+    const relationSchema = {
+      users: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+    } satisfies WasmSchema;
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            allRelationSnapshot: () => {
+              calls.push("allRelationSnapshot");
+              return encodeRelationSnapshot(
+                [
+                  {
+                    table: "users",
+                    rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                    title: "Ada",
+                  },
+                  {
+                    table: "todos",
+                    rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+                    title: "Ship relation reads",
+                  },
+                ],
+                [
+                  {
+                    sourceTable: "users",
+                    sourceRowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                    relation: "todosViaOwner",
+                    targetTable: "todos",
+                    targetRowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+                  },
+                ],
+              );
+            },
             all: () => {
               calls.push("all");
               return encodeRows([
@@ -1223,29 +1261,47 @@ describe("NativeRuntimeAdapter server transport", () => {
           throw new Error("not used");
         },
       } as never,
-      testSchema,
+      relationSchema,
       new Uint8Array(16),
       new Uint8Array(16),
       1,
       true,
     );
 
-    await expect(
-      runtime.query(
-        JSON.stringify({
-          table: "todos",
-          array_subqueries: [
-            {
-              column_name: "children",
-              table: "todos",
-              inner_column: "parent_id",
-              outer_column: "id",
-            },
-          ],
-        }),
-      ),
-    ).rejects.toThrow('Relation IR operator "array_subqueries" requires a relation-tree lowerer');
-    expect(calls).toEqual([]);
+    const rows = (await runtime.query(
+      JSON.stringify({
+        table: "users",
+        array_subqueries: [
+          {
+            column_name: "todosViaOwner",
+            table: "todos",
+            inner_column: "owner_id",
+            outer_column: "users.id",
+          },
+        ],
+      }),
+    )) as Array<{
+      table: string;
+      id: string;
+      values: unknown[];
+      valuesByColumn?: Map<string, unknown>;
+    }>;
+
+    expect(calls).toEqual(["prepareQuery", "allRelationSnapshot"]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.table).toBe("users");
+    expect(rows[0]?.valuesByColumn?.get("todosViaOwner")).toEqual({
+      type: "Array",
+      value: [
+        {
+          type: "Row",
+          value: {
+            id: "00000000-0000-0000-0000-000000000002",
+            values: [{ type: "Text", value: "Ship relation reads" }],
+          },
+        },
+      ],
+    });
   });
 
   it("decodes native subscription chunks", async () => {
@@ -2613,6 +2669,7 @@ function readPreparedSelect(query: Uint8Array): string[] | undefined {
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
   return reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
 }
 
@@ -2953,6 +3010,30 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
 function encodeRows(rows: Array<{ table: string; rowId: Uint8Array; title: string }>): Uint8Array {
   const writer = new PostcardWriter();
   writeRowBatches(writer, rows);
+  return writer.finish();
+}
+
+function encodeRelationSnapshot(
+  rows: Array<{ table: string; rowId: Uint8Array; title: string }>,
+  edges: Array<{
+    sourceTable: string;
+    sourceRowId: Uint8Array;
+    relation: string;
+    targetTable: string;
+    targetRowId: Uint8Array;
+  }>,
+): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(0);
+  writeRowBatches(writer, rows);
+  writer.vec((edge, index) => {
+    const source = edges[index]!;
+    edge.string(source.sourceTable);
+    edge.bytes(source.sourceRowId);
+    edge.string(source.relation);
+    edge.string(source.targetTable);
+    edge.bytes(source.targetRowId);
+  }, edges.length);
   return writer.finish();
 }
 

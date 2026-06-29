@@ -127,6 +127,7 @@ export function queryFromTable(table: string): Uint8Array {
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
   writer.none();
   writer.vec(() => undefined, 0);
   writer.none();
@@ -207,12 +208,29 @@ export type QueryOrder = {
   column: string;
   direction: "Asc" | "Desc";
 };
+export type QueryArraySubqueryRequirement =
+  | "Optional"
+  | "AtLeastOne"
+  | "MatchCorrelationCardinality";
+export type QueryArraySubquery = {
+  columnName: string;
+  table: string;
+  innerColumn: string;
+  outerColumn: string;
+  filters?: QueryPredicate[];
+  select?: string[];
+  orderBy?: QueryOrder[];
+  limit?: number | null;
+  requirement?: QueryArraySubqueryRequirement;
+  nestedArrays?: QueryArraySubquery[];
+};
 
 export type QueryOptions = {
   limit?: number;
   offset?: number;
   orderBy?: QueryOrder[];
   select?: string[];
+  arraySubqueries?: QueryArraySubquery[];
 };
 
 export function queryWithEqFilters(
@@ -233,7 +251,7 @@ export function queryWithPredicates(
   options: number | QueryOptions = {},
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
-  const { limit, offset = 0, orderBy = [], select } = queryOptions;
+  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [] } = queryOptions;
   if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
     throw new Error("query limit must be a non-negative safe integer");
   }
@@ -250,6 +268,9 @@ export function queryWithPredicates(
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
+  writer.vec((subquery, index) => {
+    writeArraySubquery(subquery, arraySubqueries[index]!);
+  }, arraySubqueries.length);
   if (select == null) {
     writer.none();
   } else {
@@ -272,6 +293,58 @@ export function queryWithPredicates(
   }
   writer.u64(offset);
   return writer.finish();
+}
+
+function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery): void {
+  const {
+    filters = [],
+    select,
+    orderBy = [],
+    limit = null,
+    requirement = "Optional",
+    nestedArrays = [],
+  } = subquery;
+  writer.string(subquery.columnName);
+  writer.string(subquery.table);
+  writer.string(subquery.innerColumn);
+  writer.string(subquery.outerColumn);
+  writer.vec((filter, index) => {
+    writePredicate(filter, filters[index]!);
+  }, filters.length);
+  if (select == null) {
+    writer.none();
+  } else {
+    writer.some((selectWriter) => {
+      selectWriter.vec((columnWriter, index) => {
+        columnWriter.string(select[index]!);
+      }, select.length);
+    });
+  }
+  writer.vec((order, index) => {
+    const term = orderBy[index]!;
+    order.string(term.column);
+    order.u64(term.direction === "Asc" ? 0 : 1);
+  }, orderBy.length);
+  if (limit == null) {
+    writer.none();
+  } else {
+    writer.some((valueWriter) => valueWriter.u64(limit));
+  }
+  writer.u64(arraySubqueryRequirementTag(requirement));
+  writer.vec((nested, index) => {
+    writeArraySubquery(nested, nestedArrays[index]!);
+  }, nestedArrays.length);
+}
+
+function arraySubqueryRequirementTag(requirement: QueryArraySubqueryRequirement): number {
+  switch (requirement) {
+    case "Optional":
+      return 0;
+    case "AtLeastOne":
+      return 1;
+    case "MatchCorrelationCardinality":
+      return 2;
+  }
 }
 
 function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void {

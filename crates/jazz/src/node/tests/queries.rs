@@ -432,6 +432,206 @@ fn prepared_query_lowering_supports_ne_parameter_predicates() {
     assert_eq!(rows[0].cell(&schema().tables[0], "title"), Some(v("keep")));
 }
 
+fn relation_snapshot_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("owner_id", "users"),
+        TableSchema::new(
+            "comments",
+            [
+                ColumnSchema::new("body", ColumnType::String),
+                ColumnSchema::new("todo_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("todo_id", "todos"),
+    ])
+}
+
+fn relation_snapshot_policy_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("owner_id", "users")
+        .with_read_policy(Policy::owner_only("todos", "owner_id"))
+        .with_write_policy(Policy::owner_only("todos", "owner_id")),
+    ])
+}
+
+#[test]
+fn relation_snapshot_materializes_reverse_array_edges() {
+    let schema = relation_snapshot_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x44), schema.clone());
+    let alice = row(0xa1);
+    let bob = row(0xb1);
+    let todo_a = row(0x11);
+    let todo_b = row(0x12);
+    let comment = row(0xc1);
+
+    node.commit_mergeable(
+        MergeableCommit::new("users", alice, 10).cells(BTreeMap::from([(
+            "name".to_owned(),
+            v("alice"),
+        )])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("users", bob, 11).cells(BTreeMap::from([(
+            "name".to_owned(),
+            v("bob"),
+        )])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("todos", todo_a, 12).cells(BTreeMap::from([
+            ("title".to_owned(), v("alpha")),
+            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("todos", todo_b, 13).cells(BTreeMap::from([
+            ("title".to_owned(), v("beta")),
+            ("owner_id".to_owned(), Value::Uuid(bob.0)),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("comments", comment, 14).cells(BTreeMap::from([
+            ("body".to_owned(), v("nested")),
+            ("todo_id".to_owned(), Value::Uuid(todo_a.0)),
+        ])),
+    )
+    .unwrap();
+
+    let shape = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
+                .nested(ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")),
+        )
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let snapshot = node
+        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .map(|row| (row.table().to_owned(), row.row_uuid()))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            ("users".to_owned(), alice),
+            ("todos".to_owned(), todo_a),
+            ("comments".to_owned(), comment),
+        ])
+    );
+    assert_eq!(
+        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            RelationEdge {
+                source_table: "users".to_owned(),
+                source_row: alice,
+                relation: "todosViaOwner".to_owned(),
+                target_table: "todos".to_owned(),
+                target_row: todo_a,
+            },
+            RelationEdge {
+                source_table: "todos".to_owned(),
+                source_row: todo_a,
+                relation: "commentsViaTodo".to_owned(),
+                target_table: "comments".to_owned(),
+                target_row: comment,
+            },
+        ])
+    );
+}
+
+#[test]
+fn relation_snapshot_filters_unreadable_children_and_required_parents() {
+    let schema = relation_snapshot_policy_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x45), schema.clone());
+    let parent = row(0xa1);
+    let child = row(0x11);
+    let alice = user(0xa1);
+    let bob = user(0xb1);
+
+    node.commit_mergeable(
+        MergeableCommit::new("users", parent, 10).cells(BTreeMap::from([(
+            "name".to_owned(),
+            v("parent"),
+        )])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("todos", child, 11).cells(BTreeMap::from([
+            ("title".to_owned(), v("hidden")),
+            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+        ])),
+    )
+    .unwrap();
+
+    let optional_shape = Query::from("users")
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
+        .validate(&schema)
+        .unwrap();
+    let optional_binding = optional_shape.bind(BTreeMap::new()).unwrap();
+
+    let optional = node
+        .query_relation_snapshot_for_link(
+            &optional_shape,
+            &optional_binding,
+            DurabilityTier::Local,
+            bob,
+        )
+        .unwrap();
+    assert_eq!(
+        optional
+            .rows
+            .iter()
+            .map(|row| (row.table().to_owned(), row.row_uuid()))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([("users".to_owned(), parent)])
+    );
+    assert!(optional.edges.is_empty());
+
+    let required_shape = Query::from("users")
+        .array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
+                .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne),
+        )
+        .validate(&schema)
+        .unwrap();
+    let required_binding = required_shape.bind(BTreeMap::new()).unwrap();
+
+    let required = node
+        .query_relation_snapshot_for_link(
+            &required_shape,
+            &required_binding,
+            DurabilityTier::Local,
+            bob,
+        )
+        .unwrap();
+    assert!(required.rows.is_empty());
+    assert!(required.edges.is_empty());
+}
+
 #[test]
 fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
     let (_temp_dir, mut node) = open_node();

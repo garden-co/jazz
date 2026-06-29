@@ -145,6 +145,22 @@ struct WasmRow<'a> {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct WasmRelationSnapshot<'a> {
+    cursor: u64,
+    rows: Vec<WasmRowBatch<'a>>,
+    edges: Vec<WasmRelationEdge>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct WasmRelationEdge {
+    source_table: String,
+    source_row_id: RowUuid,
+    relation: String,
+    target_table: String,
+    target_row_id: RowUuid,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct WasmWriteResult {
     row_id: RowUuid,
     tx_id: jazz::tx::TxId,
@@ -380,6 +396,35 @@ impl WasmDbInner {
             Self::Memory(db) => block_on(db.all_for_identity(query, opts, author)),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => block_on(db.all_for_identity(query, opts, author)),
+        }
+    }
+
+    fn all_relation_snapshot(
+        &self,
+        query: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => block_on(db.all_relation_snapshot(query, opts)),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => block_on(db.all_relation_snapshot(query, opts)),
+        }
+    }
+
+    fn all_relation_snapshot_for_identity(
+        &self,
+        query: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => {
+                block_on(db.all_relation_snapshot_for_identity(query, opts, author))
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                block_on(db.all_relation_snapshot_for_identity(query, opts, author))
+            }
         }
     }
 
@@ -826,6 +871,36 @@ impl WasmDb {
             .all_for_identity(&query.inner, opts, author)
             .map_err(to_js_error)?;
         encode_rows(&rows).map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = allRelationSnapshot)]
+    pub fn all_relation_snapshot(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<Vec<u8>, JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        let snapshot = self
+            .inner
+            .all_relation_snapshot(&query.inner, opts)
+            .map_err(to_js_error)?;
+        encode_relation_snapshot(&snapshot).map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = allRelationSnapshotForIdentity)]
+    pub fn all_relation_snapshot_for_identity(
+        &self,
+        query: &WasmPreparedQuery,
+        author: Vec<u8>,
+        opts: JsValue,
+    ) -> Result<Vec<u8>, JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        let author = author_id_from_bytes(&author)?;
+        let snapshot = self
+            .inner
+            .all_relation_snapshot_for_identity(&query.inner, opts, author)
+            .map_err(to_js_error)?;
+        encode_relation_snapshot(&snapshot).map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = subscribe)]
@@ -1670,6 +1745,16 @@ fn encode_rows(rows: &[jazz::node::CurrentRow]) -> Result<Vec<u8>, postcard::Err
     postcard::to_allocvec(&row_batches(rows))
 }
 
+fn encode_relation_snapshot(
+    snapshot: &jazz::node::RelationSnapshot,
+) -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&WasmRelationSnapshot {
+        cursor: 0,
+        rows: row_batches(&snapshot.rows),
+        edges: snapshot.edges.iter().map(wasm_relation_edge).collect(),
+    })
+}
+
 fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
     let mut batches: Vec<WasmRowBatch<'_>> = Vec::new();
     for row in rows {
@@ -1686,6 +1771,16 @@ fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
         }
     }
     batches
+}
+
+fn wasm_relation_edge(edge: &jazz::node::RelationEdge) -> WasmRelationEdge {
+    WasmRelationEdge {
+        source_table: edge.source_table.clone(),
+        source_row_id: edge.source_row,
+        relation: edge.relation.clone(),
+        target_table: edge.target_table.clone(),
+        target_row_id: edge.target_row,
+    }
 }
 
 fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> WasmRow<'a> {

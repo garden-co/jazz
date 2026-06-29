@@ -17,8 +17,9 @@ use super::maintained_subscription_view::MaintainedSubscriptionView;
 use super::policy::ViewEvaluationContext;
 use crate::protocol::{ResultRowEntry, ShapeAst, Subscribe, SubscriptionKey};
 use crate::query::{
-    Aggregate, AggregateFunction, AggregateQuery, Binding, Include, JoinTarget, JoinVia, Operand,
-    OrderDirection, PolicyBranch, Predicate, QUERY_NAMESPACE, ShapeId, ValidatedQuery,
+    Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
+    Include, JoinTarget, JoinVia, Operand, OrderDirection, PolicyBranch, Predicate,
+    QUERY_NAMESPACE, Query as JazzQuery, ShapeId, ValidatedQuery, col, eq, lit,
 };
 
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
@@ -868,6 +869,38 @@ where
         self.query_rows_with_prepared_plan_for_identity(&shape, &binding, tier, None, identity)
     }
 
+    /// Evaluate a query plus its array-subquery relation payload against local
+    /// visible-current knowledge for one identity.
+    pub(crate) fn query_relation_snapshot_for_link(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<RelationSnapshot, Error> {
+        let mut snapshot = RelationSnapshot::default();
+        let root_rows = self.query_rows_for_link(shape, binding, tier, identity)?;
+        let mut row_keys = BTreeSet::new();
+        for row in &root_rows {
+            row_keys.insert((row.table().to_owned(), row.row_uuid()));
+        }
+        snapshot.rows.extend(root_rows.iter().cloned());
+        let root_table = self
+            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .clone();
+        self.materialize_array_subqueries(
+            &root_table,
+            &root_rows,
+            &shape.query().array_subqueries,
+            shape.schema_version(),
+            tier,
+            identity,
+            &mut snapshot,
+            &mut row_keys,
+        )?;
+        Ok(snapshot)
+    }
+
     pub(crate) fn query_rows_for_link_including_deleted(
         &mut self,
         shape: &ValidatedQuery,
@@ -929,6 +962,106 @@ where
         }
         self.finish_query_rows(shape.query(), &mut rows)?;
         Ok(rows)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_array_subqueries(
+        &mut self,
+        parent_table: &TableSchema,
+        parent_rows: &[CurrentRow],
+        subqueries: &[ArraySubquery],
+        schema_version: SchemaVersionId,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        snapshot: &mut RelationSnapshot,
+        row_keys: &mut BTreeSet<(String, RowUuid)>,
+    ) -> Result<(), Error> {
+        for subquery in subqueries {
+            let child_table = self
+                .table_in_schema(&subquery.table, schema_version)?
+                .clone();
+            for parent in parent_rows {
+                let Some(value) =
+                    relation_outer_value(parent_table, parent, &subquery.outer_column)
+                else {
+                    continue;
+                };
+                let child_rows = self.query_array_subquery_rows(
+                    subquery,
+                    schema_version,
+                    tier,
+                    identity,
+                    value,
+                )?;
+                if matches!(
+                    subquery.requirement,
+                    ArraySubqueryRequirement::AtLeastOne
+                        | ArraySubqueryRequirement::MatchCorrelationCardinality
+                ) && child_rows.is_empty()
+                {
+                    snapshot.rows.retain(|row| {
+                        row.table() != parent.table() || row.row_uuid() != parent.row_uuid()
+                    });
+                    snapshot.edges.retain(|edge| {
+                        edge.source_table != parent.table() || edge.source_row != parent.row_uuid()
+                    });
+                    row_keys.remove(&(parent.table().to_owned(), parent.row_uuid()));
+                    continue;
+                }
+                for child in &child_rows {
+                    if row_keys.insert((child.table().to_owned(), child.row_uuid())) {
+                        snapshot.rows.push(child.clone());
+                    }
+                    snapshot.edges.push(RelationEdge {
+                        source_table: parent.table().to_owned(),
+                        source_row: parent.row_uuid(),
+                        relation: subquery.column_name.clone(),
+                        target_table: child.table().to_owned(),
+                        target_row: child.row_uuid(),
+                    });
+                }
+                self.materialize_array_subqueries(
+                    &child_table,
+                    &child_rows,
+                    &subquery.nested_arrays,
+                    schema_version,
+                    tier,
+                    identity,
+                    snapshot,
+                    row_keys,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn query_array_subquery_rows(
+        &mut self,
+        subquery: &ArraySubquery,
+        schema_version: SchemaVersionId,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        value: Value,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut query = JazzQuery::from(subquery.table.clone())
+            .filter(eq(col(subquery.inner_column.clone()), lit(value)));
+        for filter in &subquery.filters {
+            query = query.filter(filter.clone());
+        }
+        for order in &subquery.order_by {
+            query = query.order_by(order.column.clone(), order.direction);
+        }
+        if let Some(limit) = subquery.limit {
+            query = query.limit(limit);
+        }
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let shape = query.validate(&schema.schema).map_err(Error::Query)?;
+        let binding = shape.bind(BTreeMap::new()).map_err(Error::Query)?;
+        self.query_rows_for_link(&shape, &binding, tier, identity)
     }
 
     fn query_rows_from_projected_current_source(
@@ -6598,6 +6731,13 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
 }
 
 fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Option<Value> {
+    if column == "id" {
+        return Some(Value::Uuid(row.row_uuid().0));
+    }
+    row.cell(table, column)
+}
+
+fn relation_outer_value(table: &TableSchema, row: &CurrentRow, column: &str) -> Option<Value> {
     if column == "id" {
         return Some(Value::Uuid(row.row_uuid().0));
     }
