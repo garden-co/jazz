@@ -23,18 +23,16 @@ const ext = (p: string) => {
 
 export function resolveEmbeddedDir(): string | null {
   const here = dirname(fileURLToPath(import.meta.url));
-  // Published: the inspector's embedded build is copied into jazz-tools' own
-  // dist at publish time, so it sits right next to this module — resolved
-  // relative to jazz-tools itself, this works in any consumer install anywhere.
-  const bundled = join(here, "embedded");
-  if (existsSync(join(bundled, "embedded.html"))) return bundled;
-  // Monorepo dev only: jazz-tools and jazz-inspector are sibling packages and we
-  // don't stage the assets into dist during a normal build, so read them from
-  // the inspector package directly. Never reached in a published install (the
-  // bundled dir above always exists there). `here` is .../jazz-tools/{src,dist}/
-  // dev/inspector-overlay, so four levels up lands on `packages/`.
-  const sibling = join(here, "../../../../inspector/dist-embedded");
-  if (existsSync(join(sibling, "embedded.html"))) return sibling;
+  // First: the inspector's embedded build bundled into jazz-tools' own dist next
+  // to this module (staged at publish via scripts/stage-inspector-overlay.mjs) —
+  // resolved relative to jazz-tools, so it works in any consumer install anywhere.
+  // Fallback (monorepo dev only, never reached in a published install): read the
+  // sibling inspector package directly, since we don't stage into dist during a
+  // normal build. `here` is .../jazz-tools/{src,dist}/dev/inspector-overlay, so
+  // four levels up lands on `packages/`.
+  for (const dir of [join(here, "embedded"), join(here, "../../../../inspector/dist-embedded")]) {
+    if (existsSync(join(dir, "embedded.html"))) return dir;
+  }
   return null;
 }
 

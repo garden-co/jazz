@@ -6,7 +6,7 @@
       "outputs": ["dist/**", "pkg/**"],
       "env": ["JAZZ_NAPI_RELEASE"]
     },
-    "jazz-inspector#build": {
+    "inspector#build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "dist-embedded/**", "dist-extension/**"]
     },

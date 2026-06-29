@@ -609,12 +609,8 @@ jobs:
       # overlay server module before jazz-tools is packed.
       - name: Stage inspector overlay assets into jazz-tools
         run: |
-          pnpm --filter jazz-inspector run build:embedded
-          DEST=packages/jazz-tools/dist/dev/inspector-overlay/embedded
-          rm -rf "${DEST}"
-          mkdir -p "${DEST}"
-          cp -R packages/inspector/dist-embedded/. "${DEST}/"
-          test -f "${DEST}/embedded.html"
+          pnpm --filter inspector run build:embedded
+          pnpm --filter jazz-tools run stage:inspector-overlay
 
       - name: Guard alpha-only lock-stepped publish versions
         run: |

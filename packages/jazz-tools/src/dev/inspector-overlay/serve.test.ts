@@ -27,9 +27,9 @@ describe("overlay serve middleware", () => {
   });
 
   it("never serves files outside the embedded dir", async () => {
-    // The embedded build resolves from jazz-tools' own dependency tree
-    // (jazz-inspector is a direct dependency), so there's no app-root input to
-    // attack — but a crafted URL must still never escape the embedded dir.
+    // The embedded build resolves from jazz-tools' own dist (the inspector's
+    // assets are bundled in), so there's no app-root input to attack — but a
+    // crafted URL must still never escape the embedded dir.
     const handler = createOverlayHandler();
     const r = fakeRes();
     const handled = await handler(
