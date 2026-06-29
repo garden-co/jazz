@@ -57,6 +57,172 @@ pub struct Query {
     pub offset: usize,
 }
 
+/// Output-changing relation query used by alpha-compatible `hopTo`/`gather`.
+///
+/// This is intentionally separate from [`Query`]: ordinary query joins filter a
+/// fixed root table, while relation queries own an explicit terminal row set.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct RelationQuery {
+    pub rel: RelationExpr,
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum RelationExpr {
+    TableScan {
+        table: String,
+    },
+    Filter {
+        input: Box<RelationExpr>,
+        predicate: RelationPredicate,
+    },
+    Union {
+        inputs: Vec<RelationExpr>,
+    },
+    Join {
+        left: Box<RelationExpr>,
+        right: Box<RelationExpr>,
+        on: Vec<RelationJoinCondition>,
+        join_kind: RelationJoinKind,
+    },
+    Project {
+        input: Box<RelationExpr>,
+        columns: Vec<RelationProjectColumn>,
+    },
+    Gather {
+        seed: Box<RelationExpr>,
+        step: Box<RelationExpr>,
+        frontier_key: RelationKeyRef,
+        max_depth: usize,
+        dedupe_key: Vec<RelationKeyRef>,
+    },
+    Distinct {
+        input: Box<RelationExpr>,
+        key: Vec<RelationKeyRef>,
+    },
+    OrderBy {
+        input: Box<RelationExpr>,
+        terms: Vec<RelationOrderBy>,
+    },
+    Offset {
+        input: Box<RelationExpr>,
+        offset: usize,
+    },
+    Limit {
+        input: Box<RelationExpr>,
+        limit: usize,
+    },
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum RelationPredicate {
+    Cmp {
+        left: RelationColumnRef,
+        op: RelationCmpOp,
+        right: RelationValueRef,
+    },
+    IsNull {
+        column: RelationColumnRef,
+    },
+    IsNotNull {
+        column: RelationColumnRef,
+    },
+    In {
+        left: RelationColumnRef,
+        values: Vec<RelationValueRef>,
+    },
+    Contains {
+        left: RelationColumnRef,
+        right: RelationValueRef,
+    },
+    And(Vec<RelationPredicate>),
+    Or(Vec<RelationPredicate>),
+    Not(Box<RelationPredicate>),
+    True,
+    False,
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum RelationCmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct RelationColumnRef {
+    #[serde(default)]
+    pub scope: Option<String>,
+    pub column: String,
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum RelationValueRef {
+    Literal(serde_json::Value),
+    SessionRef(Vec<String>),
+    OuterColumn(RelationColumnRef),
+    FrontierColumn(RelationColumnRef),
+    RowId(RelationRowIdRef),
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum RelationRowIdRef {
+    Current,
+    Outer,
+    Frontier,
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum RelationJoinKind {
+    Inner,
+    Left,
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RelationJoinCondition {
+    pub left: RelationColumnRef,
+    pub right: RelationColumnRef,
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum RelationKeyRef {
+    Column(RelationColumnRef),
+    RowId(RelationRowIdRef),
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum RelationProjectExpr {
+    Column(RelationColumnRef),
+    RowId(RelationRowIdRef),
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RelationProjectColumn {
+    pub alias: String,
+    pub expr: RelationProjectExpr,
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RelationOrderBy {
+    pub column: RelationColumnRef,
+    pub direction: OrderDirection,
+}
+
 impl Query {
     /// Construct a query rooted at `table`.
     ///

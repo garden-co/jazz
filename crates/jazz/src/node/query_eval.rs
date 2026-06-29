@@ -19,7 +19,9 @@ use crate::protocol::{ResultRowEntry, ShapeAst, Subscribe, SubscriptionKey};
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
     Include, JoinTarget, JoinVia, Operand, OrderDirection, PolicyBranch, Predicate,
-    QUERY_NAMESPACE, Query as JazzQuery, ShapeId, ValidatedQuery, col, eq, lit,
+    QUERY_NAMESPACE, Query as JazzQuery, RelationCmpOp, RelationColumnRef, RelationExpr,
+    RelationJoinCondition, RelationJoinKind, RelationPredicate, RelationProjectExpr, RelationQuery,
+    RelationRowIdRef, RelationValueRef, ShapeId, ValidatedQuery, col, eq, lit,
 };
 
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
@@ -62,6 +64,82 @@ struct LoweredQueryClauseOptions {
     binding_source_shape: String,
     source_overrides: BTreeMap<String, GraphBuilder>,
     table_overrides: BTreeMap<String, TableSchema>,
+}
+
+#[derive(Clone, Debug)]
+struct RelationEvalScopedRow {
+    table: String,
+    row: CurrentRow,
+}
+
+#[derive(Clone, Debug)]
+struct RelationEvalRow {
+    current: CurrentRow,
+    scopes: BTreeMap<String, RelationEvalScopedRow>,
+}
+
+impl RelationEvalRow {
+    fn from_row(scope: String, row: CurrentRow) -> Self {
+        let mut scopes = BTreeMap::new();
+        scopes.insert(
+            scope.clone(),
+            RelationEvalScopedRow {
+                table: scope,
+                row: row.clone(),
+            },
+        );
+        Self {
+            current: row,
+            scopes,
+        }
+    }
+
+    fn scoped_row(&self, scope: Option<&str>) -> Option<&RelationEvalScopedRow> {
+        match scope {
+            Some(scope) => self.scopes.get(scope),
+            None => self.scopes.get(self.current.table()),
+        }
+    }
+
+    fn merge(&self, other: &Self) -> Self {
+        let mut scopes = self.scopes.clone();
+        scopes.extend(other.scopes.clone());
+        Self {
+            current: other.current.clone(),
+            scopes,
+        }
+    }
+
+    fn with_aliases(mut self, aliases: impl IntoIterator<Item = String>) -> Self {
+        for alias in aliases {
+            self.scopes.insert(
+                alias,
+                RelationEvalScopedRow {
+                    table: self.current.table().to_owned(),
+                    row: self.current.clone(),
+                },
+            );
+        }
+        self
+    }
+
+    fn retarget_to_scope(mut self, scope: Option<&str>) -> Option<Self> {
+        let scoped = self.scoped_row(scope)?.clone();
+        self.current = scoped.row.clone();
+        self.scopes.insert(
+            scoped.table.clone(),
+            RelationEvalScopedRow {
+                table: scoped.table,
+                row: scoped.row,
+            },
+        );
+        Some(self)
+    }
+}
+
+#[derive(Default)]
+struct RelationEvalContext {
+    frontier: Option<CurrentRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -899,6 +977,341 @@ where
             &mut row_keys,
         )?;
         Ok(snapshot)
+    }
+
+    pub(crate) fn query_relation_query_snapshot_for_link(
+        &mut self,
+        query: &RelationQuery,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<RelationSnapshot, Error> {
+        let mut context = RelationEvalContext { frontier: None };
+        let mut rows = self.eval_relation_expr(&query.rel, tier, identity, &mut context)?;
+        rows.sort_by(|left, right| {
+            subscription_row_key_for_eval(left).cmp(&subscription_row_key_for_eval(right))
+        });
+        rows.dedup_by(|left, right| {
+            subscription_row_key_for_eval(left) == subscription_row_key_for_eval(right)
+        });
+        Ok(RelationSnapshot {
+            rows: rows.into_iter().map(|row| row.current).collect(),
+            edges: Vec::new(),
+        })
+    }
+
+    fn eval_relation_expr(
+        &mut self,
+        expr: &RelationExpr,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        context: &mut RelationEvalContext,
+    ) -> Result<Vec<RelationEvalRow>, Error> {
+        match expr {
+            RelationExpr::TableScan { table } => {
+                let shape = JazzQuery::from(table.as_str()).validate(&self.catalogue.schema)?;
+                let binding = shape.bind(BTreeMap::new())?;
+                let rows = self.query_rows_for_link(&shape, &binding, tier, identity)?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| RelationEvalRow::from_row(table.clone(), row))
+                    .collect())
+            }
+            RelationExpr::Filter { input, predicate } => {
+                let rows = self.eval_relation_expr(input, tier, identity, context)?;
+                rows.into_iter()
+                    .filter_map(|row| {
+                        match self.eval_relation_predicate(predicate, &row, context) {
+                            Ok(true) => Some(Ok(row)),
+                            Ok(false) => None,
+                            Err(err) => Some(Err(err)),
+                        }
+                    })
+                    .collect()
+            }
+            RelationExpr::Union { inputs } => {
+                let mut out = Vec::new();
+                for input in inputs {
+                    out.extend(self.eval_relation_expr(input, tier, identity, context)?);
+                }
+                Ok(out)
+            }
+            RelationExpr::Join {
+                left,
+                right,
+                on,
+                join_kind,
+            } => {
+                if *join_kind != RelationJoinKind::Inner {
+                    return Err(Error::InvalidStoredValue(
+                        "left relation joins are not supported yet",
+                    ));
+                }
+                let left_rows = self.eval_relation_expr(left, tier, identity, context)?;
+                let right_rows = self.eval_relation_expr(right, tier, identity, context)?;
+                let left_aliases = relation_join_left_aliases(on);
+                let right_aliases = relation_join_right_aliases(on);
+                let mut out = Vec::new();
+                for left_row in &left_rows {
+                    for right_row in &right_rows {
+                        let left_row = left_row.clone().with_aliases(left_aliases.clone());
+                        let right_row = right_row.clone().with_aliases(right_aliases.clone());
+                        if self.relation_join_matches(&left_row, &right_row, on, context)? {
+                            out.push(left_row.merge(&right_row));
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            RelationExpr::Project { input, columns } => {
+                let rows = self.eval_relation_expr(input, tier, identity, context)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    let Some(projected) = self.project_relation_row(row, columns, context)? else {
+                        continue;
+                    };
+                    out.push(projected);
+                }
+                Ok(out)
+            }
+            RelationExpr::Gather {
+                seed,
+                step,
+                max_depth,
+                ..
+            } => {
+                let seed_rows = self.eval_relation_expr(seed, tier, identity, context)?;
+                let mut by_key = BTreeMap::new();
+                let mut frontier = seed_rows.clone();
+                for row in seed_rows {
+                    by_key.insert(subscription_row_key_for_eval(&row), row);
+                }
+                for _ in 0..*max_depth {
+                    if frontier.is_empty() {
+                        break;
+                    }
+                    let mut next_frontier = Vec::new();
+                    for frontier_row in frontier {
+                        context.frontier = Some(frontier_row.current.clone());
+                        let step_rows = self.eval_relation_expr(step, tier, identity, context)?;
+                        context.frontier = None;
+                        for step_row in step_rows {
+                            let key = subscription_row_key_for_eval(&step_row);
+                            if let std::collections::btree_map::Entry::Vacant(entry) =
+                                by_key.entry(key)
+                            {
+                                entry.insert(step_row.clone());
+                                next_frontier.push(step_row);
+                            }
+                        }
+                    }
+                    frontier = next_frontier;
+                }
+                Ok(by_key.into_values().collect())
+            }
+            RelationExpr::Distinct { input, .. } => {
+                let mut rows = self.eval_relation_expr(input, tier, identity, context)?;
+                rows.sort_by(|left, right| {
+                    subscription_row_key_for_eval(left).cmp(&subscription_row_key_for_eval(right))
+                });
+                rows.dedup_by(|left, right| {
+                    subscription_row_key_for_eval(left) == subscription_row_key_for_eval(right)
+                });
+                Ok(rows)
+            }
+            RelationExpr::OrderBy { input, terms } => {
+                let mut rows = self.eval_relation_expr(input, tier, identity, context)?;
+                rows.sort_by(|left, right| {
+                    for term in terms {
+                        let ordering = compare_optional_values(
+                            self.relation_column_value(left, &term.column)
+                                .ok()
+                                .flatten(),
+                            self.relation_column_value(right, &term.column)
+                                .ok()
+                                .flatten(),
+                        );
+                        if ordering != Ordering::Equal {
+                            return match term.direction {
+                                OrderDirection::Asc => ordering,
+                                OrderDirection::Desc => ordering.reverse(),
+                            };
+                        }
+                    }
+                    subscription_row_key_for_eval(left).cmp(&subscription_row_key_for_eval(right))
+                });
+                Ok(rows)
+            }
+            RelationExpr::Offset { input, offset } => {
+                let rows = self.eval_relation_expr(input, tier, identity, context)?;
+                Ok(rows.into_iter().skip(*offset).collect())
+            }
+            RelationExpr::Limit { input, limit } => {
+                let rows = self.eval_relation_expr(input, tier, identity, context)?;
+                Ok(rows.into_iter().take(*limit).collect())
+            }
+        }
+    }
+
+    fn relation_join_matches(
+        &self,
+        left: &RelationEvalRow,
+        right: &RelationEvalRow,
+        on: &[RelationJoinCondition],
+        _context: &RelationEvalContext,
+    ) -> Result<bool, Error> {
+        for condition in on {
+            let left_value = self.relation_column_value(left, &condition.left)?;
+            let right_value = self.relation_column_value(right, &condition.right)?;
+            if !relation_values_equal_or_contains(left_value.as_ref(), right_value.as_ref()) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn project_relation_row(
+        &self,
+        row: RelationEvalRow,
+        columns: &[crate::query::RelationProjectColumn],
+        context: &RelationEvalContext,
+    ) -> Result<Option<RelationEvalRow>, Error> {
+        for column in columns {
+            if let RelationProjectExpr::Column(column_ref) = &column.expr {
+                if column.alias == "id" || column_ref.column == "id" {
+                    return Ok(row.retarget_to_scope(column_ref.scope.as_deref()));
+                }
+            }
+            if let RelationProjectExpr::RowId(RelationRowIdRef::Current) = column.expr {
+                return Ok(Some(row));
+            }
+            if let RelationProjectExpr::RowId(RelationRowIdRef::Frontier) = column.expr {
+                if let Some(frontier) = &context.frontier {
+                    return Ok(Some(RelationEvalRow::from_row(
+                        frontier.table().to_owned(),
+                        frontier.clone(),
+                    )));
+                }
+            }
+        }
+        Ok(Some(row))
+    }
+
+    fn eval_relation_predicate(
+        &self,
+        predicate: &RelationPredicate,
+        row: &RelationEvalRow,
+        context: &RelationEvalContext,
+    ) -> Result<bool, Error> {
+        match predicate {
+            RelationPredicate::Cmp { left, op, right } => {
+                let left = self.relation_column_value(row, left)?;
+                let right = self.relation_value_ref(row, right, context)?;
+                Ok(match op {
+                    RelationCmpOp::Eq => {
+                        relation_values_equal_or_contains(left.as_ref(), right.as_ref())
+                    }
+                    RelationCmpOp::Ne => {
+                        !relation_values_equal_or_contains(left.as_ref(), right.as_ref())
+                    }
+                    RelationCmpOp::Lt
+                    | RelationCmpOp::Le
+                    | RelationCmpOp::Gt
+                    | RelationCmpOp::Ge => {
+                        let ordering = left
+                            .as_ref()
+                            .zip(right.as_ref())
+                            .and_then(|(left, right)| compare_values(left, right));
+                        matches!(
+                            (op, ordering),
+                            (RelationCmpOp::Lt, Some(Ordering::Less))
+                                | (RelationCmpOp::Le, Some(Ordering::Less | Ordering::Equal))
+                                | (RelationCmpOp::Gt, Some(Ordering::Greater))
+                                | (RelationCmpOp::Ge, Some(Ordering::Greater | Ordering::Equal))
+                        )
+                    }
+                })
+            }
+            RelationPredicate::IsNull { column } => {
+                Ok(self.relation_column_value(row, column)?.is_none())
+            }
+            RelationPredicate::IsNotNull { column } => {
+                Ok(self.relation_column_value(row, column)?.is_some())
+            }
+            RelationPredicate::In { left, values } => {
+                let left = self.relation_column_value(row, left)?;
+                for value in values {
+                    let right = self.relation_value_ref(row, value, context)?;
+                    if relation_values_equal_or_contains(left.as_ref(), right.as_ref()) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            RelationPredicate::Contains { left, right } => {
+                let left = self.relation_column_value(row, left)?;
+                let right = self.relation_value_ref(row, right, context)?;
+                Ok(relation_value_contains(left.as_ref(), right.as_ref()))
+            }
+            RelationPredicate::And(predicates) => {
+                for predicate in predicates {
+                    if !self.eval_relation_predicate(predicate, row, context)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            RelationPredicate::Or(predicates) => {
+                for predicate in predicates {
+                    if self.eval_relation_predicate(predicate, row, context)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            RelationPredicate::Not(predicate) => {
+                Ok(!self.eval_relation_predicate(predicate, row, context)?)
+            }
+            RelationPredicate::True => Ok(true),
+            RelationPredicate::False => Ok(false),
+        }
+    }
+
+    fn relation_value_ref(
+        &self,
+        row: &RelationEvalRow,
+        value: &RelationValueRef,
+        context: &RelationEvalContext,
+    ) -> Result<Option<Value>, Error> {
+        match value {
+            RelationValueRef::Literal(value) => Ok(json_relation_value(value)),
+            RelationValueRef::OuterColumn(column) | RelationValueRef::FrontierColumn(column) => {
+                self.relation_column_value(row, column)
+            }
+            RelationValueRef::RowId(RelationRowIdRef::Current)
+            | RelationValueRef::RowId(RelationRowIdRef::Outer) => {
+                Ok(Some(Value::Uuid(row.current.row_uuid().0)))
+            }
+            RelationValueRef::RowId(RelationRowIdRef::Frontier) => Ok(context
+                .frontier
+                .as_ref()
+                .map(|row| Value::Uuid(row.row_uuid().0))),
+            RelationValueRef::SessionRef(_) => Ok(None),
+        }
+    }
+
+    fn relation_column_value(
+        &self,
+        row: &RelationEvalRow,
+        column: &RelationColumnRef,
+    ) -> Result<Option<Value>, Error> {
+        let Some(scoped) = row.scoped_row(column.scope.as_deref()) else {
+            return Ok(None);
+        };
+        if column.column == "id" {
+            return Ok(Some(Value::Uuid(scoped.row.row_uuid().0)));
+        }
+        let table = self.table(&scoped.table)?;
+        Ok(scoped.row.cell(table, &column.column))
     }
 
     pub(crate) fn subscription_snapshot_for_link(
@@ -6754,6 +7167,120 @@ fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Opt
         return Some(Value::Uuid(row.row_uuid().0));
     }
     row.cell(table, column)
+}
+
+fn subscription_row_key_for_eval(row: &RelationEvalRow) -> (String, RowUuid) {
+    (row.current.table().to_owned(), row.current.row_uuid())
+}
+
+fn relation_join_left_aliases(on: &[RelationJoinCondition]) -> Vec<String> {
+    on.iter()
+        .filter_map(|condition| condition.left.scope.clone())
+        .collect()
+}
+
+fn relation_join_right_aliases(on: &[RelationJoinCondition]) -> Vec<String> {
+    on.iter()
+        .filter_map(|condition| condition.right.scope.clone())
+        .collect()
+}
+
+fn json_relation_value(value: &serde_json::Value) -> Option<Value> {
+    if let serde_json::Value::Object(object) = value {
+        if let Some(serde_json::Value::String(value_type)) = object.get("type") {
+            let payload = object.get("value");
+            return match value_type.as_str() {
+                "Null" => None,
+                "Boolean" => payload
+                    .and_then(serde_json::Value::as_bool)
+                    .map(Value::Bool),
+                "Text" | "Enum" => payload
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| Value::String(value.to_owned())),
+                "Uuid" => payload
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                    .map(Value::Uuid),
+                "Integer" | "BigInt" | "Timestamp" => {
+                    payload.and_then(serde_json::Value::as_u64).map(Value::U64)
+                }
+                "Double" => payload.and_then(serde_json::Value::as_f64).map(Value::F64),
+                "Bytea" => payload.as_ref().and_then(|payload| {
+                    payload.as_array().map(|bytes| {
+                        Value::Bytes(
+                            bytes
+                                .iter()
+                                .filter_map(|byte| byte.as_u64().map(|byte| byte as u8))
+                                .collect(),
+                        )
+                    })
+                }),
+                "Array" => payload.as_ref().and_then(|payload| {
+                    payload.as_array().map(|values| {
+                        Value::Array(values.iter().filter_map(json_relation_value).collect())
+                    })
+                }),
+                _ => None,
+            };
+        }
+    }
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(value) => Some(Value::Bool(*value)),
+        serde_json::Value::Number(value) => value
+            .as_u64()
+            .map(Value::U64)
+            .or_else(|| value.as_f64().map(Value::F64)),
+        serde_json::Value::String(value) => uuid::Uuid::parse_str(value)
+            .map(Value::Uuid)
+            .unwrap_or_else(|_| Value::String(value.clone()))
+            .into(),
+        serde_json::Value::Array(values) => Some(Value::Array(
+            values
+                .iter()
+                .filter_map(json_relation_value)
+                .collect::<Vec<_>>(),
+        )),
+        serde_json::Value::Object(_) => None,
+    }
+}
+
+fn relation_values_equal_or_contains(left: Option<&Value>, right: Option<&Value>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            relation_value_eq(left, right)
+                || relation_value_contains(Some(left), Some(right))
+                || relation_value_contains(Some(right), Some(left))
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn relation_value_contains(left: Option<&Value>, right: Option<&Value>) -> bool {
+    let (Some(left), Some(right)) = (left, right) else {
+        return false;
+    };
+    match left {
+        Value::Array(values) | Value::Tuple(values) => {
+            values.iter().any(|value| relation_value_eq(value, right))
+        }
+        Value::Nullable(Some(value)) => relation_value_contains(Some(value), Some(right)),
+        _ => false,
+    }
+}
+
+fn relation_value_eq(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Nullable(None), Value::Nullable(None)) => true,
+        (Value::Nullable(None), _) | (_, Value::Nullable(None)) => false,
+        (Value::Nullable(Some(left)), right) => relation_value_eq(left, right),
+        (left, Value::Nullable(Some(right))) => relation_value_eq(left, right),
+        (Value::Uuid(left), Value::String(right)) | (Value::String(right), Value::Uuid(left)) => {
+            uuid::Uuid::parse_str(right).is_ok_and(|right| *left == right)
+        }
+        _ => left == right,
+    }
 }
 
 fn relation_outer_value(table: &TableSchema, row: &CurrentRow, column: &str) -> Option<Value> {
