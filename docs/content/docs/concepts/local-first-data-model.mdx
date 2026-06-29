@@ -76,35 +76,9 @@ single current visible result.
 
 You can think of it like this:
 
-<Graph
-  eyebrow="Row version history"
-  description={
-    <>
-      One device edits linearly. Concurrent edits branch into separate row versions, then reconcile
-      into a single current visible result.
-    </>
-  }
-  direction="LR"
-  converge
-  grid={{ gap: "1.25rem 3rem" }}
-  nodes={[
-    { id: "v1", rank: 0, label: "v1" },
-    { id: "v2", rank: 1, label: "v2" },
-    { id: "a3", rank: 2, order: 0, label: "a3" },
-    { id: "b3", rank: 2, order: 1, label: "b3" },
-    { id: "m4", rank: 3, label: "m4" },
-  ]}
-  edges={[
-    { from: "v1", to: "v2" },
-    { from: "v2", to: "a3" },
-    { from: "v2", to: "b3" },
-    { from: "a3", to: "m4" },
-    { from: "b3", to: "m4" },
-  ]}
-/>
+<ConcurrentWritesDiagram />
 
-The important point is not the exact shape of the graph. The important point is that Jazz preserves
-enough row history to converge deterministically after peers reconnect.
+All updates are preserved by Jazz, so peers all converge deterministically after peers connect.
 
 ## Conflict resolution
 
@@ -117,10 +91,10 @@ row state. Even row versions that lose out in the current visible result remain 
 no local-first reconciliation information is discarded.
 
 <Callout type="warn" title="Beware of unexpected results">
-  Jazz can resolve structural conflicts for you, but it cannot fully understand the meaning of your
-  data. If Alice renames a to-do while Bob marks it complete, both changes may be preserved even if
-  the new title changes what the task means. You still need application-level judgment about what
-  kinds of concurrent editing should be allowed.
+  Notice above, Alice changed the title to "Buy oat milk" and Bob marked the task complete *before*
+  he saw Alice's change. He may have bought cow's milk. This merge is mechanically correct but
+  semantically wrong. Jazz can resolve *structural* conflicts, but it cannot understand the meaning
+  of your data.
 </Callout>
 
 ## How this differs from traditional apps
