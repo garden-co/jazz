@@ -980,14 +980,16 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual([]);
   });
 
-  it("rejects Project relation IR while preparing the original subscription query", () => {
+  it("lowers simple Project relation IR while preparing the original subscription query", () => {
     const calls: string[] = [];
+    let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => {
+            prepareQuery: (query: Uint8Array) => {
               calls.push("prepareQuery");
+              preparedBytes = query;
               return {};
             },
             subscribe: () => {
@@ -1007,14 +1009,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    expect(() =>
-      runtime.createSubscription(
-        JSON.stringify({ table: "todos", relation_ir: unsupportedProjectRelationIr() }),
-      ),
-    ).toThrow(
-      'Relation IR operator "Project" requires a relation-tree lowerer or native relation query API',
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos", relation_ir: unsupportedProjectRelationIr() }),
     );
-    expect(calls).toEqual([]);
+    expect(handle).toBe(1);
+    expect(calls).toEqual(["prepareQuery", "subscribe"]);
+    expect(readPreparedSelect(preparedBytes!)).toEqual(["title"]);
   });
 
   it("subscribes to supported root relation IR as one prepared native query", () => {
