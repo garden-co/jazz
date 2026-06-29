@@ -65,6 +65,7 @@ import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
+type WriteOperationName = "Insert" | "Update" | "Upsert" | "Restore";
 
 /**
  * Configuration for creating a Db instance.
@@ -378,6 +379,24 @@ function resolveOutputColumnDescriptor(
   }
 
   return schema[tableName]?.columns.find((column) => column.name === columnName);
+}
+
+function toWriteRecordForOperation(
+  operation: WriteOperationName,
+  data: Record<string, unknown>,
+  schema: WasmSchema,
+  tableName: string,
+) {
+  try {
+    return toWriteRecord(data, schema, tableName);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${operation} failed: WriteError("${escapeWriteErrorReason(message)}")`);
+  }
+}
+
+function escapeWriteErrorReason(message: string): string {
+  return message.replaceAll('"', '\\"');
 }
 
 function resolveNativeSubscriptionColumns(
@@ -716,7 +735,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const { client, transactionId, session, attribution } = this.requireBinding("insert");
     const row = client.insertInternal(
       table._table,
@@ -743,7 +767,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   ): T {
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecordForOperation(
+      "Restore",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const { client, transactionId, session, attribution } = this.requireBinding("restore");
     const row = client.restoreInternal(
       table._table,
@@ -766,7 +795,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecordForOperation(
+      "Upsert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const { client, transactionId, session, attribution } = this.requireBinding("upsert");
     client.upsertInternal(table._table, values, options, session, attribution, transactionId);
   }
@@ -780,7 +814,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
-    const updates = toWriteRecord(transformedData, table._schema, table._table);
+    const updates = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const { client, transactionId, session, attribution } = this.requireBinding("update");
     client.updateInternal(
       table._table,
@@ -1142,7 +1181,12 @@ export class Db {
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const context = this.getRuntimeOperationContext();
     const inserted = client.insert(
       table._table,
@@ -1169,7 +1213,12 @@ export class Db {
   ): WriteResult<T> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecordForOperation(
+      "Restore",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const context = this.getRuntimeOperationContext();
     const restored = client.restore(
       table._table,
@@ -1196,7 +1245,12 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecordForOperation(
+      "Upsert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const context = this.getRuntimeOperationContext();
     return client.upsert(table._table, values, options, context?.session, context?.attribution);
   }
@@ -1214,7 +1268,12 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const updates = toWriteRecord(transformedData, table._schema, table._table);
+    const updates = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const context = this.getRuntimeOperationContext();
     return client.update(
       table._table,

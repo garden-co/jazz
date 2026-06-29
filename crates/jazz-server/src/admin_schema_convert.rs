@@ -144,12 +144,6 @@ fn convert_column(
         .as_object()
         .ok_or_else(|| err(path, "column definition must be an object"))?;
     reject_present(object, &["policies"], path)?;
-    reject_truthy(
-        object,
-        "json",
-        path,
-        "Json columns are not supported by this alpha slice",
-    )?;
     let name = object
         .get("name")
         .and_then(Value::as_str)
@@ -345,10 +339,7 @@ fn convert_scalar_kind(kind: &str, path: &str) -> Result<ColumnType, AdminSchema
             path,
             "I64 columns are not supported by this alpha slice",
         )),
-        "Json" | "JSON" => Err(err(
-            path,
-            "Json columns are not supported by this alpha slice",
-        )),
+        "Json" | "JSON" => Ok(ColumnType::String),
         "Timestamp" | "timestamp" => Ok(ColumnType::U64),
         "Row" => Err(err(
             path,
@@ -396,18 +387,6 @@ fn reject_present(
                 format!("{key} is not supported by this alpha slice"),
             ));
         }
-    }
-    Ok(())
-}
-
-fn reject_truthy(
-    object: &serde_json::Map<String, Value>,
-    key: &str,
-    path: &str,
-    message: &str,
-) -> Result<(), AdminSchemaConversionError> {
-    if object.get(key).and_then(Value::as_bool).unwrap_or(false) {
-        return Err(err(format!("{path}.{key}"), message));
     }
     Ok(())
 }
@@ -552,5 +531,42 @@ mod tests {
         }))
         .unwrap_err();
         assert!(err.to_string().contains("I64"));
+
+        let err = convert_admin_schema(&json!({
+            "todos": {
+                "columns": [
+                    { "name": "payload", "column_type": "Row" }
+                ]
+            }
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("Row columns"));
+
+        let err = convert_admin_schema(&json!({
+            "todos": {
+                "columns": [
+                    { "name": "count", "column_type": "BigInt" }
+                ]
+            }
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("unsupported column type"));
+    }
+
+    #[test]
+    fn converts_json_as_string_storage() {
+        let schema = convert_admin_schema(&json!({
+            "events": {
+                "columns": [
+                    { "name": "payload", "column_type": "Json" },
+                    { "name": "metadata", "column_type": { "type": "JSON" }, "nullable": true }
+                ]
+            }
+        }))
+        .expect("json schema converts");
+
+        let table = &schema.tables[0];
+        assert_eq!(table.columns[0].column_type, ColumnType::String);
+        assert_eq!(table.columns[1].column_type, ColumnType::String.nullable());
     }
 }
