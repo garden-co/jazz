@@ -110,7 +110,6 @@ describe("jazzPlugin", () => {
     const plugin = jazzPlugin({
       server: { port, adminSecret: "vite-test-admin" },
       schemaDir,
-      experimental_inspector: true,
     });
 
     const closeHandlers: (() => Promise<void> | void)[] = [];
@@ -154,7 +153,7 @@ describe("jazzPlugin", () => {
     expect(process.env.VITE_JAZZ_APP_ID).toBe(fakeViteServer.config.env.VITE_JAZZ_APP_ID);
     expect(process.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Inspector overlay enabled"));
-    // experimental_inspector injects the public flag the client provider reads.
+    // The plugin signals the client (mount the toggle) by exposing this flag.
     expect(fakeViteServer.config.env.VITE_JAZZ_INSPECTOR).toBe("1");
 
     for (const handler of closeHandlers) {

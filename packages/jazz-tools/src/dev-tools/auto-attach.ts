@@ -8,13 +8,14 @@
 // branch, so in production the call — and this whole module — is dropped, and
 // the inspector never ships to prod.
 
-// The inspector overlay is experimental and dev-only: it mounts only when a dev
-// plugin sets the public flag below. Vite-family bundlers inline it on
-// import.meta.env, Next on process.env — check both, since each is undefined
-// under the other's bundler (and `process` itself is undefined in a Vite
-// browser bundle, hence the guard). Read `process.env.NEXT_PUBLIC_JAZZ_INSPECTOR`
-// as a literal: Next only static-inlines that exact member access, not an alias.
-function inspectorEnabled(): boolean {
+// The overlay mounts only when the jazz dev plugin is active: the plugin exposes
+// a public flag to the browser in dev (Vite-family on import.meta.env, Next on
+// process.env), and we read both since each is undefined under the other's
+// bundler (and `process` itself is undefined in a Vite browser bundle, hence the
+// guard). Without the plugin there's no flag and no toggle — correct, since
+// nothing would serve the iframe. Read process.env.NEXT_PUBLIC_JAZZ_INSPECTOR as
+// a literal: Next only static-inlines that exact member access, not an alias.
+function jazzDevPluginActive(): boolean {
   const viteEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
   const nextFlag =
     typeof process !== "undefined" ? process.env.NEXT_PUBLIC_JAZZ_INSPECTOR : undefined;
@@ -22,14 +23,14 @@ function inspectorEnabled(): boolean {
 }
 
 /**
- * Mount the inspector overlay + attach the dev-tools bridge for a db. No-op
- * unless a dev plugin enabled the experimental inspector. Safe to call on every
- * provider effect run with no guard here: the overlay UI mounts once globally
- * and the bridge registers once per db (see attachDevTools), so repeat calls are
- * idempotent.
+ * Mount the inspector overlay + attach the dev-tools bridge for a db. The
+ * providers only call this in dev; it additionally no-ops unless the jazz dev
+ * plugin is serving the inspector. Safe to call on every provider effect run
+ * with no guard here: the overlay UI mounts once globally and the bridge
+ * registers once per db (see attachDevTools), so repeat calls are idempotent.
  */
 export function startInspectorOnce(db: object): void {
-  if (!inspectorEnabled()) return;
+  if (!jazzDevPluginActive()) return;
   void import("../dev/inspector-overlay/loader.js").then(({ startInspectorOverlay }) =>
     startInspectorOverlay(db),
   );

@@ -49,52 +49,30 @@ export interface OverlayDevServer {
   };
 }
 
-// Advertised by the dev plugins when the experimental inspector is enabled —
-// there's no way to discover the overlay's toggle/shortcut otherwise.
+// Announced so the overlay's toggle/shortcut is discoverable — there's no other
+// hint that it's there.
 export const OVERLAY_ENABLED_MESSAGE =
   "[jazz] Inspector overlay enabled — click the ⚡ button in your app (Alt+Shift+J).";
 
 /**
- * Register the inspector embedded-asset middleware (/__jazz/embedded/*) on a dev
- * server. Both Vite and SvelteKit call this. Whether the overlay's toggle
- * actually mounts is gated separately by `experimental_inspector`; this passive
- * route only responds when the toggle's iframe requests it.
+ * During dev, serve the inspector's embedded assets (/__jazz/embedded/*) and
+ * signal the client that the jazz dev plugin is active by exposing
+ * VITE_JAZZ_INSPECTOR (Vite surfaces VITE_*-prefixed keys to the browser via
+ * import.meta.env). The provider reads that flag and mounts the overlay toggle,
+ * so the inspector is on by default whenever the plugin is in use — and absent
+ * when it isn't (nothing would serve the iframe otherwise). Both the Vite and
+ * SvelteKit plugins call this.
  */
-export function attachOverlayMiddleware(server: OverlayDevServer): void {
+export function wireInspectorOverlay(server: OverlayDevServer): void {
   const overlay = createOverlayHandler();
   server.middlewares?.use((req, res, next) => {
     void overlay(req, res).then((handled) => {
       if (!handled) next();
     });
   });
-}
-
-/**
- * Experimental: when enabled, signal the client provider to mount the overlay
- * toggle by exposing VITE_JAZZ_INSPECTOR to the browser (Vite-family bundlers
- * surface VITE_*-prefixed keys via import.meta.env) and announce it. Shared by
- * the Vite and SvelteKit plugins, which inject it identically. (Next uses its
- * own NEXT_PUBLIC_ flag and announcement, since it has no Vite dev server here.)
- */
-export function enableOverlayToggle(
-  server: { config: { env?: Record<string, string> } },
-  enabled: boolean | undefined,
-): void {
-  if (!enabled) return;
   server.config.env ??= {};
   server.config.env.VITE_JAZZ_INSPECTOR = "1";
   console.log(OVERLAY_ENABLED_MESSAGE);
-}
-
-/**
- * Attach the inspector overlay middleware and, when enabled, signal the client
- * provider to mount the toggle. The Vite and SvelteKit plugins always wire
- * these together (the middleware is passive; the flag only gates the toggle),
- * so they share this entry point to keep the pair in sync.
- */
-export function wireInspectorOverlay(server: OverlayDevServer, enabled: boolean | undefined): void {
-  attachOverlayMiddleware(server);
-  enableOverlayToggle(server, enabled);
 }
 
 export interface OverlayAssetServer {

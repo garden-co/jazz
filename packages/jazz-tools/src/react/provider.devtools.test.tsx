@@ -19,8 +19,8 @@ describe("JazzProvider dev auto-attach", () => {
     startSpy.mockClear();
     currentDb = {};
     (process.env as Record<string, string>).NODE_ENV = "development";
-    // The overlay is experimental: a dev plugin injects this public flag to
-    // enable it. Set it so the auto-attach gate is satisfied by default.
+    // The jazz dev plugin exposes this flag in dev; set it so the default case
+    // simulates "the plugin is active".
     (process.env as Record<string, string>).NEXT_PUBLIC_JAZZ_INSPECTOR = "1";
   });
 
@@ -28,7 +28,7 @@ describe("JazzProvider dev auto-attach", () => {
     delete (process.env as Record<string, string>).NEXT_PUBLIC_JAZZ_INSPECTOR;
   });
 
-  it("mounts the inspector overlay in dev when experimental_inspector is enabled", async () => {
+  it("mounts the inspector overlay in dev when the jazz dev plugin is active", async () => {
     render(
       <JazzProvider config={{} as never}>
         <div />
@@ -38,7 +38,7 @@ describe("JazzProvider dev auto-attach", () => {
     expect(startSpy).toHaveBeenCalledWith(currentDb);
   });
 
-  it("does not mount without the experimental_inspector flag", async () => {
+  it("does not mount without the jazz dev plugin (no injected flag)", async () => {
     delete (process.env as Record<string, string>).NEXT_PUBLIC_JAZZ_INSPECTOR;
     render(
       <JazzProvider config={{} as never}>
