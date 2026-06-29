@@ -3,7 +3,7 @@ use std::fmt;
 
 use jazz::groove::records::EnumSchema;
 use jazz::groove::schema::ColumnType;
-use jazz::schema::{ColumnSchema, JazzSchema, LargeValueKind, TableSchema};
+use jazz::schema::{ColumnSchema, JazzSchema, LargeValueKind, MergeStrategy, TableSchema};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,11 +96,15 @@ fn convert_table(name: &str, value: &Value) -> Result<TableSchema, AdminSchemaCo
     let mut converted_columns = Vec::with_capacity(columns.len());
     let mut references = BTreeMap::new();
     let mut column_indexed = BTreeSet::new();
+    let mut merge_strategies = BTreeMap::new();
     for (index, column) in columns.iter().enumerate() {
         let path = format!("$.{name}.columns[{index}]");
-        let (column, reference, indexed) = convert_column(name, column, &path)?;
+        let (column, reference, indexed, merge_strategy) = convert_column(name, column, &path)?;
         if let Some(reference) = reference {
             references.insert(column.name.clone(), reference);
+        }
+        if let Some(merge_strategy) = merge_strategy {
+            merge_strategies.insert(column.name.clone(), merge_strategy);
         }
         if indexed {
             column_indexed.insert(column.name.clone());
@@ -109,6 +113,7 @@ fn convert_table(name: &str, value: &Value) -> Result<TableSchema, AdminSchemaCo
     }
     let mut table = TableSchema::new(name, converted_columns);
     table.references = references;
+    table.merge_strategies = merge_strategies;
     table.indexed_columns = indexed_columns(
         object.get("indexed_columns"),
         format!("$.{name}.indexed_columns"),
@@ -133,7 +138,8 @@ fn convert_column(
     table: &str,
     value: &Value,
     path: &str,
-) -> Result<(ColumnSchema, Option<String>, bool), AdminSchemaConversionError> {
+) -> Result<(ColumnSchema, Option<String>, bool, Option<MergeStrategy>), AdminSchemaConversionError>
+{
     let object = value
         .as_object()
         .ok_or_else(|| err(path, "column definition must be an object"))?;
@@ -242,7 +248,27 @@ fn convert_column(
         .get("indexOnly")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    Ok((column, reference, indexed))
+    let merge_strategy = object
+        .get("merge_strategy")
+        .map(|value| convert_merge_strategy(value, &format!("{path}.merge_strategy")))
+        .transpose()?;
+    Ok((column, reference, indexed, merge_strategy))
+}
+
+fn convert_merge_strategy(
+    value: &Value,
+    path: &str,
+) -> Result<MergeStrategy, AdminSchemaConversionError> {
+    match value.as_str() {
+        Some("Counter") => Ok(MergeStrategy::Counter),
+        Some("Lww") | Some("LWW") => Ok(MergeStrategy::Lww),
+        Some("GSet") => Err(err(
+            path,
+            "GSet merge strategy is not supported by core schema conversion yet",
+        )),
+        Some(other) => Err(err(path, format!("unsupported merge strategy {other:?}"))),
+        None => Err(err(path, "merge_strategy must be a string")),
+    }
 }
 
 fn convert_column_type(
@@ -443,6 +469,66 @@ mod tests {
         let column = &schema.tables[0].columns[0];
         assert_eq!(column.column_type, ColumnType::Bytes);
         assert_eq!(column.large_value, Some(LargeValueKind::Blob));
+    }
+
+    #[test]
+    fn converts_public_text_large_value_marker() {
+        let schema = convert_admin_schema(&json!({
+            "docs": {
+                "columns": [
+                    {
+                        "name": "body",
+                        "column_type": { "type": "Bytea" },
+                        "large_value": "Text"
+                    }
+                ]
+            }
+        }))
+        .expect("schema converts");
+
+        let column = &schema.tables[0].columns[0];
+        assert_eq!(column.column_type, ColumnType::Bytes);
+        assert_eq!(column.large_value, Some(LargeValueKind::Text));
+    }
+
+    #[test]
+    fn converts_public_counter_merge_strategy() {
+        let schema = convert_admin_schema(&json!({
+            "counters": {
+                "columns": [
+                    {
+                        "name": "count",
+                        "column_type": { "type": "Integer" },
+                        "merge_strategy": "Counter"
+                    }
+                ]
+            }
+        }))
+        .expect("schema converts");
+
+        let table = &schema.tables[0];
+        assert_eq!(
+            table.merge_strategies.get("count"),
+            Some(&MergeStrategy::Counter)
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_merge_strategy() {
+        let err = convert_admin_schema(&json!({
+            "sets": {
+                "columns": [
+                    {
+                        "name": "tags",
+                        "column_type": { "type": "Array", "element": { "type": "Text" } },
+                        "merge_strategy": "GSet"
+                    }
+                ]
+            }
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("GSet merge strategy"));
     }
 
     #[test]
