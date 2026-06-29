@@ -36,7 +36,7 @@ export function ChatPanel({
         .where({ chat_id: chatId })
         .select("id", "author_name", "text", "sent_at", "$canDelete")
         .orderBy("sent_at", "asc"),
-    ) ?? [];
+    ).data ?? [];
 
   const [messageText, setMessageText] = React.useState("");
   const [messagePending, setMessagePending] = React.useState(false);

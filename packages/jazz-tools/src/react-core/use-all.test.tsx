@@ -97,7 +97,7 @@ describe("react-core/useAll", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-02");
 
     function List() {
-      const todos = useAll(makeQuery());
+      const { data: todos } = useAll(makeQuery());
       return (
         <>
           {(todos ?? []).map((t) => (
@@ -133,7 +133,7 @@ describe("react-core/useAll", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-03");
 
     function List() {
-      const todos = useAll(makeQuery());
+      const { data: todos } = useAll(makeQuery());
       return <span>{(todos ?? []).length}</span>;
     }
 
@@ -154,7 +154,7 @@ describe("react-core/useAll", () => {
     manager.makeQueryKey(query, undefined, [{ id: "1", title: "seeded" }]);
 
     function List() {
-      const todos = useAll(query);
+      const { data: todos } = useAll(query);
       return (
         <>
           {(todos ?? []).map((t) => (
@@ -174,14 +174,19 @@ describe("react-core/useAll", () => {
     expect(subscribeCalls).toHaveLength(0);
   });
 
-  it("a failed subscription leaves non-suspense useAll undefined and does not throw", () => {
+  it("a failed subscription surfaces the error and leaves data undefined without throwing", () => {
     const { client } = makeHarness("rc-all-05", {
       throwOnSubscribe: new Error("subscribe failed"),
     });
 
     function List() {
-      const todos = useAll(makeQuery());
-      return <span>{todos === undefined ? "no-data" : String(todos.length)}</span>;
+      const { data: todos, isLoading, error } = useAll(makeQuery());
+      return (
+        <span>
+          {todos === undefined ? "no-data" : String(todos.length)}/{String(isLoading)}/
+          {error?.message ?? "no-error"}
+        </span>
+      );
     }
 
     const { container } = render(
@@ -190,7 +195,7 @@ describe("react-core/useAll", () => {
       </JazzClientProvider>,
     );
 
-    expect(container.textContent).toBe("no-data");
+    expect(container.textContent).toBe("no-data/false/subscribe failed");
   });
 
   it("useAllSuspense throws a failed subscription to the error boundary", () => {

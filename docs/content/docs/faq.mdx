@@ -38,7 +38,7 @@ This is useful when iterating on your schema during development.
 
 <Accordion id="undefined-vs-empty-array" title="Why does useAll return undefined?">
 
-`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
+A query binding's `data` (`.current` in Svelte) is `undefined` until the first response arrives from the requested tier. After that, it's an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. React and Solid also expose an `isLoading` flag (Vue and Svelte a `loading` one) that is `true` over the same window. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
 
 </Accordion>
 

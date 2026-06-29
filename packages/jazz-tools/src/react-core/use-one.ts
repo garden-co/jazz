@@ -1,6 +1,6 @@
 import type { QueryBuilder, QueryOptions } from "../shared/index.js";
 import { limitQueryToOne } from "../runtime/limit-query.js";
-import { useAllBase } from "./use-all.js";
+import { useAllResultBase, useAllSuspenseBase } from "./use-all.js";
 
 // `useOne` is `useAll` narrowed to a single row: the query is executed with
 // `limit 1` (the same wrapper `db.one` uses, so the two stay in lockstep), and
@@ -8,26 +8,40 @@ import { useAllBase } from "./use-all.js";
 // appear or the current one be removed.
 
 /**
+ * Reactive result of {@link useOne}. Like {@link UseAllResult} but for a single
+ * row: `data` is the matching row, `null` once the query resolves with no match,
+ * or `undefined` while loading (and on error); `isLoading` is `true` until the
+ * query resolves; `error` holds the subscription error, or `null`.
+ */
+export type UseOneResult<T extends { id: string }> = {
+  data: T | null | undefined;
+  isLoading: boolean;
+  error: Error | null;
+};
+
+/**
  * Read the first matching row and subscribe to changes that affect it.
  *
- * The query is run with `limit 1`, mirroring {@link Db.one}. Loading and error
- * states are handled the React way: `undefined` means the query has not resolved
- * yet, `null` means it resolved with no matching row, and for error handling use
- * {@link useOneSuspense} with a Suspense + error boundary.
+ * The query is run with `limit 1`, mirroring {@link Db.one}.
  *
  * @param query - the database query (e.g. `app.todos.where({ id })`)
  *
- * @returns the matching row, `null` if none matched, or `undefined` if the query
- * is not yet executed
+ * @returns reactive `{ data, isLoading, error }`. `data` is the matching row,
+ *   `null` once the query resolves with no match, or `undefined` while loading
+ *   (and on error); `isLoading` is `true` until the query resolves. For
+ *   Suspense-based loading/error handling use {@link useOneSuspense}.
  */
 export function useOne<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
-): T | null | undefined {
-  const rows = useAllBase(query ? limitQueryToOne(query) : undefined, options, {
-    suspense: false,
-  });
-  return rows === undefined ? undefined : (rows[0] ?? null);
+): UseOneResult<T> {
+  const {
+    data: rows,
+    isLoading,
+    error,
+  } = useAllResultBase(query ? limitQueryToOne(query) : undefined, options);
+  const data = rows === undefined ? undefined : (rows[0] ?? null);
+  return { data, isLoading, error };
 }
 
 /**
@@ -46,8 +60,6 @@ export function useOneSuspense<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
 ): T | null {
-  const rows = useAllBase(query ? limitQueryToOne(query) : undefined, options, {
-    suspense: true,
-  }) as T[];
+  const rows = useAllSuspenseBase(query ? limitQueryToOne(query) : undefined, options);
   return rows[0] ?? null;
 }

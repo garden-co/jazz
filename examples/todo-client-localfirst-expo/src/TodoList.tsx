@@ -42,7 +42,7 @@ export function TodoList() {
   }
 
   const db = useDb();
-  const todos = useAll(todosQuery) ?? [];
+  const todos = useAll(todosQuery).data ?? [];
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
 

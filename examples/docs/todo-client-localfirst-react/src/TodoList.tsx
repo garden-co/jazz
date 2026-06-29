@@ -6,30 +6,32 @@ import { app } from "../schema.js";
 export function TodoList() {
   // #region read-write-react
   const db = useDb();
-  const todos = useAll(app.todos) ?? [];
+  const todos = useAll(app.todos).data ?? [];
   // #endregion reading-reactive-hooks-react
   // #region reading-filtering-react
-  const incompleteTodos = useAll(
+  const { data: incompleteTodos } = useAll(
     app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
   );
   // #endregion reading-filtering-react
 
   // #region where-subscription-react
-  const pending = useAll(app.todos.where({ done: false }));
+  const { data: pending } = useAll(app.todos.where({ done: false }));
   // #endregion where-subscription-react
 
   // #region reading-tier-react
-  const todosAtEdgeDurability = useAll(app.todos, { tier: "edge" });
+  const { data: todosAtEdgeDurability } = useAll(app.todos, { tier: "edge" });
   // #endregion reading-tier-react
 
   // #region reading-loading-state-react
-  const allTodos = useAll(app.todos);
-  // allTodos is undefined while connecting, [] when loaded but empty
+  const { data: allTodos, isLoading } = useAll(app.todos);
+  // isLoading is true while connecting; allTodos is [] when loaded but empty
   // #endregion reading-loading-state-react
 
   // #region reading-conditional-query-react
   const [filter, setFilter] = useState<string | null>(null);
-  const filtered = useAll(filter ? app.todos.where({ title: { contains: filter } }) : undefined);
+  const { data: filtered } = useAll(
+    filter ? app.todos.where({ title: { contains: filter } }) : undefined,
+  );
   // #endregion reading-conditional-query-react
 
   // #region writing-use-db-react
@@ -56,7 +58,7 @@ export function TodoList() {
     setTitle("");
   };
 
-  if (allTodos === undefined) {
+  if (isLoading) {
     return <p>Connecting…</p>;
   }
 

@@ -30,7 +30,7 @@ export default function ClientTodo() {
 }
 
 function TodoList() {
-  const todos = useAll(app.todos) ?? [];
+  const todos = useAll(app.todos).data ?? [];
   return (
     <ul className="mt-4 space-y-1">
       {todos.length === 0 && <li className="text-sm text-foreground/30 italic">No todos yet.</li>}

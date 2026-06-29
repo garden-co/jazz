@@ -5,7 +5,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { app } from "../../../schema.js";
 
 function ReactorName({ userId, currentUserId }: { userId: string; currentUserId?: string }) {
-  const profiles = useAll(app.profiles.where({ userId })) ?? [];
+  const profiles = useAll(app.profiles.where({ userId })).data ?? [];
   const profile = profiles[0];
 
   if (userId === currentUserId) return <li>You</li>;
@@ -92,7 +92,7 @@ export const MessageReactions = ({ messageId, isMe }: MessageReactionsProps) => 
   const session = useSession();
   const userId = session?.user_id;
 
-  const reactions = useAll(app.reactions.where({ messageId })) ?? [];
+  const reactions = useAll(app.reactions.where({ messageId })).data ?? [];
 
   if (reactions.length === 0) return null;
 

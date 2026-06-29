@@ -119,7 +119,7 @@ describe("react-core/useOne", () => {
     const { client, subscribeCalls } = makeHarness("rc-one-02");
 
     function Item() {
-      const todo = useOne(makeQuery());
+      const { data: todo } = useOne(makeQuery());
       return <span>{todo === undefined ? "pending" : (todo?.title ?? "none")}</span>;
     }
 
@@ -147,7 +147,7 @@ describe("react-core/useOne", () => {
     const { client, subscribeCalls } = makeHarness("rc-one-03");
 
     function Item() {
-      const todo = useOne(makeQuery());
+      const { data: todo } = useOne(makeQuery());
       return <span>{todo?.title ?? ""}</span>;
     }
 
@@ -169,7 +169,7 @@ describe("react-core/useOne", () => {
     manager.makeQueryKey(limitQueryToOne(query), undefined, [{ id: "1", title: "seeded" }]);
 
     function Item() {
-      const todo = useOne(query);
+      const { data: todo } = useOne(query);
       return <span>{todo?.title ?? "none"}</span>;
     }
 
@@ -183,14 +183,19 @@ describe("react-core/useOne", () => {
     expect(subscribeCalls).toHaveLength(0);
   });
 
-  it("a failed subscription leaves non-suspense useOne undefined and does not throw", () => {
+  it("a failed subscription surfaces the error and leaves data undefined without throwing", () => {
     const { client } = makeHarness("rc-one-05", {
       throwOnSubscribe: new Error("subscribe failed"),
     });
 
     function Item() {
-      const todo = useOne(makeQuery());
-      return <span>{todo === undefined ? "no-data" : (todo?.title ?? "none")}</span>;
+      const { data: todo, isLoading, error } = useOne(makeQuery());
+      return (
+        <span>
+          {todo === undefined ? "no-data" : (todo?.title ?? "none")}/{String(isLoading)}/
+          {error?.message ?? "no-error"}
+        </span>
+      );
     }
 
     const { container } = render(
@@ -199,7 +204,7 @@ describe("react-core/useOne", () => {
       </JazzClientProvider>,
     );
 
-    expect(container.textContent).toBe("no-data");
+    expect(container.textContent).toBe("no-data/false/subscribe failed");
   });
 
   it("useOneSuspense throws a failed subscription to the error boundary", () => {
@@ -223,5 +228,56 @@ describe("react-core/useOne", () => {
     );
 
     expect(container.textContent).toBe("caught");
+  });
+
+  // Pre-resolve the entry for the limited query so the suspense reader returns
+  // synchronously on first render — exercising the success branch (`rows[0] ??
+  // null`) deterministically, without relying on async suspense-retry timing.
+  function resolveOne(manager: SubscriptionsOrchestrator, query: QueryBuilder<Todo>, rows: Todo[]) {
+    const limited = limitQueryToOne(query);
+    manager.makeQueryKey(limited, undefined, rows);
+    manager.getCacheEntry<Todo>(manager.computeKey(limited, undefined));
+  }
+
+  it("useOneSuspense returns the matching row once the query resolves", () => {
+    const { client, manager } = makeHarness("rc-one-07");
+    const query = makeQuery();
+    resolveOne(manager, query, [{ id: "1", title: "only" }]);
+
+    function Item() {
+      const todo = useOneSuspense(query);
+      return <span>{todo?.title ?? "none"}</span>;
+    }
+
+    const { container } = render(
+      <JazzClientProvider client={client}>
+        <Suspense fallback={<span>loading</span>}>
+          <Item />
+        </Suspense>
+      </JazzClientProvider>,
+    );
+
+    expect(container.textContent).toBe("only");
+  });
+
+  it("useOneSuspense returns null when the query resolves with no row", () => {
+    const { client, manager } = makeHarness("rc-one-08");
+    const query = makeQuery();
+    resolveOne(manager, query, []);
+
+    function Item() {
+      const todo = useOneSuspense(query);
+      return <span>{todo === null ? "null" : (todo?.title ?? "?")}</span>;
+    }
+
+    const { container } = render(
+      <JazzClientProvider client={client}>
+        <Suspense fallback={<span>loading</span>}>
+          <Item />
+        </Suspense>
+      </JazzClientProvider>,
+    );
+
+    expect(container.textContent).toBe("null");
   });
 });

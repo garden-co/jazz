@@ -5,7 +5,7 @@ import { TodoItem } from "./TodoItem";
 import { AddTodo } from "./AddTodo";
 
 export function TodoList() {
-  const todos = useAll(app.todos) ?? [];
+  const todos = useAll(app.todos).data ?? [];
 
   return (
     <View style={{ flex: 1, gap: 12 }}>

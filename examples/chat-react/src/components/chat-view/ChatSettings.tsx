@@ -62,7 +62,7 @@ function ChatSettingsContent({
   const userId = session?.user_id ?? null;
   const [willShare, setWillShare] = useState(false);
 
-  const chatRows = useAll(app.chats.where({ id: chatId })) ?? [];
+  const chatRows = useAll(app.chats.where({ id: chatId })).data ?? [];
   const chat = chatRows[0];
   const [draftName, setDraftName] = useState("");
 
@@ -70,8 +70,8 @@ function ChatSettingsContent({
     setDraftName(chat?.name ?? "");
   }, [chatId, chat?.name]);
 
-  const members = useAll(app.chatMembers.where({ chatId })) ?? [];
-  const allProfiles = useAll(app.profiles) ?? [];
+  const members = useAll(app.chatMembers.where({ chatId })).data ?? [];
+  const allProfiles = useAll(app.profiles).data ?? [];
 
   const memberUserIds = new Set(members.map((m) => m.userId));
   const memberProfiles = allProfiles.filter((p) => memberUserIds.has(p.userId));

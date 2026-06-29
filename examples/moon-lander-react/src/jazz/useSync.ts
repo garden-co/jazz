@@ -70,17 +70,17 @@ export function useSync(playerId: string): SyncResult {
   // ---------------------------------------------------------------------------
 
   // Other players (exclude self)
-  const allRemotePlayers = useAll(app.players.where({ playerId: { ne: playerId } })) ?? [];
+  const allRemotePlayers = useAll(app.players.where({ playerId: { ne: playerId } })).data ?? [];
   const remotePlayers = useMemo(
     () => allRemotePlayers.filter((p) => p.lastSeen > staleCutoff),
     [allRemotePlayers, staleCutoff],
   );
 
   // Chat messages (ordered oldest-first for rendering)
-  const allChatMessages = useAll(app.chat_messages.orderBy("createdAt", "asc")) ?? [];
+  const allChatMessages = useAll(app.chat_messages.orderBy("createdAt", "asc")).data ?? [];
 
   // Local player row — used to detect first join (no row yet) vs reconnect
-  const localPlayerRowsRaw = useAll(app.players.where({ playerId }));
+  const { data: localPlayerRowsRaw } = useAll(app.players.where({ playerId }));
   const localPlayerRows = localPlayerRowsRaw ?? [];
   const localFuelType = localPlayerRows[0]?.requiredFuelType ?? FUEL_TYPES[0];
 
@@ -100,11 +100,13 @@ export function useSync(playerId: string): SyncResult {
 
   // Uncollected deposits — what the game renders on the surface.
   // "edge" tier: undefined until the edge subscription connects, which drives settled detection.
-  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), { tier: "edge" });
+  const { data: allUncollected } = useAll(app.fuel_deposits.where({ collected: false }), {
+    tier: "edge",
+  });
 
   // This player's collected deposits (compound WHERE = precise local tracking).
   // WHERE ENTRY fires immediately when this player collects (both fields match).
-  const localCollectedDeposits = useAll(
+  const { data: localCollectedDeposits } = useAll(
     app.fuel_deposits.where({ collected: true, collectedBy: playerId }),
   );
 
@@ -112,7 +114,7 @@ export function useSync(playerId: string): SyncResult {
   // other players. When Player A shares with B, B already has the row here
   // (it entered when A collected it), so collectedBy updating to B propagates
   // as a plain row update without needing WHERE re-evaluation.
-  const allCollectedDeposits = useAll(app.fuel_deposits.where({ collected: true }));
+  const { data: allCollectedDeposits } = useAll(app.fuel_deposits.where({ collected: true }));
 
   const settled = allUncollected !== undefined;
   const uncollectedDeposits = allUncollected ?? [];

@@ -4,7 +4,7 @@ import { TodoItem } from "./TodoItem.js";
 import { AddTodo } from "./AddTodo.js";
 
 export function TodoList() {
-  const todos = useAll(app.todos) ?? [];
+  const todos = useAll(app.todos).data ?? [];
 
   return (
     <>

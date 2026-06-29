@@ -31,7 +31,7 @@ export function TodoList() {
 
   // #region reading-reactive-hooks-expo
   const db = useDb();
-  const todos = useAll(todosQuery) ?? [];
+  const todos = useAll(todosQuery).data ?? [];
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
   // #endregion reading-reactive-hooks-expo

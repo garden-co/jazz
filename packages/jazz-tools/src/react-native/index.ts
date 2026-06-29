@@ -4,6 +4,8 @@ export { loadJazzRn } from "./jazz-rn-loader.js";
 export type { JazzRnRuntimeBinding } from "./jazz-rn-runtime-adapter.js";
 export { useAll, useAllSuspense } from "./use-all.js";
 export { useOne, useOneSuspense } from "./use-one.js";
+export type { UseAllResult } from "../react-core/use-all.js";
+export type { UseOneResult } from "../react-core/use-one.js";
 export {
   JazzProvider,
   type JazzProviderProps,

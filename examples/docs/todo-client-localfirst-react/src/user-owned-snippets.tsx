@@ -24,7 +24,7 @@ s.definePermissions(app, ({ policy, session }) => {
 
 // #region owned-query
 export function MyTodos() {
-  const todos = useAll(app.todos.where({ done: false }));
+  const { data: todos } = useAll(app.todos.where({ done: false }));
 
   if (!todos) return <p>Loading…</p>;
 
