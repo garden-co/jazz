@@ -222,17 +222,21 @@ function overlayStyleSheet(): CSSStyleSheet {
 // iframe, isolated from the host page by its shadow root. All listeners are
 // registered against #ac.signal so disconnectedCallback() removes them at once.
 class JazzInspectorOverlay extends HTMLElement {
-  #ac = new AbortController();
-  #wired = false;
+  #ac: AbortController | undefined;
 
   connectedCallback(): void {
-    if (this.#wired) return;
-    this.#wired = true;
+    // Build the shadow tree once (keeps the iframe alive across moves), but
+    // re-wire every (re)connect with a fresh AbortController so the element
+    // isn't left dead if it's ever removed and re-added to the DOM.
+    let root = this.shadowRoot;
+    if (!root) {
+      root = this.attachShadow({ mode: "open" });
+      root.adoptedStyleSheets = [overlayStyleSheet()];
+      root.innerHTML = TEMPLATE;
+    }
+    this.#ac?.abort();
+    this.#ac = new AbortController();
     const { signal } = this.#ac;
-
-    const root = this.attachShadow({ mode: "open" });
-    root.adoptedStyleSheets = [overlayStyleSheet()];
-    root.innerHTML = TEMPLATE;
 
     const dock = root.querySelector<HTMLDivElement>(".jzov-dock")!;
     const bar = root.querySelector<HTMLDivElement>(".jzov-bar")!;
@@ -371,7 +375,7 @@ class JazzInspectorOverlay extends HTMLElement {
   }
 
   disconnectedCallback(): void {
-    this.#ac.abort();
+    this.#ac?.abort();
   }
 }
 

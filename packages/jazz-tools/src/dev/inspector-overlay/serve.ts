@@ -140,9 +140,6 @@ export function createOverlayHandler() {
   let dirCache: string | null | undefined;
   const embeddedDir = (): string | null =>
     dirCache !== undefined ? dirCache : (dirCache = resolveEmbeddedDir());
-  // The embedded assets are static for the process lifetime too, so memoize
-  // their bytes — an iframe reload re-requests every chunk otherwise.
-  const fileCache = new Map<string, Buffer>();
   return async function handle(req: { url?: string }, res: OverlayResponse): Promise<boolean> {
     const url = (req.url ?? "").split("?")[0];
     if (url !== OVERLAY_EMBEDDED_PREFIX && !url.startsWith(OVERLAY_EMBEDDED_PREFIX + "/")) {
@@ -170,11 +167,10 @@ export function createOverlayHandler() {
       return true;
     }
     try {
-      let body = fileCache.get(filePath);
-      if (body === undefined) {
-        body = await readFile(filePath);
-        fileCache.set(filePath, body);
-      }
+      // No in-process cache: this is a dev-only server and the OS page cache
+      // already keeps these files hot, so a plain read stays fast and always
+      // reflects a rebuild.
+      const body = await readFile(filePath);
       res.setHeader("Content-Type", MIME[ext(filePath)] ?? "application/octet-stream");
       res.end(body);
     } catch {
