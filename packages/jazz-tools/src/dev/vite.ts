@@ -1,10 +1,6 @@
 import { createRequire } from "node:module";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
-import {
-  attachOverlayMiddleware,
-  enableOverlayToggle,
-  type OverlayDevServer,
-} from "./inspector-overlay/serve.js";
+import { wireInspectorOverlay, type OverlayDevServer } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
@@ -158,8 +154,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       if (managed.telemetryCollectorUrl) {
         viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
       }
-      attachOverlayMiddleware(viteServer);
-      enableOverlayToggle(viteServer, options.experimental_inspector);
+      wireInspectorOverlay(viteServer, options.experimental_inspector);
 
       viteServer.httpServer?.once("close", async () => {
         await runtime.dispose();

@@ -43,7 +43,7 @@ export interface OverlayResponse {
 // Minimal Vite-style dev server shape the overlay needs. Shared so the Vite and
 // SvelteKit plugins serve the inspector assets the same way (one definition).
 export interface OverlayDevServer {
-  config: { root: string };
+  config: { root: string; env?: Record<string, string> };
   middlewares?: {
     use(fn: (req: { url?: string }, res: OverlayResponse, next: () => void) => void): void;
   };
@@ -84,6 +84,17 @@ export function enableOverlayToggle(
   server.config.env ??= {};
   server.config.env.VITE_JAZZ_INSPECTOR = "1";
   console.log(OVERLAY_ENABLED_MESSAGE);
+}
+
+/**
+ * Attach the inspector overlay middleware and, when enabled, signal the client
+ * provider to mount the toggle. The Vite and SvelteKit plugins always wire
+ * these together (the middleware is passive; the flag only gates the toggle),
+ * so they share this entry point to keep the pair in sync.
+ */
+export function wireInspectorOverlay(server: OverlayDevServer, enabled: boolean | undefined): void {
+  attachOverlayMiddleware(server);
+  enableOverlayToggle(server, enabled);
 }
 
 export interface OverlayAssetServer {
@@ -129,6 +140,9 @@ export function createOverlayHandler() {
   let dirCache: string | null | undefined;
   const embeddedDir = (): string | null =>
     dirCache !== undefined ? dirCache : (dirCache = resolveEmbeddedDir());
+  // The embedded assets are static for the process lifetime too, so memoize
+  // their bytes — an iframe reload re-requests every chunk otherwise.
+  const fileCache = new Map<string, Buffer>();
   return async function handle(req: { url?: string }, res: OverlayResponse): Promise<boolean> {
     const url = (req.url ?? "").split("?")[0];
     if (url !== OVERLAY_EMBEDDED_PREFIX && !url.startsWith(OVERLAY_EMBEDDED_PREFIX + "/")) {
@@ -156,7 +170,11 @@ export function createOverlayHandler() {
       return true;
     }
     try {
-      const body = await readFile(filePath);
+      let body = fileCache.get(filePath);
+      if (body === undefined) {
+        body = await readFile(filePath);
+        fileCache.set(filePath, body);
+      }
       res.setHeader("Content-Type", MIME[ext(filePath)] ?? "application/octet-stream");
       res.end(body);
     } catch {
