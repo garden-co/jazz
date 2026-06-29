@@ -77,6 +77,13 @@ type NativeDb = {
     rowId: Uint8Array,
     cells: Uint8Array,
     author: Uint8Array,
+    updatedAtMs?: number | null,
+  ): Write;
+  insertWithIdEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
   ): Write;
   restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
   restoreEncodedForIdentity(
@@ -84,6 +91,13 @@ type NativeDb = {
     rowId: Uint8Array,
     cells: Uint8Array,
     author: Uint8Array,
+    updatedAtMs?: number | null,
+  ): Write;
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
   ): Write;
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): Write;
   updateEncodedForIdentity(
@@ -91,6 +105,13 @@ type NativeDb = {
     rowId: Uint8Array,
     patch: Uint8Array,
     author: Uint8Array,
+    updatedAtMs?: number | null,
+  ): Write;
+  updateEncoded(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    updatedAtMs?: number | null,
   ): Write;
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
   upsertEncodedForIdentity(
@@ -98,6 +119,13 @@ type NativeDb = {
     rowId: Uint8Array,
     cells: Uint8Array,
     author: Uint8Array,
+    updatedAtMs?: number | null,
+  ): Write;
+  upsertEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
   ): Write;
   delete(table: string, rowId: Uint8Array): Write;
   deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): Write;
@@ -317,6 +345,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
+    const updatedAtMs = updatedAtMsFromWriteContext(_writeContext) ?? null;
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells);
@@ -325,8 +354,8 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const write = writeOrNormalizeRejection("Insert", () =>
       writeIdentity
-        ? this.db.insertWithIdEncodedForIdentity(table, rowId, cells, writeIdentity)
-        : this.db.insertWithIdEncoded(table, rowId, cells),
+        ? this.db.insertWithIdEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
+        : this.db.insertWithIdEncoded(table, rowId, cells, updatedAtMs),
     );
     return this.finishInsert(table, rowId, write, writeIdentity);
   }
@@ -342,16 +371,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
-    const tx = this.currentTx(writeContext, "Insert");
+    const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
+    const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
       this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells);
       tx.writes.push({ table, rowId });
       return this.resultForRow(table, rowId, txIdFromContext(writeContext) ?? "", writeIdentity);
     }
-    const write = writeOrNormalizeRejection("Insert", () =>
+    const write = writeOrNormalizeRejection("Restore", () =>
       writeIdentity
-        ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity)
-        : this.db.restoreEncoded(table, rowId, cells),
+        ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
+        : this.db.restoreEncoded(table, rowId, cells, updatedAtMs),
     );
     return this.finishInsert(table, rowId, write, writeIdentity);
   }
@@ -367,7 +397,8 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
-    const tx = this.currentTx(writeContext, "Insert");
+    const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
+    const tx = this.currentTx(writeContext, "Update");
     if (tx) {
       this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch);
       tx.writes.push({ table, rowId });
@@ -375,8 +406,8 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const write = writeOrNormalizeRejection("Update", () =>
       writeIdentity
-        ? this.db.updateEncodedForIdentity(table, rowId, patch, writeIdentity)
-        : this.db.updateEncoded(table, rowId, patch),
+        ? this.db.updateEncodedForIdentity(table, rowId, patch, writeIdentity, updatedAtMs)
+        : this.db.updateEncoded(table, rowId, patch, updatedAtMs),
     );
     return this.finishMutation(write);
   }
@@ -388,20 +419,30 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
   ): MutationResult {
     const rowId = parseUuid(objectId);
-    const cells = encodeCellsForRow(this.table(table), values);
+    const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
-    const tx = this.currentTx(writeContext, "Insert");
+    const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
+    const tx = this.currentTx(writeContext, "Upsert");
+    const existing = this.readRow(table, rowId, writeIdentity);
+    let cells: Uint8Array;
+    try {
+      cells = existing
+        ? encodeCellsForPatch(definition, values)
+        : encodeCellsForRow(definition, values, table);
+    } catch (error) {
+      throw writeError("Upsert", errorMessage(error));
+    }
     if (tx) {
       this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
-    const write = writeOrNormalizeRejection("Insert", () =>
+    const write = writeOrNormalizeRejection("Upsert", () =>
       writeIdentity
-        ? this.db.upsertEncodedForIdentity(table, rowId, cells, writeIdentity)
-        : this.db.upsertEncoded(table, rowId, cells),
+        ? this.db.upsertEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
+        : this.db.upsertEncoded(table, rowId, cells, updatedAtMs),
     );
     return this.finishMutation(write);
   }
@@ -862,7 +903,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private currentTx(
     writeContext: string | null | undefined,
-    operation: "Insert" | "Delete",
+    operation: "Insert" | "Restore" | "Update" | "Upsert" | "Delete",
   ): PendingTx | undefined {
     const id = txIdFromContext(writeContext);
     if (!id) return undefined;
@@ -1163,6 +1204,17 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
   }
 }
 
+function updatedAtMsFromWriteContext(writeContext?: string | null): number | undefined {
+  if (!writeContext) return undefined;
+  try {
+    const parsed = JSON.parse(writeContext) as { updated_at?: unknown };
+    if (typeof parsed.updated_at !== "number") return undefined;
+    return Math.trunc(parsed.updated_at / 1_000);
+  } catch {
+    return undefined;
+  }
+}
+
 function txStateMessage(transactionId: string, completedTxs: Map<string, CompletedTx>): string {
   const completed = completedTxs.get(transactionId);
   if (completed?.state === "committed") {
@@ -1369,7 +1421,7 @@ function rejectedWaitError(
 }
 
 function writeOrNormalizeRejection<T>(
-  operation: "Insert" | "Update" | "Delete",
+  operation: "Insert" | "Restore" | "Update" | "Upsert" | "Delete",
   write: () => T,
 ): T {
   try {
@@ -1382,6 +1434,13 @@ function writeOrNormalizeRejection<T>(
     }
     throw error;
   }
+}
+
+function writeError(
+  operation: "Insert" | "Restore" | "Update" | "Upsert" | "Delete",
+  reason: string,
+): Error {
+  return new Error(`${operation} failed: WriteError("${reason.replaceAll('"', '\\"')}")`);
 }
 
 function errorMessage(error: unknown): string {
@@ -2050,7 +2109,9 @@ function isUuidString(value: string): boolean {
 export function encodeCellsForRow(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
+  table?: string,
 ): Uint8Array {
+  assertRequiredRowColumnsPresent(definition.columns, row, table);
   return encodeCells(definition.columns, (column) => row[column.name], true);
 }
 
@@ -2080,6 +2141,23 @@ function encodeCells(
   }, descriptor.length);
   writer.bytes(createRecord(descriptor, values));
   return writer.finish();
+}
+
+function assertRequiredRowColumnsPresent(
+  columns: ColumnDescriptor[],
+  row: InsertValues,
+  table?: string,
+): void {
+  for (const column of columns) {
+    const value = row[column.name] ?? column.default;
+    if (value && value.type !== "Null") continue;
+    if (column.nullable || column.column_type.type === "Array") continue;
+    throw new Error(
+      table
+        ? `encoding error: missing required field \`${column.name}\` on table \`${table}\``
+        : `missing required column ${column.name}`,
+    );
+  }
 }
 
 function encodeValue(
@@ -2243,6 +2321,10 @@ function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowStat
           name,
           value: decodeField(batch.table, field, batch.descriptor, row.raw, index, schema),
         }));
+      const updatedAt = decodeUpdatedAt(batch.descriptor, row.raw);
+      if (updatedAt) {
+        decoded.push({ name: "$updatedAt", value: updatedAt });
+      }
       const valuesByColumn = new Map(decoded.map(({ name, value }) => [name, value]));
       return withValuesByColumn(
         {
@@ -2256,6 +2338,16 @@ function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowStat
       );
     }),
   );
+}
+
+function decodeUpdatedAt(descriptor: DescriptorField[], raw: Uint8Array): Value | undefined {
+  const index = descriptor.findIndex((field) => field.name === "tx_time");
+  if (index < 0) return undefined;
+  const bytes = decodeRecordValue(descriptor, raw, index);
+  if (!bytes || bytes.length < 8) return undefined;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const physicalMs = Number(view.getBigUint64(0, true) >> 16n);
+  return { type: "Timestamp", value: physicalMs * 1_000 };
 }
 
 function rowsFromRelationSnapshot(

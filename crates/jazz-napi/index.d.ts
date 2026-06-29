@@ -27,16 +27,16 @@ export declare class NapiDb {
   detachQuery(attachment: QueryAttachment): void
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write
-  insertWithIdEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): Write
-  updateEncodedForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array): Write
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write
-  upsertEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
+  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  insertWithIdEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  updateEncodedForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  upsertEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   delete(table: string, rowId: Uint8Array): Write
   deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): Write
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write
-  restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
+  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
   connectUpstream(): Transport
   mergeableTx(): Tx

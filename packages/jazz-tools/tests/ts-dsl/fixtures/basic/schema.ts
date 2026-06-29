@@ -58,6 +58,16 @@ export type AppSchema = s.Schema<typeof schema>;
 export const baseApp: s.App<AppSchema> = s.defineApp(schema);
 
 export const permissions = s.definePermissions(baseApp, ({ policy }) => {
+  policy.users.allowRead.where({});
+  policy.users.allowInsert.where({});
+  policy.users.allowUpdate.where({});
+  policy.users.allowDelete.where({});
+
+  policy.projects.allowRead.where({});
+  policy.projects.allowInsert.where({});
+  policy.projects.allowUpdate.where({});
+  policy.projects.allowDelete.where({});
+
   policy.todos.allowRead.where({});
   policy.todos.allowInsert.where({});
   policy.todos.allowUpdate.whereOld({ done: false }).whereNew({});

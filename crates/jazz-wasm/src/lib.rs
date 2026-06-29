@@ -606,18 +606,25 @@ impl WasmDbInner {
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                db.insert_with_id(table, row_id, cells)
-                    .map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => db.insert_with_id_at_ms(table, row_id, cells, now_ms),
+                    None => db.insert_with_id(table, row_id, cells),
+                }
+                .map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.insert_with_id(table, row_id, cells)
-                    .map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => db.insert_with_id_at_ms(table, row_id, cells, now_ms),
+                    None => db.insert_with_id(table, row_id, cells),
+                }
+                .map_err(to_js_error)?,
             ),
             Self::Closed => panic!("WasmDb is closed"),
         }
@@ -629,14 +636,20 @@ impl WasmDbInner {
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
                     Rc::clone(db),
-                    db.insert_with_id_for_identity(identity, table, row_id, cells)
-                        .map_err(to_js_error)?,
+                    match updated_at_ms {
+                        Some(now_ms) => db.insert_with_id_for_identity_at_ms(
+                            identity, table, row_id, cells, now_ms,
+                        ),
+                        None => db.insert_with_id_for_identity(identity, table, row_id, cells),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             #[cfg(target_arch = "wasm32")]
@@ -644,24 +657,43 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
                     Rc::clone(db),
-                    db.insert_with_id_for_identity(identity, table, row_id, cells)
-                        .map_err(to_js_error)?,
+                    match updated_at_ms {
+                        Some(now_ms) => db.insert_with_id_for_identity_at_ms(
+                            identity, table, row_id, cells, now_ms,
+                        ),
+                        None => db.insert_with_id_for_identity(identity, table, row_id, cells),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
-    fn update(&self, table: &str, row_id: RowUuid, patch: RowCells) -> Result<WasmWrite, JsValue> {
+    fn update(
+        &self,
+        table: &str,
+        row_id: RowUuid,
+        patch: RowCells,
+        updated_at_ms: Option<u64>,
+    ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                db.update(table, row_id, patch).map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => db.update_at_ms(table, row_id, patch, now_ms),
+                    None => db.update(table, row_id, patch),
+                }
+                .map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.update(table, row_id, patch).map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => db.update_at_ms(table, row_id, patch, now_ms),
+                    None => db.update(table, row_id, patch),
+                }
+                .map_err(to_js_error)?,
             ),
             Self::Closed => panic!("WasmDb is closed"),
         }
@@ -673,14 +705,20 @@ impl WasmDbInner {
         table: &str,
         row_id: RowUuid,
         patch: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
                     Rc::clone(db),
-                    db.update_for_identity(identity, table, row_id, patch)
-                        .map_err(to_js_error)?,
+                    match updated_at_ms {
+                        Some(now_ms) => {
+                            db.update_for_identity_at_ms(identity, table, row_id, patch, now_ms)
+                        }
+                        None => db.update_for_identity(identity, table, row_id, patch),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             #[cfg(target_arch = "wasm32")]
@@ -688,24 +726,43 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
                     Rc::clone(db),
-                    db.update_for_identity(identity, table, row_id, patch)
-                        .map_err(to_js_error)?,
+                    match updated_at_ms {
+                        Some(now_ms) => {
+                            db.update_for_identity_at_ms(identity, table, row_id, patch, now_ms)
+                        }
+                        None => db.update_for_identity(identity, table, row_id, patch),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
-    fn upsert(&self, table: &str, row_id: RowUuid, cells: RowCells) -> Result<WasmWrite, JsValue> {
+    fn upsert(
+        &self,
+        table: &str,
+        row_id: RowUuid,
+        cells: RowCells,
+        updated_at_ms: Option<u64>,
+    ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                db.upsert(table, row_id, cells).map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => db.upsert_at_ms(table, row_id, cells, now_ms),
+                    None => db.upsert(table, row_id, cells),
+                }
+                .map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.upsert(table, row_id, cells).map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => db.upsert_at_ms(table, row_id, cells, now_ms),
+                    None => db.upsert(table, row_id, cells),
+                }
+                .map_err(to_js_error)?,
             ),
             Self::Closed => panic!("WasmDb is closed"),
         }
@@ -717,14 +774,20 @@ impl WasmDbInner {
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
                     Rc::clone(db),
-                    db.upsert_for_identity(identity, table, row_id, cells)
-                        .map_err(to_js_error)?,
+                    match updated_at_ms {
+                        Some(now_ms) => {
+                            db.upsert_for_identity_at_ms(identity, table, row_id, cells, now_ms)
+                        }
+                        None => db.upsert_for_identity(identity, table, row_id, cells),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             #[cfg(target_arch = "wasm32")]
@@ -732,8 +795,13 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
                     Rc::clone(db),
-                    db.upsert_for_identity(identity, table, row_id, cells)
-                        .map_err(to_js_error)?,
+                    match updated_at_ms {
+                        Some(now_ms) => {
+                            db.upsert_for_identity_at_ms(identity, table, row_id, cells, now_ms)
+                        }
+                        None => db.upsert_for_identity(identity, table, row_id, cells),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             Self::Closed => panic!("WasmDb is closed"),
@@ -783,16 +851,30 @@ impl WasmDbInner {
         }
     }
 
-    fn restore(&self, table: &str, row_id: RowUuid, cells: RowCells) -> Result<WasmWrite, JsValue> {
+    fn restore(
+        &self,
+        table: &str,
+        row_id: RowUuid,
+        cells: RowCells,
+        updated_at_ms: Option<u64>,
+    ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                db.restore(table, row_id, cells).map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => db.restore_at_ms(table, row_id, cells, now_ms),
+                    None => db.restore(table, row_id, cells),
+                }
+                .map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.restore(table, row_id, cells).map_err(to_js_error)?,
+                match updated_at_ms {
+                    Some(now_ms) => db.restore_at_ms(table, row_id, cells, now_ms),
+                    None => db.restore(table, row_id, cells),
+                }
+                .map_err(to_js_error)?,
             ),
             Self::Closed => panic!("WasmDb is closed"),
         }
@@ -804,14 +886,20 @@ impl WasmDbInner {
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
                     Rc::clone(db),
-                    db.restore_for_identity(identity, table, row_id, cells)
-                        .map_err(to_js_error)?,
+                    match updated_at_ms {
+                        Some(now_ms) => {
+                            db.restore_for_identity_at_ms(identity, table, row_id, cells, now_ms)
+                        }
+                        None => db.restore_for_identity(identity, table, row_id, cells),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             #[cfg(target_arch = "wasm32")]
@@ -819,8 +907,13 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
                     Rc::clone(db),
-                    db.restore_for_identity(identity, table, row_id, cells)
-                        .map_err(to_js_error)?,
+                    match updated_at_ms {
+                        Some(now_ms) => {
+                            db.restore_for_identity_at_ms(identity, table, row_id, cells, now_ms)
+                        }
+                        None => db.restore_for_identity(identity, table, row_id, cells),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             Self::Closed => panic!("WasmDb is closed"),
@@ -1147,10 +1240,16 @@ impl WasmDb {
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
-        self.inner.insert_with_id(&table, row_id, cells)
+        self.inner.insert_with_id(
+            &table,
+            row_id,
+            cells,
+            updated_at_ms.map(|value| value as u64),
+        )
     }
 
     #[wasm_bindgen(js_name = insertWithIdEncodedForIdentity)]
@@ -1160,12 +1259,18 @@ impl WasmDb {
         row_id: Vec<u8>,
         cells: Vec<u8>,
         author: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
         let author = author_id_from_bytes(&author)?;
-        self.inner
-            .insert_with_id_for_identity(author, &table, row_id, cells)
+        self.inner.insert_with_id_for_identity(
+            author,
+            &table,
+            row_id,
+            cells,
+            updated_at_ms.map(|value| value as u64),
+        )
     }
 
     #[wasm_bindgen(js_name = updateEncoded)]
@@ -1174,10 +1279,16 @@ impl WasmDb {
         table: String,
         row_id: Vec<u8>,
         patch: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let patch = decode_cells(&patch)?;
-        self.inner.update(&table, row_id, patch)
+        self.inner.update(
+            &table,
+            row_id,
+            patch,
+            updated_at_ms.map(|value| value as u64),
+        )
     }
 
     #[wasm_bindgen(js_name = updateEncodedForIdentity)]
@@ -1187,12 +1298,18 @@ impl WasmDb {
         row_id: Vec<u8>,
         patch: Vec<u8>,
         author: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let patch = decode_cells(&patch)?;
         let author = author_id_from_bytes(&author)?;
-        self.inner
-            .update_for_identity(author, &table, row_id, patch)
+        self.inner.update_for_identity(
+            author,
+            &table,
+            row_id,
+            patch,
+            updated_at_ms.map(|value| value as u64),
+        )
     }
 
     #[wasm_bindgen(js_name = canUpdateEncodedForIdentity)]
@@ -1223,10 +1340,16 @@ impl WasmDb {
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
-        self.inner.upsert(&table, row_id, cells)
+        self.inner.upsert(
+            &table,
+            row_id,
+            cells,
+            updated_at_ms.map(|value| value as u64),
+        )
     }
 
     #[wasm_bindgen(js_name = upsertEncodedForIdentity)]
@@ -1236,12 +1359,18 @@ impl WasmDb {
         row_id: Vec<u8>,
         cells: Vec<u8>,
         author: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
         let author = author_id_from_bytes(&author)?;
-        self.inner
-            .upsert_for_identity(author, &table, row_id, cells)
+        self.inner.upsert_for_identity(
+            author,
+            &table,
+            row_id,
+            cells,
+            updated_at_ms.map(|value| value as u64),
+        )
     }
 
     #[wasm_bindgen(js_name = delete)]
@@ -1268,10 +1397,16 @@ impl WasmDb {
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
-        self.inner.restore(&table, row_id, cells)
+        self.inner.restore(
+            &table,
+            row_id,
+            cells,
+            updated_at_ms.map(|value| value as u64),
+        )
     }
 
     #[wasm_bindgen(js_name = restoreEncodedForIdentity)]
@@ -1281,12 +1416,18 @@ impl WasmDb {
         row_id: Vec<u8>,
         cells: Vec<u8>,
         author: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
         let author = author_id_from_bytes(&author)?;
-        self.inner
-            .restore_for_identity(author, &table, row_id, cells)
+        self.inner.restore_for_identity(
+            author,
+            &table,
+            row_id,
+            cells,
+            updated_at_ms.map(|value| value as u64),
+        )
     }
 
     #[wasm_bindgen(js_name = tick)]
