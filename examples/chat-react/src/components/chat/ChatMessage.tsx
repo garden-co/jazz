@@ -120,8 +120,8 @@ export const ChatMessage = ({ message, sender, isMe, onDelete }: ChatMessageProp
           <AlertDialogHeader>
             <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
             <AlertDialogDescription>
-              This action cannot be undone. This will permanently delete your message from our
-              servers.
+              This action cannot be undone. Your message will be permanently removed for everyone in
+              this chat.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

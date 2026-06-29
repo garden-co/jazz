@@ -304,6 +304,79 @@ describe("Chat App E2E", () => {
   });
 
   // -------------------------------------------------------------------------
+  // 3b. Reacting twice with the same preset must not duplicate the reaction
+  // -------------------------------------------------------------------------
+
+  it("does not duplicate a reaction when the same preset is picked twice", async () => {
+    const el = await mountApp({ dbName: uniqueDbName("react-dupe") });
+
+    await waitFor(
+      () => el.textContent?.includes("Hello world") ?? false,
+      10000,
+      "Seed message should be visible",
+    );
+
+    const messageBubble = () =>
+      [...el.querySelectorAll("article")].find((a) => a.textContent?.includes("Hello world"));
+
+    // Open the dropdown → React submenu → click the heart preset.
+    async function reactWithHeartViaPicker() {
+      const clickTarget = messageBubble()!.querySelector('[data-slot="dropdown-menu-trigger"]');
+      simulateClick(clickTarget as HTMLElement);
+
+      await waitFor(
+        () => document.querySelectorAll('[data-slot="dropdown-menu-sub-trigger"]').length > 0,
+        3000,
+        "React submenu trigger should appear",
+      );
+      simulateClick(
+        document.querySelector('[data-slot="dropdown-menu-sub-trigger"]') as HTMLElement,
+      );
+
+      await waitFor(
+        () =>
+          [...document.querySelectorAll('[data-slot="dropdown-menu-sub-content"] button')].some(
+            (b) => b.textContent?.includes("❤️"),
+          ),
+        3000,
+        "Heart preset should appear",
+      );
+      const heart = [
+        ...document.querySelectorAll('[data-slot="dropdown-menu-sub-content"] button'),
+      ].find((b) => b.textContent?.includes("❤️")) as HTMLElement;
+      simulateClick(heart);
+
+      // Picking closes the menu; wait for the portal content to tear down before
+      // re-opening so the second cycle clicks fresh elements.
+      await waitFor(
+        () => document.querySelectorAll('[data-slot="dropdown-menu-sub-content"]').length === 0,
+        3000,
+        "Dropdown should close after picking",
+      );
+    }
+
+    await reactWithHeartViaPicker();
+    await waitFor(
+      () => messageBubble()?.textContent?.includes("❤️") ?? false,
+      5000,
+      "Heart reaction pill should appear after the first pick",
+    );
+
+    await reactWithHeartViaPicker();
+    // Give any (buggy) duplicate insert time to land and re-render.
+    await new Promise((r) => setTimeout(r, 500));
+
+    // The reaction pill renders a count only when more than one row exists, so a
+    // duplicate would surface as "❤️ 2". Picking the same preset twice must stay
+    // at a single reaction.
+    const heartPill = [...messageBubble()!.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("❤️"),
+    );
+    expect(heartPill).toBeTruthy();
+    expect((heartPill!.textContent ?? "").replace(/\s+/g, "")).toBe("❤️");
+  });
+
+  // -------------------------------------------------------------------------
   // 4. Delete a message
   // -------------------------------------------------------------------------
 

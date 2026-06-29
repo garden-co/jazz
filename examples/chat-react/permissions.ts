@@ -42,11 +42,20 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.messages.allowInsert.where((message) =>
     policy.chatMembers.exists.where({ chatId: message.chatId, userId: session.user_id }),
   );
-  policy.messages.allowDelete.where({ senderId: session.user_id });
+  // `senderId` references a profile row, so the message is the sender's iff a
+  // profile with that id belongs to the session user. (Comparing `senderId`
+  // directly to `session.user_id` never matched — a profile id is not a user id.)
+  policy.messages.allowDelete.where((message) =>
+    policy.profiles.exists.where({ id: message.senderId, userId: session.user_id }),
+  );
 
   policy.reactions.allowRead.where(allowedTo.read("messageId"));
   policy.reactions.allowInsert.where({ userId: session.user_id });
-  policy.reactions.allowDelete.where({ userId: session.user_id });
+  // The reactor may always remove their own reaction; the message's sender may
+  // also clear reactions when deleting the message they hang off.
+  policy.reactions.allowDelete.where(
+    anyOf([{ userId: session.user_id }, allowedTo.delete("messageId")]),
+  );
 
   policy.canvases.allowRead.where((canvas) =>
     anyOf([
@@ -64,6 +73,9 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
 
   policy.attachments.allowRead.where(allowedTo.read("messageId"));
   policy.attachments.allowInsert.where(allowedTo.read("messageId"));
+  // An attachment is deletable by whoever may delete its message; files and
+  // file_parts then cascade via the deleteReferencing policies below.
+  policy.attachments.allowDelete.where(allowedTo.delete("messageId"));
 
   policy.files.allowInsert.where({});
   policy.file_parts.allowInsert.where({});
