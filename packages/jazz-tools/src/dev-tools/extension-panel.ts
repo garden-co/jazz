@@ -302,16 +302,9 @@ async function ensureDevtoolsPort(): Promise<DevtoolsBridgePort> {
         return;
       }
       const delta = payload.delta;
-      // The callback is the Db's decoding handleDelta, which accepts both wire
-      // deltas (arrays) and native row deltas ({ __jazzNativeRowDelta, ... }) and
-      // decodes the latter using the query's output columns. Only forward those
-      // two shapes; older code dropped everything non-array, which silently
-      // discarded native row deltas and left the data explorer showing no rows.
-      const isNativeRowDelta =
-        !!delta &&
-        typeof delta === "object" &&
-        (delta as { __jazzNativeRowDelta?: unknown }).__jazzNativeRowDelta === true;
-      if (!Array.isArray(delta) && !isNativeRowDelta) {
+      // Forward wire deltas (arrays) and native row deltas (objects); arrays are
+      // objects too, so this one check drops only primitives and null.
+      if (delta === null || typeof delta !== "object") {
         return;
       }
       callback(delta as Parameters<SubscriptionCallback>[0]);
@@ -545,7 +538,12 @@ class DevToolsJazzClient {
     // column values) is enough to satisfy the transform without throwing.
     const id = (values as Record<string, unknown>).id;
     const standIn = { id: typeof id === "string" ? id : "", values: [] } as unknown as Row;
-    return this.deferDurableInsert(standIn, (tier) => this.createDurable(table, values, { tier }));
+    const batchId = this.registerDurable((tier) => this.createDurable(table, values, { tier }));
+    return new WriteResult(
+      standIn,
+      batchId,
+      this as unknown as JazzClient,
+    ) as unknown as DirectInsertResult;
   }
   async createDurable(
     table: string,
@@ -576,7 +574,11 @@ class DevToolsJazzClient {
     updates: Record<string, Value>,
     options?: { tier?: DurabilityTier },
   ): DirectMutationResult {
-    return this.deferDurableWrite((tier) => this.updateDurable(objectId, updates, { tier }));
+    const batchId = this.registerDurable((tier) => this.updateDurable(objectId, updates, { tier }));
+    return new WriteHandle(
+      batchId,
+      this as unknown as JazzClient,
+    ) as unknown as DirectMutationResult;
   }
   async updateDurable(
     objectId: string,
@@ -591,27 +593,20 @@ class DevToolsJazzClient {
     });
   }
   delete(objectId: string, options?: { tier?: DurabilityTier }): DirectMutationResult {
-    return this.deferDurableWrite((tier) => this.deleteDurable(objectId, { tier }));
-  }
-  private deferDurableWrite(run: (tier: DurabilityTier) => Promise<unknown>): DirectMutationResult {
-    const batchId = randomId();
-    pendingDurableWrites.set(batchId, run);
+    const batchId = this.registerDurable((tier) => this.deleteDurable(objectId, { tier }));
     return new WriteHandle(
       batchId,
       this as unknown as JazzClient,
     ) as unknown as DirectMutationResult;
   }
-  private deferDurableInsert(
-    value: Row,
-    run: (tier: DurabilityTier) => Promise<unknown>,
-  ): DirectInsertResult {
+  // Allocate a batch id and stash the durable bridge call for it. db applies its
+  // column transform, then calls client.insert/update/delete, which defer the
+  // actual bridge call here keyed by batchId; WriteHandle.wait()/WriteResult.wait()
+  // runs it via waitForBatch (the runtime executes the durable mutation).
+  private registerDurable(run: (tier: DurabilityTier) => Promise<unknown>): string {
     const batchId = randomId();
     pendingDurableWrites.set(batchId, run);
-    return new WriteResult(
-      value,
-      batchId,
-      this as unknown as JazzClient,
-    ) as unknown as DirectInsertResult;
+    return batchId;
   }
   async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
     const run = pendingDurableWrites.get(batchId);
