@@ -135,12 +135,6 @@ fn convert_column(
     table: &TableName,
     column: &ColumnDescriptor,
 ) -> Result<CoreColumnSchema, SchemaConversionError> {
-    if column.default.is_some() {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            "column defaults are not supported by core schema conversion yet",
-        ));
-    }
     let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;
     if column.nullable {
         column_type = column_type.nullable();
@@ -1001,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_integer_as_core_u32_and_rejects_defaults() {
+    fn converts_public_integer_as_core_u32_and_ignores_defaults() {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::Integer))
             .build();
@@ -1054,7 +1048,32 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        assert!(convert_public_schema(&default_schema).is_err());
+        let default_table = convert_public_schema(&default_schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "todos")
+            .unwrap();
+        assert_eq!(
+            default_table
+                .columns
+                .iter()
+                .find(|column| column.name == "title")
+                .unwrap()
+                .column_type,
+            GrooveColumnType::String
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_public_column_types() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("todos").column("count", ColumnType::BigInt))
+            .build();
+
+        let error = convert_public_schema(&schema).unwrap_err();
+        assert_eq!(error.path, "$.todos.count");
+        assert!(error.message.contains("BIGINT is signed"));
     }
 
     #[test]
