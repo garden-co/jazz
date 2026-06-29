@@ -495,6 +495,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(session);
     const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
+    this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(queryJson)) {
         if (session) {
@@ -751,6 +752,32 @@ export class NativeRuntimeAdapter implements Runtime {
       session?.identity,
     );
     return attachment;
+  }
+
+  private attachLocalReadCoverageInBackground(
+    tier: string | null | undefined,
+    optionsJson: string | null | undefined,
+    query: PreparedQuery,
+    session: RuntimeSession | null,
+  ): void {
+    if (tier != null && tier !== "local") return;
+    if (!readPropagationIsFull(optionsJson)) return;
+    if (!this.serverTransport || !this.db.attachQuery) return;
+
+    const refresh = async () => {
+      await this.serverCarrierPromise;
+      const edgeOptionsJson = JSON.stringify({ propagation: "full" });
+      const attachment = await this.attachQueryIfNeeded("edge", edgeOptionsJson, query, session);
+      if (attachment !== undefined) this.db.detachQuery?.(attachment);
+    };
+
+    void refresh().catch((error: unknown) => {
+      if (this.closed) return;
+      if (error instanceof Error && error.message === "Timed out waiting for edge query coverage") {
+        return;
+      }
+      this.handleServerTransportError(error);
+    });
   }
 
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
@@ -1162,6 +1189,16 @@ function readOptions(
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
   return readOptions;
+}
+
+function readPropagationIsFull(optionsJson?: string | null): boolean {
+  if (optionsJson == null) return true;
+  try {
+    const options = JSON.parse(optionsJson) as { propagation?: unknown };
+    return options.propagation == null || options.propagation === "full";
+  } catch {
+    return true;
+  }
 }
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {

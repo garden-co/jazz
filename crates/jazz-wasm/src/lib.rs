@@ -270,6 +270,7 @@ enum WasmDbInner {
     Memory(Rc<Db<MemoryStorage>>),
     #[cfg(target_arch = "wasm32")]
     Browser(Rc<Db<OpfsStorage>>),
+    Closed,
 }
 
 impl Clone for WasmDbInner {
@@ -278,6 +279,7 @@ impl Clone for WasmDbInner {
             Self::Memory(db) => Self::Memory(Rc::clone(db)),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => Self::Browser(Rc::clone(db)),
+            Self::Closed => Self::Closed,
         }
     }
 }
@@ -371,6 +373,7 @@ impl WasmDbInner {
             Self::Memory(db) => db.prepare_query(query),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.prepare_query(query),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -383,6 +386,7 @@ impl WasmDbInner {
             Self::Memory(db) => block_on(db.all(query, opts)),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => block_on(db.all(query, opts)),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -396,6 +400,7 @@ impl WasmDbInner {
             Self::Memory(db) => block_on(db.all_for_identity(query, opts, author)),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => block_on(db.all_for_identity(query, opts, author)),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -408,6 +413,7 @@ impl WasmDbInner {
             Self::Memory(db) => block_on(db.all_relation_snapshot(query, opts)),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => block_on(db.all_relation_snapshot(query, opts)),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -425,6 +431,7 @@ impl WasmDbInner {
             Self::Browser(db) => {
                 block_on(db.all_relation_snapshot_for_identity(query, opts, author))
             }
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -433,6 +440,7 @@ impl WasmDbInner {
             Self::Memory(db) => db.set_identity_claims(author, claims),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.set_identity_claims(author, claims),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -447,6 +455,7 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => block_on(db.subscribe(query, opts))
                 .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -462,6 +471,7 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => block_on(db.subscribe_for_identity(query, opts, author))
                 .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -470,6 +480,7 @@ impl WasmDbInner {
             Self::Memory(db) => db.attach_query_with_opts(query, opts),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.attach_query_with_opts(query, opts),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -483,6 +494,7 @@ impl WasmDbInner {
             Self::Memory(db) => db.attach_query_with_opts_for_identity(query, opts, author),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.attach_query_with_opts_for_identity(query, opts, author),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -491,6 +503,7 @@ impl WasmDbInner {
             Self::Memory(db) => db.query_attachment_is_covered(attachment),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.query_attachment_is_covered(attachment),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -499,6 +512,7 @@ impl WasmDbInner {
             Self::Memory(db) => db.detach_query(attachment),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.detach_query(attachment),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -508,6 +522,7 @@ impl WasmDbInner {
             Self::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.set_tick_scheduler(Some(scheduler)),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -520,6 +535,7 @@ impl WasmDbInner {
             Self::Browser(db) => {
                 wasm_write_browser(Rc::clone(db), db.insert(table, cells).map_err(to_js_error)?)
             }
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -541,6 +557,7 @@ impl WasmDbInner {
                 db.insert_with_id(table, row_id, cells)
                     .map_err(to_js_error)?,
             ),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -569,6 +586,7 @@ impl WasmDbInner {
                         .map_err(to_js_error)?,
                 )
             }
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -583,6 +601,7 @@ impl WasmDbInner {
                 Rc::clone(db),
                 db.update(table, row_id, patch).map_err(to_js_error)?,
             ),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -611,6 +630,7 @@ impl WasmDbInner {
                         .map_err(to_js_error)?,
                 )
             }
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -625,6 +645,7 @@ impl WasmDbInner {
                 Rc::clone(db),
                 db.upsert(table, row_id, cells).map_err(to_js_error)?,
             ),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -653,6 +674,7 @@ impl WasmDbInner {
                         .map_err(to_js_error)?,
                 )
             }
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -667,6 +689,7 @@ impl WasmDbInner {
                 Rc::clone(db),
                 db.delete(table, row_id).map_err(to_js_error)?,
             ),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -694,6 +717,7 @@ impl WasmDbInner {
                         .map_err(to_js_error)?,
                 )
             }
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -708,6 +732,7 @@ impl WasmDbInner {
                 Rc::clone(db),
                 db.restore(table, row_id, cells).map_err(to_js_error)?,
             ),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -736,6 +761,7 @@ impl WasmDbInner {
                         .map_err(to_js_error)?,
                 )
             }
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 
@@ -744,6 +770,7 @@ impl WasmDbInner {
             Self::Memory(db) => db.tick(),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.tick(),
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 }
@@ -820,9 +847,7 @@ impl WasmDb {
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = destroyBrowserStorage)]
     pub async fn destroy_browser_storage(namespace: String) -> Result<(), JsValue> {
-        opfs_btree::OpfsFile::destroy(&namespace)
-            .await
-            .map_err(to_js_error)
+        OpfsStorage::destroy(&namespace).await.map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = prepareQuery)]
@@ -986,6 +1011,7 @@ impl WasmDb {
             WasmDbInner::Memory(db) => db.can_insert(&table, cells).map_err(to_js_error),
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => db.can_insert(&table, cells).map_err(to_js_error),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
 
@@ -1061,6 +1087,7 @@ impl WasmDb {
             WasmDbInner::Browser(db) => db
                 .can_update_for_identity(&table, row_id, author)
                 .map_err(to_js_error),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
 
@@ -1142,7 +1169,7 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = connectUpstream)]
-    pub fn connect_upstream(&self) -> WasmTransport {
+    pub fn connect_upstream(&self) -> Result<WasmTransport, JsValue> {
         let queues = WasmWireQueues::default();
         let transport = Box::new(WireTransportAdapter::current(WasmWireTransport {
             queues: queues.clone(),
@@ -1157,8 +1184,9 @@ impl WasmDb {
                 db: Rc::clone(db),
                 connection: Some(db.connect_upstream(transport)),
             },
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
-        WasmTransport { inner, queues }
+        Ok(WasmTransport { inner, queues })
     }
 
     #[wasm_bindgen(js_name = acceptSubscriber)]
@@ -1178,6 +1206,7 @@ impl WasmDb {
                 db: Rc::clone(db),
                 connection: Some(db.accept_subscriber(transport, identity)),
             },
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
         Ok(WasmTransport { inner, queues })
     }
@@ -1209,6 +1238,14 @@ impl WasmDb {
             kind: WasmTxKind::Exclusive,
             writes: Some(Vec::new()),
         }
+    }
+
+    #[wasm_bindgen(js_name = close)]
+    pub fn close(&mut self) -> bool {
+        !matches!(
+            std::mem::replace(&mut self.inner, WasmDbInner::Closed),
+            WasmDbInner::Closed
+        )
     }
 }
 
@@ -1332,6 +1369,7 @@ impl WasmTx {
             (WasmDbInner::Browser(db), WasmTxKind::Exclusive) => {
                 commit_wasm_exclusive_tx_browser(db, writes)
             }
+            (WasmDbInner::Closed, _) => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
 

@@ -51,9 +51,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly opened: Promise<void>;
 
   constructor(
-    runtimeSources: RuntimeSourcesConfig | undefined,
+    private readonly runtimeSources: RuntimeSourcesConfig | undefined,
     private readonly schema: WasmSchema,
-    dbName: string,
+    private readonly dbName: string,
     private readonly node: Uint8Array,
     private readonly author: Uint8Array,
   ) {
@@ -281,8 +281,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   async clearClientStorage(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
+    let namespace = this.dbName;
     try {
-      await this.send("clearClientStorage", []);
+      await this.opened;
+      await Promise.allSettled(this.writes.values());
+      namespace = (await this.send("closeForStorageClear", [])) as string;
     } catch (error) {
       if (!isExpectedShutdownError(error)) throw error;
     } finally {
@@ -291,6 +294,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       this.worker.terminate();
       this.resolveAll();
     }
+    await destroyBrowserStorage(this.runtimeSources, namespace);
   }
 
   connect(url: string, authJson: string): void {
@@ -528,6 +532,43 @@ function ignoreExpectedShutdown(error: unknown): void {
 
 function isExpectedShutdownError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("Persistent browser native runtime");
+}
+
+function destroyBrowserStorage(
+  runtimeSources: RuntimeSourcesConfig | undefined,
+  dbName: string,
+): Promise<void> {
+  const worker = new Worker(new URL("./persistent-browser-worker.js", import.meta.url), {
+    type: "module",
+  });
+  const id = 1;
+
+  return new Promise((resolve, reject) => {
+    const finish = (complete: () => void) => {
+      worker.terminate();
+      complete();
+    };
+
+    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+      const message = event.data;
+      if (!("id" in message) || message.id !== id) return;
+      if (message.ok) {
+        finish(resolve);
+      } else {
+        finish(() =>
+          reject(new Error(message.error.message ?? "Persistent browser storage destroy failed")),
+        );
+      }
+    };
+    worker.onerror = (event) => {
+      finish(() => reject(new Error(event.message)));
+    };
+    worker.postMessage({
+      id,
+      method: "destroyBrowserStorage",
+      args: [runtimeSources, dbName],
+    } satisfies PersistentBrowserOpfsOwnerRequest);
+  });
 }
 
 function requiresServerPropagation(tier?: string | null, optionsJson?: string | null): boolean {

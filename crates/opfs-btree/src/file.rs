@@ -353,15 +353,40 @@ impl OpfsFile {
             .map_err(|_| BTreeError::Io("OPFS removeEntry is unavailable".to_string()))?;
         let opts = js_sys::Object::new();
         let _ = js_sys::Reflect::set(&opts, &"recursive".into(), &false.into());
-        let promise = remove_fn.call2(&root, &name.into(), &opts.into());
-        if let Ok(promise) = promise {
-            let promise: js_sys::Promise = promise
-                .dyn_into()
-                .map_err(|_| BTreeError::Io("failed to cast removeEntry promise".to_string()))?;
-            let _ = JsFuture::from(promise).await;
+        const MAX_RETRIES: u32 = 6;
+        const BASE_DELAY_MS: u32 = 25;
+
+        let mut last_error = None;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = BASE_DELAY_MS * (1 << (attempt - 1));
+                sleep_ms(delay).await;
+            }
+
+            let promise = remove_fn.call2(&root, &name.clone().into(), &opts.clone().into());
+            match promise {
+                Ok(promise) => {
+                    let promise: js_sys::Promise = promise.dyn_into().map_err(|_| {
+                        BTreeError::Io("failed to cast removeEntry promise".to_string())
+                    })?;
+                    match JsFuture::from(promise).await {
+                        Ok(_) => return Ok(()),
+                        Err(error) if is_not_found_error(&error) => return Ok(()),
+                        Err(error) if is_retryable_remove_error(&error) => {
+                            last_error = Some(error);
+                        }
+                        Err(error) => return Err(map_js_error(error)),
+                    }
+                }
+                Err(error) if is_not_found_error(&error) => return Ok(()),
+                Err(error) if is_retryable_remove_error(&error) => {
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(map_js_error(error)),
+            }
         }
 
-        Ok(())
+        Err(map_js_error(last_error.unwrap()))
     }
 
     fn file_name(namespace: &str) -> String {
@@ -472,6 +497,24 @@ fn is_retryable_handle_conflict(value: &wasm_bindgen::JsValue) -> bool {
     if value.is_instance_of::<web_sys::DomException>() {
         let ex: &web_sys::DomException = value.unchecked_ref();
         return ex.name() != "SecurityError";
+    }
+    false
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_not_found_error(value: &wasm_bindgen::JsValue) -> bool {
+    if value.is_instance_of::<web_sys::DomException>() {
+        let ex: &web_sys::DomException = value.unchecked_ref();
+        return ex.name() == "NotFoundError";
+    }
+    false
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_retryable_remove_error(value: &wasm_bindgen::JsValue) -> bool {
+    if value.is_instance_of::<web_sys::DomException>() {
+        let ex: &web_sys::DomException = value.unchecked_ref();
+        return ex.name() == "NoModificationAllowedError";
     }
     false
 }

@@ -35,6 +35,10 @@ impl OpfsStorage {
         })
     }
 
+    pub async fn destroy(namespace: &str) -> Result<(), Error> {
+        Ok(OpfsFile::destroy(namespace).await?)
+    }
+
     fn ensure_cf(&self, cf: &ColumnFamilyName) -> Result<(), Error> {
         if self.column_families.borrow().contains(cf) {
             Ok(())
