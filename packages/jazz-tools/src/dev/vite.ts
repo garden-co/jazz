@@ -1,6 +1,10 @@
 import { createRequire } from "node:module";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
-import { attachOverlayMiddleware, type OverlayDevServer } from "./inspector-overlay/serve.js";
+import {
+  attachOverlayMiddleware,
+  enableOverlayToggle,
+  type OverlayDevServer,
+} from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
@@ -61,6 +65,13 @@ export interface JazzPluginOptions {
   schemaDir?: string;
   appId?: string;
   telemetry?: TelemetryOptions;
+  /**
+   * Experimental: mount the in-app inspector overlay (a floating toggle that
+   * opens the embedded inspector) during dev. Off by default. When enabled, the
+   * plugin injects a public env flag the framework provider reads to mount the
+   * overlay toggle.
+   */
+  experimental_inspector?: boolean;
 }
 
 const LOG_PREFIX = "[jazz]";
@@ -148,6 +159,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
       }
       attachOverlayMiddleware(viteServer);
+      enableOverlayToggle(viteServer, options.experimental_inspector);
 
       viteServer.httpServer?.once("close", async () => {
         await runtime.dispose();

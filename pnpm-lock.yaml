@@ -52,6 +52,7 @@ catalogs:
 overrides:
   react: 19.2.4
   react-dom: 19.2.4
+  jazz-inspector: workspace:*
 
 importers:
 
@@ -704,7 +705,7 @@ importers:
         version: 19.2.14
       babel-preset-expo:
         specifier: ~54.0.10
-        version: 54.0.10(@babel/core@7.29.0)(@babel/runtime@7.29.7)(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))(react-refresh@0.17.0)
+        version: 54.0.10(@babel/core@7.29.0)(@babel/runtime@7.28.6)(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))(react-refresh@0.14.2)
       typescript:
         specifier: catalog:default
         version: 6.0.2
@@ -1402,32 +1403,13 @@ importers:
         version: 6.0.2
 
   packages/inspector:
-    dependencies:
-      '@tanstack/react-table':
-        specifier: ^8.21.3
-        version: 8.21.3(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      jazz-tools:
-        specifier: workspace:*
-        version: link:../jazz-tools
-      react:
-        specifier: 19.2.4
-        version: 19.2.4
-      react-data-grid:
-        specifier: 7.0.0-beta.59
-        version: 7.0.0-beta.59(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      react-dom:
-        specifier: 19.2.4
-        version: 19.2.4(react@19.2.4)
-      react-resizable-panels:
-        specifier: ^4.9.0
-        version: 4.9.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      react-router:
-        specifier: ^7.13.0
-        version: 7.13.1(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
     devDependencies:
       '@playwright/test':
         specifier: ^1.58.2
         version: 1.58.2
+      '@tanstack/react-table':
+        specifier: ^8.21.3
+        version: 8.21.3(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@testing-library/react':
         specifier: ^16.3.2
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -1449,9 +1431,27 @@ importers:
       happy-dom:
         specifier: ^20.8.4
         version: 20.8.4
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../jazz-tools
       jsdom:
         specifier: ^28.1.0
         version: 28.1.0(@noble/hashes@2.0.1)
+      react:
+        specifier: 19.2.4
+        version: 19.2.4
+      react-data-grid:
+        specifier: 7.0.0-beta.59
+        version: 7.0.0-beta.59(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      react-dom:
+        specifier: 19.2.4
+        version: 19.2.4(react@19.2.4)
+      react-resizable-panels:
+        specifier: ^4.9.0
+        version: 4.9.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      react-router:
+        specifier: ^7.13.0
+        version: 7.13.1(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       typescript:
         specifier: catalog:default
         version: 6.0.2
@@ -1506,6 +1506,9 @@ importers:
       expo-secure-store:
         specifier: '>=14.0.0'
         version: 14.0.1(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
+      jazz-inspector:
+        specifier: workspace:*
+        version: link:../inspector
       jazz-wasm:
         specifier: workspace:*
         version: link:../../crates/jazz-wasm

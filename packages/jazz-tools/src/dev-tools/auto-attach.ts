@@ -9,8 +9,33 @@
 // dropped, and the inspector never ships to prod.
 const attachedDbs = new WeakSet<object>();
 
-/** Mount the inspector + attach the bridge for a db, at most once per db. */
+// The inspector overlay is experimental: it only mounts when a dev plugin opts
+// in via `experimental_inspector`, which injects a public env flag the host
+// bundler inlines. We read both channels because this shared module is bundled
+// by whichever framework the app uses, and the overlay is dev-only — so this
+// runs against a live env object (Vite) or an inlined value (Next), never in a
+// shipped production bundle.
+//   Vite-based (React/Vue/Solid/SvelteKit): import.meta.env.VITE_JAZZ_INSPECTOR
+//   Next:                                   process.env.NEXT_PUBLIC_JAZZ_INSPECTOR
+function inspectorEnabled(): boolean {
+  let viteFlag: unknown;
+  try {
+    viteFlag = (import.meta as unknown as { env?: Record<string, unknown> }).env
+      ?.VITE_JAZZ_INSPECTOR;
+  } catch {
+    /* import.meta.env is unavailable in non-Vite bundlers */
+  }
+  const nextFlag =
+    typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_JAZZ_INSPECTOR : undefined;
+  return Boolean(viteFlag ?? nextFlag);
+}
+
+/**
+ * Mount the inspector + attach the bridge for a db, at most once per db. No-op
+ * unless a dev plugin enabled the experimental inspector overlay.
+ */
 export function startInspectorOnce(db: object): void {
+  if (!inspectorEnabled()) return;
   if (attachedDbs.has(db)) return;
   attachedDbs.add(db);
   void import("../dev/inspector-overlay/loader.js").then(({ startInspectorOverlay }) =>
