@@ -45,6 +45,8 @@ type NativeDbConstructor = {
 type NativeDb = {
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+  allRelationQuery?(queryJson: string, opts: unknown): Uint8Array;
+  allRelationQueryForIdentity?(queryJson: string, author: Uint8Array, opts: unknown): Uint8Array;
   allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array;
   allRelationSnapshotForIdentity?(
     query: PreparedQuery,
@@ -60,6 +62,12 @@ type NativeDb = {
   subscribe?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
   subscribeForIdentity?(
     query: PreparedQuery,
+    author: Uint8Array,
+    opts: unknown,
+  ): ReadableStream<unknown> | Subscription;
+  subscribeRelationQuery?(queryJson: string, opts: unknown): ReadableStream<unknown> | Subscription;
+  subscribeRelationQueryForIdentity?(
+    queryJson: string,
     author: Uint8Array,
     opts: unknown,
   ): ReadableStream<unknown> | Subscription;
@@ -161,7 +169,7 @@ type RuntimeSession = {
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
-  rootTable: string;
+  rootTable: string | null;
   opened: boolean;
   callback?: Function;
   cancelled: boolean;
@@ -490,10 +498,24 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<unknown> {
     assertSupportedReadOptions(tier, optionsJson);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
-    const query = this.prepareQuery(queryJson);
     const session = readSession(sessionJson);
     this.applySessionClaims(session);
     const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
+    if (queryUsesNativeRelationApi(queryJson)) {
+      if (session) {
+        if (!this.db.allRelationQueryForIdentity) {
+          throw new Error("Native runtime does not support session-scoped relation queries");
+        }
+        const payload = this.db.allRelationQueryForIdentity(queryJson, session.identity, opts);
+        return rowsFromBatches(readRowBatches(payload), this.schema);
+      }
+      if (!this.db.allRelationQuery) {
+        throw new Error("Native runtime does not support relation queries");
+      }
+      const payload = this.db.allRelationQuery(queryJson, opts);
+      return rowsFromBatches(readRowBatches(payload), this.schema);
+    }
+    const query = this.prepareQuery(queryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
@@ -537,28 +559,44 @@ export class NativeRuntimeAdapter implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     const session = readSession(sessionJson);
     this.applySessionClaims(session);
-    if (!this.db.subscribe) {
+    const usesNativeRelationApi = queryUsesNativeRelationApi(queryJson);
+    if (usesNativeRelationApi) {
+      if (!this.db.subscribeRelationQuery) {
+        throw new Error("Native runtime does not support relation query subscriptions");
+      }
+      if (session && !this.db.subscribeRelationQueryForIdentity) {
+        throw new Error(
+          "Native runtime does not support session-scoped relation query subscriptions",
+        );
+      }
+    } else if (!this.db.subscribe) {
       throw new Error("Native runtime does not support subscriptions");
     }
-    if (session && !this.db.subscribeForIdentity) {
+    if (!usesNativeRelationApi && session && !this.db.subscribeForIdentity) {
       throw new Error("Native runtime does not support session-scoped subscriptions");
     }
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
     const identity = session?.identity;
-    const query = this.prepareQuery(queryJson);
     let nativeSubscription: ReadableStream<unknown> | Subscription;
     try {
-      nativeSubscription = identity
-        ? this.db.subscribeForIdentity!(query, identity, opts)
-        : this.db.subscribe!(query, opts);
+      if (usesNativeRelationApi) {
+        nativeSubscription = identity
+          ? this.db.subscribeRelationQueryForIdentity!(queryJson, identity, opts)
+          : this.db.subscribeRelationQuery!(queryJson, opts);
+      } else {
+        const query = this.prepareQuery(queryJson);
+        nativeSubscription = identity
+          ? this.db.subscribeForIdentity!(query, identity, opts)
+          : this.db.subscribe!(query, opts);
+      }
     } catch (error) {
       throw new Error(`Core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
     }
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       rows: [],
-      rootTable: queryTable(queryJson),
+      rootTable: usesNativeRelationApi ? null : queryTable(queryJson),
       opened: false,
       cancelled: false,
     });
@@ -1268,6 +1306,23 @@ function queryHasArraySubqueries(queryJson: string): boolean {
   } catch {
     return false;
   }
+}
+
+function queryUsesNativeRelationApi(queryJson: string): boolean {
+  try {
+    const relationIr = (JSON.parse(queryJson) as { relation_ir?: unknown }).relation_ir;
+    return relationIrContainsNativeOperator(relationIr);
+  } catch {
+    return false;
+  }
+}
+
+function relationIrContainsNativeOperator(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(relationIrContainsNativeOperator);
+  const record = value as Record<string, unknown>;
+  if ("Join" in record || "Gather" in record || "Union" in record) return true;
+  return Object.values(record).some(relationIrContainsNativeOperator);
 }
 
 function queryTable(queryJson: string): string {
@@ -2207,7 +2262,7 @@ function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowStat
 function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
-  rootTable: string,
+  rootTable: string | null,
 ): RowState[] {
   const rows = rowsFromBatches(snapshot.rows, schema);
   const rowsByKey = new Map(rows.map((row) => [rowKey(row.table, row.id), row]));
@@ -2222,7 +2277,7 @@ function rowsFromRelationSnapshot(
   }
   const materialized = new Map<string, RowState>();
   return rows
-    .filter((row) => row.table === rootTable)
+    .filter((row) => rootTable === null || row.table === rootTable)
     .map((row) => materializeRelationRow(row, childRowsBySourceAndRelation, materialized));
 }
 

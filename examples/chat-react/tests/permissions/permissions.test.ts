@@ -262,9 +262,28 @@ describe("chat permissions", () => {
     const carolDb = testApp.as({ user_id: "carol", claims: {}, authMode: "local-first" });
 
     await expect(bobDb.all(app.files.where({ id: file.id }))).resolves.toEqual([
-      expect.objectContaining({ id: file.id, name: "hello.txt" }),
+      expect.objectContaining({
+        id: file.id,
+        name: "hello.txt",
+        mime_type: "text/plain",
+        data: new Uint8Array([104, 105]),
+      }),
     ]);
     await expect(carolDb.all(app.attachments.where({ fileId: file.id }))).resolves.toEqual([]);
+    await expect(carolDb.all(app.files.where({ id: file.id }))).resolves.toEqual([]);
+    await expect(carolDb.loadFileAsBlob(app, file.id)).rejects.toMatchObject({
+      name: "FileNotFoundError",
+    });
+
+    const blob = await bobDb.loadFileAsBlob(app, file.id);
+    expect(blob.type).toBe("text/plain");
+    expect(Array.from(new Uint8Array(await blob.arrayBuffer()))).toEqual([104, 105]);
+
+    bobDb.expectDenied((db) =>
+      db.update(app.files, file.id, {
+        mime_type: "text/plain+edited",
+      }),
+    );
   });
 
   it("inherits attachment file deletes from the source attachment delete policy", async () => {

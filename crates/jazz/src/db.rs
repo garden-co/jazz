@@ -30,7 +30,9 @@ use crate::protocol::{
     ContentExtent, CoverageKey, CurrentWriteSchema, MigrationLens, RegisterShapeOptions,
     SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
 };
-use crate::query::{ArraySubquery, Binding, Query, QueryError, ShapeId, ValidatedQuery};
+use crate::query::{
+    ArraySubquery, Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery,
+};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
@@ -541,6 +543,37 @@ where
             .map_err(Into::into)
     }
 
+    /// Tier-gated one-shot output-changing relation read evaluated as the database identity.
+    pub async fn all_relation_query(
+        &self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.all_relation_query_for_identity(query, opts, self.identity.author)
+            .await
+    }
+
+    /// Tier-gated one-shot output-changing relation read evaluated as `author`.
+    pub async fn all_relation_query_for_identity(
+        &self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<RelationSnapshot, Error> {
+        if opts.include_deleted {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation queries do not support include_deleted yet",
+            ));
+        }
+        let tier = effective_read_tier(opts);
+        self.node
+            .node
+            .borrow_mut()
+            .query_relation_query_snapshot_for_link(query, tier, author)
+            .map_err(Into::into)
+    }
+
     /// Subscribe to a query and return a stream of materialized subscription events.
     ///
     /// ```rust
@@ -588,6 +621,26 @@ where
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
         self.open_subscription(prepared, opts, author).await
+    }
+
+    /// Subscribe to an output-changing relation query.
+    pub async fn subscribe_relation_query(
+        &self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        self.subscribe_relation_query_for_identity(query, opts, self.identity.author)
+            .await
+    }
+
+    /// Subscribe to an output-changing relation query evaluated as `author`.
+    pub async fn subscribe_relation_query_for_identity(
+        &self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<SubscriptionStream, Error> {
+        self.open_relation_subscription(query, opts, author).await
     }
 
     /// Attach a one-shot usage-site query coverage request.
@@ -741,13 +794,15 @@ where
         );
         let (sender, receiver) = unbounded();
         let state = Rc::new(RefCell::new(SubscriptionState {
-            shape: prepared.shape.clone(),
-            binding: prepared.binding.clone(),
+            kind: SubscriptionKind::Prepared {
+                shape: prepared.shape.clone(),
+                binding: prepared.binding.clone(),
+                maintained_subscription,
+            },
             author,
             read_tier,
             snapshot: snapshot.clone(),
             settled,
-            maintained_subscription,
             sender,
         }));
         state
@@ -792,6 +847,56 @@ where
             receiver,
             _state: state,
             cleanup,
+        })
+    }
+
+    async fn open_relation_subscription(
+        &self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<SubscriptionStream, Error> {
+        if opts.include_deleted {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation query subscriptions do not support include_deleted yet",
+            ));
+        }
+        let read_tier = effective_read_tier(opts);
+        let snapshot = self
+            .node
+            .node
+            .borrow_mut()
+            .query_relation_query_snapshot_for_link(query, read_tier, author)?;
+        let settled = true;
+        let (sender, receiver) = unbounded();
+        let state = Rc::new(RefCell::new(SubscriptionState {
+            kind: SubscriptionKind::RelationQuery {
+                query: query.clone(),
+            },
+            author,
+            read_tier,
+            snapshot: snapshot.clone(),
+            settled,
+            sender,
+        }));
+        state
+            .borrow()
+            .sender
+            .unbounded_send(SubscriptionEvent::Opened {
+                current: snapshot,
+                settled,
+                tier: read_tier,
+            })
+            .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
+        self.node
+            .subscriptions
+            .borrow_mut()
+            .push(Rc::downgrade(&state));
+        Ok(SubscriptionStream {
+            receiver,
+            _state: state,
+            cleanup: None,
         })
     }
 
@@ -1878,22 +1983,25 @@ where
         for state in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
             {
                 let state = state.borrow();
+                let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind else {
+                    continue;
+                };
                 let opts = RegisterShapeOptions {
                     tier: state.read_tier,
                 };
-                let coverage = coverage_key(&state.shape, &state.binding, opts.clone());
+                let coverage = coverage_key(shape, binding, opts.clone());
                 if !pending_coverage.insert(coverage.clone()) {
                     continue;
                 }
-                let subscription = self.next_subscription_key(&state.shape);
+                let subscription = self.next_subscription_key(shape);
                 self.latest_coverage_subscriptions
                     .borrow_mut()
                     .insert(coverage, subscription);
                 pending.push(PendingUpstreamCommand::Subscribe(
                     PendingUpstreamSubscription {
                         subscription,
-                        shape: state.shape.clone(),
-                        binding: state.binding.clone(),
+                        shape: shape.clone(),
+                        binding: binding.clone(),
                         opts,
                     },
                 ));
@@ -2056,59 +2164,74 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (read_tier, previous, previous_settled, shape, binding, author) = {
+        let (read_tier, previous, previous_settled, author) = {
             let state = state.borrow();
             (
                 state.read_tier,
                 state.snapshot.clone(),
                 state.settled,
-                state.shape.clone(),
-                state.binding.clone(),
                 state.author,
             )
         };
-        let maybe_snapshot = {
+        let (snapshot, settled) = {
             let mut state_ref = state.borrow_mut();
-            if let Some(maintained) = state_ref.maintained_subscription.as_mut() {
-                let update = {
-                    node.borrow_mut()
-                        .drain_local_maintained_view_subscription(maintained)?
-                };
-                if let Some(update) = update {
-                    if shape.query().array_subqueries.is_empty() {
-                        let mut rows_by_id = previous
-                            .rows
-                            .iter()
-                            .cloned()
-                            .map(|row| (subscription_row_key(&row), row))
-                            .collect::<BTreeMap<_, _>>();
-                        for (_, row_uuid, _) in update.removes {
-                            rows_by_id
-                                .retain(|(_, existing_row_uuid), _| *existing_row_uuid != row_uuid);
+            match &mut state_ref.kind {
+                SubscriptionKind::Prepared {
+                    shape,
+                    binding,
+                    maintained_subscription,
+                } => {
+                    let snapshot = if let Some(maintained) = maintained_subscription.as_mut() {
+                        let update = {
+                            node.borrow_mut()
+                                .drain_local_maintained_view_subscription(maintained)?
+                        };
+                        if let Some(update) = update {
+                            if shape.query().array_subqueries.is_empty() {
+                                let mut rows_by_id = previous
+                                    .rows
+                                    .iter()
+                                    .cloned()
+                                    .map(|row| (subscription_row_key(&row), row))
+                                    .collect::<BTreeMap<_, _>>();
+                                for (_, row_uuid, _) in update.removes {
+                                    rows_by_id.retain(|(_, existing_row_uuid), _| {
+                                        *existing_row_uuid != row_uuid
+                                    });
+                                }
+                                for row in update.adds {
+                                    rows_by_id.insert(subscription_row_key(&row), row);
+                                }
+                                let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
+                                node.borrow().apply_query_order(shape.query(), &mut rows)?;
+                                subscription_snapshot_for_rows(shape, rows)
+                            } else {
+                                node.borrow_mut().subscription_snapshot_for_link(
+                                    shape, binding, read_tier, author,
+                                )?
+                            }
+                        } else if !shape.query().array_subqueries.is_empty() {
+                            node.borrow_mut()
+                                .subscription_snapshot_for_link(shape, binding, read_tier, author)?
+                        } else {
+                            previous.clone()
                         }
-                        for row in update.adds {
-                            rows_by_id.insert(subscription_row_key(&row), row);
-                        }
-                        let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
-                        node.borrow().apply_query_order(shape.query(), &mut rows)?;
-                        subscription_snapshot_for_rows(&shape, rows)
                     } else {
                         node.borrow_mut()
-                            .subscription_snapshot_for_link(&shape, &binding, read_tier, author)?
-                    }
-                } else if !shape.query().array_subqueries.is_empty() {
-                    node.borrow_mut()
-                        .subscription_snapshot_for_link(&shape, &binding, read_tier, author)?
-                } else {
-                    previous.clone()
+                            .subscription_snapshot_for_link(shape, binding, read_tier, author)?
+                    };
+                    let settled =
+                        subscription_is_settled(&node.borrow(), shape, binding, read_tier);
+                    (snapshot, settled)
                 }
-            } else {
-                node.borrow_mut()
-                    .subscription_snapshot_for_link(&shape, &binding, read_tier, author)?
+                SubscriptionKind::RelationQuery { query } => {
+                    let snapshot = node
+                        .borrow_mut()
+                        .query_relation_query_snapshot_for_link(query, read_tier, author)?;
+                    (snapshot, true)
+                }
             }
         };
-        let snapshot = maybe_snapshot;
-        let settled = subscription_is_settled(&node.borrow(), &shape, &binding, read_tier);
         if snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
             let event = subscription_delta_event(read_tier, settled, &previous, &snapshot);
@@ -3698,14 +3821,23 @@ fn write_rejected(reason: RejectionReason) -> Error {
 }
 
 struct SubscriptionState {
-    shape: ValidatedQuery,
-    binding: Binding,
+    kind: SubscriptionKind,
     author: AuthorId,
     read_tier: DurabilityTier,
     snapshot: RelationSnapshot,
     settled: bool,
-    maintained_subscription: Option<LocalMaintainedViewSubscription>,
     sender: UnboundedSender<SubscriptionEvent>,
+}
+
+enum SubscriptionKind {
+    Prepared {
+        shape: ValidatedQuery,
+        binding: Binding,
+        maintained_subscription: Option<LocalMaintainedViewSubscription>,
+    },
+    RelationQuery {
+        query: RelationQuery,
+    },
 }
 
 /// Row identity removed from a materialized subscription result.

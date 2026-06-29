@@ -54,6 +54,8 @@ declare module "jazz-wasm" {
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+    allRelationQuery(queryJson: string, opts: unknown): Uint8Array;
+    allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts: unknown): Uint8Array;
     attachQuery(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
     attachQueryForIdentity(
       query: WasmPreparedQuery,
@@ -63,6 +65,12 @@ declare module "jazz-wasm" {
     queryAttachmentIsCovered(attachment: QueryAttachment): boolean;
     detachQuery(attachment: QueryAttachment): void;
     subscribe(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
+    subscribeRelationQuery(queryJson: string, opts: unknown): ReadableStream<unknown>;
+    subscribeRelationQueryForIdentity(
+      queryJson: string,
+      author: Uint8Array,
+      opts: unknown,
+    ): ReadableStream<unknown>;
 
     insertEncoded(table: string, cells: Uint8Array): WasmWrite;
     canInsertEncoded(table: string, cells: Uint8Array): boolean;
