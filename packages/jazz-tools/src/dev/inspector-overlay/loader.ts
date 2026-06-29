@@ -318,7 +318,10 @@ class JazzInspectorOverlay extends HTMLElement {
     window.addEventListener(
       "keydown",
       (e) => {
-        if (e.altKey && e.shiftKey && e.key.toLowerCase() === "j") {
+        // Match the physical key via `code`, not `key`: on macOS, holding Option
+        // (Alt) composes a special character, so `e.key` for Alt+Shift+J is not
+        // "j". `e.code === "KeyJ"` is layout- and modifier-independent.
+        if (e.altKey && e.shiftKey && e.code === "KeyJ") {
           e.preventDefault();
           setOpen(!open);
         } else if (e.key === "Escape" && open) {
