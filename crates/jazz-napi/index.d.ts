@@ -33,8 +33,8 @@ export declare class NapiDb {
   updateEncodedForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
   upsertEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  delete(table: string, rowId: Uint8Array): Write
-  deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): Write
+  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
   restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
@@ -73,11 +73,11 @@ export declare class Transport {
 }
 
 export declare class Tx {
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void
-  delete(table: string, rowId: Uint8Array): void
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void
+  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): void
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
+  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | undefined | null): void
+  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
   commit(): Write
   rollback(): void
 }

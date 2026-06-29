@@ -476,6 +476,9 @@ describe("raw websocket private read gate", () => {
         "edge",
       ),
     ).resolves.toBeDefined();
+    await expect(bob.loadFileAsBlob(camelChatApp, rawFile.id, { tier: "edge" })).rejects.toThrow(
+      `File "${rawFile.id}" was not found.`,
+    );
 
     await withTimeout(
       alice
@@ -500,6 +503,13 @@ describe("raw websocket private read gate", () => {
     );
     expect(visibleRawFile.mime_type).toBe("application/x-raw-file-proof");
     expectBytesEqual(visibleRawFile.data, rawFileBytes);
+    const visibleRawBlob = await withTimeout(
+      bob.loadFileAsBlob(camelChatApp, rawFile.id, { tier: "edge" }),
+      15_000,
+      "Bob visible raw file blob edge load",
+    );
+    expect(visibleRawBlob.type).toBe("application/x-raw-file-proof");
+    expectBytesEqual(new Uint8Array(await visibleRawBlob.arrayBuffer()), rawFileBytes);
 
     const subscriptionQueries = [
       {

@@ -100,6 +100,24 @@ describe("TS Insert API", () => {
     });
   });
 
+  it("can use caller-supplied updatedAt on transaction-scoped insert", async () => {
+    const updatedAt = 1_704_067_200_123_000;
+    const tx = db.beginTransaction();
+    const project = tx.insert(app.projects, { name: "Backfilled Project" }, { updatedAt });
+
+    await tx.commit().wait({ tier: "local" });
+
+    const projected = await db.one(
+      app.projects.select("name", "$updatedAt").where({ id: { eq: project.id } }),
+    );
+
+    expect(projected).toEqual({
+      id: project.id,
+      name: "Backfilled Project",
+      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+    });
+  });
+
   it("cannot insert two rows with the same id", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
     const { value: project } = db.insert(app.projects, { name: "Test Project 1" }, { id });

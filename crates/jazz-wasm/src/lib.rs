@@ -808,16 +808,29 @@ impl WasmDbInner {
         }
     }
 
-    fn delete(&self, table: &str, row_id: RowUuid) -> Result<WasmWrite, JsValue> {
+    fn delete(
+        &self,
+        table: &str,
+        row_id: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                db.delete(table, row_id).map_err(to_js_error)?,
+                match now_ms {
+                    Some(now_ms) => db.delete_at_ms(table, row_id, now_ms),
+                    None => db.delete(table, row_id),
+                }
+                .map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.delete(table, row_id).map_err(to_js_error)?,
+                match now_ms {
+                    Some(now_ms) => db.delete_at_ms(table, row_id, now_ms),
+                    None => db.delete(table, row_id),
+                }
+                .map_err(to_js_error)?,
             ),
             Self::Closed => panic!("WasmDb is closed"),
         }
@@ -828,14 +841,20 @@ impl WasmDbInner {
         identity: AuthorId,
         table: &str,
         row_id: RowUuid,
+        now_ms: Option<u64>,
     ) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => {
                 set_identity_claims(db, identity);
                 wasm_write_memory(
                     Rc::clone(db),
-                    db.delete_for_identity(identity, table, row_id)
-                        .map_err(to_js_error)?,
+                    match now_ms {
+                        Some(now_ms) => {
+                            db.delete_for_identity_at_ms(identity, table, row_id, now_ms)
+                        }
+                        None => db.delete_for_identity(identity, table, row_id),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             #[cfg(target_arch = "wasm32")]
@@ -843,8 +862,13 @@ impl WasmDbInner {
                 set_identity_claims(db, identity);
                 wasm_write_browser(
                     Rc::clone(db),
-                    db.delete_for_identity(identity, table, row_id)
-                        .map_err(to_js_error)?,
+                    match now_ms {
+                        Some(now_ms) => {
+                            db.delete_for_identity_at_ms(identity, table, row_id, now_ms)
+                        }
+                        None => db.delete_for_identity(identity, table, row_id),
+                    }
+                    .map_err(to_js_error)?,
                 )
             }
             Self::Closed => panic!("WasmDb is closed"),
@@ -935,20 +959,24 @@ enum WasmTxWrite {
         table: String,
         row_id: RowUuid,
         cells: RowCells,
+        now_ms: Option<u64>,
     },
     Update {
         table: String,
         row_id: RowUuid,
         patch: RowCells,
+        now_ms: Option<u64>,
     },
     Delete {
         table: String,
         row_id: RowUuid,
+        now_ms: Option<u64>,
     },
     Restore {
         table: String,
         row_id: RowUuid,
         cells: RowCells,
+        now_ms: Option<u64>,
     },
 }
 
@@ -1374,9 +1402,15 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = delete)]
-    pub fn delete(&self, table: String, row_id: Vec<u8>) -> Result<WasmWrite, JsValue> {
+    pub fn delete(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        updated_at_ms: Option<f64>,
+    ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
-        self.inner.delete(&table, row_id)
+        self.inner
+            .delete(&table, row_id, updated_at_ms.map(|value| value as u64))
     }
 
     #[wasm_bindgen(js_name = deleteForIdentity)]
@@ -1385,10 +1419,16 @@ impl WasmDb {
         table: String,
         row_id: Vec<u8>,
         author: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let author = author_id_from_bytes(&author)?;
-        self.inner.delete_for_identity(author, &table, row_id)
+        self.inner.delete_for_identity(
+            author,
+            &table,
+            row_id,
+            updated_at_ms.map(|value| value as u64),
+        )
     }
 
     #[wasm_bindgen(js_name = restoreEncoded)]
@@ -1552,13 +1592,16 @@ impl WasmTx {
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<(), JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
+        let now_ms = updated_at_ms.map(|value| value as u64);
         self.pending_writes()?.push(WasmTxWrite::Insert {
             table,
             row_id,
             cells,
+            now_ms,
         });
         Ok(())
     }
@@ -1569,13 +1612,16 @@ impl WasmTx {
         table: String,
         row_id: Vec<u8>,
         patch: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<(), JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let patch = decode_cells(&patch)?;
+        let now_ms = updated_at_ms.map(|value| value as u64);
         self.pending_writes()?.push(WasmTxWrite::Update {
             table,
             row_id,
             patch,
+            now_ms,
         });
         Ok(())
     }
@@ -1586,15 +1632,24 @@ impl WasmTx {
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<(), JsValue> {
-        self.insert_with_id_encoded(table, row_id, cells)
+        self.insert_with_id_encoded(table, row_id, cells, updated_at_ms)
     }
 
     #[wasm_bindgen(js_name = delete)]
-    pub fn delete(&mut self, table: String, row_id: Vec<u8>) -> Result<(), JsValue> {
+    pub fn delete(
+        &mut self,
+        table: String,
+        row_id: Vec<u8>,
+        updated_at_ms: Option<f64>,
+    ) -> Result<(), JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
-        self.pending_writes()?
-            .push(WasmTxWrite::Delete { table, row_id });
+        self.pending_writes()?.push(WasmTxWrite::Delete {
+            table,
+            row_id,
+            now_ms: updated_at_ms.map(|value| value as u64),
+        });
         Ok(())
     }
 
@@ -1604,13 +1659,16 @@ impl WasmTx {
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
+        updated_at_ms: Option<f64>,
     ) -> Result<(), JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
+        let now_ms = updated_at_ms.map(|value| value as u64);
         self.pending_writes()?.push(WasmTxWrite::Restore {
             table,
             row_id,
             cells,
+            now_ms,
         });
         Ok(())
     }
@@ -1759,22 +1817,41 @@ where
                 table,
                 row_id,
                 cells,
-            } => tx
-                .insert_with_id(&table, row_id, cells)
-                .map_err(to_js_error)?,
+                now_ms,
+            } => match now_ms {
+                Some(now_ms) => tx.insert_with_id_at_ms(&table, row_id, cells, now_ms),
+                None => tx.insert_with_id(&table, row_id, cells),
+            }
+            .map_err(to_js_error)?,
             WasmTxWrite::Update {
                 table,
                 row_id,
                 patch,
-            } => tx.update(&table, row_id, patch).map_err(to_js_error)?,
-            WasmTxWrite::Delete { table, row_id } => {
-                tx.delete(&table, row_id).map_err(to_js_error)?
+                now_ms,
+            } => match now_ms {
+                Some(now_ms) => tx.update_at_ms(&table, row_id, patch, now_ms),
+                None => tx.update(&table, row_id, patch),
             }
+            .map_err(to_js_error)?,
+            WasmTxWrite::Delete {
+                table,
+                row_id,
+                now_ms,
+            } => match now_ms {
+                Some(now_ms) => tx.delete_at_ms(&table, row_id, now_ms),
+                None => tx.delete(&table, row_id),
+            }
+            .map_err(to_js_error)?,
             WasmTxWrite::Restore {
                 table,
                 row_id,
                 cells,
-            } => tx.restore(&table, row_id, cells).map_err(to_js_error)?,
+                now_ms,
+            } => match now_ms {
+                Some(now_ms) => tx.restore_at_ms(&table, row_id, cells, now_ms),
+                None => tx.restore(&table, row_id, cells),
+            }
+            .map_err(to_js_error)?,
         }
     }
     tx.commit().map_err(to_js_error)
@@ -1791,6 +1868,7 @@ where
                 table,
                 row_id,
                 cells,
+                ..
             } => tx
                 .insert_with_id(&table, row_id, cells)
                 .map_err(to_js_error)?,
@@ -1798,14 +1876,16 @@ where
                 table,
                 row_id,
                 patch,
+                ..
             } => tx.update(&table, row_id, patch).map_err(to_js_error)?,
-            WasmTxWrite::Delete { table, row_id } => {
+            WasmTxWrite::Delete { table, row_id, .. } => {
                 tx.delete(&table, row_id).map_err(to_js_error)?
             }
             WasmTxWrite::Restore {
                 table,
                 row_id,
                 cells,
+                ..
             } => tx
                 .insert_with_id(&table, row_id, cells)
                 .map_err(to_js_error)?,

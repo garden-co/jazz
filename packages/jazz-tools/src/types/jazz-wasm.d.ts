@@ -36,11 +36,31 @@ declare module "jazz-wasm" {
   }
 
   export class WasmTx {
-    insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
-    updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void;
-    upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
-    delete(table: string, rowId: Uint8Array): void;
-    restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
+    insertWithIdEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      updatedAtMs?: number | null,
+    ): void;
+    updateEncoded(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      updatedAtMs?: number | null,
+    ): void;
+    upsertEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      updatedAtMs?: number | null,
+    ): void;
+    delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
+    restoreEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      updatedAtMs?: number | null,
+    ): void;
     commit(): WasmWrite;
     rollback(): void;
   }
@@ -101,8 +121,13 @@ declare module "jazz-wasm" {
       cells: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
-    delete(table: string, rowId: Uint8Array): WasmWrite;
-    deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): WasmWrite;
+    delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): WasmWrite;
+    deleteForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      author: Uint8Array,
+      updatedAtMs?: number | null,
+    ): WasmWrite;
     restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     restoreEncodedForIdentity(
       table: string,

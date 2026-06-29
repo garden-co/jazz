@@ -1944,12 +1944,19 @@ where
             if projected_table != table {
                 continue;
             }
-            let deleted = deletions.get(&row_uuid).is_some_and(|deletion| {
+            let deletion = deletions.get(&row_uuid).filter(|deletion| {
                 deletion.deletion() == Some(DeletionEvent::Deleted)
                     && deletion.tx_time() > version.tx_time()
             });
+            let deleted = deletion.is_some();
+            let provenance = deletion.unwrap_or(&version);
             rows.push((
-                current_row_from_materialized_cells(&read_table, &version, &cells)?,
+                current_row_from_materialized_cells_with_provenance(
+                    &read_table,
+                    &version,
+                    provenance,
+                    &cells,
+                )?,
                 deleted,
             ));
         }
@@ -7495,7 +7502,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     };
     let deleted_winners = deletion_current
         .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
-        .project(["row_uuid"]);
+        .project(["row_uuid", "tx_time", "tx_node_id"]);
     let undeleted = GraphBuilder::anti_join(
         content_current.clone(),
         deleted_winners.clone(),
@@ -7512,7 +7519,13 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         .project_fields(
             current_row_fields(table)
                 .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                .map(|field| {
+                    let source = match field.as_str() {
+                        "tx_time" | "tx_node_id" => format!("right.{field}"),
+                        _ => format!("left.{field}"),
+                    };
+                    ProjectField::renamed(source, field)
+                })
                 .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
         );
     GraphBuilder::union([undeleted, deleted])

@@ -127,8 +127,13 @@ type NativeDb = {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
-  delete(table: string, rowId: Uint8Array): Write;
-  deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): Write;
+  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): Write;
+  deleteForIdentity(
+    table: string,
+    rowId: Uint8Array,
+    author: Uint8Array,
+    updatedAtMs?: number | null,
+  ): Write;
   mergeableTx(): Tx;
   mergeableTxForIdentity?(author: Uint8Array): Tx;
   exclusiveTx?(): Tx;
@@ -162,11 +167,31 @@ type Write = {
 type Tx = {
   commit(): Write;
   rollback(): void;
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void;
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
-  delete(table: string, rowId: Uint8Array): void;
+  insertWithIdEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
+  ): void;
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
+  ): void;
+  updateEncoded(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    updatedAtMs?: number | null,
+  ): void;
+  upsertEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
+  ): void;
+  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
 };
 
 export type Transport = {
@@ -348,7 +373,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = updatedAtMsFromWriteContext(_writeContext) ?? null;
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
-      this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells);
+      this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells, updatedAtMs);
       tx.writes.push({ table, rowId });
       return this.resultForRow(table, rowId, txIdFromContext(_writeContext) ?? "", writeIdentity);
     }
@@ -374,7 +399,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
-      this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells);
+      this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells, updatedAtMs);
       tx.writes.push({ table, rowId });
       return this.resultForRow(table, rowId, txIdFromContext(writeContext) ?? "", writeIdentity);
     }
@@ -400,7 +425,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
-      this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch);
+      this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch, updatedAtMs);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
@@ -435,7 +460,7 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", errorMessage(error));
     }
     if (tx) {
-      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells);
+      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, updatedAtMs);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
@@ -453,16 +478,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
+    const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
-      this.txForWrite(tx, writeIdentity).delete(table, rowId);
+      this.txForWrite(tx, writeIdentity).delete(table, rowId, updatedAtMs);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
       writeIdentity
-        ? this.db.deleteForIdentity(table, rowId, writeIdentity)
-        : this.db.delete(table, rowId),
+        ? this.db.deleteForIdentity(table, rowId, writeIdentity, updatedAtMs)
+        : this.db.delete(table, rowId, updatedAtMs),
     );
     return this.finishMutation(write);
   }

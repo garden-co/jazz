@@ -690,6 +690,59 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(staged).toEqual(["todos"]);
   });
 
+  it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
+    const updatedAt = 1_704_067_200_123_000;
+    const expectedUpdatedAtMs = Math.trunc(updatedAt / 1_000);
+    const staged: Array<{ op: string; updatedAtMs: number | null | undefined }> = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            mergeableTx: () =>
+              fakeTx({
+                insertWithIdEncoded: (_table, _rowId, _cells, updatedAtMs) =>
+                  staged.push({ op: "insert", updatedAtMs }),
+                updateEncoded: (_table, _rowId, _patch, updatedAtMs) =>
+                  staged.push({ op: "update", updatedAtMs }),
+                upsertEncoded: (_table, _rowId, _cells, updatedAtMs) =>
+                  staged.push({ op: "upsert", updatedAtMs }),
+                restoreEncoded: (_table, _rowId, _cells, updatedAtMs) =>
+                  staged.push({ op: "restore", updatedAtMs }),
+                delete: (_table, _rowId, updatedAtMs) => staged.push({ op: "delete", updatedAtMs }),
+              }),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const tx = runtime.beginTransaction("mergeable");
+    const context = JSON.stringify({ batch_id: tx, updated_at: updatedAt });
+    const rowId = "00000000-0000-0000-0000-000000000001";
+    runtime.insert("todos", { title: { type: "Text", value: "inserted" } }, context, rowId);
+    runtime.update("todos", rowId, { title: { type: "Text", value: "updated" } }, context);
+    runtime.upsert("todos", rowId, { title: { type: "Text", value: "upserted" } }, context);
+    runtime.restore("todos", rowId, { title: { type: "Text", value: "restored" } }, context);
+    runtime.delete("todos", rowId, context);
+
+    expect(staged).toEqual([
+      { op: "insert", updatedAtMs: expectedUpdatedAtMs },
+      { op: "update", updatedAtMs: expectedUpdatedAtMs },
+      { op: "upsert", updatedAtMs: expectedUpdatedAtMs },
+      { op: "restore", updatedAtMs: expectedUpdatedAtMs },
+      { op: "delete", updatedAtMs: expectedUpdatedAtMs },
+    ]);
+  });
+
   it("rejects mixed identities within one mergeable transaction", () => {
     const runtime = new NativeRuntimeAdapter(
       {
@@ -3376,11 +3429,31 @@ function fakeWrite() {
 type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void;
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void;
-  delete(table: string, rowId: Uint8Array): void;
+  insertWithIdEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
+  ): void;
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
+  ): void;
+  updateEncoded(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    updatedAtMs?: number | null,
+  ): void;
+  upsertEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
+  ): void;
+  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
 };
 
 function uuidBytes(value: string): Uint8Array {
