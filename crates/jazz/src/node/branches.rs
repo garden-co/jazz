@@ -658,6 +658,7 @@ where
                 policy_branches: Vec::new(),
                 reachable: Vec::new(),
                 includes: Vec::new(),
+                array_subqueries: Vec::new(),
                 select: None,
                 order_by: Vec::new(),
                 aggregate: None,

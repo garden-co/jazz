@@ -35,6 +35,9 @@ pub struct Query {
     pub reachable: Vec<ReachableVia>,
     /// Included reference paths.
     pub includes: Vec<Include>,
+    /// Correlated relation arrays materialized as relation payload edges.
+    #[serde(default)]
+    pub array_subqueries: Vec<ArraySubquery>,
     /// Selected application columns. Row id is always included.
     #[serde(default)]
     pub select: Option<Vec<String>>,
@@ -72,6 +75,7 @@ impl Query {
             policy_branches: Vec::new(),
             reachable: Vec::new(),
             includes: Vec::new(),
+            array_subqueries: Vec::new(),
             select: None,
             order_by: Vec::new(),
             aggregate: None,
@@ -341,6 +345,12 @@ impl Query {
         self
     }
 
+    /// Add a correlated relation array subquery.
+    pub fn array_subquery(mut self, subquery: ArraySubquery) -> Self {
+        self.array_subqueries.push(subquery);
+        self
+    }
+
     /// Select application columns. The row id is always included.
     ///
     /// ```rust
@@ -468,6 +478,7 @@ impl PolicyBranch {
             policy_branches: Vec::new(),
             reachable: self.reachable.clone(),
             includes: Vec::new(),
+            array_subqueries: Vec::new(),
             select: None,
             order_by: Vec::new(),
             aggregate: None,
@@ -509,6 +520,121 @@ pub struct Include {
     pub join_mode: JoinMode,
     /// Require every include target to be resolvable.
     pub require: bool,
+}
+
+/// Requirement mode for a correlated relation array.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum ArraySubqueryRequirement {
+    /// Keep the parent row even when no readable child rows match.
+    #[default]
+    Optional,
+    /// Keep only parent rows with at least one readable matching child.
+    AtLeastOne,
+    /// Keep only parent rows whose correlation has a complete matching child set.
+    MatchCorrelationCardinality,
+}
+
+/// Correlated relation array materialized in the relation payload.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ArraySubquery {
+    /// Name of the output relation.
+    pub column_name: String,
+    /// Inner table queried for relation targets.
+    pub table: String,
+    /// Column on the inner table correlated with the parent scope.
+    pub inner_column: String,
+    /// Column on the parent scope used as the correlation value.
+    pub outer_column: String,
+    /// Child-local filters.
+    pub filters: Vec<Predicate>,
+    /// Child-local selected application columns. Row id is always included.
+    #[serde(default)]
+    pub select: Option<Vec<String>>,
+    /// Child-local ordering keys.
+    #[serde(default)]
+    pub order_by: Vec<OrderBy>,
+    /// Child-local row limit.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Parent membership requirement for this relation.
+    #[serde(default)]
+    pub requirement: ArraySubqueryRequirement,
+    /// Nested correlated relation arrays rooted at child rows.
+    #[serde(default)]
+    pub nested_arrays: Vec<ArraySubquery>,
+}
+
+impl ArraySubquery {
+    /// Construct a correlated relation array subquery.
+    pub fn new(
+        column_name: impl Into<String>,
+        table: impl Into<String>,
+        inner_column: impl Into<String>,
+        outer_column: impl Into<String>,
+    ) -> Self {
+        Self {
+            column_name: column_name.into(),
+            table: table.into(),
+            inner_column: inner_column.into(),
+            outer_column: outer_column.into(),
+            filters: Vec::new(),
+            select: None,
+            order_by: Vec::new(),
+            limit: None,
+            requirement: ArraySubqueryRequirement::Optional,
+            nested_arrays: Vec::new(),
+        }
+    }
+
+    /// Add a child-local filter.
+    pub fn filter(mut self, predicate: Predicate) -> Self {
+        self.filters.push(predicate);
+        self
+    }
+
+    /// Select child application columns. The row id is always included.
+    pub fn select(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.select = Some(columns.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Add a child-local ordering key.
+    pub fn order_by(mut self, column: impl Into<String>, direction: OrderDirection) -> Self {
+        self.order_by.push(OrderBy {
+            column: column.into(),
+            direction,
+        });
+        self
+    }
+
+    /// Limit child rows after filtering and ordering.
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Set the parent membership requirement.
+    pub fn requirement(mut self, requirement: ArraySubqueryRequirement) -> Self {
+        self.requirement = requirement;
+        self
+    }
+
+    /// Add a nested correlated relation array rooted at child rows.
+    pub fn nested(mut self, subquery: ArraySubquery) -> Self {
+        self.nested_arrays.push(subquery);
+        self
+    }
 }
 
 /// Sort direction for a query ordering key.
@@ -1152,6 +1278,7 @@ fn validate_query_canonical_parts(
     for include in &query.includes {
         validate_include(schema, &root, &include.path)?;
     }
+    validate_array_subqueries(schema, &root, &query.array_subqueries, &mut params)?;
     if let Some(select) = &query.select {
         for column in select {
             validate_select_column(&root, column)?;
@@ -1403,6 +1530,51 @@ fn validate_include(schema: &JazzSchema, root: &TableSchema, path: &str) -> Resu
         };
         current = table(schema, target)?;
     }
+    Ok(())
+}
+
+fn validate_array_subqueries(
+    schema: &JazzSchema,
+    parent: &TableSchema,
+    subqueries: &[ArraySubquery],
+    params: &mut BTreeMap<String, ColumnType>,
+) -> Result<(), QueryError> {
+    let mut names = std::collections::BTreeSet::new();
+    for subquery in subqueries {
+        if subquery.column_name.is_empty() || !names.insert(subquery.column_name.as_str()) {
+            return Err(QueryError::BadIncludePath {
+                path: subquery.column_name.clone(),
+            });
+        }
+        validate_array_subquery(schema, parent, subquery, params)?;
+    }
+    Ok(())
+}
+
+fn validate_array_subquery(
+    schema: &JazzSchema,
+    parent: &TableSchema,
+    subquery: &ArraySubquery,
+    params: &mut BTreeMap<String, ColumnType>,
+) -> Result<(), QueryError> {
+    let child = table(schema, &subquery.table)?;
+    let parent_type = planner_column_type(parent, &subquery.outer_column)?;
+    let child_type = planner_column_type(&child, &subquery.inner_column)?;
+    if !column_types_comparable(parent_type, child_type) {
+        return Err(QueryError::OperandTypeMismatch);
+    }
+    for predicate in &subquery.filters {
+        validate_predicate(&child, predicate, params)?;
+    }
+    if let Some(select) = &subquery.select {
+        for column in select {
+            validate_select_column(&child, column)?;
+        }
+    }
+    for order in &subquery.order_by {
+        planner_column_type(&child, &order.column)?;
+    }
+    validate_array_subqueries(schema, &child, &subquery.nested_arrays, params)?;
     Ok(())
 }
 
@@ -1743,6 +1915,13 @@ fn normalize_query(query: &Query) -> Query {
     query.reachable.sort_by_key(canonical_reachable_key);
     query.includes.sort();
     query.includes.dedup();
+    for subquery in &mut query.array_subqueries {
+        normalize_array_subquery(subquery);
+    }
+    query
+        .array_subqueries
+        .sort_by_key(canonical_array_subquery_key);
+    query.array_subqueries.dedup();
     if let Some(select) = &mut query.select {
         select.sort();
         select.dedup();
@@ -1751,6 +1930,21 @@ fn normalize_query(query: &Query) -> Query {
         aggregate.aggregates.sort_by_key(canonical_aggregate_key);
     }
     query
+}
+
+fn normalize_array_subquery(subquery: &mut ArraySubquery) {
+    subquery.filters.sort_by_key(canonical_predicate_key);
+    if let Some(select) = &mut subquery.select {
+        select.sort();
+        select.dedup();
+    }
+    for nested in &mut subquery.nested_arrays {
+        normalize_array_subquery(nested);
+    }
+    subquery
+        .nested_arrays
+        .sort_by_key(canonical_array_subquery_key);
+    subquery.nested_arrays.dedup();
 }
 
 fn normalize_join(join: &mut JoinVia) {
@@ -1792,6 +1986,53 @@ fn canonical_aggregate_key(aggregate: &Aggregate) -> Vec<u8> {
         put_str(&mut bytes, column);
     }
     put_str(&mut bytes, &aggregate.alias);
+    bytes
+}
+
+fn canonical_array_subquery_key(subquery: &ArraySubquery) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    put_str(&mut bytes, &subquery.column_name);
+    put_str(&mut bytes, &subquery.table);
+    put_str(&mut bytes, &subquery.inner_column);
+    put_str(&mut bytes, &subquery.outer_column);
+    put_len(&mut bytes, subquery.filters.len());
+    for filter in &subquery.filters {
+        put_bytes(&mut bytes, &canonical_predicate_key(filter));
+    }
+    if let Some(select) = &subquery.select {
+        bytes.push(b's');
+        put_len(&mut bytes, select.len());
+        for column in select {
+            put_str(&mut bytes, column);
+        }
+    }
+    if !subquery.order_by.is_empty() {
+        bytes.push(b'o');
+        put_len(&mut bytes, subquery.order_by.len());
+        for order in &subquery.order_by {
+            put_str(&mut bytes, &order.column);
+            bytes.push(match order.direction {
+                OrderDirection::Asc => b'a',
+                OrderDirection::Desc => b'd',
+            });
+        }
+    }
+    if let Some(limit) = subquery.limit {
+        bytes.push(b'l');
+        put_len(&mut bytes, limit);
+    }
+    bytes.push(match subquery.requirement {
+        ArraySubqueryRequirement::Optional => b'?',
+        ArraySubqueryRequirement::AtLeastOne => b'+',
+        ArraySubqueryRequirement::MatchCorrelationCardinality => b'=',
+    });
+    if !subquery.nested_arrays.is_empty() {
+        bytes.push(b'n');
+        put_len(&mut bytes, subquery.nested_arrays.len());
+        for nested in &subquery.nested_arrays {
+            put_bytes(&mut bytes, &canonical_array_subquery_key(nested));
+        }
+    }
     bytes
 }
 
@@ -2018,6 +2259,13 @@ fn canonical_query_bytes(query: &Query) -> Vec<u8> {
             JoinMode::Holes => b'h',
         });
         bytes.push(u8::from(include.require));
+    }
+    if !query.array_subqueries.is_empty() {
+        bytes.push(b'y');
+        put_len(&mut bytes, query.array_subqueries.len());
+        for subquery in &query.array_subqueries {
+            put_bytes(&mut bytes, &canonical_array_subquery_key(subquery));
+        }
     }
     if let Some(select) = &query.select {
         bytes.push(b's');
@@ -2386,6 +2634,99 @@ mod tests {
             )
         );
         assert_eq!(validated.query().includes[0].join_mode, JoinMode::Holes);
+    }
+
+    #[test]
+    fn validates_array_subquery_shape_without_execution() {
+        // Internal test: array-subquery execution is not implemented yet, but
+        // shape validation/canonical identity are query-module responsibilities.
+        let validated = Query::from("issues")
+            .array_subquery(
+                ArraySubquery::new("tags", "issue_tags", "issue", "id")
+                    .filter(eq(col("tag"), param("tag")))
+                    .select(["tag"])
+                    .order_by("tag", OrderDirection::Asc)
+                    .limit(5)
+                    .requirement(ArraySubqueryRequirement::AtLeastOne)
+                    .nested(ArraySubquery::new("tagRows", "tags", "id", "tag").select(["name"])),
+            )
+            .validate(&schema())
+            .unwrap();
+
+        assert_eq!(validated.params()["tag"], ColumnType::Uuid);
+        let subquery = &validated.query().array_subqueries[0];
+        assert_eq!(subquery.column_name, "tags");
+        assert_eq!(subquery.nested_arrays[0].column_name, "tagRows");
+        assert_eq!(
+            subquery.select.as_deref(),
+            Some(["tag".to_owned()].as_slice())
+        );
+    }
+
+    #[test]
+    fn array_subquery_order_does_not_change_shape_id() {
+        // Internal test: canonicalization should be stable before execution is
+        // exposed through black-box relation payload tests.
+        let left = Query::from("issues")
+            .array_subquery(
+                ArraySubquery::new("tags", "issue_tags", "issue", "id")
+                    .filter(eq(col("tag"), param("tag")))
+                    .filter(ne(col("issue"), param("issue"))),
+            )
+            .array_subquery(ArraySubquery::new(
+                "projectIssues",
+                "issues",
+                "project",
+                "project",
+            ))
+            .validate(&schema())
+            .unwrap();
+        let right = Query::from("issues")
+            .array_subquery(ArraySubquery::new(
+                "projectIssues",
+                "issues",
+                "project",
+                "project",
+            ))
+            .array_subquery(
+                ArraySubquery::new("tags", "issue_tags", "issue", "id")
+                    .filter(ne(col("issue"), param("issue")))
+                    .filter(eq(col("tag"), param("tag"))),
+            )
+            .validate(&schema())
+            .unwrap();
+
+        assert_eq!(left.shape_id(), right.shape_id());
+    }
+
+    #[test]
+    fn rejects_invalid_array_subquery_shapes() {
+        let schema = schema();
+
+        let err = Query::from("issues")
+            .array_subquery(ArraySubquery::new("bad", "missing", "issue", "id"))
+            .validate(&schema)
+            .unwrap_err();
+        assert!(matches!(err, QueryError::UnknownTable(_)));
+
+        let err = Query::from("issues")
+            .array_subquery(ArraySubquery::new("bad", "issue_tags", "missing", "id"))
+            .validate(&schema)
+            .unwrap_err();
+        assert!(matches!(err, QueryError::UnknownColumn { .. }));
+
+        let err = Query::from("issues")
+            .array_subquery(ArraySubquery::new("bad", "issue_tags", "issue", "title"))
+            .validate(&schema)
+            .unwrap_err();
+        assert_eq!(err, QueryError::OperandTypeMismatch);
+
+        let err = Query::from("issues")
+            .array_subquery(ArraySubquery::new("dupe", "issue_tags", "issue", "id"))
+            .array_subquery(ArraySubquery::new("dupe", "issues", "id", "id"))
+            .validate(&schema)
+            .unwrap_err();
+        assert!(matches!(err, QueryError::BadIncludePath { .. }));
     }
 
     #[test]
