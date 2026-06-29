@@ -1449,16 +1449,48 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn delete(&self, table: &str, row: RowUuid) -> Result<WriteHandle<S>, Error> {
+        self.delete_at_ms_option(table, row, None)
+    }
+
+    /// Soft-delete a row with explicit millisecond provenance time.
+    pub fn delete_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.delete_at_ms_option(table, row, Some(now_ms))
+    }
+
+    fn delete_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
         let (_, parent) = self.merge_existing_cells(table, row, BTreeMap::new())?;
-        self.write_mergeable(
-            self.identity.author,
-            None,
-            table,
-            row,
-            BTreeMap::new(),
-            parent.into_iter().collect(),
-            Some(DeletionEvent::Deleted),
-        )
+        match now_ms {
+            Some(now_ms) => self.write_mergeable_at_ms(
+                self.identity.author,
+                None,
+                table,
+                row,
+                BTreeMap::new(),
+                parent.into_iter().collect(),
+                Some(DeletionEvent::Deleted),
+                now_ms,
+            ),
+            None => self.write_mergeable(
+                self.identity.author,
+                None,
+                table,
+                row,
+                BTreeMap::new(),
+                parent.into_iter().collect(),
+                Some(DeletionEvent::Deleted),
+            ),
+        }
     }
 
     /// Soft-delete a row while attributing provenance to `made_by`.
@@ -1488,6 +1520,28 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<WriteHandle<S>, Error> {
+        self.delete_for_identity_at_ms_option(identity, table, row, None)
+    }
+
+    /// Soft-delete a row while evaluating write policy as `identity`, with explicit time.
+    pub fn delete_for_identity_at_ms(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.delete_for_identity_at_ms_option(identity, table, row, Some(now_ms))
+    }
+
+    fn delete_for_identity_at_ms_option(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
         if !self.can_delete_for_identity(table, row, identity)? {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -1496,15 +1550,27 @@ where
         }
         let (_, parent) =
             self.merge_existing_cells_for_identity(table, row, BTreeMap::new(), identity)?;
-        self.write_mergeable(
-            identity,
-            Some(identity),
-            table,
-            row,
-            BTreeMap::new(),
-            parent.into_iter().collect(),
-            Some(DeletionEvent::Deleted),
-        )
+        match now_ms {
+            Some(now_ms) => self.write_mergeable_at_ms(
+                identity,
+                Some(identity),
+                table,
+                row,
+                BTreeMap::new(),
+                parent.into_iter().collect(),
+                Some(DeletionEvent::Deleted),
+                now_ms,
+            ),
+            None => self.write_mergeable(
+                identity,
+                Some(identity),
+                table,
+                row,
+                BTreeMap::new(),
+                parent.into_iter().collect(),
+                Some(DeletionEvent::Deleted),
+            ),
+        }
     }
 
     /// Return whether this Db's author can read the current local row.
@@ -3853,6 +3919,7 @@ struct PendingMergeableWrite {
     cells: RowCells,
     deletion: Option<DeletionEvent>,
     parents: Vec<TxId>,
+    now_ms: Option<u64>,
 }
 
 /// Builder for a group of mergeable writes committed as one transaction.
@@ -3884,6 +3951,27 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
+        self.insert_with_id_at_ms_option(table, row, cells, None)
+    }
+
+    /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
+    pub fn insert_with_id_at_ms(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.insert_with_id_at_ms_option(table, row, cells, Some(now_ms))
+    }
+
+    fn insert_with_id_at_ms_option(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
         self.db.table_schema(table)?;
         self.stage_value_write(PendingMergeableWrite {
             table: table.to_owned(),
@@ -3891,19 +3979,55 @@ where
             cells,
             deletion: None,
             parents: Vec::new(),
+            now_ms,
         });
         Ok(())
     }
 
     /// Stage an update; omitted fields keep the transaction-local value.
     pub fn update(&mut self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+        self.update_at_ms_option(table, row, patch, None)
+    }
+
+    /// Stage an update with an explicit millisecond provenance time.
+    pub fn update_at_ms(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.update_at_ms_option(table, row, patch, Some(now_ms))
+    }
+
+    fn update_at_ms_option(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
         let mut cells = self.current_cells(table, row)?;
         cells.extend(patch);
-        self.insert_with_id(table, row, cells)
+        self.insert_with_id_at_ms_option(table, row, cells, now_ms)
     }
 
     /// Stage a soft delete.
     pub fn delete(&mut self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.delete_at_ms_option(table, row, None)
+    }
+
+    /// Stage a soft delete with explicit millisecond provenance time.
+    pub fn delete_at_ms(&mut self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
+        self.delete_at_ms_option(table, row, Some(now_ms))
+    }
+
+    fn delete_at_ms_option(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
         self.db.table_schema(table)?;
         self.stage_deletion_write(PendingMergeableWrite {
             table: table.to_owned(),
@@ -3911,12 +4035,34 @@ where
             cells: BTreeMap::new(),
             deletion: Some(DeletionEvent::Deleted),
             parents: Vec::new(),
+            now_ms,
         });
         Ok(())
     }
 
     /// Stage a restore with explicit row data.
     pub fn restore(&mut self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.restore_at_ms_option(table, row, cells, None)
+    }
+
+    /// Stage a restore with explicit row data and millisecond provenance time.
+    pub fn restore_at_ms(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.restore_at_ms_option(table, row, cells, Some(now_ms))
+    }
+
+    fn restore_at_ms_option(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
         if cells.is_empty() {
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
@@ -3939,6 +4085,7 @@ where
             cells,
             deletion: None,
             parents: content_parents,
+            now_ms,
         });
         self.stage_deletion_write(PendingMergeableWrite {
             table: table.to_owned(),
@@ -3946,6 +4093,7 @@ where
             cells: BTreeMap::new(),
             deletion: Some(DeletionEvent::Restored),
             parents: deletion_parents,
+            now_ms,
         });
         Ok(())
     }
@@ -3956,11 +4104,14 @@ where
             .writes
             .into_iter()
             .map(|write| {
-                let mut commit =
-                    MergeableCommit::new(write.table, write.row_uuid, self.db.next_now_ms())
-                        .made_by(self.author)
-                        .parents(write.parents)
-                        .cells(write.cells);
+                let mut commit = MergeableCommit::new(
+                    write.table,
+                    write.row_uuid,
+                    write.now_ms.unwrap_or_else(|| self.db.next_now_ms()),
+                )
+                .made_by(self.author)
+                .parents(write.parents)
+                .cells(write.cells);
                 if let Some(subject) = self.permission_subject {
                     commit = commit.permission_subject(subject);
                 }

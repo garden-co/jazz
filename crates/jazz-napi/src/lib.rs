@@ -151,25 +151,30 @@ enum NapiTxWrite {
         table: String,
         row_id: CoreRowUuid,
         cells: CoreRowCells,
+        now_ms: Option<u64>,
     },
     Update {
         table: String,
         row_id: CoreRowUuid,
         patch: CoreRowCells,
+        now_ms: Option<u64>,
     },
     Upsert {
         table: String,
         row_id: CoreRowUuid,
         cells: CoreRowCells,
+        now_ms: Option<u64>,
     },
     Delete {
         table: String,
         row_id: CoreRowUuid,
+        now_ms: Option<u64>,
     },
     Restore {
         table: String,
         row_id: CoreRowUuid,
         cells: CoreRowCells,
+        now_ms: Option<u64>,
     },
 }
 
@@ -413,13 +418,16 @@ impl Tx {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<()> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
+        let now_ms = updated_at_ms.map(|value| value as u64);
         self.pending_writes()?.push(NapiTxWrite::Insert {
             table,
             row_id,
             cells,
+            now_ms,
         });
         Ok(())
     }
@@ -430,13 +438,16 @@ impl Tx {
         table: String,
         row_id: Uint8Array,
         patch: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<()> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
+        let now_ms = updated_at_ms.map(|value| value as u64);
         self.pending_writes()?.push(NapiTxWrite::Update {
             table,
             row_id,
             patch,
+            now_ms,
         });
         Ok(())
     }
@@ -447,22 +458,33 @@ impl Tx {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<()> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
+        let now_ms = updated_at_ms.map(|value| value as u64);
         self.pending_writes()?.push(NapiTxWrite::Upsert {
             table,
             row_id,
             cells,
+            now_ms,
         });
         Ok(())
     }
 
     #[napi(js_name = "delete")]
-    pub fn delete_encoded(&mut self, table: String, row_id: Uint8Array) -> napi::Result<()> {
+    pub fn delete_encoded(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        updated_at_ms: Option<f64>,
+    ) -> napi::Result<()> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
-        self.pending_writes()?
-            .push(NapiTxWrite::Delete { table, row_id });
+        self.pending_writes()?.push(NapiTxWrite::Delete {
+            table,
+            row_id,
+            now_ms: updated_at_ms.map(|value| value as u64),
+        });
         Ok(())
     }
 
@@ -472,13 +494,16 @@ impl Tx {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<()> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
+        let now_ms = updated_at_ms.map(|value| value as u64);
         self.pending_writes()?.push(NapiTxWrite::Restore {
             table,
             row_id,
             cells,
+            now_ms,
         });
         Ok(())
     }
@@ -1069,8 +1094,14 @@ impl NapiDb {
     }
 
     #[napi(js_name = "delete")]
-    pub fn delete_encoded(&self, table: String, row_id: Uint8Array) -> napi::Result<Write> {
+    pub fn delete_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        updated_at_ms: Option<f64>,
+    ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1078,13 +1109,19 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.delete(&table, row_id)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.delete_at_ms(&table, row_id, now_ms),
+                    None => db.delete(&table, row_id),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.delete(&table, row_id)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.delete_at_ms(&table, row_id, now_ms),
+                    None => db.delete(&table, row_id),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -1095,9 +1132,11 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         author: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let author = core_author_id_from_bytes(&author)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1105,13 +1144,19 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.delete_for_identity(author, &table, row_id)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.delete_for_identity_at_ms(author, &table, row_id, now_ms),
+                    None => db.delete_for_identity(author, &table, row_id),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.delete_for_identity(author, &table, row_id)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.delete_for_identity_at_ms(author, &table, row_id, now_ms),
+                    None => db.delete_for_identity(author, &table, row_id),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -1509,33 +1554,51 @@ where
                 table,
                 row_id,
                 cells,
-            } => tx
-                .insert_with_id(&table, row_id, cells)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                now_ms,
+            } => match now_ms {
+                Some(now_ms) => tx.insert_with_id_at_ms(&table, row_id, cells, now_ms),
+                None => tx.insert_with_id(&table, row_id, cells),
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             NapiTxWrite::Update {
                 table,
                 row_id,
                 patch,
-            } => tx
-                .update(&table, row_id, patch)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                now_ms,
+            } => match now_ms {
+                Some(now_ms) => tx.update_at_ms(&table, row_id, patch, now_ms),
+                None => tx.update(&table, row_id, patch),
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             NapiTxWrite::Upsert {
                 table,
                 row_id,
                 cells,
-            } => tx
-                .update(&table, row_id, cells)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            NapiTxWrite::Delete { table, row_id } => tx
-                .delete(&table, row_id)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                now_ms,
+            } => match now_ms {
+                Some(now_ms) => tx.update_at_ms(&table, row_id, cells, now_ms),
+                None => tx.update(&table, row_id, cells),
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            NapiTxWrite::Delete {
+                table,
+                row_id,
+                now_ms,
+            } => match now_ms {
+                Some(now_ms) => tx.delete_at_ms(&table, row_id, now_ms),
+                None => tx.delete(&table, row_id),
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             NapiTxWrite::Restore {
                 table,
                 row_id,
                 cells,
-            } => tx
-                .restore(&table, row_id, cells)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                now_ms,
+            } => match now_ms {
+                Some(now_ms) => tx.restore_at_ms(&table, row_id, cells, now_ms),
+                None => tx.restore(&table, row_id, cells),
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         }
     }
     tx.commit()
