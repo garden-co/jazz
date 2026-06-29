@@ -16,7 +16,7 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::groove::storage::OpfsStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::Query;
+use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::tx::{DurabilityTier, TxId};
 use jazz::wire::{TransportError, WireTransport};
@@ -435,6 +435,33 @@ impl WasmDbInner {
         }
     }
 
+    fn all_relation_query(
+        &self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+    ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => block_on(db.all_relation_query(query, opts)),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => block_on(db.all_relation_query(query, opts)),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    fn all_relation_query_for_identity(
+        &self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => block_on(db.all_relation_query_for_identity(query, opts, author)),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => block_on(db.all_relation_query_for_identity(query, opts, author)),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
     fn set_identity_claims(&self, author: AuthorId, claims: BTreeMap<String, Value>) {
         match self {
             Self::Memory(db) => db.set_identity_claims(author, claims),
@@ -471,6 +498,41 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => block_on(db.subscribe_for_identity(query, opts, author))
                 .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    fn subscribe_relation_query(
+        &self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+    ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => block_on(db.subscribe_relation_query(query, opts))
+                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => block_on(db.subscribe_relation_query(query, opts))
+                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    fn subscribe_relation_query_for_identity(
+        &self,
+        query: &RelationQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => block_on(
+                db.subscribe_relation_query_for_identity(query, opts, author),
+            )
+            .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => block_on(
+                db.subscribe_relation_query_for_identity(query, opts, author),
+            )
+            .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
             Self::Closed => panic!("WasmDb is closed"),
         }
     }
@@ -898,6 +960,38 @@ impl WasmDb {
         encode_rows(&rows).map_err(to_js_error)
     }
 
+    #[wasm_bindgen(js_name = allRelationQuery)]
+    pub fn all_relation_query(
+        &self,
+        query_json: String,
+        opts: JsValue,
+    ) -> Result<Vec<u8>, JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        let query = relation_query_from_json(&query_json)?;
+        let snapshot = self
+            .inner
+            .all_relation_query(&query, opts)
+            .map_err(to_js_error)?;
+        encode_rows(&snapshot.rows).map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = allRelationQueryForIdentity)]
+    pub fn all_relation_query_for_identity(
+        &self,
+        query_json: String,
+        author: Vec<u8>,
+        opts: JsValue,
+    ) -> Result<Vec<u8>, JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        let author = author_id_from_bytes(&author)?;
+        let query = relation_query_from_json(&query_json)?;
+        let snapshot = self
+            .inner
+            .all_relation_query_for_identity(&query, opts, author)
+            .map_err(to_js_error)?;
+        encode_rows(&snapshot.rows).map_err(to_js_error)
+    }
+
     #[wasm_bindgen(js_name = allRelationSnapshot)]
     pub fn all_relation_snapshot(
         &self,
@@ -950,6 +1044,38 @@ impl WasmDb {
         let stream = self
             .inner
             .subscribe_for_identity(&query.inner, opts, author)
+            .map_err(to_js_error)?;
+        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+    }
+
+    #[wasm_bindgen(js_name = subscribeRelationQuery)]
+    pub fn subscribe_relation_query(
+        &self,
+        query_json: String,
+        opts: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        let query = relation_query_from_json(&query_json)?;
+        let stream = self
+            .inner
+            .subscribe_relation_query(&query, opts)
+            .map_err(to_js_error)?;
+        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+    }
+
+    #[wasm_bindgen(js_name = subscribeRelationQueryForIdentity)]
+    pub fn subscribe_relation_query_for_identity(
+        &self,
+        query_json: String,
+        author: Vec<u8>,
+        opts: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        let author = author_id_from_bytes(&author)?;
+        let query = relation_query_from_json(&query_json)?;
+        let stream = self
+            .inner
+            .subscribe_relation_query_for_identity(&query, opts, author)
             .map_err(to_js_error)?;
         readable_stream_from_stream(stream.map(subscription_chunk_to_js))
     }
@@ -1414,6 +1540,18 @@ fn decode_open_args(
     let config: WasmOpenDbConfig = postcard::from_bytes(config)
         .map_err(|err| to_js_error(format!("decode open config: {err}")))?;
     Ok((schema, config))
+}
+
+fn relation_query_from_json(query_json: &str) -> Result<RelationQuery, JsValue> {
+    let value: serde_json::Value = serde_json::from_str(query_json)
+        .map_err(|err| to_js_error(format!("decode query json: {err}")))?;
+    let relation_ir = value
+        .get("relation_ir")
+        .ok_or_else(|| to_js_error("relation query json is missing relation_ir"))?
+        .clone();
+    let rel: RelationExpr = serde_json::from_value(relation_ir)
+        .map_err(|err| to_js_error(format!("decode relation_ir: {err}")))?;
+    Ok(RelationQuery { rel })
 }
 
 fn open_db<S>(

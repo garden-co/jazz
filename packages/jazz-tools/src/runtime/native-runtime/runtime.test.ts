@@ -945,7 +945,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("rejects Join relation IR before preparing or reading", async () => {
+  it("routes Join relation IR to the native relation API", async () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -980,9 +980,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     await expect(
       runtime.query(JSON.stringify({ table: "todos", relation_ir: unsupportedJoinRelationIr() })),
-    ).rejects.toThrow(
-      'Relation IR operator "Join" requires a relation-tree lowerer or native relation query API',
-    );
+    ).rejects.toThrow("Native runtime does not support relation queries");
     expect(calls).toEqual([]);
   });
 
@@ -1500,9 +1498,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           },
         }),
       ),
-    ).toThrow(
-      'Relation IR operator "Gather" requires a relation-tree lowerer or native relation query API',
-    );
+    ).toThrow("Native runtime does not support relation query subscriptions");
     expect(calls).toEqual([]);
   });
 
