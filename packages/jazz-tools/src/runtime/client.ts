@@ -912,10 +912,6 @@ export class JazzClient {
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
 
-    // Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
-    // a handle synchronously (zero work), then `executeSubscription` is deferred
-    // via the scheduler so compilation + first tick run outside the caller's
-    // synchronous stack (e.g. outside a React render).
     const handle = this.runtime.createSubscription(
       query,
       sessionJson,
@@ -923,17 +919,15 @@ export class JazzClient {
       optionsJson,
     );
 
-    this.scheduler(() => {
-      this.runtime.executeSubscription(handle, (...args: unknown[]) => {
-        const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
-        if (deltaJsonOrObject === undefined) {
-          return;
-        }
+    this.runtime.executeSubscription(handle, (...args: unknown[]) => {
+      const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
+      if (deltaJsonOrObject === undefined) {
+        return;
+      }
 
-        const delta: SubscriptionWireDelta =
-          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(delta);
-      });
+      const delta: SubscriptionWireDelta =
+        typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
+      callback(delta);
     });
 
     return handle;

@@ -8,7 +8,7 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
-import { SYSTEM_AUTHOR_ID } from "../runtime/system-identity.js";
+import { SYSTEM_AUTHOR_ID, SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import {
@@ -130,7 +130,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         adminSecret: config.adminSecret,
         cookieSession: config.cookieSession,
         tier: nodeTier,
-        defaultDurabilityTier: nodeTier,
+        defaultDurabilityTier: config.serverUrl ? nodeTier : undefined,
       },
       { onAuthFailure },
     );
@@ -152,8 +152,13 @@ class BackendDb extends Db {
   constructor(
     config: DbConfig,
     coreSource: RuntimeSource<DbConfig>,
+    private readonly client: JazzClient,
     private readonly runtimeSchema: WasmSchema,
-    private readonly operationContext: { session?: Session; attribution?: string } | null,
+    private readonly operationContext: {
+      session?: Session;
+      attribution?: string;
+      readSession?: Session;
+    } | null,
     scopedAuthState?: AuthState,
   ) {
     super(
@@ -177,7 +182,7 @@ class BackendDb extends Db {
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
-    return super.getClient(this.runtimeSchema);
+    return this.client;
   }
 }
 
@@ -220,6 +225,7 @@ export class JazzContext {
   private readonly defaultSchemaInput?: BackendSchemaInput;
   private readonly nodeIdentityScope: string;
   private readonly coreSource: BackendRuntimeSource;
+  private backendSyncEnabled = false;
 
   constructor(config: BackendContextConfig) {
     assertValidBackendConfig(config);
@@ -261,13 +267,26 @@ export class JazzContext {
     };
   }
 
-  private wrapDb(session?: Session, attribution?: string, backendScoped = false): Db {
-    const schema = this.resolveSchema();
+  private wrapDb(
+    client: JazzClient,
+    schema: WasmSchema,
+    session?: Session,
+    attribution?: string,
+    backendScoped = false,
+    backendReads = false,
+  ): Db {
     return new BackendDb(
       this.buildDbConfig(),
       this.coreSource,
+      client,
       schema,
-      session || attribution ? { session, attribution } : null,
+      session || attribution || backendReads
+        ? {
+            session,
+            attribution,
+            readSession: backendReads ? SYSTEM_READ_SESSION : undefined,
+          }
+        : null,
       backendScoped
         ? {
             authMode: session?.authMode ?? "external",
@@ -289,21 +308,34 @@ export class JazzContext {
     });
   }
 
+  private getClientAndSchema(source?: BackendSchemaInput): {
+    client: JazzClient;
+    schema: WasmSchema;
+  } {
+    const schema = this.resolveSchema(source);
+    const client = this.coreSource.createClient({
+      config: this.buildDbConfig(),
+      schema,
+      onAuthFailure: () => {},
+    });
+    return { client, schema };
+  }
+
   /**
    * Get the shared high-level `Db` for this context with no per-request session attached.
    */
   db(source?: BackendSchemaInput): Db {
-    this.getClient(source);
-    return this.wrapDb();
+    const { client, schema } = this.getClientAndSchema(source);
+    return this.wrapDb(client, schema);
   }
 
   /**
    * Get a backend-scoped `Db` authenticated with `backendSecret`.
    */
   asBackend(source?: BackendSchemaInput): Db {
-    const client = this.getClient(source);
+    const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(undefined, SYSTEM_AUTHOR_ID, true);
+    return this.wrapDb(client, schema, undefined, SYSTEM_AUTHOR_ID, true, true);
   }
 
   /**
@@ -311,9 +343,9 @@ export class JazzContext {
    * without evaluating permissions as that user.
    */
   withAttribution(principalId: string, source?: BackendSchemaInput): Db {
-    const client = this.getClient(source);
+    const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(undefined, principalId, true);
+    return this.wrapDb(client, schema, undefined, principalId, true, true);
   }
 
   /**
@@ -330,6 +362,16 @@ export class JazzContext {
       );
     }
     client.asBackend();
+    if (this.backendSyncEnabled) {
+      return;
+    }
+    client.connectTransport(this.config.serverUrl, {
+      jwt_token: this.config.jwtToken,
+      admin_secret: this.config.adminSecret,
+      backend_secret: this.config.backendSecret,
+      backend_session: this.config.cookieSession,
+    });
+    this.backendSyncEnabled = true;
   }
 
   private async resolveRequestSession(request: RequestLike): Promise<Session> {
@@ -345,10 +387,10 @@ export class JazzContext {
    * Build a requester-scoped `Db` from an authenticated request.
    */
   async forRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
-    const client = this.getClient(source);
+    const { client, schema } = this.getClientAndSchema(source);
     const session = await this.resolveRequestSession(request);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(session, undefined, true);
+    return this.wrapDb(client, schema, session, undefined, true);
   }
 
   /**
@@ -356,9 +398,9 @@ export class JazzContext {
    * principal in `session` without switching permission evaluation to it.
    */
   withAttributionForSession(session: Session, source?: BackendSchemaInput): Db {
-    const client = this.getClient(source);
+    const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(undefined, session.user_id, true);
+    return this.wrapDb(client, schema, undefined, session.user_id, true);
   }
 
   /**
@@ -373,9 +415,9 @@ export class JazzContext {
    * Build a session-scoped `Db` for server-side impersonation flows.
    */
   forSession(session: Session, source?: BackendSchemaInput): Db {
-    const client = this.getClient(source);
+    const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(session, undefined, true);
+    return this.wrapDb(client, schema, session, undefined, true);
   }
 
   /**
@@ -389,6 +431,7 @@ export class JazzContext {
    * Shutdown the context and release runtime resources.
    */
   async shutdown(): Promise<void> {
+    this.backendSyncEnabled = false;
     await this.coreSource.shutdown();
   }
 }

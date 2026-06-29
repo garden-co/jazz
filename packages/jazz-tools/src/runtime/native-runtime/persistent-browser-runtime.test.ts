@@ -259,35 +259,29 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(worker.messages.some((message) => message.method === "query")).toBe(false);
-    expect(worker.messages.some((message) => message.method === "createSubscription")).toBe(false);
+    expect(worker.messages.some((message) => message.method === "createExecutedSubscription")).toBe(
+      false,
+    );
 
     const connectMessage = worker.messages.find((message) => message.method === "connect");
     worker.respond(connectMessage!.id, undefined);
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "query")).toBe(true);
-      expect(worker.messages.some((message) => message.method === "createSubscription")).toBe(true);
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
     });
 
     const queryMessage = worker.messages.find((message) => message.method === "query");
     const createSubscriptionMessage = worker.messages.find(
-      (message) => message.method === "createSubscription",
+      (message) => message.method === "createExecutedSubscription",
     );
     worker.respond(queryMessage!.id, []);
     worker.respond(createSubscriptionMessage!.id, 7);
 
     await expect(queryPromise).resolves.toEqual([]);
-    await vi.waitFor(() => {
-      expect(worker.messages.some((message) => message.method === "executeSubscription")).toBe(
-        true,
-      );
-    });
-
-    const executeSubscriptionMessage = worker.messages.find(
-      (message) => message.method === "executeSubscription",
-    );
-    expect(executeSubscriptionMessage?.args).toEqual([7]);
-    worker.respond(executeSubscriptionMessage!.id, undefined);
+    expect(createSubscriptionMessage?.args[0]).toBe(subscriptionHandle);
 
     await runtime.close();
   });

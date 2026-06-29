@@ -263,7 +263,7 @@ impl Backend {
         }
     }
 
-    fn query_attachment_is_covered(&self, attachment: jazz::db::QueryAttachment) -> bool {
+    fn query_attachment_is_covered(&self, attachment: &jazz::db::QueryAttachment) -> bool {
         match self {
             Self::Memory(db) => db.query_attachment_is_covered(attachment),
             #[cfg(feature = "rocksdb")]
@@ -729,7 +729,7 @@ impl ClientDbInner {
         };
         let attachment = if wait_for_coverage {
             let attachment = inner.borrow().db.attach_query(&prepared, opts);
-            Self::wait_for_query_coverage(inner, attachment).await?;
+            Self::wait_for_query_coverage(inner, &attachment).await?;
             Some(attachment)
         } else {
             None
@@ -751,7 +751,7 @@ impl ClientDbInner {
 
     async fn wait_for_query_coverage(
         inner: &Rc<std::cell::RefCell<Self>>,
-        attachment: jazz::db::QueryAttachment,
+        attachment: &jazz::db::QueryAttachment,
     ) -> Result<()> {
         if inner.borrow().db.query_attachment_is_covered(attachment) {
             return Ok(());

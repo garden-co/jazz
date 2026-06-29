@@ -110,6 +110,10 @@ enum WriteStateWaiterNotify {
 enum PendingUpstreamCommand {
     Subscribe(PendingUpstreamSubscription),
     Unsubscribe(SubscriptionKey),
+    SessionClaims {
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    },
 }
 
 #[derive(Clone)]
@@ -146,15 +150,15 @@ pub struct WriteState {
 }
 
 /// Usage-site query coverage attachment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryAttachment {
-    subscription: SubscriptionKey,
+    subscriptions: Vec<SubscriptionKey>,
 }
 
 impl QueryAttachment {
     /// Wire subscription id owned by this attachment.
     pub fn subscription(&self) -> SubscriptionKey {
-        self.subscription
+        self.subscriptions[0]
     }
 }
 
@@ -564,27 +568,60 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> QueryAttachment {
-        let subscription = self.node.next_subscription_key(&prepared.shape);
-        let opts = RegisterShapeOptions {
-            tier: effective_read_tier(opts),
-        };
+        let tier = effective_read_tier(opts);
+        QueryAttachment {
+            subscriptions: vec![self.attach_query_shape_binding(
+                &prepared.shape,
+                &prepared.binding,
+                tier,
+            )],
+        }
+    }
+
+    /// Attach a one-shot usage-site query coverage request evaluated as `author`.
+    pub fn attach_query_with_opts_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<QueryAttachment, Error> {
+        let tier = effective_read_tier(opts);
+        let (shape, binding, _) = self.node.node.borrow_mut().prepare_query_binding_for_link(
+            &prepared.shape,
+            &prepared.binding,
+            tier,
+            author,
+        )?;
+        Ok(QueryAttachment {
+            subscriptions: vec![self.attach_query_shape_binding(&shape, &binding, tier)],
+        })
+    }
+
+    fn attach_query_shape_binding(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+    ) -> SubscriptionKey {
+        let subscription = self.node.next_subscription_key(shape);
+        let opts = RegisterShapeOptions { tier };
         self.node
             .upstream_subscriptions
             .borrow_mut()
             .push(PendingUpstreamCommand::Subscribe(
                 PendingUpstreamSubscription {
                     subscription,
-                    shape: prepared.shape.clone(),
-                    binding: prepared.binding.clone(),
+                    shape: shape.clone(),
+                    binding: binding.clone(),
                     opts: opts.clone(),
                 },
             ));
-        self.node.latest_coverage_subscriptions.borrow_mut().insert(
-            coverage_key(&prepared.shape, &prepared.binding, opts),
-            subscription,
-        );
+        self.node
+            .latest_coverage_subscriptions
+            .borrow_mut()
+            .insert(coverage_key(shape, binding, opts), subscription);
         self.node.schedule_tick(TickUrgency::Immediate);
-        QueryAttachment { subscription }
+        subscription
     }
 
     /// Attach a one-shot usage-site query coverage request at the default tier.
@@ -593,27 +630,27 @@ where
     }
 
     /// Return whether a query attachment has received at least one upstream view update.
-    pub fn query_attachment_is_covered(&self, attachment: QueryAttachment) -> bool {
-        self.node
-            .node
-            .borrow()
-            .has_settled_result_set(attachment.subscription)
+    pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
+        let node = self.node.node.borrow();
+        attachment
+            .subscriptions
+            .iter()
+            .all(|subscription| node.has_settled_result_set(*subscription))
     }
 
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
-        self.node
-            .node
-            .borrow_mut()
-            .apply_unsubscribe(attachment.subscription);
-        self.node
-            .latest_coverage_subscriptions
-            .borrow_mut()
-            .retain(|_, subscription| *subscription != attachment.subscription);
-        self.node
-            .upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamCommand::Unsubscribe(attachment.subscription));
+        for subscription in attachment.subscriptions {
+            self.node.node.borrow_mut().apply_unsubscribe(subscription);
+            self.node
+                .latest_coverage_subscriptions
+                .borrow_mut()
+                .retain(|_, attached| *attached != subscription);
+            self.node
+                .upstream_subscriptions
+                .borrow_mut()
+                .push(PendingUpstreamCommand::Unsubscribe(subscription));
+        }
         self.node.schedule_tick(TickUrgency::Immediate);
     }
 
@@ -923,23 +960,27 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if !self.can_update_for_identity(table, row, identity)? {
+        let (cells, parent) =
+            self.merge_existing_cells_for_identity(table, row, patch, identity)?;
+        let parents = parent.into_iter().collect::<Vec<_>>();
+        let dry_run = MergeableCommit::new(table, row, self.next_now_ms())
+            .made_by(identity)
+            .permission_subject(identity)
+            .cells(cells.clone())
+            .parents(parents.clone());
+        let allowed = self
+            .node
+            .node
+            .borrow_mut()
+            .dry_run_mergeable_write_allows(dry_run)
+            .map_err(Error::from)?;
+        if !allowed {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
                 format!("policy denied UPDATE on table {table}"),
             ));
         }
-        let (cells, parent) =
-            self.merge_existing_cells_for_identity(table, row, patch, identity)?;
-        self.write_mergeable(
-            identity,
-            Some(identity),
-            table,
-            row,
-            cells,
-            parent.into_iter().collect(),
-            None,
-        )
+        self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
     }
 
     /// Apply explicit edit operations to a text/blob column.
@@ -1134,7 +1175,12 @@ where
         self.node
             .node
             .borrow_mut()
-            .set_session_claims(identity, claims);
+            .set_session_claims(identity, claims.clone());
+        self.node
+            .upstream_subscriptions
+            .borrow_mut()
+            .push(PendingUpstreamCommand::SessionClaims { identity, claims });
+        self.node.schedule_tick(TickUrgency::Deferred);
     }
 
     /// Return whether this Db's author can delete the current local row.
@@ -2365,6 +2411,14 @@ where
                                 return Err(transport_error(error));
                             }
                         }
+                        PendingUpstreamCommand::SessionClaims { identity, claims } => {
+                            if let Err(error) = self.transport.send(SyncMessage::SessionClaims {
+                                identity: *identity,
+                                claims: claims.clone(),
+                            }) {
+                                return Err(transport_error(error));
+                            }
+                        }
                     }
                     pending.remove(pending_index);
                 }
@@ -2502,7 +2556,7 @@ where
                                 upstream_subscriptions.borrow_mut().push(
                                     PendingUpstreamCommand::Subscribe(
                                         PendingUpstreamSubscription {
-                                            subscription,
+                                            subscription: group_subscription,
                                             shape: shape.clone(),
                                             binding,
                                             opts,
@@ -2526,9 +2580,9 @@ where
                                     };
                                     peer.forget_subscription(group_subscription);
                                     coverage_groups.remove(&coverage);
-                                    upstream_subscriptions
-                                        .borrow_mut()
-                                        .push(PendingUpstreamCommand::Unsubscribe(subscription));
+                                    upstream_subscriptions.borrow_mut().push(
+                                        PendingUpstreamCommand::Unsubscribe(group_subscription),
+                                    );
                                 }
                             }
                         }

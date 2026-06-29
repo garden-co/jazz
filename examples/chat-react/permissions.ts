@@ -42,7 +42,9 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.messages.allowInsert.where((message) =>
     policy.chatMembers.exists.where({ chatId: message.chatId, userId: session.user_id }),
   );
-  policy.messages.allowDelete.where({ senderId: session.user_id });
+  policy.messages.allowDelete.where((message) =>
+    policy.profiles.exists.where({ id: message.senderId, userId: session.user_id }),
+  );
 
   policy.reactions.allowRead.where(allowedTo.read("messageId"));
   policy.reactions.allowInsert.where({ userId: session.user_id });
@@ -64,6 +66,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
 
   policy.attachments.allowRead.where(allowedTo.read("messageId"));
   policy.attachments.allowInsert.where(allowedTo.read("messageId"));
+  policy.attachments.allowDelete.where(allowedTo.delete("messageId"));
 
   policy.files.allowInsert.where({});
 

@@ -241,6 +241,7 @@ enum NapiSubscription {
 #[napi(js_name = "Tx")]
 pub struct Tx {
     db: NapiDbInnerStorage,
+    identity: Option<CoreAuthorId>,
     writes: Option<Vec<NapiTxWrite>>,
 }
 
@@ -473,8 +474,10 @@ impl Tx {
             .take()
             .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))?;
         match &self.db {
-            NapiDbInnerStorage::Memory(db) => core_commit_tx_memory(db, writes),
-            NapiDbInnerStorage::Persistent(db) => core_commit_tx_persistent(db, writes),
+            NapiDbInnerStorage::Memory(db) => core_commit_tx_memory(db, self.identity, writes),
+            NapiDbInnerStorage::Persistent(db) => {
+                core_commit_tx_persistent(db, self.identity, writes)
+            }
         }
     }
 
@@ -627,11 +630,9 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let rows = match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_set_identity_claims(db, author);
                 core_block_on(db.all_for_identity(&query.inner, opts, author))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_set_identity_claims(db, author);
                 core_block_on(db.all_for_identity(&query.inner, opts, author))
             }
         }
@@ -659,6 +660,31 @@ impl NapiDb {
         Ok(QueryAttachment { inner })
     }
 
+    #[napi(js_name = "attachQueryForIdentity")]
+    pub fn attach_query_for_identity(
+        &self,
+        query: &PreparedQuery,
+        author: Uint8Array,
+        opts: Option<serde_json::Value>,
+    ) -> napi::Result<QueryAttachment> {
+        let author = core_author_id_from_bytes(&author)?;
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                db.attach_query_with_opts_for_identity(&query.inner, opts, author)
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                db.attach_query_with_opts_for_identity(&query.inner, opts, author)
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(QueryAttachment { inner })
+    }
+
     #[napi(js_name = "queryAttachmentIsCovered")]
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> napi::Result<bool> {
         let db = self.inner.borrow();
@@ -666,8 +692,8 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         Ok(match db {
-            NapiDbInnerStorage::Memory(db) => db.query_attachment_is_covered(attachment.inner),
-            NapiDbInnerStorage::Persistent(db) => db.query_attachment_is_covered(attachment.inner),
+            NapiDbInnerStorage::Memory(db) => db.query_attachment_is_covered(&attachment.inner),
+            NapiDbInnerStorage::Persistent(db) => db.query_attachment_is_covered(&attachment.inner),
         })
     }
 
@@ -678,8 +704,8 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => db.detach_query(attachment.inner),
-            NapiDbInnerStorage::Persistent(db) => db.detach_query(attachment.inner),
+            NapiDbInnerStorage::Memory(db) => db.detach_query(attachment.inner.clone()),
+            NapiDbInnerStorage::Persistent(db) => db.detach_query(attachment.inner.clone()),
         }
         Ok(())
     }
@@ -728,20 +754,14 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_set_identity_claims(db, author);
-                NapiSubscription::Memory(
-                    core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_set_identity_claims(db, author);
-                NapiSubscription::Persistent(
-                    core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
+                core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
+                core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
         };
         Ok(Subscription { inner: Some(inner) })
     }
@@ -789,22 +809,16 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_set_identity_claims(db, author);
-                core_write_memory(
-                    Rc::clone(db),
-                    db.insert_with_id_for_identity(author, &table, row_id, cells)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_set_identity_claims(db, author);
-                core_write_persistent(
-                    Rc::clone(db),
-                    db.insert_with_id_for_identity(author, &table, row_id, cells)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.insert_with_id_for_identity(author, &table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.insert_with_id_for_identity(author, &table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
         }
     }
 
@@ -851,22 +865,16 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_set_identity_claims(db, author);
-                core_write_memory(
-                    Rc::clone(db),
-                    db.update_for_identity(author, &table, row_id, patch)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_set_identity_claims(db, author);
-                core_write_persistent(
-                    Rc::clone(db),
-                    db.update_for_identity(author, &table, row_id, patch)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.update_for_identity(author, &table, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.update_for_identity(author, &table, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
         }
     }
 
@@ -913,22 +921,16 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_set_identity_claims(db, author);
-                core_write_memory(
-                    Rc::clone(db),
-                    db.upsert_for_identity(author, &table, row_id, cells)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_set_identity_claims(db, author);
-                core_write_persistent(
-                    Rc::clone(db),
-                    db.upsert_for_identity(author, &table, row_id, cells)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.upsert_for_identity(author, &table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.upsert_for_identity(author, &table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
         }
     }
 
@@ -967,22 +969,16 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_set_identity_claims(db, author);
-                core_write_memory(
-                    Rc::clone(db),
-                    db.delete_for_identity(author, &table, row_id)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_set_identity_claims(db, author);
-                core_write_persistent(
-                    Rc::clone(db),
-                    db.delete_for_identity(author, &table, row_id)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.delete_for_identity(author, &table, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.delete_for_identity(author, &table, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
         }
     }
 
@@ -1029,22 +1025,16 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_set_identity_claims(db, author);
-                core_write_memory(
-                    Rc::clone(db),
-                    db.restore_for_identity(author, &table, row_id, cells)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_set_identity_claims(db, author);
-                core_write_persistent(
-                    Rc::clone(db),
-                    db.restore_for_identity(author, &table, row_id, cells)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                db.restore_for_identity(author, &table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                db.restore_for_identity(author, &table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
         }
     }
 
@@ -1095,6 +1085,24 @@ impl NapiDb {
                 NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
                 NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
             },
+            identity: None,
+            writes: Some(Vec::new()),
+        })
+    }
+
+    #[napi(js_name = "mergeableTxForIdentity")]
+    pub fn mergeable_tx_for_identity(&self, author: Uint8Array) -> napi::Result<Tx> {
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        Ok(Tx {
+            db: match db {
+                NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
+                NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
+            },
+            identity: Some(author),
             writes: Some(Vec::new()),
         })
     }
@@ -1200,21 +1208,6 @@ fn core_write_persistent(
     })
 }
 
-fn core_set_identity_claims<S>(db: &CoreDb<S>, author: CoreAuthorId)
-where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
-{
-    let subject = author.0.to_string();
-    db.set_identity_claims(
-        author,
-        BTreeMap::from([
-            ("subject".to_owned(), CoreValue::String(subject.clone())),
-            ("sub".to_owned(), CoreValue::String(subject.clone())),
-            ("user_id".to_owned(), CoreValue::String(subject)),
-        ]),
-    );
-}
-
 fn core_claims_from_json(
     author: CoreAuthorId,
     claims: Option<JsonValue>,
@@ -1232,9 +1225,15 @@ fn core_claims_from_json(
         }
     };
     let subject = author.0.to_string();
-    claims.insert("subject".to_owned(), CoreValue::String(subject.clone()));
-    claims.insert("sub".to_owned(), CoreValue::String(subject.clone()));
-    claims.insert("user_id".to_owned(), CoreValue::String(subject));
+    claims
+        .entry("subject".to_owned())
+        .or_insert_with(|| CoreValue::String(subject.clone()));
+    claims
+        .entry("sub".to_owned())
+        .or_insert_with(|| CoreValue::String(subject.clone()));
+    claims
+        .entry("user_id".to_owned())
+        .or_insert_with(|| CoreValue::String(subject));
     Ok(claims)
 }
 
@@ -1337,11 +1336,19 @@ fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
     }
 }
 
-fn core_commit_tx<S>(db: &CoreDb<S>, writes: Vec<NapiTxWrite>) -> napi::Result<TxId>
+fn core_commit_tx<S>(
+    db: &CoreDb<S>,
+    identity: Option<CoreAuthorId>,
+    writes: Vec<NapiTxWrite>,
+) -> napi::Result<TxId>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    let mut tx = db.mergeable_tx();
+    let mut tx = if let Some(identity) = identity {
+        db.mergeable_tx_for_identity(identity)
+    } else {
+        db.mergeable_tx()
+    };
     for write in writes {
         match write {
             NapiTxWrite::Insert {
@@ -1383,9 +1390,10 @@ where
 
 fn core_commit_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
+    identity: Option<CoreAuthorId>,
     writes: Vec<NapiTxWrite>,
 ) -> napi::Result<Write> {
-    let tx_id = core_commit_tx(db, writes)?;
+    let tx_id = core_commit_tx(db, identity, writes)?;
     core_tx_write(
         tx_id,
         Some(NapiWrite::Memory {
@@ -1397,9 +1405,10 @@ fn core_commit_tx_memory(
 
 fn core_commit_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    identity: Option<CoreAuthorId>,
     writes: Vec<NapiTxWrite>,
 ) -> napi::Result<Write> {
-    let tx_id = core_commit_tx(db, writes)?;
+    let tx_id = core_commit_tx(db, identity, writes)?;
     core_tx_write(
         tx_id,
         Some(NapiWrite::Persistent {

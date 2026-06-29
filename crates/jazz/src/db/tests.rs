@@ -9,7 +9,8 @@ use super::*;
 use crate::ids::{AuthorId, NodeUuid};
 use crate::protocol::{CatalogueAck, LensOp, TableLens};
 use crate::query::{
-    Include, JoinMode, all_of, any_of, col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
+    Include, JoinMode, all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit, lte,
+    ne, not,
 };
 use crate::schema::{Policy, TableSchema};
 
@@ -170,6 +171,21 @@ fn owner_write_schema() -> JazzSchema {
     )
     .with_read_policy(Policy::public())
     .with_write_policy(Policy::owner_only("todos", "owner"))])
+}
+
+fn editor_claim_write_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::shape(
+        Query::from("todos").filter(eq(claim("role"), lit("editor"))),
+    ))])
 }
 
 fn owner_id_read_schema() -> JazzSchema {
@@ -2270,12 +2286,12 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
     let prepared = prepared(&client, &query);
 
     let attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
-    assert!(!client.query_attachment_is_covered(attachment));
+    assert!(!client.query_attachment_is_covered(&attachment));
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert!(client.query_attachment_is_covered(attachment));
+    assert!(client.query_attachment_is_covered(&attachment));
     assert!(prepared_read(&client, &query).is_empty());
     client.detach_query(attachment);
 }
@@ -2301,18 +2317,18 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(client.query_attachment_is_covered(first_attachment));
+    assert!(client.query_attachment_is_covered(&first_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 1);
 
     seed(&server, "todos", cells("second", false, owner));
     let second_attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
-    assert!(client.query_attachment_is_covered(first_attachment));
-    assert!(!client.query_attachment_is_covered(second_attachment));
+    assert!(client.query_attachment_is_covered(&first_attachment));
+    assert!(!client.query_attachment_is_covered(&second_attachment));
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert!(client.query_attachment_is_covered(second_attachment));
+    assert!(client.query_attachment_is_covered(&second_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 2);
     client.detach_query(first_attachment);
     client.detach_query(second_attachment);
@@ -2478,18 +2494,18 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(client.query_attachment_is_covered(first_attachment));
+    assert!(client.query_attachment_is_covered(&first_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 1);
 
     seed(&server, "todos", cells("second", false, owner));
     let second_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
-    assert!(client.query_attachment_is_covered(first_attachment));
-    assert!(!client.query_attachment_is_covered(second_attachment));
+    assert!(client.query_attachment_is_covered(&first_attachment));
+    assert!(!client.query_attachment_is_covered(&second_attachment));
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert!(client.query_attachment_is_covered(second_attachment));
+    assert!(client.query_attachment_is_covered(&second_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 2);
     client.detach_query(first_attachment);
     client.detach_query(second_attachment);
@@ -2547,7 +2563,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(client.query_attachment_is_covered(first_attachment));
+    assert!(client.query_attachment_is_covered(&first_attachment));
     assert_eq!(
         row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
         vec![first]
@@ -2565,13 +2581,13 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
         ]),
     );
     let second_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
-    assert!(client.query_attachment_is_covered(first_attachment));
-    assert!(!client.query_attachment_is_covered(second_attachment));
+    assert!(client.query_attachment_is_covered(&first_attachment));
+    assert!(!client.query_attachment_is_covered(&second_attachment));
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert!(client.query_attachment_is_covered(second_attachment));
+    assert!(client.query_attachment_is_covered(&second_attachment));
     assert_eq!(
         row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
         vec![first, second]
@@ -3600,6 +3616,81 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
     let rows = server.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row(0xf2));
+}
+
+#[test]
+fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
+    let schema = editor_claim_write_schema();
+    let backend_author = AuthorId::from_bytes([0xb0; 16]);
+    let editor_author = AuthorId::from_bytes([0xe1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let backend = open_db(0xb0, backend_author, &schema);
+
+    let (backend_transport, server_transport) = duplex();
+    let _upstream = backend.connect_upstream(backend_transport);
+    let _subscriber = server.accept_subscriber_with_trust(
+        server_transport,
+        backend_author,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    backend.set_identity_claims(
+        editor_author,
+        BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+    );
+    let write = backend
+        .insert_with_id_for_identity(
+            editor_author,
+            "todos",
+            row(0xe1),
+            cells("claim-backed", false, editor_author),
+        )
+        .unwrap();
+
+    backend.tick().unwrap();
+    server.tick().unwrap();
+    backend.tick().unwrap();
+
+    assert_eq!(
+        block_on(write.wait(DurabilityTier::Global)).unwrap(),
+        write.mergeable_tx_id()
+    );
+    let rows = server.read(&Query::from("todos")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), row(0xe1));
+}
+
+#[test]
+fn session_claim_assertions_require_trusted_backend_upload() {
+    let schema = editor_claim_write_schema();
+    let session_author = AuthorId::from_bytes([0xe1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xe1, session_author, &schema);
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, session_author);
+
+    client.set_identity_claims(
+        session_author,
+        BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+    );
+    let write = client
+        .insert_with_id_for_identity(
+            session_author,
+            "todos",
+            row(0xe2),
+            cells("claim-backed", false, session_author),
+        )
+        .unwrap();
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let err = block_on(write.wait(DurabilityTier::Global)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
 }
 
 #[test]

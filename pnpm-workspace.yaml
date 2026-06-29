@@ -33,4 +33,15 @@ catalogs:
 
 ignoredBuiltDependencies:
   - blake3
-  - lefthook
+
+allowBuilds:
+  "@swc/core": true
+  esbuild: true
+  lefthook: true
+  protobufjs: true
+  sharp: true
+  workerd: true
+
+overrides:
+  react: 19.2.4
+  react-dom: 19.2.4

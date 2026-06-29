@@ -59,11 +59,12 @@ with values encoded in parameter-name order. Binding rejects missing, unknown,
 or type-mismatched params (`INV-QUERY-3`).
 
 Claims are a separate input channel. `Operand::Claim` is _not_
-client-supplied binding data: recognized claims (`sub`, `team`, `isAdmin`) are
-injected server-side from the subscriber's identity by policy composition
-(ch. 7), and an unknown claim is a validation error. Recognition is not
-evaluation support: ch. 7 defines which claims actually authorize a policy
-decision. `sub` is supported; `team` and `isAdmin` fail closed.
+client-supplied binding data: claim bindings are injected server-side from the
+subscriber's authenticated identity and admission/session claims by policy
+composition (ch. 7). `sub` is the canonical identity claim and resolves to the
+authenticated `AuthorId`; additional claim names are product/admission-defined
+and must come from the trusted admission/session context, never from ordinary
+query bindings.
 
 ## 6.4 Result sets and matched include paths
 

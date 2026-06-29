@@ -2185,6 +2185,157 @@ describe("NativeRuntimeAdapter server transport", () => {
       ],
     });
   });
+
+  it("serializes InheritsReferencing without a source operation policy as fail-closed", () => {
+    const policy = readSchemaSelectPolicyBranches(
+      encodeSchema({
+        projects: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+          policies: {
+            select: {
+              using: {
+                type: "InheritsReferencing",
+                operation: "Select",
+                source_table: "todos",
+                via_column: "project_id",
+              },
+            },
+          },
+        },
+        todos: {
+          columns: [
+            {
+              name: "project_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "projects",
+            },
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+          ],
+        },
+      }),
+      "projects",
+    );
+
+    expect(policy).toEqual({
+      table: "projects",
+      filters: [],
+      joins: [
+        {
+          table: "todos",
+          onColumn: "project_id",
+          targetTag: 0,
+          sourceColumn: undefined,
+          sourceLookup: undefined,
+          filters: [{ tag: 1, children: [] }],
+          nestedJoins: [],
+        },
+      ],
+      branches: [],
+    });
+  });
+
+  it("serializes direct Inherits delete through the parent delete policy", () => {
+    const policy = readSchemaPolicyBranches(
+      encodeSchema({
+        messages: {
+          columns: [{ name: "room_id", column_type: { type: "Uuid" }, nullable: false }],
+          policies: {
+            delete: {
+              using: {
+                type: "Cmp",
+                column: "room_id",
+                op: "Eq",
+                value: { type: "SessionRef", path: ["roomId"] },
+              },
+            },
+          },
+        },
+        reactions: {
+          columns: [
+            {
+              name: "message_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "messages",
+            },
+          ],
+          policies: {
+            delete: {
+              using: {
+                type: "Inherits",
+                operation: "Delete",
+                via_column: "message_id",
+              },
+            },
+          },
+        },
+      }),
+      "reactions",
+      "delete",
+    );
+
+    expect(policy).toEqual({
+      table: "reactions",
+      filters: [],
+      joins: [
+        {
+          table: "messages",
+          onColumn: "id",
+          targetTag: 1,
+          sourceColumn: "message_id",
+          sourceLookup: undefined,
+          filters: [
+            {
+              tag: 3,
+              column: "room_id",
+              operand: { tag: 2, claim: "roomId" },
+            },
+          ],
+          nestedJoins: [],
+        },
+      ],
+      branches: [],
+    });
+  });
+
+  it("serializes direct Inherits without a parent operation policy as fail-closed", () => {
+    const policy = readSchemaPolicyBranches(
+      encodeSchema({
+        messages: {
+          columns: [{ name: "body", column_type: { type: "Text" }, nullable: false }],
+        },
+        reactions: {
+          columns: [
+            {
+              name: "message_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "messages",
+            },
+          ],
+          policies: {
+            delete: {
+              using: {
+                type: "Inherits",
+                operation: "Delete",
+                via_column: "message_id",
+              },
+            },
+          },
+        },
+      }),
+      "reactions",
+      "delete",
+    );
+
+    expect(policy).toEqual({
+      table: "reactions",
+      filters: [{ tag: 1, children: [] }],
+      joins: [],
+      branches: [],
+    });
+  });
 });
 
 const testSchema = {
@@ -2451,6 +2602,19 @@ function readSchemaSelectPolicyBranches(
   joins: TestPolicyJoin[];
   branches: TestPolicyBranch[];
 } {
+  return readSchemaPolicyBranches(schemaBytes, tableName, "select");
+}
+
+function readSchemaPolicyBranches(
+  schemaBytes: Uint8Array,
+  tableName: string,
+  operation: "select" | "insert" | "updateUsing" | "updateCheck" | "delete",
+): {
+  table: string;
+  filters: TestPolicyPredicate[];
+  joins: TestPolicyJoin[];
+  branches: TestPolicyBranch[];
+} {
   const reader = new PostcardReader(schemaBytes);
   const tables = reader.readVec((tableReader) => {
     const table = tableReader.string();
@@ -2464,20 +2628,25 @@ function readSchemaSelectPolicyBranches(
       tableReader.string();
       tableReader.string();
     }
-    const selectPolicy = tableReader.option(readPolicyQueryForTest);
-    tableReader.option(readPolicyQueryForTest);
+    const policies = {
+      select: tableReader.option(readPolicyQueryForTest),
+      insert: tableReader.option(readPolicyQueryForTest),
+      updateUsing: tableReader.option(readPolicyQueryForTest),
+      updateCheck: tableReader.option(readPolicyQueryForTest),
+      delete: tableReader.option(readPolicyQueryForTest),
+    };
     tableReader.u64();
     const indexCount = tableReader.u64();
     for (let index = 0; index < indexCount; index += 1) {
       tableReader.string();
       tableReader.readVec((indexReader) => indexReader.string());
     }
-    return { table, selectPolicy };
+    return { table, policy: policies[operation] };
   });
   reader.option(() => undefined);
   reader.option(() => undefined);
 
-  const policy = tables.find((table) => table.table === tableName)?.selectPolicy;
+  const policy = tables.find((table) => table.table === tableName)?.policy;
   expect(policy).toBeDefined();
   return policy!;
 }
@@ -2492,7 +2661,7 @@ function readPolicyQueryForTest(reader: PostcardReader): {
   const filters = reader.readVec(readPolicyPredicateForTest);
   const joins = reader.readVec(readPolicyJoinForTest);
   const branches = reader.readVec(readPolicyBranchForTest);
-  reader.readVec(() => undefined);
+  reader.readVec(skipPolicyReachableForTest);
   reader.readVec(() => undefined);
   reader.option(() => undefined);
   reader.readVec(() => undefined);
@@ -2505,7 +2674,7 @@ function readPolicyQueryForTest(reader: PostcardReader): {
 function readPolicyBranchForTest(reader: PostcardReader): TestPolicyBranch {
   const filters = reader.readVec(readPolicyPredicateForTest);
   const joins = reader.readVec(readPolicyJoinForTest);
-  reader.readVec(() => undefined);
+  reader.readVec(skipPolicyReachableForTest);
   return { filters, joins };
 }
 
@@ -2519,9 +2688,32 @@ function readPolicyJoinForTest(reader: PostcardReader): TestPolicyJoin {
     rowIdSourceColumn: lookupReader.string(),
     valueColumn: lookupReader.string(),
   }));
+  reader.readVec((correlationReader) => {
+    correlationReader.string();
+    correlationReader.string();
+  });
   const filters = reader.readVec(readPolicyPredicateForTest);
   const nestedJoins = reader.readVec(readPolicyJoinForTest);
   return { table, onColumn, targetTag, sourceColumn, sourceLookup, filters, nestedJoins };
+}
+
+function skipPolicyReachableForTest(reader: PostcardReader): void {
+  reader.string();
+  reader.string();
+  reader.string();
+  reader.u64();
+  readPolicyOperandForTest(reader);
+  reader.readVec(readPolicyPredicateForTest);
+  reader.string();
+  reader.string();
+  reader.string();
+  reader.readVec(readPolicyPredicateForTest);
+  reader.u64();
+  reader.option((seedReader) => {
+    seedReader.string();
+    seedReader.string();
+    seedReader.readVec(readPolicyPredicateForTest);
+  });
 }
 
 function readPolicyPredicateForTest(reader: PostcardReader): TestPolicyPredicate {

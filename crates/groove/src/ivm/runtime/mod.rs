@@ -1460,11 +1460,6 @@ impl IvmRuntime {
                 if builder_contains_recursive(seed) || builder_contains_recursive(step) {
                     return Err(IvmRuntimeError::UnsupportedNestedRecursion);
                 }
-                if builder_contains_arg_max_by(seed) || builder_contains_arg_max_by(step) {
-                    return Err(IvmRuntimeError::UnsupportedArgMaxBy(
-                        "arg_max_by is not supported inside recursive graphs".to_owned(),
-                    ));
-                }
                 let compiled_seed = self.add_dedup_graph(seed)?;
                 let compiled_step = self.add_dedup_graph(step)?;
                 if compiled_seed.output != compiled_step.output
@@ -3553,14 +3548,22 @@ impl NodeState {
                 .borrowed(&input.descriptor)
                 .to_values()
                 .map_err(IvmRuntimeError::RecordEncoding)?;
-            let Value::Nullable(value) = &values[unwrap.field_idx] else {
-                return Err(IvmRuntimeError::UnsupportedOperator);
+            let Some(value) = values.get(unwrap.field_idx) else {
+                return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(
+                    unwrap.field_idx,
+                ));
             };
-            let Some(inner) = value.as_ref().map(|value| (**value).clone()) else {
-                continue;
+            let unwrapped = match value {
+                Value::Nullable(value) => {
+                    let Some(inner) = value.as_ref().map(|value| (**value).clone()) else {
+                        continue;
+                    };
+                    inner
+                }
+                value => value.clone(),
             };
             let mut output_values = values;
-            output_values[unwrap.field_idx] = inner;
+            output_values[unwrap.field_idx] = unwrapped;
             deltas.push(RecordDelta {
                 record: output_desc.create(&output_values)?,
                 weight: delta.weight,
@@ -3649,29 +3652,6 @@ fn plan_expr_names(expressions: &[PlanExpr]) -> Vec<String> {
             PlanExpr::Literal(_) | PlanExpr::Null(_) => None,
         })
         .collect()
-}
-
-fn builder_contains_arg_max_by(graph: &GraphBuilder) -> bool {
-    match graph {
-        GraphBuilder::ArgMaxBy { .. }
-        | GraphBuilder::ArgMinBy { .. }
-        | GraphBuilder::TopBy { .. } => true,
-        GraphBuilder::Recursive { seed, step, .. } => {
-            builder_contains_arg_max_by(seed) || builder_contains_arg_max_by(step)
-        }
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. } => builder_contains_arg_max_by(input),
-        GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_arg_max_by),
-        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
-            builder_contains_arg_max_by(left) || builder_contains_arg_max_by(right)
-        }
-        GraphBuilder::Table { .. }
-        | GraphBuilder::InlineRecords { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. }
-        | GraphBuilder::BindingSource { .. } => false,
-    }
 }
 
 fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
@@ -4675,10 +4655,10 @@ fn unwrap_nullable_descriptor(
         .enumerate()
         .map(|(idx, field)| {
             let value_type = if idx == field_idx {
-                let ValueType::Nullable(inner) = &field.value_type else {
-                    return Err(IvmRuntimeError::UnsupportedOperator);
-                };
-                (**inner).clone()
+                match &field.value_type {
+                    ValueType::Nullable(inner) => (**inner).clone(),
+                    other => other.clone(),
+                }
             } else {
                 field.value_type.clone()
             };

@@ -1384,19 +1384,10 @@ export class Db {
     const queryOptions = ordinaryDbQueryOptions(options);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
-    const shouldBypassRuntimeSettledTier =
-      usesRelationTraversal && queryOptions.tier !== "edge" && queryOptions.tier !== "global";
-    const runtimeQueryOptions = shouldBypassRuntimeSettledTier
-      ? { ...queryOptions, runtimeSettledTier: null }
-      : queryOptions;
     const context = this.getRuntimeOperationContext();
     const rows =
       context || usesRelationTraversal
-        ? await client.query(
-            wasmQuery,
-            runtimeQueryOptions,
-            context?.readSession ?? context?.session,
-          )
+        ? await client.query(wasmQuery, queryOptions, context?.readSession ?? context?.session)
         : await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
@@ -1526,19 +1517,8 @@ export class Db {
         outputTable === builtQuery.table ? query : {},
         transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
-    const nativeTransform =
-      Object.keys(outputIncludes).length === 0 && builtQuery.select.length === 0
-        ? (row: Record<string, unknown>): T =>
-            transformOutputRow(outputTable === builtQuery.table ? query : {}, row)
-        : undefined;
-
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
-      const typedDelta = manager.handleDelta(
-        delta,
-        transform,
-        nativeOutputColumns,
-        nativeTransform,
-      );
+      const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
       callback(typedDelta);
     };
 
@@ -1755,6 +1735,9 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 ): Promise<Db> {
   if (config.secret && config.cookieSession) {
     throw new Error("DbConfig error: secret and cookieSession are mutually exclusive");
+  }
+  if (config.secret && config.jwtToken) {
+    throw new Error("DbConfig error: secret and jwtToken are mutually exclusive");
   }
   if (config.jwtToken && config.cookieSession) {
     throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");

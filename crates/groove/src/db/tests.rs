@@ -3601,7 +3601,7 @@ fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
         .unwrap_err();
     assert!(format!("{err}").contains("requires primary key"));
 
-    let err = database
+    database
         .subscribe(GraphBuilder::recursive(
             history_arg_max().project(["row", "stamp"]),
             GraphBuilder::frontier_source(
@@ -3614,8 +3614,7 @@ fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
             "frontier",
             4,
         ))
-        .unwrap_err();
-    assert!(format!("{err}").contains("inside recursive graphs"));
+        .unwrap();
 }
 
 #[test]
