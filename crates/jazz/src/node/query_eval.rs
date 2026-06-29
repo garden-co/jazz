@@ -958,6 +958,24 @@ where
     ) -> Result<RelationSnapshot, Error> {
         let mut snapshot = RelationSnapshot::default();
         let root_rows = self.query_rows_for_link(shape, binding, tier, identity)?;
+        let relation_source_rows = if shape.query().select.is_some() {
+            let mut relation_source_query = shape.query().clone();
+            relation_source_query.select = None;
+            let relation_source_shape = relation_source_query
+                .validate(&self.catalogue.schema)
+                .map_err(Error::Query)?;
+            let relation_source_binding = relation_source_shape
+                .bind(binding.values().clone())
+                .map_err(Error::Query)?;
+            self.query_rows_for_link(
+                &relation_source_shape,
+                &relation_source_binding,
+                tier,
+                identity,
+            )?
+        } else {
+            root_rows.clone()
+        };
         let mut row_keys = BTreeSet::new();
         for row in &root_rows {
             row_keys.insert((row.table().to_owned(), row.row_uuid()));
@@ -968,7 +986,7 @@ where
             .clone();
         self.materialize_array_subqueries(
             &root_table,
-            &root_rows,
+            &relation_source_rows,
             &shape.query().array_subqueries,
             shape.schema_version(),
             tier,
@@ -1415,13 +1433,11 @@ where
                 else {
                     continue;
                 };
-                let child_rows = self.query_array_subquery_rows(
-                    subquery,
-                    schema_version,
-                    tier,
-                    identity,
-                    value,
-                )?;
+                let child_rows = if relation_correlation_value_is_null(&value) {
+                    Vec::new()
+                } else {
+                    self.query_array_subquery_rows(subquery, schema_version, tier, identity, value)?
+                };
                 if matches!(
                     subquery.requirement,
                     ArraySubqueryRequirement::AtLeastOne
@@ -1472,8 +1488,13 @@ where
         identity: AuthorId,
         value: Value,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let mut query = JazzQuery::from(subquery.table.clone())
-            .filter(eq(col(subquery.inner_column.clone()), lit(value)));
+        let correlation = match value {
+            Value::Array(_) => {
+                crate::query::contains(lit(value), col(subquery.inner_column.clone()))
+            }
+            _ => eq(col(subquery.inner_column.clone()), lit(value)),
+        };
+        let mut query = JazzQuery::from(subquery.table.clone()).filter(correlation);
         for filter in &subquery.filters {
             query = query.filter(filter.clone());
         }
@@ -7295,6 +7316,10 @@ fn relation_outer_value(table: &TableSchema, row: &CurrentRow, column: &str) -> 
         return Some(Value::Uuid(row.row_uuid().0));
     }
     row.cell(table, column)
+}
+
+fn relation_correlation_value_is_null(value: &Value) -> bool {
+    matches!(value, Value::Nullable(None))
 }
 
 fn current_row_fields(table: &TableSchema) -> Vec<String> {

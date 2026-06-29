@@ -472,6 +472,53 @@ describe("transformRows", () => {
     ]);
   });
 
+  it("uses included row valuesByColumn when positional values are descriptor-ordered", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Uuid", value: "user-1" },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: {
+                  id: "user-1",
+                  values: [
+                    { type: "Timestamp", value: 0 },
+                    { type: "Text", value: "Alice" },
+                    { type: "Null" },
+                  ],
+                  valuesByColumn: new Map<string, WasmValue>([
+                    ["name", { type: "Text", value: "Alice" }],
+                    ["manager_id", { type: "Null" }],
+                  ]),
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ] as unknown as WasmRow[];
+
+    const result = transformRows(rows, relationSchema, "todos", { owner: true });
+
+    expect(result).toEqual([
+      {
+        id: "todo-1",
+        title: "Buy milk",
+        owner_id: "user-1",
+        owner: {
+          id: "user-1",
+          name: "Alice",
+          manager_id: null,
+        },
+      },
+    ]);
+  });
+
   it("keeps included relations when applying root select projections", () => {
     const rows: WasmRow[] = [
       {

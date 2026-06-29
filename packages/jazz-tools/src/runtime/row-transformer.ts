@@ -22,6 +22,11 @@ type IncludePlan = {
 };
 
 type NamedRowValues = Map<string, WasmValue> | Record<string, WasmValue>;
+type RowValueWithNamedValues = {
+  id?: string;
+  values: WasmValue[];
+  valuesByColumn?: NamedRowValues;
+};
 type WasmRowWithNamedValues = WasmRow & { valuesByColumn?: NamedRowValues };
 
 function getNamedValue(
@@ -125,6 +130,7 @@ function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: Was
     // Row id is carried in the struct's `id` field
     const rowId = entry.value.id;
     const columnValues = entry.value.values;
+    const valuesByColumn = (entry.value as RowValueWithNamedValues).valuesByColumn;
     return transformRowValues(
       columnValues,
       schema,
@@ -132,6 +138,7 @@ function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: Was
       plan.nested,
       rowId,
       plan.projection,
+      valuesByColumn,
     );
   });
 
@@ -176,8 +183,15 @@ function transformRowValues(
     const hiddenColumnName = hiddenIncludeColumnName(plan.relation.name);
     const value = hasNamedValue(valuesByColumn, hiddenColumnName)
       ? getNamedValue(valuesByColumn, hiddenColumnName)
-      : values[baseColumns.length + i];
-    if (value === undefined) continue;
+      : hasNamedValue(valuesByColumn, plan.relation.name)
+        ? getNamedValue(valuesByColumn, plan.relation.name)
+        : valuesByColumn
+          ? undefined
+          : values[baseColumns.length + i];
+    if (value === undefined) {
+      obj[plan.relation.name] = plan.relation.isArray ? [] : null;
+      continue;
+    }
     obj[plan.relation.name] = transformIncludedValue(value, plan, schema);
   }
 
