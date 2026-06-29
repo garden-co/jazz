@@ -1156,17 +1156,105 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("uses native subscription chunks for array subquery subscriptions", async () => {
+  it("rejects array subquery subscriptions until core relation payloads exist", () => {
     const calls: string[] = [];
-    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            subscribe: () => {
+              calls.push("subscribe");
+              return new ReadableStream();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({
+          table: "todos",
+          array_subqueries: [
+            {
+              column_name: "children",
+              table: "todos",
+              inner_column: "parent_id",
+              outer_column: "id",
+            },
+          ],
+        }),
+      ),
+    ).toThrow('Relation IR operator "array_subqueries" requires a relation-tree lowerer');
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects array subquery reads until core relation payloads exist", async () => {
+    const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
             all: () => {
               calls.push("all");
-              return new Uint8Array([0]);
+              return encodeRows([
+                {
+                  table: "todos",
+                  rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                  title: "should not be read",
+                },
+              ]);
             },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          array_subqueries: [
+            {
+              column_name: "children",
+              table: "todos",
+              inner_column: "parent_id",
+              outer_column: "id",
+            },
+          ],
+        }),
+      ),
+    ).rejects.toThrow('Relation IR operator "array_subqueries" requires a relation-tree lowerer');
+    expect(calls).toEqual([]);
+  });
+
+  it("decodes native subscription chunks", async () => {
+    const calls: string[] = [];
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
             prepareQuery: () => {
               calls.push("prepareQuery");
               return {};
@@ -1192,19 +1280,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
     const deltas: unknown[] = [];
-    const handle = runtime.createSubscription(
-      JSON.stringify({
-        table: "todos",
-        array_subqueries: [
-          {
-            column_name: "children",
-            table: "todos",
-            inner_column: "parent_id",
-            outer_column: "id",
-          },
-        ],
-      }),
-    );
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }));
     runtime.executeSubscription(handle, (delta: unknown) => {
       deltas.push(delta);
     });
