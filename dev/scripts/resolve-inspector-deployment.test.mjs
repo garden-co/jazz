@@ -182,6 +182,58 @@ test("resolveInspectorDeployment reports the last matching deployments when none
   assert.equal(fs.existsSync(outputFile), false);
 });
 
+test("resolveInspectorDeployment uses VERCEL_DEPLOY_BRANCH to query deployments from a custom branch", async () => {
+  const outputFile = makeOutputFile();
+  const requests = [];
+
+  const result = await resolveInspectorDeployment({
+    env: { ...requiredEnv, GITHUB_OUTPUT: outputFile, VERCEL_DEPLOY_BRANCH: "feature/foo" },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), authorization: init.headers.Authorization });
+      return jsonResponse({
+        deployments: [
+          {
+            url: "jazz-inspector-git-feature-foo.vercel.app",
+            readyState: "READY",
+            target: "production",
+            readySubstate: "STAGED",
+          },
+        ],
+      });
+    },
+    log: () => {},
+  });
+
+  assert.deepEqual(result, {
+    deploymentUrl: "https://jazz-inspector-git-feature-foo.vercel.app",
+    alreadyPromoted: false,
+  });
+  assert.equal(requests.length, 1);
+  const requestUrl = new URL(requests[0].url);
+  assert.equal(requestUrl.searchParams.get("branch"), "feature/foo");
+});
+
+test("resolveInspectorDeployment error message mentions the custom branch", async () => {
+  const outputFile = makeOutputFile();
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env: {
+        ...requiredEnv,
+        GITHUB_OUTPUT: outputFile,
+        VERCEL_DEPLOY_BRANCH: "staging",
+      },
+      fetchImpl: async () =>
+        jsonResponse({
+          deployments: [],
+        }),
+      attempts: 1,
+      log: () => {},
+    }),
+    /No staged inspector production deployment found on staging/,
+  );
+});
+
 test("resolveInspectorDeployment requires all CI environment variables", async () => {
   const env = { ...requiredEnv };
   delete env.VERCEL_TOKEN;
