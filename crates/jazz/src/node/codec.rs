@@ -1483,6 +1483,15 @@ pub(super) fn current_row_from_materialized_cells(
     version: &VersionRow,
     cells: &BTreeMap<String, Value>,
 ) -> Result<CurrentRow, Error> {
+    current_row_from_materialized_cells_with_provenance(table, version, version, cells)
+}
+
+pub(super) fn current_row_from_materialized_cells_with_provenance(
+    table: &TableSchema,
+    content: &VersionRow,
+    provenance: &VersionRow,
+    cells: &BTreeMap<String, Value>,
+) -> Result<CurrentRow, Error> {
     let descriptor = records::RecordDescriptor::new(
         std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
@@ -1496,14 +1505,14 @@ pub(super) fn current_row_from_materialized_cells(
                 ("tx_node_id".to_owned(), records::ValueType::U64),
             ]),
     );
-    let mut values = vec![Value::Uuid(version.row_uuid().0)];
+    let mut values = vec![Value::Uuid(content.row_uuid().0)];
     for column in &table.columns {
         values.push(Value::Nullable(
             cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    values.push(Value::U64(version.tx_time().0));
-    values.push(Value::U64(version.tx_node_alias().0));
+    values.push(Value::U64(provenance.tx_time().0));
+    values.push(Value::U64(provenance.tx_node_alias().0));
     let raw = descriptor.create(&values)?;
     Ok(CurrentRow::new(
         table.name.clone(),
