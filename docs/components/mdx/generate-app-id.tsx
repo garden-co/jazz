@@ -71,6 +71,10 @@ export function GenerateAppId() {
   if (!app) {
     return (
       <div className="space-y-3">
+        <Callout type="warn">
+          Apps generated here are unclaimed. Claim the app in the dashboard within 14 days.
+          Unclaimed apps are automatically deleted after 14 days.
+        </Callout>
         <button
           onClick={generate}
           disabled={loading}
@@ -106,7 +110,7 @@ export function GenerateAppId() {
         >
           dashboard
         </a>{" "}
-        later.
+        within 14 days. Unclaimed apps are automatically deleted after 14 days.
       </Callout>
 
       <CredentialsBlock app={app} />
