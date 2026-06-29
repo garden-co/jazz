@@ -2,6 +2,12 @@
 
 Integrate `ON DELETE CASCADE` with the built-in file storage table. When this lands, app developers no longer need to manually delete file rows referenced by parent rows.
 
+Jazz's file-storage convention diverges from the historical alpha `files` +
+`file_parts` model. Files are ordinary application rows whose payload lives in
+a binary large-value column; `mime_type` and `data` are only naming
+conventions. Permissions therefore follow normal row/column policy for that
+row, rather than a special chunk/table permission model.
+
 Depends on the future row-level cascade semantics work. Can be deferred to `c_later/` if cascade isn't ready at launch.
 
 See also: [Mutable files and smart chunking](../c_later/mutable_files_and_smart_chunking.md).
@@ -14,7 +20,7 @@ The built-in schema gains `ON DELETE CASCADE` declarations:
 create table files (
   name text,
   mime_type text not null,
-  data bytea
+  data bytea large value
 );
 
 -- App schema

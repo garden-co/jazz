@@ -216,7 +216,10 @@ describe("chat permissions", () => {
   });
 
   it("inherits attachment file reads from the parent message/chat chain", async () => {
-    const file = testApp.seed((db) => {
+    const largeFileData = new Uint8Array(128 * 1024 + 7);
+    largeFileData.set([104, 105]);
+
+    const { file, unattachedFile } = testApp.seed((db) => {
       const { value: aliceProfile } = db.insert(app.profiles, {
         userId: "alice",
         name: "Alice",
@@ -243,30 +246,54 @@ describe("chat permissions", () => {
         senderId: aliceProfile.id,
         createdAt: new Date("2026-01-01T00:00:04.000Z"),
       });
+      const { value: unattachedFile } = db.insert(app.files, {
+        name: "private.bin",
+        mime_type: "application/octet-stream",
+        data: new Uint8Array([112, 114, 105, 118, 97, 116, 101]),
+      });
       const { value: file } = db.insert(app.files, {
         name: "hello.txt",
         mime_type: "text/plain",
-        data: new Uint8Array([104, 105]),
+        data: largeFileData,
       });
       db.insert(app.attachments, {
         messageId: message.id,
         type: "file",
         name: "hello.txt",
         fileId: file.id,
-        size: 2,
+        size: largeFileData.byteLength,
       });
-      return file;
+      return { file, unattachedFile };
     });
 
+    const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
     const bobDb = testApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
     const carolDb = testApp.as({ user_id: "carol", claims: {}, authMode: "local-first" });
+
+    aliceDb.expectAllowed((db) =>
+      db.insert(app.files, {
+        name: "direct-insert.bin",
+        mime_type: "application/octet-stream",
+        data: new Uint8Array([1, 2, 3]),
+      }),
+    );
+    bobDb.expectAllowed((db) =>
+      db.insert(app.files, {
+        name: "direct-insert.bin",
+        mime_type: "application/octet-stream",
+        data: new Uint8Array([4, 5, 6]),
+      }),
+    );
+
+    await expect(bobDb.all(app.files.where({ id: unattachedFile.id }))).resolves.toEqual([]);
+    await expect(carolDb.all(app.files.where({ id: unattachedFile.id }))).resolves.toEqual([]);
 
     await expect(bobDb.all(app.files.where({ id: file.id }))).resolves.toEqual([
       expect.objectContaining({
         id: file.id,
         name: "hello.txt",
         mime_type: "text/plain",
-        data: new Uint8Array([104, 105]),
+        data: largeFileData,
       }),
     ]);
     await expect(carolDb.all(app.attachments.where({ fileId: file.id }))).resolves.toEqual([]);
@@ -277,8 +304,13 @@ describe("chat permissions", () => {
 
     const blob = await bobDb.loadFileAsBlob(app, file.id);
     expect(blob.type).toBe("text/plain");
-    expect(Array.from(new Uint8Array(await blob.arrayBuffer()))).toEqual([104, 105]);
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(largeFileData);
 
+    aliceDb.expectDenied((db) =>
+      db.update(app.files, file.id, {
+        mime_type: "text/plain+edited",
+      }),
+    );
     bobDb.expectDenied((db) =>
       db.update(app.files, file.id, {
         mime_type: "text/plain+edited",
@@ -331,7 +363,7 @@ describe("chat permissions", () => {
       const { value: file } = db.insert(app.files, {
         name: "owned.txt",
         mime_type: "text/plain",
-        data: new Uint8Array([111, 107]),
+        data: new Uint8Array(96 * 1024).fill(111),
       });
       const { value: attachment } = db.insert(app.attachments, {
         messageId: message.id,
