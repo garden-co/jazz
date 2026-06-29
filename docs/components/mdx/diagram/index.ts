@@ -21,6 +21,10 @@ export type { SequenceProps, Participant, SequenceStep } from "./sequence";
 
 export { NodeShell, NodeIcon, NodeTitle, NodeSubtitle, NodeFooter, NodeAction } from "./kit";
 
+export { DiagramFrame } from "./frame";
+export { DiagramStyles } from "./styles";
+export { PhoneChrome } from "./phone-chrome";
+
 export { useDiagramTraces, traceDuration } from "./traces";
 export type { DiagramTraces, TraceSpec } from "./traces";
 
