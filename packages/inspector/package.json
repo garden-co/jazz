@@ -1,12 +1,16 @@
 {
   "name": "jazz-inspector",
-  "version": "0.0.0",
+  "version": "2.0.0-alpha.51",
   "files": [
     "dist-embedded"
   ],
   "type": "module",
   "exports": {
     "./dist-embedded/*": "./dist-embedded/*"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
   },
   "scripts": {
     "dev": "vite",
@@ -19,17 +23,9 @@
     "test": "vitest run --config vitest.config.ts",
     "test:browser": "playwright test --config playwright.config.ts"
   },
-  "dependencies": {
-    "@tanstack/react-table": "^8.21.3",
-    "jazz-tools": "workspace:*",
-    "react": "^19.2.0",
-    "react-data-grid": "7.0.0-beta.59",
-    "react-dom": "^19.2.0",
-    "react-resizable-panels": "^4.9.0",
-    "react-router": "^7.13.0"
-  },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
+    "@tanstack/react-table": "^8.21.3",
     "@testing-library/react": "^16.3.2",
     "@types/node": "catalog:default",
     "@types/react": "^19.2.7",
@@ -37,7 +33,13 @@
     "@vitejs/plugin-react-swc": "^4.3.0",
     "@vitest/ui": "4.1.0",
     "happy-dom": "^20.8.4",
+    "jazz-tools": "workspace:*",
     "jsdom": "^28.1.0",
+    "react": "^19.2.0",
+    "react-data-grid": "7.0.0-beta.59",
+    "react-dom": "^19.2.0",
+    "react-resizable-panels": "^4.9.0",
+    "react-router": "^7.13.0",
     "typescript": "catalog:default",
     "vite": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",

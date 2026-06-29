@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { Module } from "node:module";
 import { createOverlayHandler } from "./serve.js";
 
 function fakeRes() {
@@ -23,26 +22,25 @@ function fakeRes() {
 
 describe("overlay serve middleware", () => {
   it("ignores unrelated urls", async () => {
-    const handler = createOverlayHandler({ appRoot: process.cwd() });
+    const handler = createOverlayHandler();
     expect(await handler({ url: "/index.html" }, fakeRes().res as never)).toBe(false);
   });
-  it("404s embedded requests when jazz-inspector is not installed (no crash)", async () => {
-    // A real consumer dev server has no ambient NODE_PATH, so resolving
-    // `jazz-inspector` from a nonexistent app root fails. Vitest's forked worker,
-    // however, injects NODE_PATH pointing at this monorepo's pnpm store (where
-    // jazz-inspector is symlinked), which would otherwise make it resolvable from
-    // any path. Neutralize that injection here to faithfully simulate "not installed".
-    const savedNodePath = process.env.NODE_PATH;
-    process.env.NODE_PATH = "";
-    (Module as unknown as { _initPaths(): void })._initPaths();
-    try {
-      const handler = createOverlayHandler({ appRoot: "/nonexistent-app-root" });
-      const r = fakeRes();
-      expect(await handler({ url: "/__jazz/embedded/embedded.html" }, r.res as never)).toBe(true);
-      expect(r.state.statusCode).toBe(404);
-    } finally {
-      process.env.NODE_PATH = savedNodePath;
-      (Module as unknown as { _initPaths(): void })._initPaths();
-    }
+
+  it("never serves files outside the embedded dir", async () => {
+    // The embedded build resolves from jazz-tools' own dependency tree
+    // (jazz-inspector is a direct dependency), so there's no app-root input to
+    // attack — but a crafted URL must still never escape the embedded dir.
+    const handler = createOverlayHandler();
+    const r = fakeRes();
+    const handled = await handler(
+      { url: "/__jazz/embedded/../../../../etc/passwd" },
+      r.res as never,
+    );
+    // The handler owns the /__jazz/embedded prefix, so it handles the request...
+    expect(handled).toBe(true);
+    // ...but rejects the traversal (403 when the build is present, 404 when it
+    // isn't) and never returns the out-of-tree file.
+    expect([403, 404]).toContain(r.state.statusCode);
+    expect(r.state.body).not.toContain("root:");
   });
 });

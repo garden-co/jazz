@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { dirname, join, relative, isAbsolute } from "node:path";
 
@@ -20,11 +21,15 @@ const ext = (p: string) => {
   return i === -1 ? "" : p.slice(i);
 };
 
-export function resolveEmbeddedDir(appRoot: string): string | null {
+export function resolveEmbeddedDir(): string | null {
   try {
-    const requireFromApp = createRequire(join(appRoot, "noop.js"));
+    // `jazz-inspector` is a direct dependency of jazz-tools, so the embedded
+    // build always sits in jazz-tools' own dependency tree — resolve it relative
+    // to this module rather than the host app. The build is dev tooling, so this
+    // runs lazily (dynamic resolution) and never gets bundled into app output.
+    const require = createRequire(import.meta.url);
     // Resolve an existing emitted file (the build outputs embedded.html, not index.html).
-    return dirname(requireFromApp.resolve(`${INSPECTOR_PACKAGE}/dist-embedded/embedded.html`));
+    return dirname(require.resolve(`${INSPECTOR_PACKAGE}/dist-embedded/embedded.html`));
   } catch {
     return null;
   }
@@ -35,9 +40,6 @@ export interface OverlayResponse {
   statusCode: number;
   end(body?: string | Buffer): void;
 }
-export interface OverlayHandlerOptions {
-  appRoot: string;
-}
 // Minimal Vite-style dev server shape the overlay needs. Shared so the Vite and
 // SvelteKit plugins serve the inspector assets the same way (one definition).
 export interface OverlayDevServer {
@@ -47,29 +49,86 @@ export interface OverlayDevServer {
   };
 }
 
+// Advertised by the dev plugins when the experimental inspector is enabled —
+// there's no way to discover the overlay's toggle/shortcut otherwise.
+export const OVERLAY_ENABLED_MESSAGE =
+  "[jazz] Inspector overlay enabled — click the ⚡ button in your app (Alt+Shift+J).";
+
 /**
  * Register the inspector embedded-asset middleware (/__jazz/embedded/*) on a dev
- * server, and announce that the overlay is live. Both Vite and SvelteKit call
- * this, so the announcement lives here — there's no way to enable the overlay
- * without telling the developer how to open it.
+ * server. Both Vite and SvelteKit call this. Whether the overlay's toggle
+ * actually mounts is gated separately by `experimental_inspector`; this passive
+ * route only responds when the toggle's iframe requests it.
  */
 export function attachOverlayMiddleware(server: OverlayDevServer): void {
-  const overlay = createOverlayHandler({ appRoot: server.config.root });
+  const overlay = createOverlayHandler();
   server.middlewares?.use((req, res, next) => {
     void overlay(req, res).then((handled) => {
       if (!handled) next();
     });
   });
-  console.log("[jazz] Inspector overlay enabled — click the ⚡ button in your app (Alt+Shift+J).");
 }
 
-export function createOverlayHandler({ appRoot }: OverlayHandlerOptions) {
+/**
+ * Experimental: when enabled, signal the client provider to mount the overlay
+ * toggle by exposing VITE_JAZZ_INSPECTOR to the browser (Vite-family bundlers
+ * surface VITE_*-prefixed keys via import.meta.env) and announce it. Shared by
+ * the Vite and SvelteKit plugins, which inject it identically. (Next uses its
+ * own NEXT_PUBLIC_ flag and announcement, since it has no Vite dev server here.)
+ */
+export function enableOverlayToggle(
+  server: { config: { env?: Record<string, string> } },
+  enabled: boolean | undefined,
+): void {
+  if (!enabled) return;
+  server.config.env ??= {};
+  server.config.env.VITE_JAZZ_INSPECTOR = "1";
+  console.log(OVERLAY_ENABLED_MESSAGE);
+}
+
+export interface OverlayAssetServer {
+  /** Origin to proxy `/__jazz/embedded/*` requests to, e.g. http://127.0.0.1:54321 */
+  origin: string;
+  close(): Promise<void>;
+}
+
+/**
+ * Start a tiny localhost HTTP server that serves the inspector's embedded build
+ * at /__jazz/embedded/*, reusing the same handler as the Vite/SvelteKit
+ * middleware. Next has no dev-middleware hook, so its plugin proxies to this
+ * server via a dev-only rewrite instead of copying assets into the app. The
+ * socket is unref()'d so it never keeps the dev process alive.
+ */
+export async function startOverlayAssetServer(): Promise<OverlayAssetServer> {
+  const handle = createOverlayHandler();
+  const server = createServer((req, res) => {
+    void handle({ url: req.url }, res as unknown as OverlayResponse).then((handled) => {
+      if (!handled) {
+        res.statusCode = 404;
+        res.end("Not found");
+      }
+    });
+  });
+  server.unref();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+export function createOverlayHandler() {
   let warnedMissing = false;
-  // appRoot is fixed for the handler's lifetime, so resolve the embedded dir
-  // once (require.resolve walks node_modules and hits disk) instead of per request.
+  // The embedded dir is fixed for the process lifetime, so resolve it once
+  // (require.resolve walks node_modules and hits disk) instead of per request.
   let dirCache: string | null | undefined;
   const embeddedDir = (): string | null =>
-    dirCache !== undefined ? dirCache : (dirCache = resolveEmbeddedDir(appRoot));
+    dirCache !== undefined ? dirCache : (dirCache = resolveEmbeddedDir());
   return async function handle(req: { url?: string }, res: OverlayResponse): Promise<boolean> {
     const url = (req.url ?? "").split("?")[0];
     if (url !== OVERLAY_EMBEDDED_PREFIX && !url.startsWith(OVERLAY_EMBEDDED_PREFIX + "/")) {
@@ -80,7 +139,8 @@ export function createOverlayHandler({ appRoot }: OverlayHandlerOptions) {
       if (!warnedMissing) {
         warnedMissing = true;
         console.log(
-          `[jazz] Inspector overlay: install \`${INSPECTOR_PACKAGE}\` as a devDependency to enable it.`,
+          `[jazz] Inspector overlay: couldn't find the \`${INSPECTOR_PACKAGE}\` build. ` +
+            "It ships with jazz-tools — try reinstalling dependencies.",
         );
       }
       res.statusCode = 404;

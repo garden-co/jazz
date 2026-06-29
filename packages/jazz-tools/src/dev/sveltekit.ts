@@ -1,6 +1,6 @@
 import { join, resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
-import { attachOverlayMiddleware } from "./inspector-overlay/serve.js";
+import { attachOverlayMiddleware, enableOverlayToggle } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime, type ManagedRuntime } from "./managed-runtime.js";
 import { buildJazzViteConfig } from "./vite.js";
 import type {
@@ -165,6 +165,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       }
 
       attachOverlayMiddleware(viteServer);
+      enableOverlayToggle(viteServer, options.experimental_inspector);
     },
   };
 }
