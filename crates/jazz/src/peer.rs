@@ -794,6 +794,20 @@ impl PeerState {
                     && output_tables.contains_key(entry.0.as_str())
             })
             .collect::<Vec<_>>();
+        let result_row_adds = node
+            .expand_maintained_view_result_rows(
+                shape,
+                binding,
+                result_row_adds,
+                self.identity(),
+                tier,
+            )?
+            .into_iter()
+            .filter(|entry| {
+                result_table_filter.is_none_or(|table| entry.0.as_str() == table)
+                    && output_tables.contains_key(entry.0.as_str())
+            })
+            .collect::<Vec<_>>();
         let current_row_result_set = result_row_adds.iter().copied().collect::<BTreeSet<_>>();
         let result_row_removes = previous_row_result_set
             .difference(&current_row_result_set)
@@ -1994,7 +2008,7 @@ fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> bool {
 fn filter_view_update_to_result_table(update: &mut SyncMessage, table: &str) {
     let SyncMessage::ViewUpdate {
         version_bundles,
-        peer_payload_inventory,
+        peer_payload_inventory: _,
         result_row_adds,
         result_row_removes,
         ..
@@ -2009,10 +2023,13 @@ fn filter_view_update_to_result_table(update: &mut SyncMessage, table: &str) {
         .chain(result_row_removes.iter())
         .map(|(_, _, tx_id)| *tx_id)
         .collect::<BTreeSet<_>>();
-    version_bundles.retain(|bundle| retained_tx_ids.contains(&bundle.tx.tx_id));
-    peer_payload_inventory
-        .complete_tx_payloads
-        .retain(|tx_id| retained_tx_ids.contains(tx_id));
+    version_bundles.retain(|bundle| {
+        retained_tx_ids.contains(&bundle.tx.tx_id)
+            || bundle
+                .versions
+                .iter()
+                .any(|version| version.table() == table)
+    });
 }
 
 fn drain_initial_subscription_snapshot(receiver: &Subscription) {

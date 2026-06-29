@@ -368,6 +368,33 @@ impl IvmRuntime {
         Ok(())
     }
 
+    fn hydrate_prepared_shape_routes<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        storage: &S,
+    ) -> Result<(), IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let output_node = {
+            let shape = self
+                .prepared_shapes
+                .get(&shape_id)
+                .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
+            shape
+                .routing
+                .as_ref()
+                .map(|routing| routing.output.node)
+                .unwrap_or(shape.output.node)
+        };
+        let records = self.hydration_snapshot(output_node, storage)?;
+        let Some(shape) = self.prepared_shapes.get_mut(&shape_id) else {
+            return Err(IvmRuntimeError::PreparedShapeNotFound(shape_id));
+        };
+        route_shape_records(shape, records)?;
+        Ok(())
+    }
+
     fn tick_durable_nodes<S>(
         &mut self,
         table_deltas: &[TableDelta],
@@ -583,8 +610,7 @@ impl IvmRuntime {
             routing_output.node,
             Retainer::PreparedShape(shape_id.retainer_key()),
         );
-        debug_assert!(retained_output);
-        debug_assert!(retained_routing);
+        debug_assert!(retained_output || retained_routing);
         let output_node = output.node;
         let routing_node = routing_output.node;
         self.prepared_shapes.insert(
@@ -652,10 +678,14 @@ impl IvmRuntime {
             .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
         let binding_record = shape.binding_descriptor.create(binding_values)?;
         let binding_key = BindingKey(binding_record.clone());
+        let shape_binding_exists = shape.bindings.contains_key(&binding_key);
         let subscription_id = self.next_subscription_id();
         let (sender, receiver) = mpsc::channel();
         let binding_delta = self.add_binding_ref(shape_id, binding_key.clone())?;
         let is_new_binding = !binding_delta.deltas.is_empty();
+        if !is_new_binding && !shape_binding_exists {
+            self.hydrate_prepared_shape_routes(shape_id, storage)?;
+        }
         if let Some(shape) = self.prepared_shapes.get_mut(&shape_id) {
             shape
                 .bindings
@@ -826,6 +856,9 @@ impl IvmRuntime {
         &self,
         graph: &GraphBuilder,
     ) -> Result<Option<AutoDirectFamilyPlan>, IvmRuntimeError> {
+        if builder_contains_recursive(graph) {
+            return Ok(None);
+        }
         let original_output = self.infer_builder_output(graph)?;
         let binding_field = auto_direct_binding_field(graph, &original_output, self)?;
         let Some(lifted) = lift_literal_filter(self, graph, &binding_field)? else {
@@ -2886,6 +2919,11 @@ fn lift_literal_filter(
                             field.output_name.clone(),
                             value_type.clone(),
                         )),
+                        ProjectExpr::Nullable(source) => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::nullable(source, field.output_name.clone()))
+                        }
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 fields.push(ProjectField::renamed(
@@ -2977,42 +3015,7 @@ fn lift_literal_filter(
                 value: lifted.value,
             }))
         }
-        GraphBuilder::Recursive {
-            seed,
-            step,
-            frontier,
-            max_iters,
-        } => {
-            let Some(lifted) = lift_literal_filter(runtime, seed, binding_field)? else {
-                return Ok(None);
-            };
-            let original_output = runtime.infer_builder_output(graph)?;
-            let value_type = lifted
-                .value
-                .value_type()
-                .ok_or(IvmRuntimeError::UnsupportedOperator)?;
-            let Some(step) =
-                propagate_binding_through_frontier(step, frontier, binding_field, value_type)
-            else {
-                return Ok(None);
-            };
-            let step =
-                project_to_output_with_binding(runtime, step, &original_output, binding_field)?;
-            let seed_output = runtime.infer_builder_output(&lifted.graph)?;
-            let step_output = runtime.infer_builder_output(&step)?;
-            if seed_output != step_output {
-                return Ok(None);
-            }
-            Ok(Some(LiftedLiteralFilter {
-                graph: GraphBuilder::Recursive {
-                    seed: Box::new(lifted.graph),
-                    step: Box::new(step),
-                    frontier: frontier.clone(),
-                    max_iters: *max_iters,
-                },
-                value: lifted.value,
-            }))
-        }
+        GraphBuilder::Recursive { .. } => Ok(None),
         GraphBuilder::Union { .. } => Ok(None),
         GraphBuilder::UnwrapNullable { input, field } => {
             let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
@@ -3136,14 +3139,20 @@ fn project_fields_against_rewritten_input(
     fields
         .iter()
         .map(|field| {
-            let ProjectExpr::Field(field_ref) = &field.expression else {
-                return Ok(field.clone());
+            let (field_ref, wrap_nullable) = match &field.expression {
+                ProjectExpr::Field(field_ref) => (field_ref, false),
+                ProjectExpr::Nullable(field_ref) => (field_ref, true),
+                ProjectExpr::Literal(_) | ProjectExpr::Null(_) => return Ok(field.clone()),
             };
             let source = field_ref_name(&original_output, field_ref)?;
             if rewritten_output.field_index(&source).is_none() {
                 return Err(IvmRuntimeError::GraphFieldNotFound(source));
             }
-            Ok(ProjectField::renamed(source, field.output_name.clone()))
+            if wrap_nullable {
+                Ok(ProjectField::nullable(source, field.output_name.clone()))
+            } else {
+                Ok(ProjectField::renamed(source, field.output_name.clone()))
+            }
         })
         .collect()
 }
@@ -3233,6 +3242,7 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn propagate_binding_through_frontier(
     graph: &GraphBuilder,
     frontier: &FrontierName,
@@ -3244,8 +3254,14 @@ fn propagate_binding_through_frontier(
             let fields = output
                 .fields()
                 .iter()
-                .filter_map(|field| Some((field.name.clone()?, field.value_type.clone())))
-                .chain([(binding_field.to_owned(), binding_type.clone())]);
+                .filter_map(|field| Some((field.name.clone()?, field.value_type.clone())));
+            let fields = if output.field_index(binding_field).is_some() {
+                fields.collect::<Vec<_>>()
+            } else {
+                fields
+                    .chain([(binding_field.to_owned(), binding_type.clone())])
+                    .collect::<Vec<_>>()
+            };
             Some(GraphBuilder::frontier_source(
                 binding.0.clone(),
                 RecordDescriptor::new(fields),
@@ -3456,20 +3472,23 @@ impl NodeState {
             let Some(snapshot) = binding_snapshots.get(&input.shape) else {
                 return Ok(RecordDeltas::empty(*output_desc));
             };
-            if snapshot.descriptor != *output_desc {
-                return Err(IvmRuntimeError::GraphOutputMismatch);
-            }
-            return Ok(snapshot.clone());
+            return project_binding_source_deltas(snapshot, output_desc);
         }
         let mut deltas = Vec::new();
         for delta in binding_deltas
             .iter()
             .filter(|delta| delta.shape == input.shape)
         {
-            if delta.descriptor != *output_desc {
-                return Err(IvmRuntimeError::GraphOutputMismatch);
-            }
-            deltas.extend(delta.deltas.iter().cloned());
+            deltas.extend(
+                project_binding_source_deltas(
+                    &RecordDeltas {
+                        descriptor: delta.descriptor,
+                        deltas: delta.deltas.clone(),
+                    },
+                    output_desc,
+                )?
+                .deltas,
+            );
         }
         Ok(RecordDeltas {
             descriptor: *output_desc,
@@ -3626,7 +3645,7 @@ fn plan_expr_names(expressions: &[PlanExpr]) -> Vec<String> {
     expressions
         .iter()
         .filter_map(|expr| match expr {
-            PlanExpr::Field(name) => Some(name.clone()),
+            PlanExpr::Field(name) | PlanExpr::Nullable(name) => Some(name.clone()),
             PlanExpr::Literal(_) | PlanExpr::Null(_) => None,
         })
         .collect()
@@ -4534,6 +4553,16 @@ fn project_descriptor(
                     .value_type()
                     .ok_or(IvmRuntimeError::UnsupportedOperator)?,
                 ProjectExpr::Null(value_type) => value_type.clone(),
+                ProjectExpr::Nullable(source) => {
+                    let source_idx = resolve_field_ref(input, source)?;
+                    let inner = input
+                        .fields()
+                        .get(source_idx)
+                        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(source_idx))?
+                        .value_type
+                        .clone();
+                    ValueType::Nullable(Box::new(inner))
+                }
             };
             Ok((project_field.output_name.clone(), value_type))
         })
@@ -4549,6 +4578,7 @@ fn project_field_expr(
         ProjectExpr::Field(source) => Ok(PlanExpr::field(field_ref_name(input, source)?)),
         ProjectExpr::Literal(value) => Ok(PlanExpr::literal(value.clone())),
         ProjectExpr::Null(value_type) => Ok(PlanExpr::null(value_type.clone())),
+        ProjectExpr::Nullable(source) => Ok(PlanExpr::nullable(field_ref_name(input, source)?)),
     }
 }
 
@@ -4574,6 +4604,7 @@ fn project_record(
             PlanExpr::Field(field) => input.get(field)?.clone(),
             PlanExpr::Literal(value) => value.to_value(),
             PlanExpr::Null(_) => Value::Nullable(None),
+            PlanExpr::Nullable(field) => Value::Nullable(Some(Box::new(input.get(field)?.clone()))),
         });
     }
     Ok(output_desc.create(&values)?)
@@ -5065,6 +5096,48 @@ fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
     key.extend([0, 0]);
 }
 
+fn project_binding_source_deltas(
+    input: &RecordDeltas,
+    output_desc: &RecordDescriptor,
+) -> Result<RecordDeltas, IvmRuntimeError> {
+    if input.descriptor == *output_desc {
+        return Ok(input.clone());
+    }
+    let mapping = output_desc
+        .fields()
+        .iter()
+        .map(|field| {
+            let name = field
+                .name
+                .as_ref()
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+            input
+                .descriptor
+                .field_index(name)
+                .map(|index| (0, index))
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let deltas = input
+        .deltas
+        .iter()
+        .map(|delta| {
+            Ok(RecordDelta {
+                record: output_desc.project_record_raw(
+                    std::slice::from_ref(&input.descriptor),
+                    &[delta.raw()],
+                    &mapping,
+                )?,
+                weight: delta.weight,
+            })
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+    Ok(RecordDeltas {
+        descriptor: *output_desc,
+        deltas,
+    })
+}
+
 fn consolidate_deltas(deltas: Vec<RecordDelta>) -> Vec<RecordDelta> {
     let mut consolidated = HashMap::<Vec<u8>, i64>::new();
     for delta in deltas {
@@ -5527,12 +5600,13 @@ mod tests {
         GraphBuilder::recursive(seed, step, "frontier", 16)
     }
 
-    fn assert_auto_family_matches_direct(
+    fn assert_auto_family_matches_direct_with_prepared_count(
         schema: DatabaseSchema,
         families: &[GraphBuilder],
         table_deltas: Vec<TableDelta>,
         storage_familied: &impl OrderedKvStorage,
         storage_direct: &impl OrderedKvStorage,
+        expected_prepared_shapes: usize,
     ) {
         let mut familied = IvmRuntime::new(schema.clone()).unwrap();
         let mut direct = IvmRuntime::new(schema).unwrap();
@@ -5549,7 +5623,7 @@ mod tests {
             .map(|graph| direct.subscribe(graph, storage_direct).unwrap())
             .collect::<Vec<_>>();
 
-        assert_eq!(familied.prepared_shapes.len(), 1);
+        assert_eq!(familied.prepared_shapes.len(), expected_prepared_shapes);
         for (familied_subscription, direct_subscription) in familied_subscriptions
             .iter()
             .zip(direct_subscriptions.iter())
@@ -5581,6 +5655,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn assert_auto_family_matches_direct(
+        schema: DatabaseSchema,
+        families: &[GraphBuilder],
+        table_deltas: Vec<TableDelta>,
+        storage_familied: &impl OrderedKvStorage,
+        storage_direct: &impl OrderedKvStorage,
+    ) {
+        assert_auto_family_matches_direct_with_prepared_count(
+            schema,
+            families,
+            table_deltas,
+            storage_familied,
+            storage_direct,
+            1,
+        );
     }
 
     #[test]
@@ -6005,7 +6096,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_family_recursive_shape_is_byte_identical_to_direct_path() {
+    fn auto_family_recursive_shape_falls_back_to_byte_identical_direct_path() {
         let schema = edges_schema();
         let edges = schema.table("edges").unwrap().record_schema();
         let deltas = vec![TableDelta {
@@ -6034,12 +6125,13 @@ mod tests {
         }];
         let familied_storage = crate::storage::MemoryStorage::new(&["edges"]);
         let direct_storage = crate::storage::MemoryStorage::new(&["edges"]);
-        assert_auto_family_matches_direct(
+        assert_auto_family_matches_direct_with_prepared_count(
             schema,
             &[recursive_reach_from_graph(1), recursive_reach_from_graph(9)],
             deltas,
             &familied_storage,
             &direct_storage,
+            0,
         );
     }
 

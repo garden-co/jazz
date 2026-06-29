@@ -231,6 +231,7 @@ pub enum PlanExpr {
     Field(String),
     Literal(LiteralValue),
     Null(ValueType),
+    Nullable(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -445,5 +446,9 @@ impl PlanExpr {
 
     pub fn null(value_type: ValueType) -> Self {
         Self::Null(value_type)
+    }
+
+    pub fn nullable(name: impl Into<String>) -> Self {
+        Self::Nullable(name.into())
     }
 }
