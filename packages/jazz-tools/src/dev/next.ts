@@ -161,13 +161,14 @@ export function withJazz(
     if (copyAndAdvertiseWasm) {
       await copyWasmToPublic(options.appRoot ?? process.cwd());
     }
-    // Inspector overlay is experimental and dev-only. When enabled in dev, serve
-    // its build from a localhost asset server and proxy to it via a rewrite, and
-    // inject the public flag the client provider reads to mount the toggle. It
-    // leaves no trace in production builds (no rewrite, no env, no server).
-    const inspectorActive = options.experimental_inspector === true && phase === DEVELOPMENT_PHASE;
+    // Inspector overlay is dev-only and on by default: in dev, serve its build
+    // from a localhost asset server, proxy to it via a rewrite, and expose a
+    // public flag so the client provider mounts the toggle (the signal that the
+    // jazz dev plugin is active). It leaves no trace in production builds (no
+    // rewrite, no env, no server).
+    const overlayInDev = phase === DEVELOPMENT_PHASE;
     let overlayRewrites: NextRewritesFn | undefined;
-    if (inspectorActive) {
+    if (overlayInDev) {
       const firstStart = overlayAssetServer === null;
       const assetServer = await ensureOverlayAssetServer();
       overlayRewrites = withOverlayRewrite(merged.rewrites, assetServer.origin);
@@ -183,7 +184,7 @@ export function withJazz(
         ...(copyAndAdvertiseWasm
           ? { [PUBLIC_WASM_URL_ENV]: buildPublicWasmUrl(merged.basePath) }
           : {}),
-        ...(inspectorActive ? { [PUBLIC_INSPECTOR_ENV]: "1" } : {}),
+        ...(overlayInDev ? { [PUBLIC_INSPECTOR_ENV]: "1" } : {}),
       },
     };
 
