@@ -1902,6 +1902,18 @@ function PlainTableView({
       );
     }
   };
+  const selectOnlyRow = (rowId: string): void => {
+    onSelectedRowIdsChange((currentSelectedRowIds) => {
+      // Avoid changing selection if selected row didn't actually change.
+      // This prevents unnecessary re-renders that sometimes prevented cells
+      // from entering edit mode on double-click
+      if (currentSelectedRowIds.size === 1 && currentSelectedRowIds.has(rowId)) {
+        return currentSelectedRowIds;
+      }
+
+      return new Set([rowId]);
+    });
+  };
   const selectRowRange = (
     row: EditableGridRow,
     rowIndex: number,
@@ -1911,7 +1923,7 @@ function PlainTableView({
 
     if (!isRangeSelection) {
       selectionAnchorRowIdRef.current = rowId;
-      onSelectedRowIdsChange(new Set([rowId]));
+      selectOnlyRow(rowId);
       return;
     }
 
@@ -1921,7 +1933,7 @@ function PlainTableView({
     );
     if (anchorRowIndex === -1) {
       selectionAnchorRowIdRef.current = rowId;
-      onSelectedRowIdsChange(new Set([rowId]));
+      selectOnlyRow(rowId);
       return;
     }
 
