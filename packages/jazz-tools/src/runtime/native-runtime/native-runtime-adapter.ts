@@ -2420,10 +2420,14 @@ function materializeRelationRow(
       type: "Array",
       value: materializedChildren.map((child) => ({
         type: "Row",
-        value: { id: child.id, values: child.values },
+        value: rowValueWithValuesByColumn(child),
       })),
-    };
+    } as Value;
     valuesByColumn.set(relation, value);
+    const publicRelation = publicIncludeRelationName(relation);
+    if (publicRelation !== relation) {
+      valuesByColumn.set(publicRelation, value);
+    }
     relationValues.push(value);
   }
   const next = withValuesByColumn(
@@ -2435,6 +2439,31 @@ function materializeRelationRow(
   );
   materialized.set(rowKeyValue, next);
   return next;
+}
+
+function publicIncludeRelationName(relation: string): string {
+  return relation.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
+    ? relation.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
+    : relation;
+}
+
+function rowValueWithValuesByColumn(row: RowState): {
+  id: string;
+  values: Value[];
+  valuesByColumn?: Map<string, Value>;
+} {
+  const value: { id: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
+    id: row.id,
+    values: row.values,
+  };
+  if (row.valuesByColumn) {
+    Object.defineProperty(value, "valuesByColumn", {
+      value: row.valuesByColumn,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  return value;
 }
 
 function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): RowState {
@@ -2620,7 +2649,7 @@ function nativeDeltaFromRows(
         kind: 0,
         id: row.id,
         index,
-        row: { id: row.id, values: row.values },
+        row: rowValueWithValuesByColumn(row),
       });
       return;
     }
@@ -2629,7 +2658,7 @@ function nativeDeltaFromRows(
         kind: 2,
         id: row.id,
         index,
-        row: { id: row.id, values: row.values },
+        row: rowValueWithValuesByColumn(row),
       });
     }
   });
