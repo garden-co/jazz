@@ -20,8 +20,8 @@ import {
   writeValueType,
   type NativeRowBatch,
   type NativeRemovedRow,
-  type QueryOrder,
   type QueryLiteral,
+  type QueryOrder,
   type QueryPredicate,
   type QueryPredicateOp,
   type DescriptorField,
@@ -1275,6 +1275,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     relation_ir?: unknown;
     offset?: unknown;
     select?: unknown;
+    select_columns?: unknown;
   };
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
@@ -1289,7 +1290,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
           limit: readLimitIfPresent(parsed.limit ?? encoded.limit),
           offset: encoded.offset,
           orderBy: encoded.orderBy,
-          select: readSelectColumns(parsed.select),
+          select: readSelectColumns(parsed.select_columns ?? parsed.select ?? encoded.select),
         },
   );
 }
@@ -1316,6 +1317,7 @@ function encodeSimpleRelationQuery(
   limit?: number;
   offset: number;
   orderBy: QueryOrder[];
+  select?: string[];
 } {
   const unwrapped = unwrapSimpleQuery(table, query);
   if (!unwrapped) throw unsupportedRelationQueryError(relationOperator(query.relation_ir));
@@ -1326,6 +1328,7 @@ function encodeSimpleRelationQuery(
     limit: unwrapped.limit,
     offset: unwrapped.offset,
     orderBy: unwrapped.orderBy,
+    select: unwrapped.select,
     predicates: unwrapped.predicates
       .concat(rootPredicates)
       .map((filter) => coerceQueryPredicate(table, filter, schema)),
@@ -1379,6 +1382,7 @@ function unwrapSimpleQuery(
   limit?: number;
   offset: number;
   orderBy: QueryOrder[];
+  select?: string[];
 } | null {
   if (query.relation_ir == null) return { predicates: [], offset: 0, orderBy: [] };
   return unwrapSimpleRelation(table, query.relation_ir);
@@ -1392,6 +1396,7 @@ function unwrapSimpleRelation(
   limit?: number;
   offset: number;
   orderBy: QueryOrder[];
+  select?: string[];
 } | null {
   if (relationIr == null) return { predicates: [], offset: 0, orderBy: [] };
   if (typeof relationIr !== "object") return null;
@@ -1426,6 +1431,14 @@ function unwrapSimpleRelation(
     if (!input || !terms) return null;
     return { ...input, orderBy: input.orderBy.concat(terms) };
   }
+  const project = relation.Project;
+  if (project && typeof project === "object") {
+    const projectRecord = project as { input?: unknown; columns?: unknown };
+    const input = unwrapSimpleRelation(table, projectRecord.input);
+    const columns = readProjectColumns(projectRecord.columns);
+    if (!input || !columns) return null;
+    return { ...input, select: columns };
+  }
   const filter = relation.Filter;
   if (!filter || typeof filter !== "object") return null;
   const filterRecord = filter as { input?: unknown; predicate?: unknown };
@@ -1433,6 +1446,30 @@ function unwrapSimpleRelation(
   if (!input) return null;
   const predicates = predicateToFilters(filterRecord.predicate);
   return predicates ? { ...input, predicates: input.predicates.concat(predicates) } : null;
+}
+
+function readProjectColumns(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const columns: string[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") return null;
+    const record = entry as { alias?: unknown; expr?: unknown; source?: unknown };
+    const expr = record.expr ?? record.source;
+    if (!expr || typeof expr !== "object") return null;
+    const column = readColumnProjectExpr(expr);
+    if (!column) return null;
+    if (record.alias != null && record.alias !== column) return null;
+    columns.push(column);
+  }
+  return columns;
+}
+
+function readColumnProjectExpr(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as { Column?: unknown; column?: unknown };
+  if (record.Column != null) return readColumnRef(record.Column);
+  if (record.column != null) return readColumnRef(record);
+  return null;
 }
 
 function readSelectColumns(value: unknown): string[] | undefined {
