@@ -995,6 +995,7 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_absent(table, row, self.identity.author)?;
         self.write_mergeable(
             self.identity.author,
             None,
@@ -1016,7 +1017,29 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_absent(table, row, self.identity.author)?;
         self.write_mergeable_as_session_subject(made_by, table, row, cells, Vec::new(), None)
+    }
+
+    /// Insert a caller-id row with an explicit millisecond provenance time.
+    pub fn insert_with_id_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_absent(table, row, self.identity.author)?;
+        self.write_mergeable_at_ms(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+            now_ms,
+        )
     }
 
     /// Insert a caller-id row while evaluating write policy as `identity`.
@@ -1031,6 +1054,7 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_absent(table, row, identity)?;
         let allowed = self
             .node
             .node
@@ -1056,6 +1080,45 @@ where
             cells,
             Vec::new(),
             None,
+        )
+    }
+
+    /// Insert a caller-id row for `identity` with an explicit millisecond provenance time.
+    pub fn insert_with_id_for_identity_at_ms(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_absent(table, row, identity)?;
+        let allowed = self
+            .node
+            .node
+            .borrow_mut()
+            .dry_run_insert_allows(
+                MergeableCommit::new(table, row, now_ms)
+                    .made_by(identity)
+                    .permission_subject(identity)
+                    .cells(cells.clone()),
+            )
+            .map_err(Error::from)?;
+        if !allowed {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("policy denied INSERT on table {table}"),
+            ));
+        }
+        self.write_mergeable_at_ms(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+            now_ms,
         )
     }
 
@@ -1115,6 +1178,27 @@ where
         )
     }
 
+    /// Update a row with an explicit millisecond provenance time.
+    pub fn update_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_at_ms(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            parent.into_iter().collect(),
+            None,
+            now_ms,
+        )
+    }
+
     /// Update a row while attributing provenance to `made_by`.
     ///
     /// See [`Db::insert_attributed`] for the security boundary.
@@ -1165,6 +1249,47 @@ where
             ));
         }
         self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
+    }
+
+    /// Update a row for `identity` with an explicit millisecond provenance time.
+    pub fn update_for_identity_at_ms(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        let (cells, parent) =
+            self.merge_existing_cells_for_identity(table, row, patch, identity)?;
+        let parents = parent.into_iter().collect::<Vec<_>>();
+        let dry_run = MergeableCommit::new(table, row, now_ms)
+            .made_by(identity)
+            .permission_subject(identity)
+            .cells(cells.clone())
+            .parents(parents.clone());
+        let allowed = self
+            .node
+            .node
+            .borrow_mut()
+            .dry_run_mergeable_write_allows(dry_run)
+            .map_err(Error::from)?;
+        if !allowed {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("policy denied UPDATE on table {table}"),
+            ));
+        }
+        self.write_mergeable_at_ms(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            now_ms,
+        )
     }
 
     /// Apply explicit edit operations to a text/blob column.
@@ -1224,6 +1349,7 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
         let (cells, parents) = if self.local_row(table, row)?.is_some() {
             let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
             (cells, parent.into_iter().collect())
@@ -1231,6 +1357,33 @@ where
             (cells, Vec::new())
         };
         self.write_mergeable(self.identity.author, None, table, row, cells, parents, None)
+    }
+
+    /// Upsert a row with an explicit millisecond provenance time.
+    pub fn upsert_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let (cells, parents) = if self.local_row(table, row)?.is_some() {
+            let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
+            (cells, parent.into_iter().collect())
+        } else {
+            (cells, Vec::new())
+        };
+        self.write_mergeable_at_ms(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            now_ms,
+        )
     }
 
     /// Upsert a row while evaluating write policy as `identity`.
@@ -1241,6 +1394,7 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
         let (cells, parents) = if self.local_row_for_identity(table, row, identity)?.is_some() {
             let (cells, parent) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
@@ -1249,6 +1403,35 @@ where
             (cells, Vec::new())
         };
         self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
+    }
+
+    /// Upsert a row for `identity` with an explicit millisecond provenance time.
+    pub fn upsert_for_identity_at_ms(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let (cells, parents) = if self.local_row_for_identity(table, row, identity)?.is_some() {
+            let (cells, parent) =
+                self.merge_existing_cells_for_identity(table, row, cells, identity)?;
+            (cells, parent.into_iter().collect())
+        } else {
+            (cells, Vec::new())
+        };
+        self.write_mergeable_at_ms(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            now_ms,
+        )
     }
 
     /// Soft-delete a row locally.
@@ -1492,6 +1675,7 @@ where
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
         self.table_schema(table)?;
+        self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = {
             let mut node = self.node.node.borrow_mut();
             let content_parents = node
@@ -1537,6 +1721,7 @@ where
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
         self.table_schema(table)?;
+        self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = {
             let mut node = self.node.node.borrow_mut();
             let content_parents = node
@@ -1593,6 +1778,79 @@ where
         )
     }
 
+    /// Restore a row with an explicit millisecond provenance time.
+    pub fn restore_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        if cells.is_empty() {
+            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
+        }
+        self.table_schema(table)?;
+        self.ensure_row_deleted(table, row, self.identity.author)?;
+        let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
+        let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
+            MergeableCommit::new(table, row, now_ms)
+                .made_by(self.identity.author)
+                .parents(content_parents)
+                .cells(cells),
+            MergeableCommit::new(table, row, now_ms)
+                .made_by(self.identity.author)
+                .parents(deletion_parents)
+                .cells(BTreeMap::<String, Value>::new())
+                .deletion(DeletionEvent::Restored),
+        ])?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    /// Restore a row for `identity` with an explicit millisecond provenance time.
+    pub fn restore_for_identity_at_ms(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        if cells.is_empty() {
+            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
+        }
+        self.table_schema(table)?;
+        self.ensure_row_deleted(table, row, identity)?;
+        let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
+        let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
+            MergeableCommit::new(table, row, now_ms)
+                .made_by(identity)
+                .permission_subject(identity)
+                .parents(content_parents)
+                .cells(cells),
+            MergeableCommit::new(table, row, now_ms)
+                .made_by(identity)
+                .permission_subject(identity)
+                .parents(deletion_parents)
+                .cells(BTreeMap::<String, Value>::new())
+                .deletion(DeletionEvent::Restored),
+        ])?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
     fn write_mergeable(
         &self,
         made_by: AuthorId,
@@ -1603,6 +1861,29 @@ where
         parents: Vec<TxId>,
         deletion: Option<DeletionEvent>,
     ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_at_ms(
+            made_by,
+            permission_subject,
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            self.next_now_ms(),
+        )
+    }
+
+    fn write_mergeable_at_ms(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
             "DELETE"
         } else if parents.is_empty() {
@@ -1610,7 +1891,7 @@ where
         } else {
             "UPDATE"
         };
-        let mut commit = MergeableCommit::new(table, row, self.next_now_ms())
+        let mut commit = MergeableCommit::new(table, row, now_ms)
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
@@ -1721,6 +2002,87 @@ where
         self.local_row_for_identity(table, row, self.identity.author)
     }
 
+    fn ensure_row_absent(
+        &self,
+        table: &str,
+        row: RowUuid,
+        _identity: AuthorId,
+    ) -> Result<(), Error> {
+        self.table_schema(table)?;
+        let (content_parent, deletion_parent) = {
+            let mut node = self.node.node.borrow_mut();
+            (
+                node.local_content_winner_tx_id(table, row)?,
+                node.local_deletion_winner_tx_id(table, row)?,
+            )
+        };
+        if deletion_parent.is_some() {
+            return Err(row_already_deleted(row));
+        }
+        if content_parent.is_some() {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("encoding error: object already exists: {}", row.0),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_row_deleted(
+        &self,
+        table: &str,
+        row: RowUuid,
+        _identity: AuthorId,
+    ) -> Result<(), Error> {
+        self.table_schema(table)?;
+        let deleted = self
+            .node
+            .node
+            .borrow_mut()
+            .local_deletion_winner_tx_id(table, row)?
+            .is_some();
+        if deleted {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("row not deleted: {}", row.0),
+            ))
+        }
+    }
+
+    fn ensure_row_not_deleted(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.table_schema(table)?;
+        let deleted = self
+            .node
+            .node
+            .borrow_mut()
+            .local_deletion_winner_tx_id(table, row)?
+            .is_some();
+        if deleted {
+            Err(row_already_deleted(row))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn row_layer_parents(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(Vec<TxId>, Vec<TxId>), Error> {
+        let mut node = self.node.node.borrow_mut();
+        let content_parents = node
+            .local_content_winner_tx_id(table, row)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let deletion_parents = node
+            .local_deletion_winner_tx_id(table, row)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok((content_parents, deletion_parents))
+    }
+
     fn local_row_for_identity(
         &self,
         table: &str,
@@ -1759,6 +2121,7 @@ where
         identity: AuthorId,
     ) -> Result<(RowCells, Option<TxId>), Error> {
         let table_schema = self.table_schema(table)?;
+        self.ensure_row_not_deleted(table, row)?;
         let mut cells = BTreeMap::new();
         let mut parent = None;
         if let Some(existing) = self.local_row_for_identity(table, row, identity)? {
@@ -3247,6 +3610,13 @@ impl Error {
             message: message.into(),
         }
     }
+}
+
+fn row_already_deleted(row: RowUuid) -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        format!("row already deleted: {}", row.0),
+    )
 }
 
 /// Stable API error code.

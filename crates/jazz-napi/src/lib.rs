@@ -846,9 +846,11 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -856,13 +858,19 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.insert_with_id(&table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.insert_with_id_at_ms(&table, row_id, cells, now_ms),
+                    None => db.insert_with_id(&table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.insert_with_id(&table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.insert_with_id_at_ms(&table, row_id, cells, now_ms),
+                    None => db.insert_with_id(&table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -874,10 +882,12 @@ impl NapiDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         author: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let author = core_author_id_from_bytes(&author)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -885,13 +895,23 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.insert_with_id_for_identity(author, &table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => {
+                        db.insert_with_id_for_identity_at_ms(author, &table, row_id, cells, now_ms)
+                    }
+                    None => db.insert_with_id_for_identity(author, &table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.insert_with_id_for_identity(author, &table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => {
+                        db.insert_with_id_for_identity_at_ms(author, &table, row_id, cells, now_ms)
+                    }
+                    None => db.insert_with_id_for_identity(author, &table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -902,9 +922,11 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         patch: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -912,13 +934,19 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.update(&table, row_id, patch)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.update_at_ms(&table, row_id, patch, now_ms),
+                    None => db.update(&table, row_id, patch),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.update(&table, row_id, patch)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.update_at_ms(&table, row_id, patch, now_ms),
+                    None => db.update(&table, row_id, patch),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -930,10 +958,12 @@ impl NapiDb {
         row_id: Uint8Array,
         patch: Uint8Array,
         author: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
         let author = core_author_id_from_bytes(&author)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -941,13 +971,23 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.update_for_identity(author, &table, row_id, patch)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => {
+                        db.update_for_identity_at_ms(author, &table, row_id, patch, now_ms)
+                    }
+                    None => db.update_for_identity(author, &table, row_id, patch),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.update_for_identity(author, &table, row_id, patch)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => {
+                        db.update_for_identity_at_ms(author, &table, row_id, patch, now_ms)
+                    }
+                    None => db.update_for_identity(author, &table, row_id, patch),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -958,9 +998,11 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -968,13 +1010,19 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.upsert(&table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.upsert_at_ms(&table, row_id, cells, now_ms),
+                    None => db.upsert(&table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.upsert(&table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.upsert_at_ms(&table, row_id, cells, now_ms),
+                    None => db.upsert(&table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -986,10 +1034,12 @@ impl NapiDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         author: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let author = core_author_id_from_bytes(&author)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -997,13 +1047,23 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.upsert_for_identity(author, &table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => {
+                        db.upsert_for_identity_at_ms(author, &table, row_id, cells, now_ms)
+                    }
+                    None => db.upsert_for_identity(author, &table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.upsert_for_identity(author, &table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => {
+                        db.upsert_for_identity_at_ms(author, &table, row_id, cells, now_ms)
+                    }
+                    None => db.upsert_for_identity(author, &table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -1062,9 +1122,11 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1072,13 +1134,19 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.restore(&table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.restore_at_ms(&table, row_id, cells, now_ms),
+                    None => db.restore(&table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.restore(&table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => db.restore_at_ms(&table, row_id, cells, now_ms),
+                    None => db.restore(&table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -1090,10 +1158,12 @@ impl NapiDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         author: Uint8Array,
+        updated_at_ms: Option<f64>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let author = core_author_id_from_bytes(&author)?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1101,13 +1171,23 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.restore_for_identity(author, &table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => {
+                        db.restore_for_identity_at_ms(author, &table, row_id, cells, now_ms)
+                    }
+                    None => db.restore_for_identity(author, &table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.restore_for_identity(author, &table, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                match updated_at_ms {
+                    Some(now_ms) => {
+                        db.restore_for_identity_at_ms(author, &table, row_id, cells, now_ms)
+                    }
+                    None => db.restore_for_identity(author, &table, row_id, cells),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
