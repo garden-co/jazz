@@ -12,11 +12,13 @@
 // plugin sets the public flag below. Vite-family bundlers inline it on
 // import.meta.env, Next on process.env — check both, since each is undefined
 // under the other's bundler (and `process` itself is undefined in a Vite
-// browser bundle, hence the guard).
+// browser bundle, hence the guard). Read `process.env.NEXT_PUBLIC_JAZZ_INSPECTOR`
+// as a literal: Next only static-inlines that exact member access, not an alias.
 function inspectorEnabled(): boolean {
   const viteEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
-  const nextEnv = typeof process !== "undefined" ? process.env : undefined;
-  return Boolean(viteEnv?.VITE_JAZZ_INSPECTOR || nextEnv?.NEXT_PUBLIC_JAZZ_INSPECTOR);
+  const nextFlag =
+    typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_JAZZ_INSPECTOR : undefined;
+  return Boolean(viteEnv?.VITE_JAZZ_INSPECTOR || nextFlag);
 }
 
 /**
