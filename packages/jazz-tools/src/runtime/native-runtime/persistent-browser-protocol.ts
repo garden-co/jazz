@@ -98,15 +98,15 @@ export type PersistentBrowserOpfsOwnerRequest =
     }
   | {
       id: number;
-      method: "createSubscription";
+      method: "createExecutedSubscription";
       args: [
+        ownerHandle: number,
         queryJson: string,
         sessionJson: string | null | undefined,
         tier: string | null | undefined,
         optionsJson: string | null | undefined,
       ];
     }
-  | { id: number; method: "executeSubscription"; args: [handle: number] }
   | { id: number; method: "unsubscribe"; args: [handle: number] }
   | { id: number; method: "clearClientStorage"; args: [] }
   | { id: number; method: "connect"; args: [url: string, authJson: string] }

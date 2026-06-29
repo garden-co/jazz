@@ -214,4 +214,122 @@ describe("chat permissions", () => {
     ]);
     await expect(carolDb.all(app.reactions.where({ id: reaction.id }))).resolves.toEqual([]);
   });
+
+  it("inherits attachment file reads from the parent message/chat chain", async () => {
+    const file = testApp.seed((db) => {
+      const { value: aliceProfile } = db.insert(app.profiles, {
+        userId: "alice",
+        name: "Alice",
+      });
+      const { value: privateChat } = db.insert(app.chats, {
+        name: "Uploads",
+        isPublic: false,
+        createdBy: "alice",
+        joinCode: "invite-files",
+      });
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: "alice",
+        joinCode: "invite-files",
+      });
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: "bob",
+        joinCode: "invite-files",
+      });
+      const { value: message } = db.insert(app.messages, {
+        chatId: privateChat.id,
+        text: "see attachment",
+        senderId: aliceProfile.id,
+        createdAt: new Date("2026-01-01T00:00:04.000Z"),
+      });
+      const { value: file } = db.insert(app.files, {
+        name: "hello.txt",
+        mime_type: "text/plain",
+        data: new Uint8Array([104, 105]),
+      });
+      db.insert(app.attachments, {
+        messageId: message.id,
+        type: "file",
+        name: "hello.txt",
+        fileId: file.id,
+        size: 2,
+      });
+      return file;
+    });
+
+    const bobDb = testApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
+    const carolDb = testApp.as({ user_id: "carol", claims: {}, authMode: "local-first" });
+
+    await expect(bobDb.all(app.files.where({ id: file.id }))).resolves.toEqual([
+      expect.objectContaining({ id: file.id, name: "hello.txt" }),
+    ]);
+    await expect(carolDb.all(app.attachments.where({ fileId: file.id }))).resolves.toEqual([]);
+  });
+
+  it("inherits attachment file deletes from the source attachment delete policy", async () => {
+    const aliceUserId = "00000000-0000-4000-8000-0000000000a1";
+    const bobUserId = "00000000-0000-4000-8000-0000000000b0";
+    const { attachment, file } = testApp.seed((db) => {
+      const { value: aliceProfile } = db.insert(
+        app.profiles,
+        {
+          userId: aliceUserId,
+          name: "Alice",
+        },
+        { id: aliceUserId },
+      );
+      db.insert(
+        app.profiles,
+        {
+          userId: bobUserId,
+          name: "Bob",
+        },
+        { id: bobUserId },
+      );
+      const { value: privateChat } = db.insert(app.chats, {
+        name: "Uploads",
+        isPublic: false,
+        createdBy: aliceUserId,
+        joinCode: "invite-delete-files",
+      });
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: aliceUserId,
+        joinCode: "invite-delete-files",
+      });
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: bobUserId,
+        joinCode: "invite-delete-files",
+      });
+      const { value: message } = db.insert(app.messages, {
+        chatId: privateChat.id,
+        text: "delete my attachment",
+        senderId: aliceProfile.id,
+        createdAt: new Date("2026-01-01T00:00:05.000Z"),
+      });
+      const { value: file } = db.insert(app.files, {
+        name: "owned.txt",
+        mime_type: "text/plain",
+        data: new Uint8Array([111, 107]),
+      });
+      const { value: attachment } = db.insert(app.attachments, {
+        messageId: message.id,
+        type: "file",
+        name: "owned.txt",
+        fileId: file.id,
+        size: 2,
+      });
+      return { attachment, file };
+    });
+
+    const aliceDb = testApp.as({ user_id: aliceUserId, claims: {}, authMode: "local-first" });
+    const bobDb = testApp.as({ user_id: bobUserId, claims: {}, authMode: "local-first" });
+
+    bobDb.expectDenied((db) => db.delete(app.attachments, attachment.id));
+    bobDb.expectDenied((db) => db.delete(app.files, file.id));
+    aliceDb.expectAllowed((db) => db.delete(app.files, file.id));
+    aliceDb.expectAllowed((db) => db.delete(app.attachments, attachment.id));
+  });
 });

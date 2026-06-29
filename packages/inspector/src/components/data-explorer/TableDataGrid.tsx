@@ -10,7 +10,7 @@ import {
   type RowsChangeData,
   type SortColumn,
 } from "react-data-grid";
-import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy, Value } from "jazz-tools";
+import type { ColumnDescriptor, ColumnType, TableProxy, Value } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
 import {
   useEffect,
@@ -26,6 +26,7 @@ import {
 import { Link, Navigate, useParams, useSearchParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
+import type { DynamicTableRow } from "../../utility/generic-query-builder.js";
 import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder.js";
 import {
   formatMutationFieldValue,

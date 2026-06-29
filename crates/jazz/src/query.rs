@@ -124,6 +124,7 @@ impl Query {
             target: JoinTarget::Column,
             source_column: None,
             source_lookup: None,
+            correlated_filters: Vec::new(),
             filters: filters.into_iter().collect(),
             nested_joins: Vec::new(),
         });
@@ -146,6 +147,29 @@ impl Query {
             target: JoinTarget::Column,
             source_column: Some(source_column.into()),
             source_lookup: None,
+            correlated_filters: Vec::new(),
+            filters: filters.into_iter().collect(),
+            nested_joins: Vec::new(),
+        });
+        self
+    }
+
+    /// Add a junction traversal with extra source-row equality correlations.
+    pub fn join_via_column_with_correlations(
+        mut self,
+        table: impl Into<String>,
+        on_column: impl Into<String>,
+        source_column: impl Into<String>,
+        correlated_filters: impl IntoIterator<Item = JoinCorrelation>,
+        filters: impl IntoIterator<Item = Predicate>,
+    ) -> Self {
+        self.joins.push(JoinVia {
+            table: table.into(),
+            on_column: on_column.into(),
+            target: JoinTarget::Column,
+            source_column: Some(source_column.into()),
+            source_lookup: None,
+            correlated_filters: correlated_filters.into_iter().collect(),
             filters: filters.into_iter().collect(),
             nested_joins: Vec::new(),
         });
@@ -188,6 +212,7 @@ impl Query {
             target,
             source_column: Some(source_lookup.value_column.clone()),
             source_lookup: Some(source_lookup),
+            correlated_filters: Vec::new(),
             filters: filters.into_iter().collect(),
             nested_joins: Vec::new(),
         });
@@ -208,6 +233,7 @@ impl Query {
             target: JoinTarget::Column,
             source_column: None,
             source_lookup: None,
+            correlated_filters: Vec::new(),
             filters: filters.into_iter().collect(),
             nested_joins: nested_joins.into_iter().collect(),
         });
@@ -229,6 +255,7 @@ impl Query {
             target: JoinTarget::RowId,
             source_column: Some(source_column.into()),
             source_lookup: None,
+            correlated_filters: Vec::new(),
             filters: filters.into_iter().collect(),
             nested_joins: Vec::new(),
         });
@@ -281,6 +308,7 @@ impl Query {
             access_table: access_table.into(),
             access_row_column: access_row_column.into(),
             access_team_column: access_team_column.into(),
+            access_team_target: JoinTarget::Column,
             from,
             access_filters: access_filters.into_iter().collect(),
             edge_table: edge_table.into(),
@@ -288,6 +316,7 @@ impl Query {
             edge_parent_column: edge_parent_column.into(),
             edge_filters: edge_filters.into_iter().collect(),
             max_depth: 8,
+            seed: None,
         });
         self
     }
@@ -635,11 +664,24 @@ pub struct JoinVia {
     /// reference needs to correlate through a column on the referenced row.
     #[serde(default)]
     pub source_lookup: Option<JoinSourceLookup>,
+    /// Additional equality correlations from joined-table columns to columns
+    /// on the source row currently being checked.
+    #[serde(default)]
+    pub correlated_filters: Vec<JoinCorrelation>,
     /// Filters evaluated on the junction table.
     pub filters: Vec<Predicate>,
     /// Additional joins evaluated relative to the joined row.
     #[serde(default)]
     pub nested_joins: Vec<JoinVia>,
+}
+
+/// Additional row correlation required by a [`JoinVia`] traversal.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct JoinCorrelation {
+    /// Column on the joined table.
+    pub join_column: String,
+    /// Column on the source row.
+    pub source_column: String,
 }
 
 /// How a [`JoinVia`] derives its target value from a referenced source row.
@@ -672,6 +714,9 @@ pub struct ReachableVia {
     pub access_row_column: String,
     /// Access-table column referencing a team.
     pub access_team_column: String,
+    /// Which access-table field `access_team_column` names.
+    #[serde(default)]
+    pub access_team_target: JoinTarget,
     /// Seed team, usually a claim.
     pub from: Operand,
     /// Filters on access edges.
@@ -687,6 +732,23 @@ pub struct ReachableVia {
     pub edge_filters: Vec<Predicate>,
     /// Iteration cap for v0 recursive policies.
     pub max_depth: usize,
+    /// Optional relation that produces initial reachable team ids.
+    ///
+    /// When present, this replaces `from` as the initial recursive frontier.
+    /// `from` remains for the single-seed form and for older call sites.
+    #[serde(default)]
+    pub seed: Option<ReachableSeed>,
+}
+
+/// Relation seed for recursive reachability.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ReachableSeed {
+    /// Table containing seed rows.
+    pub table: String,
+    /// Seed-table column referencing the initial team frontier.
+    pub team_column: String,
+    /// Filters applied to seed rows.
+    pub filters: Vec<Predicate>,
 }
 
 /// Query predicate.
@@ -1181,6 +1243,13 @@ fn validate_join(
     } else {
         root_table.to_owned()
     };
+    for correlation in &join.correlated_filters {
+        let source_type = planner_column_type(root, &correlation.source_column)?;
+        let join_type = planner_column_type(&join_table, &correlation.join_column)?;
+        if source_type != join_type {
+            return Err(QueryError::OperandTypeMismatch);
+        }
+    }
     match join.target {
         JoinTarget::Column => match join_table.references.get(&join.on_column) {
             Some(target) if target == &target_table => {}
@@ -1346,24 +1415,46 @@ fn validate_reachable(
     let access = table(schema, &reachable.access_table)?;
     planner_column_type(&access, &reachable.access_row_column)?;
     planner_column_type(&access, &reachable.access_team_column)?;
-    match access.references.get(&reachable.access_row_column) {
-        Some(target) if target == &root.name => {}
-        _ => {
+    if reachable.access_row_column == "id" {
+        if access.name != root.name {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
                 column: reachable.access_row_column.clone(),
                 target_table: root.name.clone(),
             });
         }
+    } else {
+        match access.references.get(&reachable.access_row_column) {
+            Some(target) if target == &root.name => {}
+            _ => {
+                return Err(QueryError::JoinNotRefCompatible {
+                    join_table: reachable.access_table.clone(),
+                    column: reachable.access_row_column.clone(),
+                    target_table: root.name.clone(),
+                });
+            }
+        }
     }
-    let team_table = access
-        .references
-        .get(&reachable.access_team_column)
-        .ok_or_else(|| QueryError::JoinNotRefCompatible {
-            join_table: reachable.access_table.clone(),
-            column: reachable.access_team_column.clone(),
-            target_table: "referenced table".to_owned(),
-        })?;
+    let team_table = match reachable.access_team_target {
+        JoinTarget::Column => access
+            .references
+            .get(&reachable.access_team_column)
+            .ok_or_else(|| QueryError::JoinNotRefCompatible {
+                join_table: reachable.access_table.clone(),
+                column: reachable.access_team_column.clone(),
+                target_table: "referenced table".to_owned(),
+            })?,
+        JoinTarget::RowId => {
+            if reachable.access_team_column != "id" {
+                return Err(QueryError::JoinNotRefCompatible {
+                    join_table: reachable.access_table.clone(),
+                    column: reachable.access_team_column.clone(),
+                    target_table: reachable.access_table.clone(),
+                });
+            }
+            &access.name
+        }
+    };
     let edge = table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
         planner_column_type(&edge, column)?;
@@ -1378,10 +1469,28 @@ fn validate_reachable(
             }
         }
     }
-    match operand_type(root, &reachable.from, params)? {
-        Some(ColumnType::Uuid) => {}
-        None => infer_param(&reachable.from, ColumnType::Uuid, params)?,
-        Some(_) => return Err(QueryError::OperandTypeMismatch),
+    if let Some(seed) = &reachable.seed {
+        let seed_table = table(schema, &seed.table)?;
+        planner_column_type(&seed_table, &seed.team_column)?;
+        match seed_table.references.get(&seed.team_column) {
+            Some(target) if target == team_table => {}
+            _ => {
+                return Err(QueryError::JoinNotRefCompatible {
+                    join_table: seed.table.clone(),
+                    column: seed.team_column.clone(),
+                    target_table: team_table.clone(),
+                });
+            }
+        }
+        for predicate in &seed.filters {
+            validate_predicate(&seed_table, predicate, params)?;
+        }
+    } else {
+        match operand_type(root, &reachable.from, params)? {
+            Some(ColumnType::Uuid) => {}
+            None => infer_param(&reachable.from, ColumnType::Uuid, params)?,
+            Some(_) => return Err(QueryError::OperandTypeMismatch),
+        }
     }
     for predicate in &reachable.access_filters {
         validate_predicate(&access, predicate, params)?;
@@ -1442,15 +1551,22 @@ fn validate_predicate(
         }
         Predicate::Contains(left, right) => {
             let left_type = operand_type(table, left, params)?;
-            match left_type.map(|column_type| non_null_column_type(&column_type)) {
-                Some(ColumnType::String) => {
+            let right_type = operand_type(table, right, params)?;
+            match (
+                left_type.map(|column_type| non_null_column_type(&column_type)),
+                right_type,
+            ) {
+                (Some(ColumnType::String), _) => {
                     validate_operand_against_type(table, right, ColumnType::String, params)
                 }
-                Some(ColumnType::Array(member)) => {
+                (Some(ColumnType::Array(member)), _) => {
                     validate_operand_against_type(table, right, *member, params)
                 }
-                Some(_) => Err(QueryError::OperandTypeMismatch),
-                None => Err(QueryError::OperandTypeMismatch),
+                (Some(_), _) => Err(QueryError::OperandTypeMismatch),
+                (None, Some(right_type)) => {
+                    infer_param(left, ColumnType::Array(Box::new(right_type)), params)
+                }
+                (None, None) => Err(QueryError::OperandTypeMismatch),
             }
         }
         Predicate::IsNull(operand) => match operand_type(table, operand, params)? {
@@ -1606,6 +1722,9 @@ fn normalize_query(query: &Query) -> Query {
                 .access_filters
                 .sort_by_key(canonical_predicate_key);
             reachable.edge_filters.sort_by_key(canonical_predicate_key);
+            if let Some(seed) = &mut reachable.seed {
+                seed.filters.sort_by_key(canonical_predicate_key);
+            }
         }
         branch.reachable.sort_by_key(canonical_reachable_key);
     }
@@ -1617,6 +1736,9 @@ fn normalize_query(query: &Query) -> Query {
             .access_filters
             .sort_by_key(canonical_predicate_key);
         reachable.edge_filters.sort_by_key(canonical_predicate_key);
+        if let Some(seed) = &mut reachable.seed {
+            seed.filters.sort_by_key(canonical_predicate_key);
+        }
     }
     query.reachable.sort_by_key(canonical_reachable_key);
     query.includes.sort();
@@ -1632,6 +1754,8 @@ fn normalize_query(query: &Query) -> Query {
 }
 
 fn normalize_join(join: &mut JoinVia) {
+    join.correlated_filters
+        .sort_by_key(canonical_join_correlation_key);
     for nested in &mut join.nested_joins {
         nested.filters.sort_by_key(canonical_predicate_key);
         normalize_join(nested);
@@ -1676,6 +1800,10 @@ fn canonical_reachable_key(reachable: &ReachableVia) -> Vec<u8> {
     put_str(&mut bytes, &reachable.access_table);
     put_str(&mut bytes, &reachable.access_row_column);
     put_str(&mut bytes, &reachable.access_team_column);
+    match reachable.access_team_target {
+        JoinTarget::Column => {}
+        JoinTarget::RowId => bytes.push(b'r'),
+    }
     put_bytes(&mut bytes, &canonical_operand_key(&reachable.from));
     put_len(&mut bytes, reachable.access_filters.len());
     for filter in &reachable.access_filters {
@@ -1687,6 +1815,15 @@ fn canonical_reachable_key(reachable: &ReachableVia) -> Vec<u8> {
     put_len(&mut bytes, reachable.max_depth);
     for filter in &reachable.edge_filters {
         put_bytes(&mut bytes, &canonical_predicate_key(filter));
+    }
+    if let Some(seed) = &reachable.seed {
+        bytes.push(b's');
+        put_str(&mut bytes, &seed.table);
+        put_str(&mut bytes, &seed.team_column);
+        put_len(&mut bytes, seed.filters.len());
+        for filter in &seed.filters {
+            put_bytes(&mut bytes, &canonical_predicate_key(filter));
+        }
     }
     bytes
 }
@@ -1709,6 +1846,13 @@ fn canonical_join_key(join: &JoinVia) -> Vec<u8> {
         put_str(&mut bytes, &lookup.row_id_source_column);
         put_str(&mut bytes, &lookup.value_column);
     }
+    if !join.correlated_filters.is_empty() {
+        bytes.push(b'c');
+        put_len(&mut bytes, join.correlated_filters.len());
+        for correlation in &join.correlated_filters {
+            put_bytes(&mut bytes, &canonical_join_correlation_key(correlation));
+        }
+    }
     if !join.nested_joins.is_empty() {
         bytes.push(b'j');
         put_len(&mut bytes, join.nested_joins.len());
@@ -1719,6 +1863,13 @@ fn canonical_join_key(join: &JoinVia) -> Vec<u8> {
     for filter in &join.filters {
         put_bytes(&mut bytes, &canonical_predicate_key(filter));
     }
+    bytes
+}
+
+fn canonical_join_correlation_key(correlation: &JoinCorrelation) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    put_str(&mut bytes, &correlation.join_column);
+    put_str(&mut bytes, &correlation.source_column);
     bytes
 }
 
@@ -2161,6 +2312,19 @@ mod tests {
         assert_eq!(validated.params()["user"], ColumnType::Uuid);
         assert_eq!(validated.params()["tag"], ColumnType::Uuid);
         assert!(!validated.canonical_bytes().is_empty());
+    }
+
+    #[test]
+    fn contains_param_array_against_column_infers_array_type() {
+        let validated = Query::from("issues")
+            .filter(contains(param("teams"), col("assignee")))
+            .validate(&schema())
+            .unwrap();
+
+        assert_eq!(
+            validated.params()["teams"],
+            ColumnType::Array(Box::new(ColumnType::Uuid))
+        );
     }
 
     #[test]

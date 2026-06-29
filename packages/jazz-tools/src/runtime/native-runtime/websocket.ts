@@ -93,6 +93,7 @@ export class WebSocketCarrier {
   private readonly onFrame: WebSocketFrameHandler;
   private readonly onError?: WebSocketErrorHandler;
   private readonly opened: Promise<void>;
+  private closing = false;
 
   constructor(options: WebSocketCarrierOptions) {
     const WebSocketCtor = options.WebSocket ?? browserWebSocketConstructor();
@@ -109,6 +110,7 @@ export class WebSocketCarrier {
       void this.handleMessage(event.data);
     });
     this.socket.addEventListener("error", () => {
+      if (this.closing) return;
       this.onError?.({
         code: "websocket_error",
         retry: "later",
@@ -116,6 +118,7 @@ export class WebSocketCarrier {
       });
     });
     this.socket.addEventListener("close", () => {
+      if (this.closing) return;
       this.onError?.({
         code: "websocket_closed",
         retry: "later",
@@ -139,7 +142,15 @@ export class WebSocketCarrier {
   }
 
   close(): void {
-    this.socket.close();
+    if (this.closing) return;
+    this.closing = true;
+    if (isNodeRuntime()) return;
+    try {
+      this.socket.close();
+    } catch {
+      // Node's undici WebSocket can throw while already closing; intentional
+      // shutdown should not be reported as a transport failure.
+    }
   }
 
   private async handleMessage(data: unknown): Promise<void> {
@@ -152,6 +163,10 @@ export class WebSocketCarrier {
       this.onFrame(frame);
     }
   }
+}
+
+function isNodeRuntime(): boolean {
+  return typeof process !== "undefined" && process.versions?.node != null;
 }
 
 export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {

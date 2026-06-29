@@ -102,7 +102,7 @@ fn permission_scope_key(schema: &JazzSchema, table: &str, writer: AuthorId) -> S
         .tables
         .iter()
         .find(|candidate| candidate.name == table)
-        .and_then(|table| table.write_policy.clone())
+        .and_then(|table| table.write_policies.insert_check.clone())
         .expect("table should have a write policy");
     let mut values = BTreeMap::new();
     values.insert("__jazz_claim_sub".to_owned(), Value::Uuid(writer.0));

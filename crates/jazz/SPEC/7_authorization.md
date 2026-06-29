@@ -9,11 +9,14 @@ authorization, read narrowing, and policy composition. It builds on queries
 
 ## 7.1 Policies are shapes
 
-Each table may define a read policy and a write policy. A policy is an optional
-`Query` (ch. 6) over the protected row's columns and the authenticated claims
-for the peer being evaluated (`read_policy: Option<Query>` and `write_policy:
-Option<Query>`). If the policy is absent, the operation is **public** for that
-table (`TableSchema::new` defaults both policies to `None`, `INV-RLS-15`).
+Each table may define a read policy and operation-specific write policies. A
+policy is an optional `Query` (ch. 6) over the protected row's columns and the
+authenticated claims for the peer being evaluated. The stored core shape is
+`read_policy: Option<Query>` plus `write_policies: WritePolicies`, with
+`insert_check`, `update_using`, `update_check`, and `delete_using` clauses. If
+the relevant policy clause is absent, that operation is **public** for that table
+(`TableSchema::new` defaults the read policy and all write clauses to `None`,
+`INV-RLS-15`).
 
 An owner-only policy is the canonical single-subject policy: it selects rows
 whose ownership column equals the authenticated subject
@@ -26,21 +29,31 @@ it (`INV-RLS-4`), and `AuthorId::SYSTEM` bypasses both read and write checks
 
 Policy evaluation is **fail-closed**: an unsupported predicate/operator form or
 an unresolved operand denies rather than allows (`INV-RLS-14`). Direct policy
-evaluation supports equality and inequality, boolean composition, columns,
-literals, and authenticated subject claims: `Eq`/`Ne`/`All`/`Any`/`Not` over
-column / literal / `claim("sub")`. The claims `team` and `isAdmin` are valid
-claim names at the query-shape layer, but policies must not rely on them until
-direct evaluation resolves them; unresolved claims deny under the fail-closed
-rule (see Open questions).
+evaluation supports equality and inequality, membership/containment predicates,
+boolean composition, columns, literals, and authenticated/admission-controlled
+claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over column / literal /
+`claim(...)`. `claim("sub")` resolves to the authenticated `AuthorId`.
+Additional claim names are runtime session claims supplied by the trusted
+admission/session layer and must not be client-supplied query bindings. Predicate
+forms outside the supported direct-evaluation subset, such as range and null
+checks, deny until explicitly supported.
 
 ## 7.2 Write authorization
 
 Write policy is an acceptance gate, not a post-acceptance filter. The fate
-authority evaluates it **before acceptance** for every version in the commit
-unit. If any version fails, the whole unit is rejected as
+authority evaluates the relevant operation-specific clause **before acceptance**
+for every version in the commit unit. If any version fails, the whole unit is
+rejected as
 `Fate::Rejected(RejectionReason::AuthorizationDenied)`: it receives no
 `global_seq`, makes no durability claim, is audit-only, contributes no accepted
 rows, and causes descendants to cascade as described in ch. 3 (`INV-RLS-1`).
+
+For an insert, `insert_check` is evaluated against the inserted row. For an
+update, `update_using` is evaluated against the previous content row and
+`update_check` is evaluated against the new content row; if both clauses are
+present both must pass. For a delete, `delete_using` is evaluated against the row
+being deleted. Missing clauses preserve the operation-level public default rather
+than falling back to another operation's policy.
 
 Uploaded commit units are authorized under the **authenticated link identity**,
 not under the self-declared `Transaction.made_by`. A normal `Session` link must
@@ -109,6 +122,18 @@ choosing a different claim binding (`INV-RLS-10`).
 Join policies extend that same identity-bound evaluation across relationships. A
 join policy passes when a matching global-current row in the joined table reaches
 the protected row and its filters hold under the same identity (`INV-RLS-9`).
+Policy joins may carry additional source-row equality correlations beyond their
+primary join key; these are part of the same join and must be enforced in direct
+evaluation, one-shot reads, and maintained subscription views.
+
+`allowedTo.<op>Referencing(sourcePolicy, viaColumn)` is reverse operation
+inheritance. It grants access to a target row only when there exists at least one
+row in the source table whose `viaColumn` references the target row and that
+source row is allowed for the same `<op>` operation. It does not fall back to
+source read visibility, insert/update policy, ownership, or mere existence of a
+referencing row. For `deleteReferencing`, the source table's `delete_using`
+clause is the authority; if no source delete policy exists, enforcing/server
+authorization fails closed.
 
 _Further invariants._ `INV-RLS-8` — a deletion-register version is readable to a
 non-system identity only when the row has a global content winner that satisfies
@@ -142,15 +167,15 @@ cuts (`INV-RLS-13`, ch. 5, ch. 11).
   connection credentials into a link identity, claims, role, expiry, and optional
   backend trust. This hook must be the only source for policy claim bindings;
   client-supplied query bindings must never widen claims (ch. 8, ch. 13).
-- 🔶 **Claims beyond `sub`.** Query validation types `sub`, `team`, and
-  `isAdmin`, but direct policy evaluation resolves only `claim("sub")`; `team`
-  and `isAdmin` currently fail closed. Decide whether `team`/`isAdmin` are
-  normative policy claims needing evaluation support or shape-composition-only.
-- 🔶 **Direct-evaluation predicate subset.** Should ch. 7 normatively pin the
-  supported policy predicate forms (with everything else fail-closed), or is the
-  subset an implementation limitation hidden behind allowed policy shapes?
-  Broader query predicates are validation-recognized but currently fail closed
-  because direct policy evaluation does not resolve them.
+- 🔶 **Admission-controlled claim vocabulary.** `claim("sub")` is normative, and
+  arbitrary runtime session claims are supported, but the product boundary still
+  needs to define which claims are minted by first-party auth integrations,
+  custom admission hooks, trusted backend assertions, and local-only sessions.
+- 🔶 **Direct-evaluation predicate expansion.** Direct policy evaluation now
+  supports `In` and `Contains` in addition to equality/inequality and boolean
+  composition. Range/null predicates remain fail-closed. Decide whether to add
+  direct support for the remaining query predicates or reject them earlier in
+  policy-specific validation.
 - 🔶 **History visibility rule.** Decide whether current-row readability should
   imply visibility for all historical versions of that row, or whether history
   sync/read must evaluate read policy per historical cut.

@@ -3,9 +3,12 @@ use std::fmt;
 
 use jazz::groove::records::{EnumSchema, Value as GrooveValue};
 use jazz::groove::schema::ColumnType as GrooveColumnType;
-use jazz::query::{JoinSourceLookup, JoinTarget, Operand, PolicyBranch, Predicate, Query};
+use jazz::query::{
+    JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand, PolicyBranch, Predicate, Query,
+};
 use jazz::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
+    WritePolicies,
 };
 
 use crate::public_api::policy::{CmpOp, PolicyValue};
@@ -95,8 +98,36 @@ fn convert_table(
         "policies.select.using",
         table.policies.select.using.as_ref(),
     )?;
-    converted.write_policy =
-        convert_optional_policy(schema, table, name, "policies.write", write_policy(table))?;
+    converted.write_policies = WritePolicies {
+        insert_check: convert_optional_policy(
+            schema,
+            table,
+            name,
+            "policies.insert.with_check",
+            table.policies.insert.with_check.as_ref(),
+        )?,
+        update_using: convert_optional_policy(
+            schema,
+            table,
+            name,
+            "policies.update.using",
+            table.policies.update.using.as_ref(),
+        )?,
+        update_check: convert_optional_policy(
+            schema,
+            table,
+            name,
+            "policies.update.with_check",
+            table.policies.update.with_check.as_ref(),
+        )?,
+        delete_using: convert_optional_policy(
+            schema,
+            table,
+            name,
+            "policies.delete.using",
+            table.policies.delete.using.as_ref(),
+        )?,
+    };
     Ok(converted)
 }
 
@@ -181,17 +212,6 @@ fn convert_merge_strategy(
     }
 }
 
-fn write_policy(table: &TableSchema) -> Option<&PolicyExpr> {
-    table
-        .policies
-        .insert
-        .with_check
-        .as_ref()
-        .or(table.policies.update.with_check.as_ref())
-        .or(table.policies.update.using.as_ref())
-        .or(table.policies.delete.using.as_ref())
-}
-
 fn convert_optional_policy(
     schema: &Schema,
     table_schema: &TableSchema,
@@ -244,22 +264,23 @@ fn convert_policy(
             Ok(query)
         }
         PolicyExpr::Inherits {
-            operation: Operation::Select,
+            operation,
             via_column,
-            max_depth: None,
-        } => append_inherited_select_policy(
+            max_depth: _,
+        } => append_inherited_policy(
             schema,
             table_schema,
             table,
             path,
             Query::from(table.as_str()),
+            *operation,
             via_column,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
             source_table,
             via_column,
-            max_depth: None,
+            max_depth: _,
         } => append_inherited_referencing_policy(
             schema,
             table,
@@ -287,27 +308,16 @@ fn convert_policy(
 fn is_core_policy_clause(expr: &PolicyExpr) -> bool {
     matches!(
         expr,
-        PolicyExpr::Inherits {
-            operation: Operation::Select,
-            max_depth: None,
-            ..
-        } | PolicyExpr::InheritsReferencing {
-            max_depth: None,
-            ..
-        } | PolicyExpr::Exists { .. }
+        PolicyExpr::Inherits { max_depth: _, .. }
+            | PolicyExpr::InheritsReferencing { .. }
+            | PolicyExpr::Exists { .. }
     )
 }
 
 fn policy_requires_branch(expr: &PolicyExpr) -> bool {
     match expr {
-        PolicyExpr::Inherits {
-            operation: Operation::Select,
-            max_depth: None,
-            ..
-        }
-        | PolicyExpr::InheritsReferencing {
-            max_depth: None, ..
-        }
+        PolicyExpr::Inherits { max_depth: _, .. }
+        | PolicyExpr::InheritsReferencing { .. }
         | PolicyExpr::Exists { .. } => true,
         PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs.iter().any(policy_requires_branch),
         PolicyExpr::Not(expr) => policy_requires_branch(expr),
@@ -325,15 +335,23 @@ fn append_policy_clause(
 ) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::Inherits {
-            operation: Operation::Select,
+            operation,
             via_column,
-            max_depth: None,
-        } => append_inherited_select_policy(schema, table_schema, table, path, query, via_column),
+            max_depth: _,
+        } => append_inherited_policy(
+            schema,
+            table_schema,
+            table,
+            path,
+            query,
+            *operation,
+            via_column,
+        ),
         PolicyExpr::InheritsReferencing {
             operation,
             source_table,
             via_column,
-            max_depth: None,
+            max_depth: _,
         } => append_inherited_referencing_policy(
             schema,
             table,
@@ -498,6 +516,7 @@ fn append_exists_policy_clause(
 
     let mut join_column = None;
     let mut source_column = None;
+    let mut correlated_filters = Vec::new();
     let mut filters = Vec::new();
 
     let conditions = match condition {
@@ -512,14 +531,15 @@ fn append_exists_policy_clause(
                 op: CmpOp::Eq,
                 value: PolicyValue::SessionRef(path_segments),
             } if path_segments.len() == 2 && path_segments[0] == "__jazz_outer_row" => {
-                if join_column.is_some() {
-                    return Err(err(
-                        format!("$.{}.{}.Exists[{index}]", table.as_str(), path),
-                        "core schema policies support only one outer-row correlation per EXISTS",
-                    ));
+                if join_column.is_none() {
+                    join_column = Some(column.clone());
+                    source_column = Some(path_segments[1].clone());
+                } else {
+                    correlated_filters.push(JoinCorrelation {
+                        join_column: column.clone(),
+                        source_column: path_segments[1].clone(),
+                    });
                 }
-                join_column = Some(column.clone());
-                source_column = Some(path_segments[1].clone());
             }
             other => filters.push(convert_policy_predicate(
                 &exists_table_name,
@@ -539,17 +559,26 @@ fn append_exists_policy_clause(
 
     if join_column == "id" {
         Ok(query.join_via_row_id(exists_table, source_column, filters))
-    } else {
+    } else if correlated_filters.is_empty() {
         Ok(query.join_via_column(exists_table, join_column, source_column, filters))
+    } else {
+        Ok(query.join_via_column_with_correlations(
+            exists_table,
+            join_column,
+            source_column,
+            correlated_filters,
+            filters,
+        ))
     }
 }
 
-fn append_inherited_select_policy(
+fn append_inherited_policy(
     schema: &Schema,
     table_schema: &TableSchema,
     table: &TableName,
     path: &str,
     query: Query,
+    operation: Operation,
     via_column: &str,
 ) -> Result<Query, SchemaConversionError> {
     let column = table_schema
@@ -575,10 +604,10 @@ fn append_inherited_select_policy(
             format!("INHERITS via_column '{via_column}' references unknown table '{parent_table}'"),
         )
     })?;
-    let parent_policy = parent_schema.policies.select.using.as_ref().ok_or_else(|| {
+    let parent_policy = source_operation_policy(parent_schema, operation).ok_or_else(|| {
         err(
             format!("$.{}.{}", table.as_str(), path),
-            format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a SELECT policy"),
+            format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a {operation:?} policy"),
         )
     })?;
     let parent_filter = convert_policy_predicate(
@@ -598,7 +627,7 @@ fn append_inherited_select_policy(
                 &format!("{path}.Inherits[{parent_table}]"),
                 parent_policy,
             )?;
-            append_inherited_select_policy_branches(
+            append_inherited_policy_branches(
                 table,
                 path,
                 query,
@@ -611,7 +640,7 @@ fn append_inherited_select_policy(
     }
 }
 
-fn append_inherited_select_policy_branches(
+fn append_inherited_policy_branches(
     table: &TableName,
     path: &str,
     mut query: Query,
@@ -662,49 +691,83 @@ fn inherited_parent_branch_to_child_query(
         query = query.join_via_row_id(parent_table.as_str(), via_column, branch.filters);
     }
     for join in branch.joins {
-        query = match join.target {
+        let JoinVia {
+            table: join_table,
+            on_column,
+            target,
+            source_column,
+            source_lookup: _,
+            correlated_filters,
+            filters,
+            nested_joins,
+        } = join;
+        query = match target {
             JoinTarget::Column => {
-                if let Some(source_column) = join.source_column {
-                    query.join_via_source_lookup(
-                        join.table,
-                        join.on_column,
-                        JoinSourceLookup {
-                            table: parent_table.as_str().to_owned(),
-                            row_id_source_column: via_column.to_owned(),
-                            value_column: source_column,
-                        },
-                        join.filters,
-                    )
+                if let Some(source_column) = source_column {
+                    let source_lookup = JoinSourceLookup {
+                        table: parent_table.as_str().to_owned(),
+                        row_id_source_column: via_column.to_owned(),
+                        value_column: source_column,
+                    };
+                    let mut query = query;
+                    query.joins.push(JoinVia {
+                        table: join_table,
+                        on_column,
+                        target: JoinTarget::Column,
+                        source_column: Some(source_lookup.value_column.clone()),
+                        source_lookup: Some(source_lookup),
+                        correlated_filters,
+                        filters,
+                        nested_joins,
+                    });
+                    query
                 } else {
-                    query.join_via_column(
-                        join.table,
-                        join.on_column,
+                    let mut query = query.join_via_column(
+                        join_table,
+                        on_column,
                         via_column.to_owned(),
-                        join.filters,
-                    )
+                        filters,
+                    );
+                    if let Some(last) = query.joins.last_mut() {
+                        last.correlated_filters = correlated_filters;
+                        last.nested_joins = nested_joins;
+                    }
+                    query
                 }
             }
             JoinTarget::RowId => {
-                if let Some(source_column) = join.source_column {
-                    query.join_via_source_lookup_with_target(
-                        join.table,
-                        join.on_column,
-                        JoinTarget::RowId,
-                        JoinSourceLookup {
-                            table: parent_table.as_str().to_owned(),
-                            row_id_source_column: via_column.to_owned(),
-                            value_column: source_column,
-                        },
-                        join.filters,
-                    )
+                if let Some(source_column) = source_column {
+                    let source_lookup = JoinSourceLookup {
+                        table: parent_table.as_str().to_owned(),
+                        row_id_source_column: via_column.to_owned(),
+                        value_column: source_column,
+                    };
+                    let mut query = query;
+                    query.joins.push(JoinVia {
+                        table: join_table,
+                        on_column,
+                        target: JoinTarget::RowId,
+                        source_column: Some(source_lookup.value_column.clone()),
+                        source_lookup: Some(source_lookup),
+                        correlated_filters,
+                        filters,
+                        nested_joins,
+                    });
+                    query
                 } else {
-                    if join.table != parent_table.as_str() {
+                    if join_table != parent_table.as_str() {
                         return Err(err(
                             format!("$.{}.{}.InheritsBranch[{index}]", table.as_str(), path),
                             "core schema policies do not support inherited SELECT row-id joins to non-parent tables yet",
                         ));
                     }
-                    query.join_via_row_id(join.table, via_column.to_owned(), join.filters)
+                    let mut query =
+                        query.join_via_row_id(join_table, via_column.to_owned(), filters);
+                    if let Some(last) = query.joins.last_mut() {
+                        last.correlated_filters = correlated_filters;
+                        last.nested_joins = nested_joins;
+                    }
+                    query
                 }
             }
         };
@@ -765,6 +828,28 @@ fn convert_policy_predicate(
             Operand::Column(column.clone()),
             convert_policy_operand(table, path, value)?,
         )),
+        PolicyExpr::In {
+            column,
+            session_path,
+        } => Ok(Predicate::Contains(
+            convert_session_path_operand(table, path, session_path)?,
+            Operand::Column(column.clone()),
+        )),
+        PolicyExpr::InList { column, values } => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                convert_policy_operand(table, &format!("{path}.InList[{index}]"), value)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| {
+                Predicate::Any(
+                    values
+                        .into_iter()
+                        .map(|value| Predicate::Eq(Operand::Column(column.clone()), value))
+                        .collect(),
+                )
+            }),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
             format!("core schema policies do not support {other:?} yet"),
@@ -778,28 +863,34 @@ fn convert_policy_operand(
     value: &PolicyValue,
 ) -> Result<Operand, SchemaConversionError> {
     match value {
-        PolicyValue::SessionRef(path_segments)
-            if path_segments.len() == 1
-                && PUBLIC_USER_ID_SESSION_PATHS.contains(&path_segments[0].as_str()) =>
-        {
-            Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()))
+        PolicyValue::SessionRef(path_segments) => {
+            convert_session_path_operand(table, path, path_segments)
         }
-        PolicyValue::SessionRef(path_segments)
-            if path_segments.len() == 2 && path_segments[0] == "claims" =>
-        {
-            Ok(Operand::Claim(path_segments[1].clone()))
-        }
-        PolicyValue::SessionRef(path_segments) => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            format!(
-                "core schema policies only support session.user_id and session.claims.* references, got session.{}",
-                path_segments.join(".")
-            ),
-        )),
         PolicyValue::Literal(value) => Ok(Operand::Literal(convert_policy_literal(
             table, path, value,
         )?)),
     }
+}
+
+fn convert_session_path_operand(
+    table: &TableName,
+    path: &str,
+    path_segments: &[String],
+) -> Result<Operand, SchemaConversionError> {
+    if path_segments.len() == 1 && PUBLIC_USER_ID_SESSION_PATHS.contains(&path_segments[0].as_str())
+    {
+        return Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()));
+    }
+    if path_segments.len() == 2 && path_segments[0] == "claims" {
+        return Ok(Operand::Claim(path_segments[1].clone()));
+    }
+    Err(err(
+        format!("$.{}.{}", table.as_str(), path),
+        format!(
+            "core schema policies only support session.user_id and session.claims.* references, got session.{}",
+            path_segments.join(".")
+        ),
+    ))
 }
 
 fn convert_policy_literal(
@@ -1012,9 +1103,12 @@ mod tests {
                 ]),
             ])]
         );
-        assert_eq!(todos.write_policy.as_ref().unwrap().table, "todos");
         assert_eq!(
-            todos.write_policy.as_ref().unwrap().filters,
+            todos.write_policies.insert_check.as_ref().unwrap().table,
+            "todos"
+        );
+        assert_eq!(
+            todos.write_policies.insert_check.as_ref().unwrap().filters,
             vec![Predicate::Eq(
                 Operand::Column("token_id".to_owned()),
                 Operand::Literal(GrooveValue::Uuid(Uuid::nil())),
@@ -1062,7 +1156,7 @@ mod tests {
             .iter()
             .find(|table| table.name == "messages")
             .unwrap();
-        let policy = messages.write_policy.as_ref().unwrap();
+        let policy = messages.write_policies.insert_check.as_ref().unwrap();
         assert!(policy.filters.is_empty());
         assert_eq!(policy.joins.len(), 1);
         let join = &policy.joins[0];
@@ -1335,6 +1429,97 @@ mod tests {
                 Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
             )]
         );
+    }
+
+    #[test]
+    fn converts_depth_limited_inherited_select_to_row_id_join() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("teams")
+                    .column("name", ColumnType::Text)
+                    .column("kind", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::And(vec![
+                        PolicyExpr::In {
+                            column: "id".to_owned(),
+                            session_path: vec!["claims".to_owned(), "team_ids".to_owned()],
+                        },
+                        PolicyExpr::InList {
+                            column: "kind".to_owned(),
+                            values: vec![
+                                PolicyValue::Literal(Value::Text("individual".to_owned())),
+                                PolicyValue::Literal(Value::Text("manual".to_owned())),
+                            ],
+                        },
+                    ]))),
+            )
+            .table(
+                TableSchemaBuilder::new("team_access_edges")
+                    .fk_column("target_team", "teams")
+                    .column("grant_role", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "target_team".to_owned(),
+                        max_depth: Some(32),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let access_edges = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "team_access_edges")
+            .unwrap();
+        let policy = access_edges.read_policy.as_ref().unwrap();
+        assert!(policy.filters.is_empty());
+        assert_eq!(policy.joins.len(), 1);
+        let join = &policy.joins[0];
+        assert_eq!(join.table, "teams");
+        assert_eq!(join.on_column, "id");
+        assert_eq!(join.target, JoinTarget::RowId);
+        assert_eq!(join.source_column.as_deref(), Some("target_team"));
+        assert_eq!(
+            join.filters,
+            vec![Predicate::All(vec![
+                Predicate::Contains(
+                    Operand::Claim("team_ids".to_owned()),
+                    Operand::Column("id".to_owned()),
+                ),
+                Predicate::Any(vec![
+                    Predicate::Eq(
+                        Operand::Column("kind".to_owned()),
+                        Operand::Literal(GrooveValue::String("individual".to_owned())),
+                    ),
+                    Predicate::Eq(
+                        Operand::Column("kind".to_owned()),
+                        Operand::Literal(GrooveValue::String("manual".to_owned())),
+                    ),
+                ])
+            ])]
+        );
+    }
+
+    #[test]
+    fn converts_empty_in_list_to_false_predicate() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("teams")
+                    .column("kind", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::InList {
+                        column: "kind".to_owned(),
+                        values: Vec::new(),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let teams = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "teams")
+            .unwrap();
+        let policy = teams.read_policy.as_ref().unwrap();
+        assert_eq!(policy.filters, vec![Predicate::Any(Vec::new())]);
     }
 
     #[test]

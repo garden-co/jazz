@@ -1,4 +1,6 @@
-import type { DynamicTableRow, QueryBuilder, WasmSchema } from "jazz-tools";
+import type { QueryBuilder, WasmSchema } from "jazz-tools";
+
+export type DynamicTableRow = { id: string } & Record<string, unknown>;
 
 /**
  * Where condition value: either a scalar (implies eq) or an object of op -> value.

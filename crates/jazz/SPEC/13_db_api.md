@@ -273,11 +273,12 @@ Facade errors carry an `ErrorCode` plus a message:
 **Callable today:** `Db::open`; the mutation methods (§13.4), including
 `mergeable_tx`, `exclusive_tx`, attributed writes, and `can_*` dry-runs; `table` /
 `read` / `one` / `all` / `subscribe` (§13.3); and the binding sync surface
-(§13.5). Read policies evaluate `claim("sub")` today — `team`/`isAdmin` validate
-but are not yet evaluated (ch. 7), so do not gate app logic on them. Time-travel
-reads and branches exist at the `Node` level (ch. 11) but are not on the `Db`
-facade yet. The initial binding ABI design is below; remaining **designed but not
-yet on the facade** surface stays in the Open questions section.
+(§13.5). Read policies evaluate `claim("sub")` plus admission/session-provided
+runtime claims (ch. 7); client query bindings never supply policy claims.
+Time-travel reads and branches exist at the `Node` level (ch. 11) but are not on
+the `Db` facade yet. The initial binding ABI design is below; remaining
+**designed but not yet on the facade** surface stays in the Open questions
+section.
 
 ## 13.7 Initial TS/WASM/NAPI Binding Surface
 

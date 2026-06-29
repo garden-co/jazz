@@ -43,8 +43,6 @@ describe("JazzClient runtime helpers", () => {
 
     expect(createSubscriptionCalls).toHaveLength(1);
     expect(createSubscriptionCalls[0]![0]).toBe(queryJson);
-    expect(executeSubscriptionCalls).toHaveLength(0);
-    await flushMicrotasks();
     expect(executeSubscriptionCalls).toHaveLength(1);
   });
 
@@ -233,14 +231,11 @@ describe("JazzClient runtime helpers", () => {
   // 2-phase subscribe lifecycle
   // =========================================================================
 
-  it("createSubscription is called synchronously, executeSubscription is deferred", async () => {
+  it("createSubscription and executeSubscription are called synchronously", () => {
     const { client, createSubscriptionCalls, executeSubscriptionCalls } = makeClient();
     client.subscribe('{"table":"todos"}', () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
-    expect(executeSubscriptionCalls).toHaveLength(0);
-
-    await flushMicrotasks();
     expect(executeSubscriptionCalls).toHaveLength(1);
   });
 
@@ -252,15 +247,12 @@ describe("JazzClient runtime helpers", () => {
     expect(subId2).toBe(1);
   });
 
-  it("unsubscribe before execute calls runtime.unsubscribe with the handle", async () => {
+  it("unsubscribe calls runtime.unsubscribe with the handle", () => {
     const { client, executeSubscriptionCalls, unsubscribeCalls } = makeClient();
     const subId = client.subscribe('{"table":"todos"}', () => {});
     client.unsubscribe(subId);
 
     expect(unsubscribeCalls).toEqual([0]);
-
-    await flushMicrotasks();
-    // executeSubscription still fires (the runtime no-ops since handle was already unsubscribed)
     expect(executeSubscriptionCalls).toHaveLength(1);
   });
 

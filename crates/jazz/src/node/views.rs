@@ -186,9 +186,7 @@ where
         let previous_row_result_set = previous_row_result_set.into_iter().collect::<BTreeSet<_>>();
         let degenerate_whole_table = is_degenerate_whole_table(shape, binding);
         let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
-        let rows = if identity == AuthorId::SYSTEM
-            && let Some((effective_shape, effective_binding, plan)) = prepared_plan
-        {
+        let rows = if let Some((effective_shape, effective_binding, plan)) = prepared_plan {
             self.query_rows_with_prepared_plan_for_identity(
                 effective_shape,
                 effective_binding,

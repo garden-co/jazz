@@ -1,6 +1,5 @@
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { TransactionScope } from "../index.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import {
   fetchPermissionsHead,
@@ -16,7 +15,7 @@ type ExpectLike = (value: unknown) => {
   };
   toThrow(expected?: unknown): void;
 };
-type TestDbMethodCallback = (db: TransactionScope) => unknown;
+type TestDbMethodCallback = (db: Db) => unknown;
 
 /**
  * Db used for testing permissions.
@@ -43,16 +42,12 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
   Object.defineProperties(testDb, {
     expectAllowed: {
       value: (callback: TestDbMethodCallback) => {
-        const tx = db.beginExclusiveTransaction();
-        expect(() => callback(tx)).not.toThrow();
-        tx.rollback();
+        expect(() => callback(db)).not.toThrow();
       },
     },
     expectDenied: {
       value: (callback: TestDbMethodCallback) => {
-        const tx = db.beginExclusiveTransaction();
-        expect(() => callback(tx)).toThrow('WriteError("policy denied');
-        tx.rollback();
+        expect(() => callback(db)).toThrow('WriteError("policy denied');
       },
     },
   });

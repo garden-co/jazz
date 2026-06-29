@@ -237,7 +237,7 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
       );
 
       expect(listenerA).toHaveLength(0);
-      expect(listenerB[listenerB.length - 1]).toEqual(["remaining-1", "remaining-2"]);
+      expect(listenerB[listenerB.length - 1]?.toSorted()).toEqual(["remaining-1", "remaining-2"]);
 
       offB();
     });

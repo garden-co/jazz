@@ -83,6 +83,14 @@ where
         S: ReopenableStorage,
     {
         match message {
+            SyncMessage::SessionClaims { identity, claims } => {
+                if let Some(context) = ingest_context
+                    && context.trust == CommitUnitTrust::TrustedBackend
+                {
+                    self.set_session_claims(identity, claims);
+                }
+                Ok(Vec::new())
+            }
             SyncMessage::CommitUnit { tx, versions } => self.ingest_commit_unit_with_context(
                 tx,
                 versions,

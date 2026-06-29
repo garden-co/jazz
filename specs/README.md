@@ -38,6 +38,8 @@ migration context only, not active architecture.
 
 **[Schema Files](legacy-alpha-status-quo/schema_files.md)** — Historical alpha notes on the developer-facing schema workflow: `schema.ts`, `permissions.ts`, migrations, and CLI commands.
 
+**[Core-Supported Public Schema Subset](a_mvp/core_supported_public_schema_subset.md)** — Active MVP note for keeping executable schema validation consistent across CLI/dev publish, runtime open, and server conversion while the public catalogue vocabulary is broader than core support.
+
 ### 4. Sync and Runtime Orchestration
 
 **[Sync Manager](legacy-alpha-status-quo/sync_manager.md)** — Legacy alpha query-scoped sync and row-batch replication. New network sync should stay on core wire frames.

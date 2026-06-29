@@ -102,9 +102,14 @@ impl JazzSchema {
                 assert_eq!(policy.table, table.name, "read policy table must match");
                 policy.validate(&self).expect("valid read policy shape");
             }
-            if let Some(policy) = &table.write_policy {
-                assert_eq!(policy.table, table.name, "write policy table must match");
-                policy.validate(&self).expect("valid write policy shape");
+            for (label, policy) in table.write_policies.iter() {
+                assert_eq!(
+                    policy.table, table.name,
+                    "{label} write policy table must match"
+                );
+                policy
+                    .validate(&self)
+                    .unwrap_or_else(|_| panic!("valid {label} write policy shape"));
             }
         }
         if let Some(policy) = &self.branch_read_policy {
@@ -411,6 +416,56 @@ impl From<groove::schema::ColumnSchema> for ColumnSchema {
     }
 }
 
+/// Operation-specific write policy clauses for an application table.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct WritePolicies {
+    /// Policy evaluated against the inserted row.
+    #[serde(default)]
+    pub insert_check: Option<Query>,
+    /// Policy evaluated against the row before an update.
+    #[serde(default)]
+    pub update_using: Option<Query>,
+    /// Policy evaluated against the row after an update.
+    #[serde(default)]
+    pub update_check: Option<Query>,
+    /// Policy evaluated against the row being deleted.
+    #[serde(default)]
+    pub delete_using: Option<Query>,
+}
+
+impl WritePolicies {
+    /// Build operation-specific clauses from the legacy single write policy.
+    pub fn legacy(policy: Option<Query>) -> Self {
+        Self {
+            insert_check: policy.clone(),
+            update_using: policy.clone(),
+            update_check: policy.clone(),
+            delete_using: policy,
+        }
+    }
+
+    /// Iterate over every present operation-specific clause.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, &Query)> {
+        [
+            ("insert_check", self.insert_check.as_ref()),
+            ("update_using", self.update_using.as_ref()),
+            ("update_check", self.update_check.as_ref()),
+            ("delete_using", self.delete_using.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(label, policy)| policy.map(|policy| (label, policy)))
+    }
+
+    /// Return one representative policy for coarse subscription scoping.
+    pub fn any(&self) -> Option<Query> {
+        self.insert_check
+            .clone()
+            .or_else(|| self.update_check.clone())
+            .or_else(|| self.update_using.clone())
+            .or_else(|| self.delete_using.clone())
+    }
+}
+
 /// Application table whose rows are stored as immutable history versions.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct TableSchema {
@@ -422,8 +477,9 @@ pub struct TableSchema {
     pub references: BTreeMap<String, String>,
     /// Read policy used when serving views.
     pub read_policy: Option<Query>,
-    /// Write policy used by fate authority.
-    pub write_policy: Option<Query>,
+    /// Write policies used by fate authority.
+    #[serde(default)]
+    pub write_policies: WritePolicies,
     /// User columns materialized and indexed on the global-current content table.
     #[serde(default)]
     pub indexed_columns: BTreeSet<String>,
@@ -443,7 +499,7 @@ impl TableSchema {
             columns: columns.into_iter().map(Into::into).collect(),
             references: BTreeMap::new(),
             read_policy: None,
-            write_policy: None,
+            write_policies: WritePolicies::default(),
             indexed_columns: BTreeSet::new(),
             merge_strategies: BTreeMap::new(),
         }
@@ -501,7 +557,13 @@ impl TableSchema {
 
     /// Set the table write policy.
     pub fn with_write_policy(mut self, write_policy: impl Into<Option<Query>>) -> Self {
-        self.write_policy = write_policy.into();
+        self.write_policies = WritePolicies::legacy(write_policy.into());
+        self
+    }
+
+    /// Set operation-specific write policies.
+    pub fn with_write_policies(mut self, write_policies: WritePolicies) -> Self {
+        self.write_policies = write_policies;
         self
     }
 

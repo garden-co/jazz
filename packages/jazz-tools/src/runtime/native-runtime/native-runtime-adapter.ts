@@ -44,6 +44,7 @@ type NativeDb = {
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
+  attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
   queryAttachmentIsCovered?(attachment: unknown): boolean;
   detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array): PreparedQuery;
@@ -151,6 +152,7 @@ type RuntimeSession = {
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
+  opened: boolean;
   callback?: Function;
   cancelled: boolean;
 };
@@ -523,6 +525,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       rows: [],
+      opened: false,
       cancelled: false,
     });
     return handle;
@@ -532,7 +535,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.callback = onUpdate;
-    if (subscription.rows.length > 0) {
+    if (subscription.opened) {
       subscription.callback(nativeDeltaFromRows(subscription.rows, []));
     }
     this.startSubscriptionReader(handle, subscription);
@@ -695,8 +698,18 @@ export class NativeRuntimeAdapter implements Runtime {
     if (tier == null || tier === "local") return;
     const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
     if (options.propagation != null && options.propagation !== "full") return;
+    if (!this.serverTransport) return;
     if (!this.db.attachQuery) return;
-    const attachment = this.db.attachQuery(query, readOptions(tier, false, optionsJson));
+    const opts = readOptions(tier, false, optionsJson);
+    let attachment: unknown;
+    if (session) {
+      if (!this.db.attachQueryForIdentity) {
+        throw new Error("Native runtime does not support session-scoped query coverage");
+      }
+      attachment = this.db.attachQueryForIdentity(query, session.identity, opts);
+    } else {
+      attachment = this.db.attachQuery(query, opts);
+    }
     if (!this.db.queryAttachmentIsCovered) return attachment;
     await this.waitForQueryCoverage(
       attachment,
@@ -918,6 +931,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const previousRows = subscription.rows;
     if (chunk.type === "snapshot") {
       subscription.rows = rowsFromBatches(chunk.rows, this.schema);
+      subscription.opened = true;
     } else {
       subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
     }
@@ -1041,8 +1055,8 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
             ? SYSTEM_AUTHOR_ID
             : undefined;
     if (!userId) return null;
-    const claims = parsed.session && isRecord(parsed.session.claims) ? parsed.session.claims : {};
-    return { user_id: userId, claims, identity: parseUuid(userId) };
+    const claims = sessionClaims(userId, parsed.session?.claims);
+    return { user_id: userId, claims, identity: authorBytesForSubject(userId) };
   } catch {
     return null;
   }
@@ -1126,12 +1140,23 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
   if (typeof parsed.user_id !== "string") {
     throw new Error("Native runtime session is missing user_id");
   }
-  const claims = isRecord(parsed.claims) ? parsed.claims : {};
-  return { user_id: parsed.user_id, claims, identity: parseUuid(parsed.user_id) };
+  return {
+    user_id: parsed.user_id,
+    claims: sessionClaims(parsed.user_id, parsed.claims),
+    identity: authorBytesForSubject(parsed.user_id),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sessionClaims(userId: string, rawClaims: unknown): Record<string, unknown> {
+  return {
+    ...(isRecord(rawClaims) ? rawClaims : {}),
+    user_id: userId,
+    userId,
+  };
 }
 
 function closeSubscriptionSource(source: SubscriptionSourceState["source"]): void {
@@ -2146,6 +2171,32 @@ export function parseUuid(value: string): Uint8Array {
   const bytes = new Uint8Array(16);
   for (let i = 0; i < 16; i += 1) {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function uuidBytes(value: string): Uint8Array | null {
+  try {
+    return parseUuid(value);
+  } catch {
+    return null;
+  }
+}
+
+function authorBytesForSubject(subject: string): Uint8Array {
+  return uuidBytes(subject) ?? deterministicBytes(`session:${subject}:author`);
+}
+
+function deterministicBytes(seed: string): Uint8Array {
+  let hash = 0x811c9dc5;
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  for (let round = 0; round < 4; round += 1) {
+    for (let i = 0; i < seed.length; i += 1) {
+      hash ^= seed.charCodeAt(i) + round;
+      hash = Math.imul(hash, 0x01000193);
+    }
+    view.setUint32(round * 4, hash >>> 0, true);
   }
   return bytes;
 }

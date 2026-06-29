@@ -12,14 +12,18 @@ import { PostcardWriter, writeValueType, type ValueType } from "./native-codec.j
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 
 type PolicyOperandValue = PolicyValue | { type: "OuterRowRef"; column: string };
+type InternalPolicyValue = PolicyValue | { type: "FrontierRowRef" };
+type LoweredPolicyExpr = PolicyExpr & { scope?: string };
 
 type PolicyQueryShape = {
   filters: PolicyExpr[];
   joins: PolicyJoin[];
+  reachable: PolicyReachable[];
 };
 
 type PolicyJoin = {
   table: string;
+  scope?: string;
   onColumn: string;
   target: "Column" | "RowId";
   sourceColumn?: string;
@@ -28,9 +32,39 @@ type PolicyJoin = {
     rowIdSourceColumn: string;
     valueColumn: string;
   };
+  correlatedFilters?: {
+    column: string;
+    sourceColumn: string;
+  }[];
   filters: PolicyExpr[];
   nestedJoins?: PolicyJoin[];
 };
+
+type PolicyReachable = {
+  accessTable: string;
+  accessRowColumn: string;
+  accessTeamColumn: string;
+  accessTeamTarget: "Column" | "RowId";
+  from: PolicyOperandValue;
+  accessFilters: PolicyExpr[];
+  edgeTable: string;
+  edgeMemberColumn: string;
+  edgeParentColumn: string;
+  edgeFilters: PolicyExpr[];
+  maxDepth: number;
+  seed?: PolicyReachableSeed;
+};
+
+type PolicyReachableSeed = {
+  table: string;
+  teamColumn: string;
+  filters: PolicyExpr[];
+};
+
+type PendingPolicyReachable = Omit<
+  PolicyReachable,
+  "accessTable" | "accessRowColumn" | "accessTeamColumn" | "accessTeamTarget" | "accessFilters"
+>;
 
 export function encodeSchema(schema: WasmSchema): Uint8Array {
   const tables = Object.entries(schema);
@@ -52,7 +86,10 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
       }
     }
     writePolicy(table, schema, tableName, definition.policies?.select?.using);
-    writePolicy(table, schema, tableName, writePolicyExpr(definition.policies));
+    writePolicy(table, schema, tableName, definition.policies?.insert?.with_check);
+    writePolicy(table, schema, tableName, definition.policies?.update?.using);
+    writePolicy(table, schema, tableName, definition.policies?.update?.with_check);
+    writePolicy(table, schema, tableName, definition.policies?.delete?.using);
     table.set(0);
     table.map(0);
   }, tables.length);
@@ -114,7 +151,9 @@ function writePolicyQuery(
   table: string,
   expr: PolicyExpr,
 ): void {
-  const alternatives = policyExprToAlternatives(schema, table, expr);
+  const alternatives = policyExprToAlternatives(schema, table, expr).map((alternative) =>
+    normalizePolicyQueryShape(schema, alternative),
+  );
   const query =
     alternatives.length === 1
       ? alternatives[0]!
@@ -129,7 +168,10 @@ function writePolicyQuery(
     (branch, index) => writePolicyBranch(branch, alternatives[index]!),
     alternatives.length === 1 ? 0 : alternatives.length,
   );
-  writer.vec(() => undefined, 0);
+  writer.vec(
+    (reachable, index) => writePolicyReachable(reachable, query.reachable[index]!),
+    query.reachable.length,
+  );
   writer.vec(() => undefined, 0);
   writer.none();
   writer.vec(() => undefined, 0);
@@ -189,6 +231,12 @@ function writePolicyPredicate(writer: PostcardWriter, expr: PolicyExpr): void {
       writer.string(expr.column);
       writePolicyOperand(writer, policyOperandValue(expr.value));
       return;
+    case "In":
+      writer.u64(10); // Predicate::Contains
+      writePolicyOperand(writer, { type: "SessionRef", path: expr.session_path });
+      writer.u64(0); // Operand::Column
+      writer.string(expr.column);
+      return;
     case "InList":
       writer.u64(5); // Predicate::In
       writer.u64(0); // Operand::Column
@@ -231,6 +279,19 @@ function writePolicyLiteral(writer: PostcardWriter, value: Value): void {
       writer.u64(5); // groove::records::Value::Bool
       writer.bool(value.value);
       return;
+    case "Integer":
+      writer.u64(2); // groove::records::Value::I64
+      writer.u64(value.value);
+      return;
+    case "BigInt":
+    case "Timestamp":
+      writer.u64(3); // groove::records::Value::U64
+      writer.u64(value.value);
+      return;
+    case "Double":
+      writer.u64(4); // groove::records::Value::F64
+      writer.bytes(f64Bytes(value.value), false);
+      return;
     case "Text":
       writer.u64(6); // groove::records::Value::String
       writer.string(value.value);
@@ -262,6 +323,11 @@ function writePolicyJoin(writer: PostcardWriter, join: PolicyJoin): void {
       lookup.string(join.sourceLookup!.valueColumn);
     });
   }
+  writer.vec((correlation, index) => {
+    const correlatedFilter = join.correlatedFilters![index]!;
+    correlation.string(correlatedFilter.column);
+    correlation.string(correlatedFilter.sourceColumn);
+  }, join.correlatedFilters?.length ?? 0);
   writer.vec(
     (filter, index) => writePolicyPredicate(filter, join.filters[index]!),
     join.filters.length,
@@ -278,7 +344,42 @@ function writePolicyBranch(writer: PostcardWriter, branch: PolicyQueryShape): vo
     branch.filters.length,
   );
   writer.vec((join, index) => writePolicyJoin(join, branch.joins[index]!), branch.joins.length);
-  writer.vec(() => undefined, 0);
+  writer.vec(
+    (reachable, index) => writePolicyReachable(reachable, branch.reachable[index]!),
+    branch.reachable.length,
+  );
+}
+
+function writePolicyReachable(writer: PostcardWriter, reachable: PolicyReachable): void {
+  writer.string(reachable.accessTable);
+  writer.string(reachable.accessRowColumn);
+  writer.string(reachable.accessTeamColumn);
+  writer.u64(reachable.accessTeamTarget === "Column" ? 0 : 1);
+  writePolicyOperand(writer, reachable.from);
+  writer.vec(
+    (filter, index) => writePolicyPredicate(filter, reachable.accessFilters[index]!),
+    reachable.accessFilters.length,
+  );
+  writer.string(reachable.edgeTable);
+  writer.string(reachable.edgeMemberColumn);
+  writer.string(reachable.edgeParentColumn);
+  writer.vec(
+    (filter, index) => writePolicyPredicate(filter, reachable.edgeFilters[index]!),
+    reachable.edgeFilters.length,
+  );
+  writer.u64(reachable.maxDepth);
+  if (reachable.seed) {
+    writer.some((seed) => {
+      seed.string(reachable.seed!.table);
+      seed.string(reachable.seed!.teamColumn);
+      seed.vec(
+        (filter, index) => writePolicyPredicate(filter, reachable.seed!.filters[index]!),
+        reachable.seed!.filters.length,
+      );
+    });
+  } else {
+    writer.none();
+  }
 }
 
 function policyExprToAlternatives(
@@ -286,10 +387,10 @@ function policyExprToAlternatives(
   table: string,
   expr: PolicyExpr,
 ): PolicyQueryShape[] {
-  if (expr.type === "Inherits" && expr.operation === "Select" && expr.max_depth == null) {
-    return inheritedSelectPolicyToQueryShapes(schema, table, expr.via_column);
+  if (expr.type === "Inherits") {
+    return inheritedPolicyToQueryShapes(schema, table, expr.operation, expr.via_column);
   }
-  if (expr.type === "InheritsReferencing" && expr.max_depth == null) {
+  if (expr.type === "InheritsReferencing") {
     return inheritedReferencingPolicyToQueryShapes(
       schema,
       expr.operation,
@@ -310,10 +411,11 @@ function policyExprToAlternatives(
         childAlternatives.map((right) => ({
           filters: [...left.filters, ...right.filters],
           joins: [...left.joins, ...right.joins],
+          reachable: [...left.reachable, ...right.reachable],
         })),
       );
     },
-    [{ filters: [], joins: [] }],
+    [{ filters: [], joins: [], reachable: [] }],
   );
 }
 
@@ -322,30 +424,39 @@ function policyExprToQueryShape(
   table: string,
   expr: PolicyExpr,
 ): PolicyQueryShape {
-  if (expr.type === "True") return { filters: [], joins: [] };
-  if (expr.type === "False") return { filters: [expr], joins: [] };
+  if (expr.type === "True") return { filters: [], joins: [], reachable: [] };
+  if (expr.type === "False") return { filters: [expr], joins: [], reachable: [] };
   if (expr.type === "And") {
     return expr.exprs.reduce<PolicyQueryShape>(
       (shape, child) => {
         const childShape = policyExprToQueryShape(schema, table, child);
         shape.filters.push(...childShape.filters);
         shape.joins.push(...childShape.joins);
+        shape.reachable.push(...childShape.reachable);
         return shape;
       },
-      { filters: [], joins: [] },
+      { filters: [], joins: [], reachable: [] },
     );
   }
   if (expr.type === "Exists") {
-    return { filters: [], joins: [policyExistsToJoin(schema, expr)] };
+    return { filters: [], joins: [policyExistsToJoin(schema, expr)], reachable: [] };
   }
-  if (expr.type === "Inherits" && expr.operation === "Select" && expr.max_depth == null) {
-    const alternatives = inheritedSelectPolicyToQueryShapes(schema, table, expr.via_column);
+  if (expr.type === "ExistsRel") {
+    return policyExistsRelToQueryShape(schema, table, expr.rel);
+  }
+  if (expr.type === "Inherits") {
+    const alternatives = inheritedPolicyToQueryShapes(
+      schema,
+      table,
+      expr.operation,
+      expr.via_column,
+    );
     if (alternatives.length !== 1) {
       throw new Error("Core runtime schema Inherits policy alternatives must be branch-lowered.");
     }
     return alternatives[0]!;
   }
-  if (expr.type === "InheritsReferencing" && expr.max_depth == null) {
+  if (expr.type === "InheritsReferencing") {
     const alternatives = inheritedReferencingPolicyToQueryShapes(
       schema,
       expr.operation,
@@ -359,7 +470,550 @@ function policyExprToQueryShape(
     }
     return alternatives[0]!;
   }
-  return { filters: [expr], joins: [] };
+  return { filters: [expr], joins: [], reachable: [] };
+}
+
+type RelExprObject = Record<string, unknown>;
+
+function policyExistsRelToQueryShape(
+  schema: WasmSchema,
+  rootTable: string,
+  rel: unknown,
+): PolicyQueryShape {
+  const lowered = lowerExistsRel(rel);
+  const join = policyExistsRelLoweredToJoin(schema, rootTable, lowered);
+  return { filters: [], joins: join ? [join] : [], reachable: lowered.reachable };
+}
+
+function policyExistsRelLoweredToJoin(
+  schema: WasmSchema,
+  rootTable: string,
+  lowered: LoweredRelExpr,
+): PolicyJoin | undefined {
+  const filters = [...lowered.filters] as PolicyExpr[];
+  let nestedJoins = lowered.joins;
+  let table = lowered.table;
+  let correlationIndex = filters.findIndex(isOuterRowEquality);
+  if (correlationIndex === -1 && lowered.joins.length === 1) {
+    const [join] = lowered.joins;
+    const joinCorrelationIndex = join?.filters.findIndex(isOuterRowEquality) ?? -1;
+    if (join && joinCorrelationIndex !== -1) {
+      const [joinCorrelation] = join.filters.splice(joinCorrelationIndex, 1);
+      if (joinCorrelation) {
+        filters.push(...join.filters);
+        filters.push(joinCorrelation);
+        table = join.table;
+        nestedJoins = join.nestedJoins ?? [];
+        correlationIndex = filters.length - 1;
+      }
+    }
+  }
+  if (correlationIndex === -1) {
+    const correlatedJoin = lowered.joins.find((join) => join.filters.some(isOuterRowEquality));
+    if (correlatedJoin) {
+      const joinCorrelationIndex = correlatedJoin.filters.findIndex(isOuterRowEquality);
+      const [joinCorrelation] = correlatedJoin.filters.splice(joinCorrelationIndex, 1);
+      if (joinCorrelation) {
+        if (correlatedJoin.onColumn === "id" && correlatedJoin.sourceColumn != null) {
+          filters.length = 0;
+          filters.push(...lowered.filters, ...correlatedJoin.filters, {
+            ...joinCorrelation,
+            column: correlatedJoin.sourceColumn,
+          } as LoweredPolicyExpr);
+          table = lowered.table;
+          nestedJoins = lowered.joins.filter((join) => join !== correlatedJoin);
+          correlationIndex = filters.length - 1;
+        } else {
+          filters.length = 0;
+          filters.push(...correlatedJoin.filters, joinCorrelation);
+          table = correlatedJoin.table;
+          nestedJoins = correlatedJoin.nestedJoins ?? [];
+          correlationIndex = filters.length - 1;
+        }
+      }
+    }
+  }
+  if (correlationIndex === -1) {
+    throw new Error("Core runtime schema ExistsRel policies must include an outer row equality.");
+  }
+  const [rawCorrelation] = filters.splice(correlationIndex, 1);
+  if (!rawCorrelation || rawCorrelation.type !== "Cmp" || rawCorrelation.op !== "Eq") {
+    throw new Error(
+      "Core runtime schema ExistsRel policies must use equality for outer row correlation.",
+    );
+  }
+  let correlation = rawCorrelation;
+  if (correlation.column === "id" && lowered.joins.length === 1) {
+    const [hopJoin] = lowered.joins;
+    if (hopJoin?.onColumn === "id" && hopJoin.sourceColumn != null) {
+      correlation = { ...correlation, column: hopJoin.sourceColumn };
+      nestedJoins = [];
+    }
+  }
+  const outer = policyOperandValue(correlation.value);
+  if (outer.type !== "OuterRowRef") {
+    throw new Error(
+      "Core runtime schema ExistsRel policies must correlate to an outer row reference.",
+    );
+  }
+  for (const reachable of lowered.reachable) {
+    if (reachable.accessRowColumn === "__pending_outer_row") {
+      reachable.accessRowColumn = correlation.column;
+    }
+  }
+  if (lowered.pendingReachable) {
+    lowered.reachable.push({
+      ...lowered.pendingReachable,
+      accessTable: rootTable,
+      accessRowColumn: "id",
+      accessTeamColumn: outer.column,
+      accessTeamTarget: outer.column === "id" ? "RowId" : "Column",
+      accessFilters: [],
+    });
+  }
+  if (lowered.reachable.length > 0) {
+    return undefined;
+  }
+
+  return normalizePolicyJoinTable(schema, {
+    table,
+    onColumn: correlation.column,
+    target: correlation.column === "id" && outer.column !== "id" ? "RowId" : "Column",
+    sourceColumn: outer.column,
+    filters,
+    nestedJoins,
+  });
+}
+
+function normalizePolicyJoinTable(schema: WasmSchema, join: PolicyJoin): PolicyJoin {
+  const scopedTable =
+    join.scope != null &&
+    schema[join.scope]?.columns.some((column) => column.name === join.onColumn)
+      ? join.scope
+      : undefined;
+  const filterScopedTable = join.filters
+    .map((filter) => (filter as LoweredPolicyExpr).scope)
+    .find(
+      (scope): scope is string =>
+        scope != null && schema[scope]?.columns.some((column) => column.name === join.onColumn),
+    );
+  const tableHasOnColumn = schema[join.table]?.columns.some(
+    (column) => column.name === join.onColumn,
+  );
+  const table = !tableHasOnColumn ? (scopedTable ?? filterScopedTable ?? join.table) : join.table;
+  return {
+    ...join,
+    table,
+    nestedJoins: join.nestedJoins?.map((nested) => normalizePolicyJoinTable(schema, nested)),
+  };
+}
+
+function normalizePolicyQueryShape(schema: WasmSchema, shape: PolicyQueryShape): PolicyQueryShape {
+  return {
+    filters: shape.filters,
+    joins: shape.joins.map((join) => normalizePolicyJoinTable(schema, join)),
+    reachable: shape.reachable,
+  };
+}
+
+function lowerExistsRel(rel: unknown): {
+  table: string;
+  filters: LoweredPolicyExpr[];
+  joins: PolicyJoin[];
+  reachable: PolicyReachable[];
+  pendingReachable?: PendingPolicyReachable;
+} {
+  if (!isRecord(rel)) throw new Error("Core runtime schema ExistsRel relation must be an object.");
+
+  if (isRecord(rel.TableScan)) {
+    const table = rel.TableScan.table;
+    if (typeof table !== "string") {
+      throw new Error("Core runtime schema ExistsRel TableScan is missing table.");
+    }
+    return { table, filters: [], joins: [], reachable: [] };
+  }
+
+  if (isRecord(rel.Filter)) {
+    const input = lowerExistsRel(rel.Filter.input);
+    appendRelFilters(input, relPredicateToPolicyExprs(rel.Filter.predicate));
+    return input;
+  }
+
+  if (isRecord(rel.Project)) {
+    return lowerExistsRel(rel.Project.input);
+  }
+
+  if (isRecord(rel.Gather)) {
+    return lowerGatherRel(rel.Gather);
+  }
+
+  if (isRecord(rel.Join)) {
+    const left = lowerExistsRel(rel.Join.left);
+    const right = lowerExistsRel(rel.Join.right);
+    const on = Array.isArray(rel.Join.on) ? rel.Join.on[0] : undefined;
+    if (!isRecord(on) || !isColumnRef(on.left) || !isColumnRef(on.right)) {
+      throw new Error("Core runtime schema ExistsRel joins must have a column equality.");
+    }
+    const rightCorrelationIndex = right.filters.findIndex(isOuterRowEquality);
+    if (rightCorrelationIndex !== -1 && right.joins.length === 0 && on.right.column === "id") {
+      const rightFilters = [...right.filters];
+      const [rightCorrelation] = rightFilters.splice(rightCorrelationIndex, 1);
+      if (rightCorrelation?.type !== "Cmp" || rightCorrelation.op !== "Eq") {
+        throw new Error(
+          "Core runtime schema ExistsRel policies must use equality for outer row correlation.",
+        );
+      }
+      return {
+        table: left.table,
+        filters: [
+          ...left.filters,
+          ...rightFilters,
+          { ...rightCorrelation, column: on.left.column },
+        ],
+        joins: left.joins,
+        reachable: [...left.reachable, ...right.reachable],
+        pendingReachable: left.pendingReachable,
+      };
+    }
+    const rightFilters = right.filters;
+    const correlatedLeftFilters: LoweredPolicyExpr[] = [];
+    const leftFilters: LoweredPolicyExpr[] = [];
+    for (const filter of left.filters) {
+      if (
+        filter.type === "Cmp" &&
+        filter.op === "Eq" &&
+        filter.column === on.left.column &&
+        policyOperandValue(filter.value).type === "OuterRowRef"
+      ) {
+        correlatedLeftFilters.push({ ...filter, column: on.right.column });
+      } else {
+        leftFilters.push(filter);
+      }
+    }
+    if (correlatedLeftFilters.length > 0 && leftFilters.length === 0 && left.joins.length === 0) {
+      return {
+        table: right.table,
+        filters: [...rightFilters, ...correlatedLeftFilters],
+        joins: right.joins,
+        reachable: [...left.reachable, ...right.reachable],
+        pendingReachable: right.pendingReachable,
+      };
+    }
+
+    if (left.pendingReachable && on.left.column === "id") {
+      return {
+        table: right.table,
+        filters: rightFilters,
+        joins: right.joins,
+        reachable: [
+          ...left.reachable,
+          ...right.reachable,
+          {
+            ...left.pendingReachable,
+            accessTable: right.table,
+            accessRowColumn: "__pending_outer_row",
+            accessTeamColumn: on.right.column,
+            accessTeamTarget: on.right.column === "id" ? "RowId" : "Column",
+            accessFilters: [],
+          },
+        ],
+      };
+    }
+
+    const join: PolicyJoin = {
+      table: right.table,
+      scope: on.right.scope,
+      onColumn: on.right.column,
+      target: on.right.column === "id" ? "RowId" : "Column",
+      sourceColumn: on.left.column,
+      filters: rightFilters,
+      nestedJoins: right.joins,
+    };
+    return {
+      table: left.table,
+      filters: leftFilters,
+      joins: [...left.joins, join],
+      reachable: [...left.reachable, ...right.reachable],
+      pendingReachable: left.pendingReachable,
+    };
+  }
+
+  throw new Error("Core runtime schema policies do not support this ExistsRel relation yet.");
+}
+
+type LoweredRelExpr = ReturnType<typeof lowerExistsRel>;
+
+function lowerGatherRel(gather: RelExprObject): LoweredRelExpr {
+  const seed = lowerGatherSeed(gather.seed);
+  const step = lowerGatherStep(gather.step);
+  return {
+    table: step.outputTable,
+    filters: [],
+    joins: [],
+    reachable: [],
+    pendingReachable: {
+      from: seed.from,
+      seed: seed.seed,
+      edgeTable: step.edgeTable,
+      edgeMemberColumn: step.edgeMemberColumn,
+      edgeParentColumn: step.edgeParentColumn,
+      edgeFilters: step.edgeFilters,
+      maxDepth: typeof gather.max_depth === "number" ? gather.max_depth : 1,
+    },
+  };
+}
+
+function lowerGatherSeed(seed: unknown): {
+  from: PolicyOperandValue;
+  seed: PolicyReachableSeed;
+} {
+  const projected = unwrapProject(seed);
+  const filtered = unwrapSingleFilter(projected ?? seed);
+  const join =
+    isRecord(filtered.input) && isRecord(filtered.input.Join) ? filtered.input.Join : undefined;
+  if (!join) {
+    throw new Error("Core runtime schema Gather policies require projected hop relation seeds.");
+  }
+  const on = Array.isArray(join.on) ? join.on[0] : undefined;
+  if (!isRecord(on) || !isColumnRef(on.left) || !isColumnRef(on.right)) {
+    throw new Error("Core runtime schema Gather policies require seed joins with column equality.");
+  }
+  const left = unwrapSingleFilter(join.left);
+  const right = unwrapSingleFilter(join.right);
+  const leftTable = tableScanName(left.input);
+  const rightTable = tableScanName(right.input);
+  const leftFilters = [...filtersForScope(filtered.filters, on.left.scope), ...left.filters];
+  const rightFilters = [...filtersForScope(filtered.filters, on.right.scope), ...right.filters];
+  const leftSeedFilter = leftFilters.find(
+    (filter) => filter.type === "Cmp" && filter.op === "Eq" && filter.column !== "id",
+  );
+  const rightSeedFilter = rightFilters.find(
+    (filter) => filter.type === "Cmp" && filter.op === "Eq" && filter.column !== "id",
+  );
+  const seedIsRightSide = rightSeedFilter != null && rightTable != null;
+  const seedFilter = seedIsRightSide ? rightSeedFilter : leftSeedFilter;
+  if (!seedFilter || seedFilter.type !== "Cmp") {
+    throw new Error("Core runtime schema Gather policies could not identify the seed edge.");
+  }
+  const table = seedIsRightSide ? rightTable : leftTable;
+  const teamColumn = seedIsRightSide ? on.right.column : on.left.column;
+  const filters = seedIsRightSide ? rightFilters : leftFilters;
+  if (!table) {
+    throw new Error("Core runtime schema Gather policies could not identify the seed edge.");
+  }
+  return {
+    from: policyOperandValue(seedFilter.value),
+    seed: {
+      table,
+      teamColumn,
+      filters,
+    },
+  };
+}
+
+function lowerGatherStep(step: unknown): {
+  outputTable: string;
+  edgeTable: string;
+  edgeMemberColumn: string;
+  edgeParentColumn: string;
+  edgeFilters: PolicyExpr[];
+} {
+  const projected = unwrapProject(step);
+  const join = projected && isRecord(projected.Join) ? projected.Join : undefined;
+  const on = join && Array.isArray(join.on) ? join.on[0] : undefined;
+  if (!join || !isRecord(on) || !isColumnRef(on.left) || !isColumnRef(on.right)) {
+    throw new Error("Core runtime schema Gather policies require projected recursive hops.");
+  }
+  const left = unwrapSingleFilter(join.left);
+  const edgeTable = tableScanName(left.input);
+  const outputTable = tableScanName(join.right);
+  if (!edgeTable || !outputTable) {
+    throw new Error("Core runtime schema Gather policies could not identify recursive hop tables.");
+  }
+  const frontierIndex = left.filters.findIndex(isFrontierRowEquality);
+  if (frontierIndex === -1) {
+    throw new Error("Core runtime schema Gather policies require a frontier equality.");
+  }
+  const edgeFilters = [...left.filters];
+  const [frontierFilter] = edgeFilters.splice(frontierIndex, 1);
+  if (!frontierFilter || frontierFilter.type !== "Cmp") {
+    throw new Error("Core runtime schema Gather policies require an equality frontier filter.");
+  }
+  return {
+    outputTable,
+    edgeTable,
+    edgeMemberColumn: frontierFilter.column,
+    edgeParentColumn: on.left.column,
+    edgeFilters,
+  };
+}
+
+function unwrapProject(rel: unknown): RelExprObject | undefined {
+  return isRecord(rel) && isRecord(rel.Project) && isRecord(rel.Project.input)
+    ? rel.Project.input
+    : undefined;
+}
+
+function unwrapSingleFilter(rel: unknown): { input: unknown; filters: LoweredPolicyExpr[] } {
+  if (isRecord(rel) && isRecord(rel.Filter)) {
+    return {
+      input: rel.Filter.input,
+      filters: relPredicateToPolicyExprs(rel.Filter.predicate),
+    };
+  }
+  return { input: rel, filters: [] };
+}
+
+function tableScanName(rel: unknown): string | undefined {
+  return isRecord(rel) && isRecord(rel.TableScan) && typeof rel.TableScan.table === "string"
+    ? rel.TableScan.table
+    : undefined;
+}
+
+function appendRelFilters(
+  lowered: { table: string; filters: LoweredPolicyExpr[]; joins: PolicyJoin[] },
+  filters: LoweredPolicyExpr[],
+): void {
+  for (const filter of filters) {
+    const scopedJoin =
+      filter.scope == null
+        ? undefined
+        : lowered.joins.find((join) => join.scope === filter.scope || join.table === filter.scope);
+    if (scopedJoin) {
+      scopedJoin.filters.push(filter);
+    } else {
+      lowered.filters.push(filter);
+    }
+  }
+}
+
+function relPredicateToPolicyExprs(predicate: unknown): LoweredPolicyExpr[] {
+  if (predicate === "True") return [];
+  if (predicate === "False") return [{ type: "False" }];
+  if (!isRecord(predicate)) {
+    throw new Error("Core runtime schema ExistsRel predicate must be an object.");
+  }
+  if (isRecord(predicate.And)) {
+    return Object.values(predicate.And).flatMap(relPredicateToPolicyExprs);
+  }
+  if (Array.isArray(predicate.And)) {
+    return predicate.And.flatMap(relPredicateToPolicyExprs);
+  }
+  if (Array.isArray(predicate.Or)) {
+    return [
+      { type: "Or", exprs: predicate.Or.flatMap((child) => relPredicateToPolicyExprs(child)) },
+    ];
+  }
+  if (predicate.Not) {
+    const exprs = relPredicateToPolicyExprs(predicate.Not);
+    return exprs.length === 1
+      ? [{ type: "Not", expr: exprs[0]! }]
+      : [{ type: "Not", expr: { type: "And", exprs } }];
+  }
+  if (isRecord(predicate.Cmp) && isColumnRef(predicate.Cmp.left)) {
+    return [
+      {
+        type: "Cmp",
+        column: predicate.Cmp.left.column,
+        scope: predicate.Cmp.left.scope,
+        op: relCmpOp(predicate.Cmp.op),
+        value: relValueToPolicyValue(predicate.Cmp.right),
+      },
+    ];
+  }
+  if (isRecord(predicate.IsNull) && isColumnRef(predicate.IsNull.column)) {
+    return [
+      {
+        type: "IsNull",
+        column: predicate.IsNull.column.column,
+        scope: predicate.IsNull.column.scope,
+      },
+    ];
+  }
+  if (isRecord(predicate.IsNotNull) && isColumnRef(predicate.IsNotNull.column)) {
+    return [
+      {
+        type: "IsNotNull",
+        column: predicate.IsNotNull.column.column,
+        scope: predicate.IsNotNull.column.scope,
+      },
+    ];
+  }
+  if (
+    isRecord(predicate.In) &&
+    isColumnRef(predicate.In.left) &&
+    Array.isArray(predicate.In.values)
+  ) {
+    return [
+      {
+        type: "InList",
+        column: predicate.In.left.column,
+        scope: predicate.In.left.scope,
+        values: predicate.In.values.map(relValueToPolicyValue),
+      },
+    ];
+  }
+  if (isRecord(predicate.Contains) && isColumnRef(predicate.Contains.left)) {
+    return [
+      {
+        type: "Contains",
+        column: predicate.Contains.left.column,
+        scope: predicate.Contains.left.scope,
+        value: relValueToPolicyValue(predicate.Contains.right),
+      },
+    ];
+  }
+  throw new Error("Core runtime schema policies do not support this ExistsRel predicate yet.");
+}
+
+function relValueToPolicyValue(value: unknown): PolicyValue {
+  if (isRecord(value) && "OuterColumn" in value && isColumnRef(value.OuterColumn)) {
+    return { type: "SessionRef", path: [OUTER_ROW_SESSION_PREFIX, value.OuterColumn.column] };
+  }
+  if (isRecord(value) && Array.isArray(value.SessionRef)) {
+    return {
+      type: "SessionRef",
+      path: value.SessionRef.filter((part): part is string => typeof part === "string"),
+    };
+  }
+  if (isRecord(value) && "Literal" in value) {
+    return { type: "Literal", value: relLiteralToValue(value.Literal) };
+  }
+  if (isRecord(value) && value.RowId === "Outer") {
+    return { type: "SessionRef", path: [OUTER_ROW_SESSION_PREFIX, "id"] };
+  }
+  if (isRecord(value) && value.RowId === "Frontier") {
+    return { type: "FrontierRowRef" } as InternalPolicyValue as PolicyValue;
+  }
+  throw new Error("Core runtime schema policies do not support this ExistsRel value yet.");
+}
+
+function relLiteralToValue(value: unknown): Value {
+  if (isRecord(value) && typeof value.type === "string") {
+    return value as Value;
+  }
+  if (value === null) return { type: "Null" };
+  if (typeof value === "boolean") return { type: "Boolean", value };
+  if (typeof value === "number" && Number.isInteger(value)) return { type: "Integer", value };
+  if (typeof value === "string") return { type: "Text", value };
+  throw new Error("Core runtime schema policies do not support this ExistsRel literal yet.");
+}
+
+function relCmpOp(op: unknown): "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge" {
+  if (op === "Eq" || op === "Ne" || op === "Lt" || op === "Le" || op === "Gt" || op === "Ge") {
+    return op;
+  }
+  throw new Error(
+    `Core runtime schema policies do not support ExistsRel comparison ${String(op)}.`,
+  );
+}
+
+function isColumnRef(value: unknown): value is { column: string; scope?: string } {
+  return isRecord(value) && typeof value.column === "string";
+}
+
+function isRecord(value: unknown): value is RelExprObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function policyExistsToJoin(
@@ -388,19 +1042,33 @@ function policyExistsToJoin(
       "Core runtime schema Exists policies must correlate to an outer row reference.",
     );
   }
+  const correlatedFilters: PolicyJoin["correlatedFilters"] = [];
+  for (let index = filters.length - 1; index >= 0; index -= 1) {
+    const filter = filters[index]!;
+    if (!isOuterRowEquality(filter) || filter.type !== "Cmp" || filter.op !== "Eq") continue;
+    const filterOuter = policyOperandValue(filter.value);
+    if (filterOuter.type !== "OuterRowRef") continue;
+    filters.splice(index, 1);
+    correlatedFilters.unshift({
+      column: filter.column,
+      sourceColumn: filterOuter.column,
+    });
+  }
 
   return {
     table: expr.table,
     onColumn: correlation.column,
     target: correlation.column === "id" && outer.column !== "id" ? "RowId" : "Column",
     sourceColumn: outer.column,
+    correlatedFilters,
     filters,
   };
 }
 
-function inheritedSelectPolicyToQueryShapes(
+function inheritedPolicyToQueryShapes(
   schema: WasmSchema,
   table: string,
+  operation: "Select" | "Insert" | "Update" | "Delete",
   viaColumn: string,
 ): PolicyQueryShape[] {
   const parentTable = schema[table]?.columns.find(
@@ -411,12 +1079,9 @@ function inheritedSelectPolicyToQueryShapes(
       `Core runtime schema Inherits policy ${table}.${viaColumn} is not a reference.`,
     );
   }
-  const parentPolicy = schema[parentTable]?.policies?.select?.using;
-  if (!parentPolicy) {
-    throw new Error(
-      `Core runtime schema Inherits policy ${table}.${viaColumn} references ${parentTable} without a select policy.`,
-    );
-  }
+  const parentPolicy = sourceOperationPolicy(schema[parentTable]?.policies, operation) ?? {
+    type: "False" as const,
+  };
 
   const parentAlternatives = policyExprToAlternatives(schema, parentTable, parentPolicy);
   return parentAlternatives.map((branch) =>
@@ -429,8 +1094,12 @@ function inheritedParentBranchToChildQuery(
   viaColumn: string,
   branch: PolicyQueryShape,
 ): PolicyQueryShape {
+  if (isFalseFilterSet(branch.filters)) {
+    return { filters: branch.filters, joins: [], reachable: [] };
+  }
+
   const joins: PolicyJoin[] = [];
-  if (branch.filters.length > 0 && !isFalseFilterSet(branch.filters)) {
+  if (branch.filters.length > 0) {
     joins.push({
       table: parentTable,
       onColumn: "id",
@@ -453,7 +1122,7 @@ function inheritedParentBranchToChildQuery(
             },
     });
   }
-  return { filters: [], joins };
+  return { filters: [], joins, reachable: [] };
 }
 
 function inheritedReferencingPolicyToQueryShapes(
@@ -469,7 +1138,7 @@ function inheritedReferencingPolicyToQueryShapes(
     );
   }
   const sourcePolicy = sourceOperationPolicy(schema[sourceTable]?.policies, operation) ?? {
-    type: "True" as const,
+    type: "False" as const,
   };
   return policyExprToAlternatives(schema, sourceTable, sourcePolicy).map((branch) => ({
     filters: [],
@@ -482,6 +1151,7 @@ function inheritedReferencingPolicyToQueryShapes(
         nestedJoins: branch.joins,
       },
     ],
+    reachable: [],
   }));
 }
 
@@ -509,6 +1179,21 @@ function isOuterRowEquality(expr: PolicyExpr): boolean {
   return (
     expr.type === "Cmp" && expr.op === "Eq" && policyOperandValue(expr.value).type === "OuterRowRef"
   );
+}
+
+function isFrontierRowEquality(expr: LoweredPolicyExpr): boolean {
+  return (
+    expr.type === "Cmp" &&
+    expr.op === "Eq" &&
+    (expr.value as InternalPolicyValue).type === "FrontierRowRef"
+  );
+}
+
+function filtersForScope(
+  filters: LoweredPolicyExpr[],
+  scope: string | undefined,
+): LoweredPolicyExpr[] {
+  return filters.filter((filter) => filter.scope == null || filter.scope === scope);
 }
 
 function policyOperandValue(value: PolicyValue): PolicyOperandValue {
@@ -552,15 +1237,6 @@ function policyPredicateOpTag(op: "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge"): numb
   }
 }
 
-function writePolicyExpr(policies: TablePolicies | undefined): PolicyExpr | undefined {
-  return (
-    policies?.insert?.with_check ??
-    policies?.update?.with_check ??
-    policies?.update?.using ??
-    policies?.delete?.using
-  );
-}
-
 function uuidBytes(value: string): Uint8Array {
   const hex = value.replaceAll("-", "");
   if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
@@ -568,5 +1244,11 @@ function uuidBytes(value: string): Uint8Array {
   for (let index = 0; index < 16; index += 1) {
     bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
+  return bytes;
+}
+
+function f64Bytes(value: number): Uint8Array {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setFloat64(0, value, true);
   return bytes;
 }

@@ -70,17 +70,13 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         postResult(message.id, result);
         return;
       }
-      case "createSubscription": {
-        const result = getRuntime().createSubscription(...message.args);
-        postResult(message.id, result);
-        return;
-      }
-      case "executeSubscription": {
-        const [handle] = message.args;
-        getRuntime().executeSubscription(handle, (...args: unknown[]) => {
-          workerScope.postMessage({ subscription: handle, args });
+      case "createExecutedSubscription": {
+        const [ownerHandle, ...subscriptionArgs] = message.args;
+        const result = getRuntime().createSubscription(...subscriptionArgs);
+        getRuntime().executeSubscription(result, (...args: unknown[]) => {
+          workerScope.postMessage({ subscription: ownerHandle, args });
         });
-        postResult(message.id, undefined);
+        postResult(message.id, result);
         return;
       }
       case "unsubscribe": {

@@ -160,22 +160,55 @@ where
             return Ok(true);
         }
         let (table, cells) = self.policy_projection_for_version_record(version)?;
-        let Some(policy) = table.write_policy.clone() else {
-            return Ok(true);
-        };
         if version.deletion() == Some(DeletionEvent::Deleted) {
+            let Some(policy) = table.write_policies.delete_using.clone() else {
+                return Ok(true);
+            };
             let current = match self.policy_delete_subject_row(&table, version)? {
                 Some(current) => current,
                 None => current_row_from_cells(&table, version.row_uuid(), &cells)?,
             };
             return self.policy_allows_current_row(&table, &policy, &current, author);
         }
+        let is_update = self
+            .policy_previous_content_subject_row(&table, version)?
+            .is_some();
+        if is_update {
+            if let Some(policy) = table.write_policies.update_using.clone() {
+                let Some(previous) = self.policy_previous_content_subject_row(&table, version)?
+                else {
+                    return Ok(false);
+                };
+                if !self.policy_allows_current_row(&table, &policy, &previous, author)? {
+                    return Ok(false);
+                }
+            }
+            let Some(policy) = table.write_policies.update_check.clone() else {
+                return Ok(true);
+            };
+            return self.policy_allows(&table, &policy, version.row_uuid(), author, |column| {
+                cells.get(column).cloned()
+            });
+        }
+        let Some(policy) = table.write_policies.insert_check.clone() else {
+            return Ok(true);
+        };
         self.policy_allows(&table, &policy, version.row_uuid(), author, |column| {
             cells.get(column).cloned()
         })
     }
 
     pub(crate) fn dry_run_insert_allows(&mut self, commit: MergeableCommit) -> Result<bool, Error> {
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let table = self.table_in_schema(&commit.table, write_schema_version)?;
+        let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
+        self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
+    }
+
+    pub(crate) fn dry_run_mergeable_write_allows(
+        &mut self,
+        commit: MergeableCommit,
+    ) -> Result<bool, Error> {
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
@@ -214,7 +247,7 @@ where
         else {
             return Ok(false);
         };
-        let Some(policy) = table.write_policy.clone() else {
+        let Some(policy) = table.write_policies.update_using.clone() else {
             return Ok(true);
         };
         self.policy_allows_current_row(&table, &policy, &row, author)
@@ -226,7 +259,21 @@ where
         row_uuid: RowUuid,
         author: AuthorId,
     ) -> Result<bool, Error> {
-        self.dry_run_write_current_allows(table_name, row_uuid, author)
+        if author == AuthorId::SYSTEM {
+            return Ok(true);
+        }
+        let table = self.table(table_name)?.clone();
+        let Some(row) = self
+            .current_rows(table_name, DurabilityTier::Local)?
+            .into_iter()
+            .find(|row| row.row_uuid() == row_uuid)
+        else {
+            return Ok(false);
+        };
+        let Some(policy) = table.write_policies.delete_using.clone() else {
+            return Ok(true);
+        };
+        self.policy_allows_current_row(&table, &policy, &row, author)
     }
 
     pub(super) fn read_policy_allows_version(
@@ -431,6 +478,14 @@ where
         table: &TableSchema,
         version: &VersionRecord,
     ) -> Result<Option<CurrentRow>, Error> {
+        self.policy_previous_content_subject_row(table, version)
+    }
+
+    fn policy_previous_content_subject_row(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRecord,
+    ) -> Result<Option<CurrentRow>, Error> {
         for parent in version.parents() {
             for parent_version in self.query_versions_for_tx(parent)? {
                 if parent_version.table() != table.name
@@ -481,7 +536,7 @@ where
         identity: AuthorId,
     ) -> Result<bool, Error> {
         self.policy_allows(table, policy, row.row_uuid(), identity, |column| {
-            row.cell(table, column)
+            policy_join_row_value(row, table, column)
         })
     }
 
@@ -534,7 +589,7 @@ where
             row_uuid,
             identity,
             column_value,
-            DurabilityTier::Global,
+            DurabilityTier::Local,
         )
     }
 
@@ -615,7 +670,9 @@ where
         row: &CurrentRow,
         identity: AuthorId,
     ) -> Result<bool, Error> {
-        self.policy_filters_allow(table, policy, identity, |column| row.cell(table, column))
+        self.policy_filters_allow(table, policy, identity, |column| {
+            policy_join_row_value(row, table, column)
+        })
     }
 
     pub(super) fn policy_filters_allow(
@@ -662,13 +719,38 @@ where
                     .policy_predicate_matches(table, predicate, identity, column_value)
                     .map(|matches| !matches);
             }
-            crate::query::Predicate::In(_, _)
-            | crate::query::Predicate::Gt(_, _)
+            crate::query::Predicate::In(left, values) => {
+                let Some(left_value) =
+                    self.policy_operand_value(table, left, identity, &mut *column_value)
+                else {
+                    return Ok(false);
+                };
+                return Ok(values.iter().any(|value| {
+                    self.policy_operand_value(table, value, identity, &mut *column_value)
+                        .is_some_and(|value| {
+                            policy_values_equal(&left_value, &value)
+                                || policy_value_contains(&left_value, &value)
+                        })
+                }));
+            }
+            crate::query::Predicate::Gt(_, _)
             | crate::query::Predicate::Gte(_, _)
             | crate::query::Predicate::Lt(_, _)
             | crate::query::Predicate::Lte(_, _)
-            | crate::query::Predicate::Contains(_, _)
             | crate::query::Predicate::IsNull(_) => return Ok(false),
+            crate::query::Predicate::Contains(left, right) => {
+                let Some(left_value) =
+                    self.policy_operand_value(table, left, identity, &mut *column_value)
+                else {
+                    return Ok(false);
+                };
+                let Some(right_value) =
+                    self.policy_operand_value(table, right, identity, &mut *column_value)
+                else {
+                    return Ok(false);
+                };
+                return Ok(policy_value_contains(&left_value, &right_value));
+            }
             crate::query::Predicate::Eq(_, _) | crate::query::Predicate::Ne(_, _) => {}
         }
         let (left, right, equal) = match predicate {
@@ -727,7 +809,7 @@ where
                 join,
                 row_uuid,
                 column_value,
-                DurabilityTier::Global,
+                DurabilityTier::Local,
             )?;
             let Some(target) = target else {
                 return Ok(false);
@@ -749,11 +831,12 @@ where
             for row in self.current_rows_for_schema(
                 &join.table,
                 self.catalogue.current_schema_version_id,
-                DurabilityTier::Global,
+                DurabilityTier::Local,
             )? {
                 let reaches_row = policy_join_row_value(&row, &join_table, &join.on_column)
                     == Some(target.clone());
                 if reaches_row
+                    && policy_join_correlations_allow(table, join, &row, &join_table, column_value)
                     && self.policy_allows_current_row(&join_table, &join_policy, &row, identity)?
                 {
                     found = true;
@@ -812,12 +895,52 @@ where
         tier: DurabilityTier,
     ) -> Result<bool, Error> {
         for reachable in &policy.reachable {
-            let Some(Value::Uuid(seed)) =
-                self.policy_operand_value(table, &reachable.from, identity, &mut column_value)
-            else {
+            let mut reachable_teams = BTreeSet::new();
+            if let Some(seed) = &reachable.seed {
+                let seed_table = self.table(&seed.table)?.clone();
+                let seed_policy = crate::query::Query {
+                    table: seed.table.clone(),
+                    filters: seed.filters.clone(),
+                    joins: Vec::new(),
+                    policy_branches: Vec::new(),
+                    reachable: Vec::new(),
+                    includes: Vec::new(),
+                    select: None,
+                    order_by: Vec::new(),
+                    aggregate: None,
+                    limit: None,
+                    offset: 0,
+                };
+                for seed_row in self.current_rows_for_schema(
+                    &seed.table,
+                    self.catalogue.current_schema_version_id,
+                    tier,
+                )? {
+                    if !self.policy_filters_allow_current_row(
+                        &seed_table,
+                        &seed_policy,
+                        &seed_row,
+                        identity,
+                    )? {
+                        continue;
+                    }
+                    if let Some(Value::Uuid(seed_team)) =
+                        policy_join_row_value(&seed_row, &seed_table, &seed.team_column)
+                    {
+                        reachable_teams.insert(seed_team);
+                    }
+                }
+            } else {
+                let Some(Value::Uuid(seed)) =
+                    self.policy_operand_value(table, &reachable.from, identity, &mut column_value)
+                else {
+                    return Ok(false);
+                };
+                reachable_teams.insert(seed);
+            }
+            if reachable_teams.is_empty() {
                 return Ok(false);
-            };
-            let mut reachable_teams = BTreeSet::from([seed]);
+            }
             let edge_table = self.table(&reachable.edge_table)?.clone();
             let edge_policy = crate::query::Query {
                 table: reachable.edge_table.clone(),
@@ -849,7 +972,7 @@ where
                         continue;
                     }
                     let Some(Value::Uuid(member)) =
-                        edge_row.cell(&edge_table, &reachable.edge_member_column)
+                        policy_join_row_value(edge_row, &edge_table, &reachable.edge_member_column)
                     else {
                         continue;
                     };
@@ -857,7 +980,7 @@ where
                         continue;
                     }
                     let Some(Value::Uuid(parent)) =
-                        edge_row.cell(&edge_table, &reachable.edge_parent_column)
+                        policy_join_row_value(edge_row, &edge_table, &reachable.edge_parent_column)
                     else {
                         continue;
                     };
@@ -897,17 +1020,25 @@ where
                     continue;
                 }
                 let Some(Value::Uuid(access_row_uuid)) =
-                    access_row.cell(&access_table, &reachable.access_row_column)
+                    policy_join_row_value(&access_row, &access_table, &reachable.access_row_column)
                 else {
                     continue;
                 };
                 if access_row_uuid != row_uuid.0 {
                     continue;
                 }
-                let Some(Value::Uuid(access_team)) =
-                    access_row.cell(&access_table, &reachable.access_team_column)
-                else {
-                    continue;
+                let access_team = match reachable.access_team_target {
+                    crate::query::JoinTarget::Column => {
+                        let Some(Value::Uuid(access_team)) = policy_join_row_value(
+                            &access_row,
+                            &access_table,
+                            &reachable.access_team_column,
+                        ) else {
+                            continue;
+                        };
+                        access_team
+                    }
+                    crate::query::JoinTarget::RowId => access_row.row_uuid().0,
                 };
                 if reachable_teams.contains(&access_team) {
                     found = true;
@@ -966,7 +1097,18 @@ where
             };
             if let Some(rows) = rows {
                 for row in rows {
-                    if self.policy_allows_current_row(&join_table, &join_policy, &row, identity)? {
+                    if policy_join_correlations_allow(
+                        table,
+                        join,
+                        &row,
+                        &join_table,
+                        &mut column_value,
+                    ) && self.policy_allows_current_row(
+                        &join_table,
+                        &join_policy,
+                        &row,
+                        identity,
+                    )? {
                         found = true;
                         break;
                     }
@@ -1138,6 +1280,18 @@ fn policy_values_equal(left: &Value, right: &Value) -> bool {
     }
 }
 
+fn policy_value_contains(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Nullable(Some(left)), right) => policy_value_contains(left, right),
+        (left, Value::Nullable(Some(right))) => policy_value_contains(left, right),
+        (Value::Array(values), right) => {
+            values.iter().any(|value| policy_values_equal(value, right))
+        }
+        (Value::String(left), Value::String(right)) => left.contains(right),
+        _ => false,
+    }
+}
+
 pub(super) fn policy_join_row_value(
     row: &CurrentRow,
     table: &TableSchema,
@@ -1148,6 +1302,22 @@ pub(super) fn policy_join_row_value(
     } else {
         row.cell(table, column)
     }
+}
+
+fn policy_join_correlations_allow(
+    table: &TableSchema,
+    join: &crate::query::JoinVia,
+    join_row: &CurrentRow,
+    join_table: &TableSchema,
+    column_value: &mut dyn FnMut(&str) -> Option<Value>,
+) -> bool {
+    let _ = table;
+    join.correlated_filters.iter().all(|correlation| {
+        let Some(source_value) = column_value(&correlation.source_column) else {
+            return false;
+        };
+        policy_join_row_value(join_row, join_table, &correlation.join_column) == Some(source_value)
+    })
 }
 
 fn policy_tables_are_directly_compatible(source: &TableSchema, target: &TableSchema) -> bool {
