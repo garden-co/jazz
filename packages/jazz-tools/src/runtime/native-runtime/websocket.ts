@@ -144,7 +144,6 @@ export class WebSocketCarrier {
   close(): void {
     if (this.closing) return;
     this.closing = true;
-    if (isNodeRuntime()) return;
     try {
       this.socket.close();
     } catch {
@@ -163,10 +162,6 @@ export class WebSocketCarrier {
       this.onFrame(frame);
     }
   }
-}
-
-function isNodeRuntime(): boolean {
-  return typeof process !== "undefined" && process.versions?.node != null;
 }
 
 export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {

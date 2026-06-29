@@ -120,20 +120,7 @@ export function openConfig(
 }
 
 export function queryFromTable(table: string): Uint8Array {
-  const writer = new PostcardWriter();
-  writer.string(table);
-  writer.vec(() => undefined, 0);
-  writer.vec(() => undefined, 0);
-  writer.vec(() => undefined, 0);
-  writer.vec(() => undefined, 0);
-  writer.vec(() => undefined, 0);
-  writer.vec(() => undefined, 0);
-  writer.none();
-  writer.vec(() => undefined, 0);
-  writer.none();
-  writer.none();
-  writer.u64(0);
-  return writer.finish();
+  return queryWithPredicates(table, []);
 }
 
 export function queryWhereBool(table: string, column: string, value: boolean): Uint8Array {
@@ -146,27 +133,11 @@ export function queryWhereStringContains(
   value: string,
   limit?: number,
 ): Uint8Array {
-  if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
-    throw new Error("query limit must be a non-negative safe integer");
-  }
-  const writer = new PostcardWriter();
-  writer.string(table);
-  writer.vec((filter) => {
-    writePredicateContainsString(filter, column, value);
-  }, 1);
-  writer.vec(() => undefined, 0);
-  writer.vec(() => undefined, 0);
-  writer.vec(() => undefined, 0);
-  writer.none();
-  writer.vec(() => undefined, 0);
-  writer.none();
-  if (limit == null) {
-    writer.none();
-  } else {
-    writer.some((valueWriter) => valueWriter.u64(limit));
-  }
-  writer.u64(0);
-  return writer.finish();
+  return queryWithPredicates(
+    table,
+    [{ column, op: "Contains", value: { type: "Text", value } }],
+    limit,
+  );
 }
 
 export type QueryLiteral =
@@ -456,15 +427,6 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
   }
   writer.u64(6); // groove::records::Value::String
   writer.string(value.value);
-}
-
-function writePredicateContainsString(writer: PostcardWriter, column: string, value: string): void {
-  writer.u64(10); // Predicate::Contains
-  writer.u64(0); // Operand::Column
-  writer.string(column);
-  writer.u64(3); // Operand::Literal
-  writer.u64(6); // groove::records::Value::String
-  writer.string(value);
 }
 
 function parseUuidBytes(value: string): Uint8Array {
