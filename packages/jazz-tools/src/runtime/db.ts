@@ -46,6 +46,7 @@ import {
 } from "./browser-broker-errors.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
+import { limitQueryToOne } from "./limit-query.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
@@ -147,28 +148,6 @@ type DbRuntimeOperationContext = {
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
   return { localUpdates: "deferred", ...options };
-}
-
-function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
-  return {
-    get _table() {
-      return query._table;
-    },
-    get _schema() {
-      return query._schema;
-    },
-    get _columnTransforms() {
-      return query._columnTransforms;
-    },
-    get _rowType() {
-      return query._rowType;
-    },
-    _build() {
-      const builtQuery = JSON.parse(query._build()) as Record<string, unknown>;
-      builtQuery.limit = 1;
-      return JSON.stringify(builtQuery);
-    },
-  };
 }
 
 function queryUsesRelationTraversal(builtQuery: NormalizedBuiltQuery): boolean {

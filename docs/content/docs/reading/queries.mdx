@@ -141,14 +141,14 @@ Each framework has a reactive binding that re-renders when query results change.
 
 | Framework  | API                            | Notes                                               |
 | ---------- | ------------------------------ | --------------------------------------------------- |
-| React/Expo | `useAll(query)`                | Returns `T[] \| undefined`                          |
+| React/Expo | `useAll(query)`                | Returns `{ data, isLoading, error }`                |
 | Vue        | `useAll(query)`                | Returns `{ data, error, loading }` refs             |
 | Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` / `.loading` / `.error` |
 | Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }`                |
 
 ### The `undefined` loading state
 
-`useAll` (its `data` ref in Vue) and `QuerySubscription` return `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
+`useAll`'s `data` (a ref in Vue) and `QuerySubscription`'s `.current` are `undefined` until the first server response arrives; React and Solid also expose an `isLoading` flag for the same window. After that, `data` is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
@@ -178,6 +178,22 @@ Each framework has a reactive binding that re-renders when query results change.
   tier](#read-durability). Local storage reads are effectively instant and resolve to `[]` if no
   data exists yet.
 </Callout>
+
+### Reading a single row
+
+When a component renders one row — a detail view fetched by id, or the first match of a query — React's `useOne` subscribes to just that row, the hook counterpart of [`db.one`](#one-shot-queries). It runs the query with `limit 1` and returns the first row under the query's order, re-rendering if a different row takes that spot or the current one is removed.
+
+```tsx
+function TodoItem({ id }: { id: string }) {
+  // data: `undefined` while loading, `null` if no row matches, otherwise the row.
+  const { data: todo, isLoading } = useOne(app.todos.where({ id }));
+  if (isLoading) return <Spinner />;
+  if (todo === null) return <NotFound />;
+  return <span>{todo.title}</span>;
+}
+```
+
+`useOne` returns `{ data, isLoading, error }` like `useAll`, but `data` is a single row instead of an array: it is `undefined` while loading, `null` once the query resolves with no match (distinct from the empty array `useAll` returns), or the matching row. A `useOneSuspense` variant mirrors `useAllSuspense`, suspending until the query resolves and then returning the row or `null` directly.
 
 ### Fine-grained updates
 

@@ -27,14 +27,14 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
 
   const [showNLastMessages, setShowNLastMessages] = useState(INITIAL_MESSAGES_TO_SHOW);
 
-  const chatRowsResult = useAll(app.chats.where({ id: chatId }));
+  const { data: chatRowsResult } = useAll(app.chats.where({ id: chatId }));
   const chatRows = chatRowsResult ?? [];
   const chatKnown = chatRows.length > 0;
 
   // Auto-join: if the user can see the chat but isn't a member yet, insert a
   // chatMember row so they appear in the member list and can send messages.
   const myMemberships =
-    useAll(app.chatMembers.where({ chatId, userId: userId ?? "__none__" })) ?? [];
+    useAll(app.chatMembers.where({ chatId, userId: userId ?? "__none__" })).data ?? [];
   const isMember = myMemberships.length > 0;
   // autoJoinPending: true while we've started the insert but haven't yet
   // received server acknowledgement.  Used to suppress the isMember shortcut
@@ -106,7 +106,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
         .include({ sender: true })
         .orderBy("createdAt", "desc")
         .limit(showNLastMessages + 1),
-    ) ?? [];
+    ).data ?? [];
 
   const hasMore = messages.length > showNLastMessages;
 

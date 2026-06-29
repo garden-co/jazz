@@ -11,13 +11,14 @@ full details.
 
 ## API equivalents
 
-| Concept            | React / Expo                     | Vue                               | Svelte                          | Solid                         |
-| ------------------ | -------------------------------- | --------------------------------- | ------------------------------- | ----------------------------- |
-| Provider           | `<JazzProvider config={config}>` | `<JazzProvider :client="client">` | `<JazzSvelteProvider {client}>` | `<JazzProvider client={...}>` |
-| Query subscription | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`  | `useAll(() => ({ query }))`   |
-| DB access          | `useDb()`                        | `useDb()`                         | `getDb()`                       | `useDb()`                     |
-| Session            | `useSession()`                   | `useSession()`                    | `getSession()`                  | `useSession()`                |
-| Client creation    | `createJazzClient(config)`       | `createJazzClient(config)`        | `createJazzClient(config)`      | `createSolidJazzClient(...)`  |
+| Concept            | React / Expo                     | Vue                               | Svelte                             | Solid                         |
+| ------------------ | -------------------------------- | --------------------------------- | ---------------------------------- | ----------------------------- |
+| Provider           | `<JazzProvider config={config}>` | `<JazzProvider :client="client">` | `<JazzSvelteProvider {client}>`    | `<JazzProvider client={...}>` |
+| Query subscription | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`     | `useAll(() => ({ query }))`   |
+| Single-row query   | `useOne(query)`                  | `useOne(query)`                   | `new SingleRowSubscription(query)` | `useOne(() => ({ query }))`   |
+| DB access          | `useDb()`                        | `useDb()`                         | `getDb()`                          | `useDb()`                     |
+| Session            | `useSession()`                   | `useSession()`                    | `getSession()`                     | `useSession()`                |
+| Client creation    | `createJazzClient(config)`       | `createJazzClient(config)`        | `createJazzClient(config)`         | `createSolidJazzClient(...)`  |
 
 ## Provider setup
 
@@ -73,7 +74,7 @@ Subscribe to query results reactively. See [Reading Data](/docs/reading/queries)
   </Tab>
 </Tabs>
 
-The `?? []` guard handles the `undefined` (not yet connected) case. See
+Each binding surfaces the same loading signal a little differently: React and Solid's `useAll` return `{ data, isLoading, error }`, Vue returns the same fields as refs (with `loading` rather than `isLoading`), and Svelte's `QuerySubscription` exposes `.current` / `.loading` / `.error`. In every case `data` (or `.current`) is `undefined` until the first response, then an array&hairsp;—&hairsp;empty (`[]`) if no rows match. See
 [Reading Data: The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for patterns that depend on this signal.
 
 In Vue, Svelte, and Solid, the binding reconciles updates into the existing reactive array in place, so only fields that actually changed trigger re-renders. See [Fine-grained updates](/docs/reading/queries#fine-grained-updates) for the full behaviour.

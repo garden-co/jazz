@@ -24,7 +24,7 @@ export function ChatHeader({ chatId }: ChatHeaderProps) {
 function ChatHeaderContent({ chatId }: ChatHeaderProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const chatRows = useAll(app.chats.where({ id: chatId })) ?? [];
+  const chatRows = useAll(app.chats.where({ id: chatId })).data ?? [];
   const chat = chatRows[0];
 
   const displayName = useChatDisplayName(chatId, chat?.name ?? undefined);

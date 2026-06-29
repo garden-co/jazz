@@ -14,7 +14,7 @@ export function AuthSessionExamples() {
 
   // #region auth-session-react-query
   const ownedTodos =
-    useAll(sessionUserId ? app.todos.where({ owner_id: sessionUserId }) : undefined) ?? [];
+    useAll(sessionUserId ? app.todos.where({ owner_id: sessionUserId }) : undefined).data ?? [];
   // #endregion auth-session-react-query
 
   // #region auth-session-react-insert

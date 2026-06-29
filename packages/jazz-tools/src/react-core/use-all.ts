@@ -2,8 +2,16 @@ import { type Usable, use, useCallback, useRef, useSyncExternalStore } from "rea
 import type { QueryBuilder, QueryOptions, UseAllState } from "../shared/index.js";
 import { useJazzClient } from "./provider.js";
 
-type UseAllOptions = {
-  suspense?: boolean;
+/**
+ * Reactive result of {@link useAll}. `data` is the matching rows (`undefined`
+ * until the first result resolves, or on error), `isLoading` is `true` until the
+ * first result or error arrives, and `error` is the last subscription error (or
+ * `null`). Mirrors the shape Solid's `useAll` returns.
+ */
+export type UseAllResult<T extends { id: string }> = {
+  data: T[] | undefined;
+  isLoading: boolean;
+  error: Error | null;
 };
 
 // A query that never arrives has nothing to fetch, so the suspense variant
@@ -12,24 +20,39 @@ type UseAllOptions = {
 // its entry promise — opened during render so a suspended effect can't strand it.
 const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
 
-function useAllBase<T extends { id: string }>(
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+/**
+ * Subscription wiring shared by every react-core query hook: it computes the
+ * pure cache key, keeps the latest query/options in refs, and drives a
+ * `useSyncExternalStore`, returning the raw cache state. Not part of the public
+ * API.
+ *
+ * `computeKey` neither registers the query nor opens a subscription, so the
+ * render phase stays side-effect free (concurrent/strict and SSR safe).
+ * Registration + subscription happen in the commit-phase `subscribe` callback.
+ *
+ * The refs let the keyed `subscribe`/`getSnapshot` callbacks read the latest
+ * query/options without depending on object identity — an inline
+ * `app.todos.where(...)` is a fresh object every render, but the string key is
+ * stable, so we must not resubscribe just because the object changed.
+ *
+ * @internal
+ */
+function useQuerySubscription<T extends { id: string }>(
   query?: QueryBuilder<T>,
   queryOptions?: QueryOptions,
-  options?: UseAllOptions,
-): T[] | undefined {
-  const { suspense = false } = options ?? {};
+): {
+  manager: ReturnType<typeof useJazzClient>["manager"];
+  key: string | null;
+  state: UseAllState<T> | null;
+} {
   const { manager } = useJazzClient();
 
-  // Pure, render-safe key: computeKey neither registers the query nor opens a
-  // subscription, so the render phase stays side-effect free (concurrent/strict
-  // and SSR safe). Registration + subscription happen in the commit-phase
-  // `subscribe` callback below.
   const key = query ? manager.computeKey(query, queryOptions) : null;
 
-  // Keep the latest query/options in refs so the keyed `subscribe`/`getSnapshot`
-  // callbacks can read them without depending on object identity — an inline
-  // `app.todos.where(...)` is a fresh object every render, but the string key is
-  // stable, so we must not resubscribe just because the object changed.
   const queryRef = useRef(query);
   queryRef.current = query;
   const optionsRef = useRef(queryOptions);
@@ -60,56 +83,92 @@ function useAllBase<T extends { id: string }>(
 
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
-  if (suspense) {
-    if (!query || key === null) {
-      return use(SUSPEND_FOREVER as unknown as Usable<T[]>);
-    }
+  return { manager, key, state };
+}
 
-    if (state) {
-      if (state.status === "fulfilled") {
-        return state.data;
-      }
-      if (state.status === "rejected") {
-        throw state.error;
-      }
-    }
+/**
+ * Non-suspense engine behind {@link useAll} and the `useOne` bindings: returns
+ * the live `{ data, isLoading, error }` for a query. Not part of the public API.
+ *
+ * @internal
+ */
+export function useAllResultBase<T extends { id: string }>(
+  query?: QueryBuilder<T>,
+  queryOptions?: QueryOptions,
+): UseAllResult<T> {
+  const { state } = useQuerySubscription(query, queryOptions);
 
-    // Pending: a suspense data source must start fetching during render — the
-    // `subscribe` effect can't run while the boundary is suspended — so create
-    // the entry here and suspend on its real promise (which resolves on the
-    // first result), rather than a sentinel that never resolves.
-    manager.makeQueryKey(query, queryOptions);
-    const entry = manager.getCacheEntry<T>(key);
-    if (entry.state.status === "rejected") {
-      throw entry.state.error;
-    }
-    if (entry.state.status === "fulfilled") {
-      return entry.state.data;
-    }
-    return use(entry.promise as unknown as Usable<T[]>);
+  if (!query) {
+    return { data: undefined, isLoading: false, error: null };
+  }
+  if (!state || state.status === "pending") {
+    return { data: undefined, isLoading: true, error: null };
+  }
+  if (state.status === "rejected") {
+    return { data: undefined, isLoading: false, error: toError(state.error) };
+  }
+  return { data: state.data, isLoading: false, error: null };
+}
+
+/**
+ * Suspense engine behind {@link useAllSuspense} and {@link useOneSuspense}:
+ * returns the resolved rows, suspending until the query resolves and throwing
+ * its error to the nearest boundary. Not part of the public API.
+ *
+ * @internal
+ */
+export function useAllSuspenseBase<T extends { id: string }>(
+  query?: QueryBuilder<T>,
+  queryOptions?: QueryOptions,
+): T[] {
+  const { manager, key, state } = useQuerySubscription(query, queryOptions);
+
+  if (!query || key === null) {
+    return use(SUSPEND_FOREVER as unknown as Usable<T[]>);
   }
 
-  return state?.status === "fulfilled" ? state.data : undefined;
+  if (state) {
+    if (state.status === "fulfilled") {
+      return state.data;
+    }
+    if (state.status === "rejected") {
+      throw state.error;
+    }
+  }
+
+  // Pending: a suspense data source must start fetching during render — the
+  // `subscribe` effect can't run while the boundary is suspended — so create
+  // the entry here and suspend on its real promise (which resolves on the
+  // first result), rather than a sentinel that never resolves.
+  manager.makeQueryKey(query, queryOptions);
+  const entry = manager.getCacheEntry<T>(key);
+  if (entry.state.status === "rejected") {
+    throw entry.state.error;
+  }
+  if (entry.state.status === "fulfilled") {
+    return entry.state.data;
+  }
+  return use(entry.promise as unknown as Usable<T[]>);
 }
 
 /**
  * Read all matching rows and subscribe to changes that modify the query's results.
  *
- * Loading and error states are handled the React way: `undefined` means the
- * query has not resolved yet, and for error handling use {@link useAllSuspense}
- * with a Suspense + error boundary. (The Svelte and Vue bindings expose the same
- * capabilities idiomatically — Svelte's `QuerySubscription` via
- * `.current`/`.loading`/`.error`, Vue's `useAll` via `{ data, error, loading }`.)
- *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
- * @returns the matching rows, or `undefined` if the query is not yet executed
+ * @returns reactive `{ data, isLoading, error }`. `data` is `undefined` until the
+ *   query resolves (and on error); `isLoading` is `true` until the first result
+ *   or error; `error` holds the subscription error, or `null`. For Suspense-based
+ *   loading/error handling use {@link useAllSuspense}. (The Svelte and Vue
+ *   bindings expose the same capabilities idiomatically — Svelte's
+ *   `QuerySubscription` via `.current`/`.loading`/`.error`, Vue's `useAll` via
+ *   `{ data, error, loading }`.)
  */
 export function useAll<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
-): T[] | undefined {
-  return useAllBase(query, options, { suspense: false });
+): UseAllResult<T> {
+  return useAllResultBase(query, options);
 }
 
 /**
@@ -130,5 +189,5 @@ export function useAllSuspense<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
 ): T[] {
-  return useAllBase(query, options, { suspense: true }) as T[];
+  return useAllSuspenseBase(query, options);
 }

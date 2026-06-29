@@ -19,7 +19,7 @@ export function useMyProfile(): Profile | null {
   const userId = session?.user_id ?? null;
   const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
 
-  const profiles = useAll(app.profiles.where({ userId: userId ?? "__none__" }));
+  const { data: profiles } = useAll(app.profiles.where({ userId: userId ?? "__none__" }));
 
   // Deterministic: always pick the first profile by ID
   const sorted = profiles ? [...profiles].sort((a, b) => a.id.localeCompare(b.id)) : [];

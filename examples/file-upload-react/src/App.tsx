@@ -99,7 +99,7 @@ function FileUploadScreen() {
         .orderBy("lastModified", "desc")
         .limit(1)
         .requireIncludes(),
-    ) ?? [];
+    ).data ?? [];
   const latestUpload = uploads[0];
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
 

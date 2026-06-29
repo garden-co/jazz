@@ -14,6 +14,9 @@ export {
   useSession,
 } from "./provider.js";
 export { useAll, useAllSuspense } from "./use-all.js";
+export { useOne, useOneSuspense } from "./use-one.js";
+export type { UseAllResult } from "../react-core/use-all.js";
+export type { UseOneResult } from "../react-core/use-one.js";
 export { useLocalFirstAuth, type LocalFirstAuth } from "./use-local-first-auth.js";
 export { useAuthState, type AuthStateInfo } from "../react-core/use-auth-state.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";

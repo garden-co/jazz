@@ -3,7 +3,7 @@ import { app } from "../schema.js";
 
 export function TodoItem({ id }: { id: string }) {
   const db = useDb();
-  const [todo] = useAll(app.todos.where({ id }).limit(1)) ?? [];
+  const [todo] = useAll(app.todos.where({ id }).limit(1)).data ?? [];
 
   if (!todo) return null;
 

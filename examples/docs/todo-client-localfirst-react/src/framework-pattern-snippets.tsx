@@ -22,7 +22,7 @@ export function ProviderExample() {
 
 // #region live-query-react
 export function LiveQueryExample() {
-  const todos = useAll(app.todos.where({ done: false }));
+  const { data: todos } = useAll(app.todos.where({ done: false }));
 
   // undefined = not yet connected; [] = connected, no rows; [...] = rows present
   if (todos === undefined) return <p>Loading...</p>;

@@ -64,7 +64,9 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
 // #region collab-subscribe
 export function ProjectTasks({ projectId }: { projectId: string }) {
   const db = useDb();
-  const tasks = useAll(app.tasks.where({ projectId, done: false }).orderBy("$createdAt", "desc"));
+  const { data: tasks } = useAll(
+    app.tasks.where({ projectId, done: false }).orderBy("$createdAt", "desc"),
+  );
 
   function addTask(title: string) {
     db.insert(app.tasks, { title, done: false, projectId });
