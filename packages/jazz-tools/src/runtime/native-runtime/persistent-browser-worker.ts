@@ -12,7 +12,6 @@ type WriteMessage = Extract<
 
 let runtime: NativeRuntimeAdapter | null = null;
 let runtimeNamespace: string | null = null;
-let runtimeWasmModule: Awaited<ReturnType<typeof loadWasmModule>> | null = null;
 const pendingWriteTransactionIds = new Set<string>();
 
 const workerScope = self as unknown as {
@@ -29,6 +28,13 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
     switch (message.method) {
       case "open": {
         await openRuntime(message);
+        postResult(message.id, undefined);
+        return;
+      }
+      case "destroyBrowserStorage": {
+        const [runtimeSources, dbName] = message.args;
+        const wasmModule = await loadWasmModule(runtimeSources);
+        await wasmModule.WasmDb.destroyBrowserStorage(dbName);
         postResult(message.id, undefined);
         return;
       }
@@ -85,8 +91,8 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         postResult(message.id, undefined);
         return;
       }
-      case "clearClientStorage": {
-        const result = await clearClientStorage();
+      case "closeForStorageClear": {
+        const result = await closeForStorageClear();
         postResult(message.id, result);
         return;
       }
@@ -148,7 +154,6 @@ function dispatchWrite(message: WriteMessage): { transactionId: string } {
 async function openRuntime(message: OpenMessage): Promise<void> {
   const [runtimeSources, dbName, schema, node, author] = message.args;
   const wasmModule = await loadWasmModule(runtimeSources);
-  runtimeWasmModule = wasmModule;
   runtimeNamespace = dbName;
   const db = await wasmModule.WasmDb.openBrowser(
     dbName,
@@ -162,22 +167,18 @@ async function openRuntime(message: OpenMessage): Promise<void> {
   });
 }
 
-async function clearClientStorage(): Promise<void> {
+async function closeForStorageClear(): Promise<string> {
   const namespace = runtimeNamespace;
   if (!namespace) {
     throw new Error("Persistent browser native runtime has no storage namespace");
-  }
-  if (!runtimeWasmModule) {
-    throw new Error("Persistent browser native runtime has no WASM module");
   }
 
   await settlePendingWrites();
   await runtime?.close?.();
   runtime = null;
-  await runtimeWasmModule.WasmDb.destroyBrowserStorage(namespace);
   runtimeNamespace = null;
-  runtimeWasmModule = null;
   pendingWriteTransactionIds.clear();
+  return namespace;
 }
 
 async function settlePendingWrites(): Promise<void> {

@@ -104,6 +104,7 @@ declare module "jazz-wasm" {
     ): WasmWrite;
     setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
     tick(): void;
+    close(): boolean;
     connectUpstream(): WasmTransport;
     acceptSubscriber(identity: Uint8Array): WasmTransport;
     mergeableTx(): WasmTx;
