@@ -2609,14 +2609,8 @@ function readPreparedComparison(query: Uint8Array): {
   expect(rightOperandTag).toBe(3);
   const literalTag = reader.u64();
   const value = reader.string();
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
-  reader.readVec(() => undefined);
-  reader.option(() => undefined);
-  const limit = reader.option((optionReader) => optionReader.u64());
+  const tail = readPreparedQueryTail(reader);
+  const limit = tail.limit;
   return { table, predicateTag, column, literalTag, value, limit };
 }
 
@@ -2640,14 +2634,8 @@ function readPreparedUuidComparison(query: Uint8Array): {
   expect(rightOperandTag).toBe(3);
   const literalTag = reader.u64();
   const value = formatUuidForTest(reader.bytes());
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
-  reader.readVec(() => undefined);
-  reader.option(() => undefined);
-  const limit = reader.option((optionReader) => optionReader.u64());
+  const tail = readPreparedQueryTail(reader);
+  const limit = tail.limit;
   return { table, predicateTag, column, literalTag, value, limit };
 }
 
@@ -2677,14 +2665,7 @@ function readPreparedLimit(query: Uint8Array): number | undefined {
   reader.readVec(() => {
     skipPreparedPredicate(reader);
   });
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.option(() => undefined);
-  reader.readVec(() => undefined);
-  reader.option(() => undefined);
-  return reader.option((optionReader) => optionReader.u64());
+  return readPreparedQueryTail(reader).limit;
 }
 
 function skipPreparedPredicate(reader: PostcardReader): void {
@@ -2741,6 +2722,34 @@ function skipPreparedLiteral(reader: PostcardReader): void {
   }
 }
 
+function readPreparedQueryTail(
+  reader: PostcardReader,
+  opts: { prefixAlreadySkipped?: boolean } = {},
+): {
+  select: string[] | undefined;
+  orderBy: Array<{ column: string; directionTag: number }>;
+  limit: number | undefined;
+  offset: number;
+} {
+  if (!opts.prefixAlreadySkipped) {
+    reader.readVec(() => undefined); // joins
+    reader.readVec(() => undefined); // policy_branches
+    reader.readVec(() => undefined); // reachable
+    reader.readVec(() => undefined); // includes
+    reader.readVec(() => undefined); // array_subqueries
+  }
+  const select = reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
+  const orderByCount = reader.u64();
+  const orderBy = Array.from({ length: orderByCount }, () => ({
+    column: reader.string(),
+    directionTag: reader.u64(),
+  }));
+  reader.option(() => undefined); // aggregate
+  const limit = reader.option((optionReader) => optionReader.u64());
+  const offset = reader.u64();
+  return { select, orderBy, limit, offset };
+}
+
 function readPreparedSelect(query: Uint8Array): string[] | undefined {
   const reader = new PostcardReader(query);
   reader.string();
@@ -2757,7 +2766,7 @@ function readPreparedSelect(query: Uint8Array): string[] | undefined {
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
-  return reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
+  return readPreparedQueryTail(reader, { prefixAlreadySkipped: true }).select;
 }
 
 function readPreparedQueryShape(query: Uint8Array): {
@@ -2779,19 +2788,7 @@ function readPreparedQueryShape(query: Uint8Array): {
     const value = reader.string();
     return { column, opTag, literalTag, value };
   });
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.readVec(() => undefined);
-  reader.option((selectReader) => selectReader.readVec(() => selectReader.string()));
-  const orderByCount = reader.u64();
-  const orderBy = Array.from({ length: orderByCount }, () => ({
-    column: reader.string(),
-    directionTag: reader.u64(),
-  }));
-  reader.option(() => undefined);
-  const limit = reader.option((optionReader) => optionReader.u64());
-  const offset = reader.u64();
+  const { orderBy, limit, offset } = readPreparedQueryTail(reader);
   return { table, predicates, orderBy, limit, offset };
 }
 
