@@ -208,6 +208,7 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
 
     policy.attachments.allowRead.where(allowedTo.read("messageId")),
     policy.attachments.allowInsert.where(allowedTo.read("messageId")),
+    policy.attachments.allowDelete.where(allowedTo.read("messageId")),
 
     policy.files.allowInsert.where({}),
     policy.files.allowRead.where(allowedTo.readReferencing(policy.attachments, "fileId")),
@@ -396,6 +397,66 @@ describe("raw websocket private read gate", () => {
       ),
     ).resolves.toBeDefined();
 
+    const fileBytes = new Uint8Array([0, 1, 2, 3, 254, 255]);
+    const hiddenFile = await withTimeout(
+      alice.createFileFromBlob(
+        camelChatApp,
+        new Blob([fileBytes], { type: "application/x-private-proof" }),
+        {
+          name: "private-proof.bin",
+          tier: "edge",
+        },
+      ),
+      15_000,
+      "Alice private file edge wait",
+    );
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.files.where({ id: hiddenFile.id }),
+        (rows) => rows.length === 0,
+        "Bob should not read a file row before a readable attachment references it",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+    await expect(bob.loadFileAsBlob(camelChatApp, hiddenFile.id, { tier: "edge" })).rejects.toThrow(
+      `File "${hiddenFile.id}" was not found.`,
+    );
+
+    await withTimeout(
+      alice
+        .insert(camelChatApp.attachments, {
+          messageId: bobMessage.id,
+          type: "file",
+          name: hiddenFile.name ?? "private-proof.bin",
+          fileId: hiddenFile.id,
+          size: fileBytes.byteLength,
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice attachment edge wait",
+    );
+    const [visibleFile] = await waitForQuery(
+      bob,
+      camelChatApp.files.where({ id: hiddenFile.id }),
+      (rows) => rows.length === 1,
+      "Bob should read a file row after a readable attachment references it",
+      15_000,
+      "edge",
+    );
+    expect(visibleFile.mime_type).toBe("application/x-private-proof");
+    expect(Array.from(visibleFile.data)).toEqual(Array.from(fileBytes));
+    const visibleBlob = await withTimeout(
+      bob.loadFileAsBlob(camelChatApp, hiddenFile.id, { tier: "edge" }),
+      15_000,
+      "Bob visible file blob edge load",
+    );
+    expect(visibleBlob.type).toBe("application/x-private-proof");
+    expect(Array.from(new Uint8Array(await visibleBlob.arrayBuffer()))).toEqual(
+      Array.from(fileBytes),
+    );
+
     const subscriptionQueries = [
       {
         label: "chat list memberships with included chat",
@@ -564,7 +625,6 @@ describe("raw websocket private read gate", () => {
       serverUrl,
       "camel-chat-invite-bob-scoped",
       await getJazzServerJwtForUser(bobUserId, { join_code: joinCode }, appId),
-      bobSecret,
     );
 
     await expect(
@@ -957,14 +1017,12 @@ async function openJwtUserDb(
   serverUrl: string,
   label: string,
   jwtToken: string,
-  secret?: string,
 ): Promise<Db> {
   return ctx.track(
     await createDb({
       appId,
       serverUrl,
       jwtToken,
-      secret,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
     }),
   );

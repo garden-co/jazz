@@ -154,9 +154,12 @@ query-planner predicates (`INV-LVAL-17`).
 - 🔶 **Future/gated.** Chunk index, bundles, truncation/GC horizon, hash-based
   checkpoint hydration, cross-row dedup, and `[needs: text-merge]` rich-text
   three-way merge are designed but unimplemented beyond the first engine path.
-- 🔶 **Files compatibility.** Alpha `files`/`file_parts` convention tables remain
-  a userland/compat surface; this chapter is the engine-level path, and the alpha
-  convention leans compat-first.
+- ✅ **File rows use ordinary blob columns.** The replacement core deliberately
+  diverges from alpha's historical `files`/`file_parts` convention. File helpers
+  are ordinary userland rows containing a binary large value, with `mime_type`
+  and `data` as the conventional column names. Permissions, sync, subscriptions,
+  persistence, and helpers must therefore behave exactly like normal table/row
+  behavior for that file row; there is no privileged file-parts side table.
 - 🔶 **Serving topology.** The content-channel design serves content from edges;
   the implementation path serves from core until edge serving is built.
 - 🔶 **Ops as a native groove column type.** The op-log uses a custom byte
