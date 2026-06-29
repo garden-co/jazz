@@ -642,6 +642,25 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/bin/create-jazz.js"
           tar -tf "${TARBALL}" | grep -q "package/dist/index.js"
 
+      # jazz-inspector ships only static embedded assets (no native binaries), so
+      # it isn't part of the prebuilt-artifact pipeline — build its dist-embedded
+      # here from the downloaded jazz-tools/jazz-wasm, then verify and publish it
+      # like the others. jazz-tools depends on it, so it must reach npm.
+      - name: Build jazz-inspector embedded assets
+        run: pnpm --filter jazz-inspector run build:embedded
+
+      - name: Guard jazz-inspector alpha version
+        run: |
+          node -e 'const fs=require("fs");const alpha=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const insp=JSON.parse(fs.readFileSync("packages/inspector/package.json","utf8"));const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));if(!alpha.test(insp.version)){throw new Error(`jazz-inspector version must match 2.0.0-alpha.*, got ${insp.version}`);}if(insp.version!==tools.version){throw new Error(`jazz-inspector ${insp.version} must match jazz-tools ${tools.version}`);}const tag=insp.publishConfig&&insp.publishConfig.tag;if(tag!=="alpha"){throw new Error(`jazz-inspector publishConfig.tag must be alpha, got ${tag}`);}console.log(`jazz-inspector guard passed at ${insp.version}`);'
+
+      - name: Verify packed jazz-inspector manifest
+        run: |
+          TMP_DIR=$(mktemp -d)
+          pnpm --filter jazz-inspector pack --pack-destination "${TMP_DIR}"
+          TARBALL=$(ls "${TMP_DIR}"/jazz-inspector-*.tgz | head -n 1)
+          tar -tf "${TARBALL}" | grep -q "package/dist-embedded/embedded.html"
+          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}if(!(p.publishConfig&&p.publishConfig.tag==="alpha")){throw new Error(`Expected publishConfig.tag=alpha for ${p.name}, got ${(p.publishConfig||{}).tag}`);}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+
       - name: Verify packed jazz-tools native binaries and runtime bootstrap
         run: |
           TMP_DIR=$(mktemp -d)
@@ -744,6 +763,16 @@ jobs:
             echo "jazz-rn@${RN_VERSION} already exists on npm; skipping publish."
           else
             npm_config_ignore_scripts=true pnpm --filter jazz-rn publish --tag alpha --access public --no-git-checks
+          fi
+
+      - name: Publish jazz-inspector (alpha tag)
+        if: env.RELEASE_MODE == 'publish'
+        run: |
+          INSPECTOR_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/inspector/package.json","utf8")).version')
+          if npm view "jazz-inspector@${INSPECTOR_VERSION}" version >/dev/null 2>&1; then
+            echo "jazz-inspector@${INSPECTOR_VERSION} already exists on npm; skipping publish."
+          else
+            pnpm --filter jazz-inspector publish --tag alpha --access public --no-git-checks
           fi
 
       - name: Publish jazz-tools (alpha tag)
