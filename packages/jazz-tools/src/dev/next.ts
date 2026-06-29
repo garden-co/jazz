@@ -93,6 +93,7 @@ const OVERLAY_REWRITE_SOURCE = "/__jazz/embedded/:path*";
 interface NextRewrite {
   source: string;
   destination: string;
+  basePath?: false;
 }
 type NextRewritesResult =
   | NextRewrite[]
@@ -107,6 +108,10 @@ function withOverlayRewrite(previous: unknown, assetOrigin: string): NextRewrite
   const overlay: NextRewrite = {
     source: OVERLAY_REWRITE_SOURCE,
     destination: `${assetOrigin}${OVERLAY_REWRITE_SOURCE}`,
+    // The overlay iframe requests a root-absolute /__jazz/embedded/* URL; without
+    // this, Next prefixes the rewrite source with the app's basePath and the
+    // request never matches (overlay 404s on basePath apps).
+    basePath: false,
   };
   return async () => {
     const prev = typeof previous === "function" ? await (previous as NextRewritesFn)() : undefined;

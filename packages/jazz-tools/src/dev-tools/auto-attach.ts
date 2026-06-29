@@ -17,7 +17,7 @@
 function inspectorEnabled(): boolean {
   const viteEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
   const nextFlag =
-    typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_JAZZ_INSPECTOR : undefined;
+    typeof process !== "undefined" ? process.env.NEXT_PUBLIC_JAZZ_INSPECTOR : undefined;
   return Boolean(viteEnv?.VITE_JAZZ_INSPECTOR || nextFlag);
 }
 
