@@ -9,8 +9,8 @@ use super::*;
 use crate::ids::{AuthorId, NodeUuid};
 use crate::protocol::{CatalogueAck, LensOp, TableLens};
 use crate::query::{
-    Include, JoinMode, all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit, lte,
-    ne, not,
+    ArraySubquery, Include, JoinMode, all_of, any_of, claim, col, contains, eq, gt, in_list,
+    is_null, lit, lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema};
 
@@ -212,6 +212,32 @@ fn owner_id_public_schema() -> JazzSchema {
     )
     .with_read_policy(Policy::public())
     .with_write_policy(Policy::public())])
+}
+
+fn relation_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner_id", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "comments",
+            [
+                ColumnSchema::new("body", ColumnType::String),
+                ColumnSchema::new("todo_id", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
 }
 
 fn evolved_owner_write_schema() -> JazzSchema {
@@ -3124,6 +3150,49 @@ fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
     };
     assert_eq!(subscribe.shape_id, shape_id);
     assert_eq!(subscribe.subscription.shape_id, shape_id);
+}
+
+#[test]
+fn global_subscription_announces_array_subquery_upstream_coverage_recursively() {
+    let schema = relation_schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("todos", "todos", "owner_id", "id")
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+    );
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let _upstream = client.connect_upstream(client_transport);
+
+    client.tick().unwrap();
+
+    let mut registered_tables = Vec::new();
+    let mut subscribe_count = 0;
+    while let Some(message) = upstream_transport.try_recv() {
+        match message {
+            SyncMessage::RegisterShape { ast, .. } => {
+                registered_tables.push((
+                    ast.query.table,
+                    ast.query.array_subqueries.len(),
+                    ast.query.limit,
+                ));
+            }
+            SyncMessage::Subscribe(_) => subscribe_count += 1,
+            other => panic!("unexpected upstream message: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        registered_tables,
+        vec![
+            ("users".to_owned(), 1, None),
+            ("todos".to_owned(), 1, None),
+            ("comments".to_owned(), 0, None),
+        ]
+    );
+    assert_eq!(subscribe_count, registered_tables.len());
 }
 
 #[test]

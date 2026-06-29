@@ -30,7 +30,7 @@ use crate::protocol::{
     ContentExtent, CoverageKey, CurrentWriteSchema, MigrationLens, RegisterShapeOptions,
     SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
 };
-use crate::query::{Binding, Query, QueryError, ShapeId, ValidatedQuery};
+use crate::query::{ArraySubquery, Binding, Query, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
@@ -635,8 +635,16 @@ where
         binding: &Binding,
         tier: DurabilityTier,
     ) -> SubscriptionKey {
+        self.attach_query_shape_binding_with_opts(shape, binding, RegisterShapeOptions { tier })
+    }
+
+    fn attach_query_shape_binding_with_opts(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+    ) -> SubscriptionKey {
         let subscription = self.node.next_subscription_key(shape);
-        let opts = RegisterShapeOptions { tier };
         self.node
             .upstream_subscriptions
             .borrow_mut()
@@ -694,12 +702,6 @@ where
     ) -> Result<SubscriptionStream, Error> {
         let read_tier = effective_read_tier(opts);
         let (maintained_subscription, snapshot) = if read_tier == DurabilityTier::Global {
-            if !prepared.shape.query().array_subqueries.is_empty() {
-                return Err(Error::new(
-                    ErrorCode::Query,
-                    "global relation subscriptions require maintained relation edges",
-                ));
-            }
             let (subscription, rows) = self
                 .node
                 .node
@@ -711,7 +713,16 @@ where
                 )?;
             (
                 Some(subscription),
-                subscription_snapshot_for_rows(&prepared.shape, rows),
+                if prepared.shape.query().array_subqueries.is_empty() {
+                    subscription_snapshot_for_rows(&prepared.shape, rows)
+                } else {
+                    self.node.node.borrow_mut().subscription_snapshot_for_link(
+                        &prepared.shape,
+                        &prepared.binding,
+                        read_tier,
+                        author,
+                    )?
+                },
             )
         } else {
             let snapshot = self.node.node.borrow_mut().subscription_snapshot_for_link(
@@ -757,36 +768,23 @@ where
             // If this Db is attached to upstreams, ask them to carry this shape so
             // the subscription fills from synced rows, not just local writes. The consumer
             // sees only the handle; the request flows out on the next `tick`.
-            let upstream_subscription = self.node.next_subscription_key(&prepared.shape);
             let upstream_opts = RegisterShapeOptions { tier: read_tier };
-            self.node
-                .upstream_subscriptions
-                .borrow_mut()
-                .push(PendingUpstreamCommand::Subscribe(
-                    PendingUpstreamSubscription {
-                        subscription: upstream_subscription,
-                        shape: prepared.shape.clone(),
-                        binding: prepared.binding.clone(),
-                        opts: upstream_opts.clone(),
-                    },
-                ));
-            self.node.latest_coverage_subscriptions.borrow_mut().insert(
-                coverage_key(&prepared.shape, &prepared.binding, upstream_opts),
-                upstream_subscription,
-            );
-            self.node.schedule_tick(TickUrgency::Immediate);
+            let upstream_subscriptions =
+                self.open_subscription_upstream_coverage(prepared, upstream_opts.clone())?;
             let node = Rc::clone(&self.node.node);
             let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
-            let upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
+            let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
             let scheduler = Rc::clone(&self.node.scheduler);
             cleanup = Some(Box::new(move || {
-                node.borrow_mut().apply_unsubscribe(upstream_subscription);
-                latest_coverage_subscriptions
-                    .borrow_mut()
-                    .retain(|_, subscription| *subscription != upstream_subscription);
-                upstream_subscriptions
-                    .borrow_mut()
-                    .push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
+                for upstream_subscription in upstream_subscriptions {
+                    node.borrow_mut().apply_unsubscribe(upstream_subscription);
+                    latest_coverage_subscriptions
+                        .borrow_mut()
+                        .retain(|_, subscription| *subscription != upstream_subscription);
+                    pending_upstream_subscriptions
+                        .borrow_mut()
+                        .push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
+                }
                 schedule_tick_in(&scheduler, TickUrgency::Immediate);
             }) as Box<dyn FnOnce()>);
         }
@@ -795,6 +793,46 @@ where
             _state: state,
             cleanup,
         })
+    }
+
+    fn open_subscription_upstream_coverage(
+        &self,
+        prepared: &PreparedQuery,
+        opts: RegisterShapeOptions,
+    ) -> Result<Vec<SubscriptionKey>, Error> {
+        let mut shapes = vec![(prepared.shape.clone(), prepared.binding.clone())];
+        self.collect_array_subquery_upstream_coverage(
+            prepared.shape.query().array_subqueries.as_slice(),
+            &prepared.binding,
+            &mut shapes,
+        )?;
+        Ok(shapes
+            .into_iter()
+            .map(|(shape, binding)| {
+                self.attach_query_shape_binding_with_opts(&shape, &binding, opts.clone())
+            })
+            .collect())
+    }
+
+    fn collect_array_subquery_upstream_coverage(
+        &self,
+        subqueries: &[ArraySubquery],
+        parent_binding: &Binding,
+        shapes: &mut Vec<(ValidatedQuery, Binding)>,
+    ) -> Result<(), Error> {
+        let schema = self.current_write_schema_for_query()?;
+        for subquery in subqueries {
+            let query = query_for_array_subquery_coverage(subquery);
+            let shape = query.validate(&schema)?;
+            let binding = binding_for_coverage_shape(&shape, parent_binding)?;
+            shapes.push((shape, binding));
+            self.collect_array_subquery_upstream_coverage(
+                subquery.nested_arrays.as_slice(),
+                parent_binding,
+                shapes,
+            )?;
+        }
+        Ok(())
     }
 
     /// Insert a row locally, generating a uuidv7-shaped row id.
@@ -2037,22 +2075,30 @@ where
                         .drain_local_maintained_view_subscription(maintained)?
                 };
                 if let Some(update) = update {
-                    let mut rows_by_id = previous
-                        .rows
-                        .iter()
-                        .cloned()
-                        .map(|row| (subscription_row_key(&row), row))
-                        .collect::<BTreeMap<_, _>>();
-                    for (_, row_uuid, _) in update.removes {
-                        rows_by_id
-                            .retain(|(_, existing_row_uuid), _| *existing_row_uuid != row_uuid);
+                    if shape.query().array_subqueries.is_empty() {
+                        let mut rows_by_id = previous
+                            .rows
+                            .iter()
+                            .cloned()
+                            .map(|row| (subscription_row_key(&row), row))
+                            .collect::<BTreeMap<_, _>>();
+                        for (_, row_uuid, _) in update.removes {
+                            rows_by_id
+                                .retain(|(_, existing_row_uuid), _| *existing_row_uuid != row_uuid);
+                        }
+                        for row in update.adds {
+                            rows_by_id.insert(subscription_row_key(&row), row);
+                        }
+                        let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
+                        node.borrow().apply_query_order(shape.query(), &mut rows)?;
+                        subscription_snapshot_for_rows(&shape, rows)
+                    } else {
+                        node.borrow_mut()
+                            .subscription_snapshot_for_link(&shape, &binding, read_tier, author)?
                     }
-                    for row in update.adds {
-                        rows_by_id.insert(subscription_row_key(&row), row);
-                    }
-                    let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
-                    node.borrow().apply_query_order(shape.query(), &mut rows)?;
-                    subscription_snapshot_for_rows(&shape, rows)
+                } else if !shape.query().array_subqueries.is_empty() {
+                    node.borrow_mut()
+                        .subscription_snapshot_for_link(&shape, &binding, read_tier, author)?
                 } else {
                     previous.clone()
                 }
@@ -3181,6 +3227,28 @@ fn coverage_key(
         binding_id: binding.binding_id(),
         opts,
     }
+}
+
+fn query_for_array_subquery_coverage(subquery: &ArraySubquery) -> Query {
+    let mut query = Query::from(subquery.table.clone());
+    query.filters = subquery.filters.clone();
+    query.array_subqueries = subquery.nested_arrays.clone();
+    query
+}
+
+fn binding_for_coverage_shape(
+    shape: &ValidatedQuery,
+    parent_binding: &Binding,
+) -> Result<Binding, Error> {
+    let mut values = BTreeMap::new();
+    for name in shape.params().keys() {
+        let value =
+            parent_binding.values().get(name).cloned().ok_or_else(|| {
+                Error::new(ErrorCode::Query, format!("missing query param {name}"))
+            })?;
+        values.insert(name.clone(), value);
+    }
+    Ok(shape.bind(values)?)
 }
 
 /// Row cells supplied to write methods.
