@@ -52,7 +52,6 @@ catalogs:
 overrides:
   react: 19.2.4
   react-dom: 19.2.4
-  jazz-inspector: workspace:*
 
 importers:
 
@@ -1503,9 +1502,6 @@ importers:
       expo-secure-store:
         specifier: '>=14.0.0'
         version: 14.0.1(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
-      jazz-inspector:
-        specifier: workspace:*
-        version: link:../inspector
       jazz-wasm:
         specifier: workspace:*
         version: link:../../crates/jazz-wasm

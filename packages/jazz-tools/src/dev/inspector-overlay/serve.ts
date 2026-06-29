@@ -1,9 +1,9 @@
-import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { dirname, join, relative, isAbsolute } from "node:path";
 
-export const INSPECTOR_PACKAGE = "jazz-inspector";
 export const OVERLAY_EMBEDDED_PREFIX = "/__jazz/embedded";
 
 const MIME: Record<string, string> = {
@@ -22,17 +22,20 @@ const ext = (p: string) => {
 };
 
 export function resolveEmbeddedDir(): string | null {
-  try {
-    // `jazz-inspector` is a direct dependency of jazz-tools, so the embedded
-    // build always sits in jazz-tools' own dependency tree — resolve it relative
-    // to this module rather than the host app. The build is dev tooling, so this
-    // runs lazily (dynamic resolution) and never gets bundled into app output.
-    const require = createRequire(import.meta.url);
-    // Resolve an existing emitted file (the build outputs embedded.html, not index.html).
-    return dirname(require.resolve(`${INSPECTOR_PACKAGE}/dist-embedded/embedded.html`));
-  } catch {
-    return null;
-  }
+  const here = dirname(fileURLToPath(import.meta.url));
+  // Published: the inspector's embedded build is copied into jazz-tools' own
+  // dist at publish time, so it sits right next to this module — resolved
+  // relative to jazz-tools itself, this works in any consumer install anywhere.
+  const bundled = join(here, "embedded");
+  if (existsSync(join(bundled, "embedded.html"))) return bundled;
+  // Monorepo dev only: jazz-tools and jazz-inspector are sibling packages and we
+  // don't stage the assets into dist during a normal build, so read them from
+  // the inspector package directly. Never reached in a published install (the
+  // bundled dir above always exists there). `here` is .../jazz-tools/{src,dist}/
+  // dev/inspector-overlay, so four levels up lands on `packages/`.
+  const sibling = join(here, "../../../../inspector/dist-embedded");
+  if (existsSync(join(sibling, "embedded.html"))) return sibling;
+  return null;
 }
 
 export interface OverlayResponse {
@@ -112,13 +115,13 @@ export async function startOverlayAssetServer(): Promise<OverlayAssetServer> {
 }
 
 export function createOverlayHandler() {
-  // Resolve the embedded dir once at startup (require.resolve walks node_modules
-  // and hits disk). It ships with jazz-tools, so a miss means a broken install —
-  // say so once here rather than re-checking per request.
+  // Resolve the embedded dir once at startup (hits disk). It ships inside
+  // jazz-tools, so a miss means a broken install — say so once here rather than
+  // re-checking per request.
   const dir = resolveEmbeddedDir();
   if (!dir) {
     console.log(
-      `[jazz] Inspector overlay: couldn't find the \`${INSPECTOR_PACKAGE}\` build. ` +
+      "[jazz] Inspector overlay: couldn't find the embedded inspector build. " +
         "It ships with jazz-tools — try reinstalling dependencies.",
     );
   }
