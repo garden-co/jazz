@@ -397,7 +397,7 @@ describe("raw websocket private read gate", () => {
       ),
     ).resolves.toBeDefined();
 
-    const fileBytes = new Uint8Array([0, 1, 2, 3, 254, 255]);
+    const fileBytes = deterministicBytes(129 * 1024);
     const hiddenFile = await withTimeout(
       alice.createFileFromBlob(
         camelChatApp,
@@ -446,16 +446,14 @@ describe("raw websocket private read gate", () => {
       "edge",
     );
     expect(visibleFile.mime_type).toBe("application/x-private-proof");
-    expect(Array.from(visibleFile.data)).toEqual(Array.from(fileBytes));
+    expectBytesEqual(visibleFile.data, fileBytes);
     const visibleBlob = await withTimeout(
       bob.loadFileAsBlob(camelChatApp, hiddenFile.id, { tier: "edge" }),
       15_000,
       "Bob visible file blob edge load",
     );
     expect(visibleBlob.type).toBe("application/x-private-proof");
-    expect(Array.from(new Uint8Array(await visibleBlob.arrayBuffer()))).toEqual(
-      Array.from(fileBytes),
-    );
+    expectBytesEqual(new Uint8Array(await visibleBlob.arrayBuffer()), fileBytes);
 
     const rawFileBytes = new Uint8Array([9, 8, 7, 6]);
     const rawFile = await withTimeout(
@@ -501,7 +499,7 @@ describe("raw websocket private read gate", () => {
       "edge",
     );
     expect(visibleRawFile.mime_type).toBe("application/x-raw-file-proof");
-    expect(Array.from(visibleRawFile.data)).toEqual(Array.from(rawFileBytes));
+    expectBytesEqual(visibleRawFile.data, rawFileBytes);
 
     const subscriptionQueries = [
       {
@@ -1105,6 +1103,19 @@ function requireUserId(db: Db, label: string): string {
     throw new Error(`${label} Db did not initialize a local-first session`);
   }
   return userId;
+}
+
+function deterministicBytes(length: number): Uint8Array {
+  const bytes = new Uint8Array(length);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 31 + 17) % 256;
+  return bytes;
+}
+
+function expectBytesEqual(actual: Uint8Array, expected: Uint8Array): void {
+  expect(actual.byteLength).toBe(expected.byteLength);
+  for (let i = 0; i < expected.byteLength; i++) {
+    expect(actual[i]).toBe(expected[i]);
+  }
 }
 
 async function waitForSubscription<T extends { id: string }>(

@@ -1625,7 +1625,7 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             settled,
             tier,
         } => {
-            let rows = encode_core_rows(current)
+            let rows = encode_core_relation_snapshot(current)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             Ok(serde_json::json!({
                 "type": "snapshot",
@@ -1640,7 +1640,7 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             tier,
             ..
         } => {
-            let rows = encode_core_rows(current)
+            let rows = encode_core_relation_snapshot(current)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             Ok(serde_json::json!({
                 "type": "snapshot",

@@ -1804,7 +1804,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             settled,
             tier,
         } => {
-            let rows = postcard::to_allocvec(&row_batches(&current)).map_err(to_js_error)?;
+            let rows = encode_relation_snapshot(&current).map_err(to_js_error)?;
             set_prop(&object, "type", JsValue::from_str("snapshot"))?;
             set_prop(
                 &object,
@@ -1820,7 +1820,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             tier,
             ..
         } => {
-            let rows = postcard::to_allocvec(&row_batches(&current)).map_err(to_js_error)?;
+            let rows = encode_relation_snapshot(&current).map_err(to_js_error)?;
             set_prop(&object, "type", JsValue::from_str("snapshot"))?;
             set_prop(
                 &object,
