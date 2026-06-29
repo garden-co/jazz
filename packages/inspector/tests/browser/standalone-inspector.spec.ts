@@ -152,6 +152,15 @@ test.describe("data explorer page", () => {
     await expect(page.getByText('"delete"')).toBeVisible();
   });
 
+  test("opens inline text editor in selected row", async ({ page }) => {
+    const title = "First seeded todo";
+    const titleCell = page.getByRole("gridcell", { name: title, exact: true });
+
+    await titleCell.dblclick();
+
+    await expect(page.getByLabel("Edit title")).toBeVisible();
+  });
+
   test("discards queued inline text edits without persisting them", async ({ page }) => {
     const originalTitle = "Seeded todo 000003";
     const updatedTitle = `Discarded inline edit ${Date.now()}`;
