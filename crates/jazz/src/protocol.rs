@@ -21,6 +21,13 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId};
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
+    /// Trusted backend assertion of process-local auth claims for a write subject.
+    SessionClaims {
+        /// Identity these claims describe.
+        identity: AuthorId,
+        /// Claims used by policy evaluation for this identity.
+        claims: BTreeMap<String, Value>,
+    },
     /// Upstream commit unit awaiting authority fate.
     CommitUnit {
         /// Transaction payload.

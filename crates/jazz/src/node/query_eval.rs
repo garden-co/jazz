@@ -454,14 +454,15 @@ where
         let mut rows_by_id = BTreeMap::new();
         let base_shape = base_query.validate(&self.catalogue.schema)?;
         let base_binding = binding_for_shape(&base_shape, binding)?;
-        for row in self.query_rows_with_options_for_identity(
+        let base_rows = self.query_rows_with_options_for_identity(
             &base_shape,
             &base_binding,
             tier,
             None,
             identity,
             false,
-        )? {
+        )?;
+        for row in base_rows {
             rows_by_id.insert(row.row_uuid(), row);
         }
         for branch in branches {
@@ -469,14 +470,15 @@ where
                 .as_query(&shape.query().table)
                 .validate(&self.catalogue.schema)?;
             let branch_binding = binding_for_shape(&branch_shape, binding)?;
-            for row in self.query_rows_with_options_for_identity(
+            let branch_rows = self.query_rows_with_options_for_identity(
                 &branch_shape,
                 &branch_binding,
                 tier,
                 None,
                 identity,
                 false,
-            )? {
+            )?;
+            for row in branch_rows {
                 rows_by_id.insert(row.row_uuid(), row);
             }
         }
@@ -1581,13 +1583,13 @@ where
     > {
         let mut sources = BTreeMap::new();
         let mut tables = BTreeMap::new();
-        for join in &shape.query().joins {
+        for table_name in collect_join_source_tables(shape.query()) {
             let table = self
-                .table_in_schema(&join.table, shape.schema_version())?
+                .table_in_schema(&table_name, shape.schema_version())?
                 .clone();
-            let rows = self.current_rows_for_schema(&join.table, shape.schema_version(), tier)?;
-            sources.insert(join.table.clone(), inline_current_graph(&table, rows)?);
-            tables.insert(join.table.clone(), table);
+            let rows = self.current_rows_for_schema(&table_name, shape.schema_version(), tier)?;
+            sources.insert(table_name.clone(), inline_current_graph(&table, rows)?);
+            tables.insert(table_name, table);
         }
         for reachable in &shape.query().reachable {
             for table_name in [&reachable.access_table, &reachable.edge_table] {
@@ -1612,10 +1614,10 @@ where
         shape: &ValidatedQuery,
     ) -> Result<BTreeMap<String, GraphBuilder>, Error> {
         let mut sources = BTreeMap::new();
-        for join in &shape.query().joins {
-            let table = self.table(&join.table)?.clone();
-            let rows = self.tx_current_rows(tx_id, &join.table)?;
-            sources.insert(join.table.clone(), inline_current_graph(&table, rows)?);
+        for table_name in collect_join_source_tables(shape.query()) {
+            let table = self.table(&table_name)?.clone();
+            let rows = self.tx_current_rows(tx_id, &table_name)?;
+            sources.insert(table_name, inline_current_graph(&table, rows)?);
         }
         for reachable in &shape.query().reachable {
             for table_name in [&reachable.access_table, &reachable.edge_table] {
@@ -1861,14 +1863,14 @@ where
     > {
         let mut sources = BTreeMap::new();
         let mut tables = BTreeMap::new();
-        for join in &shape.query().joins {
+        for table_name in collect_join_source_tables(shape.query()) {
             let table = self
-                .table_in_schema(&join.table, shape.schema_version())?
+                .table_in_schema(&table_name, shape.schema_version())?
                 .clone();
             let rows =
-                self.current_rows_for_schema_at(&join.table, shape.schema_version(), position)?;
-            sources.insert(join.table.clone(), inline_current_graph(&table, rows)?);
-            tables.insert(join.table.clone(), table);
+                self.current_rows_for_schema_at(&table_name, shape.schema_version(), position)?;
+            sources.insert(table_name.clone(), inline_current_graph(&table, rows)?);
+            tables.insert(table_name, table);
         }
         for reachable in &shape.query().reachable {
             for table_name in [&reachable.access_table, &reachable.edge_table] {
@@ -1959,13 +1961,13 @@ where
     > {
         let mut sources = BTreeMap::new();
         let mut tables = BTreeMap::new();
-        for join in &shape.query().joins {
+        for table_name in collect_join_source_tables(shape.query()) {
             let table = self
-                .table_in_schema(&join.table, shape.schema_version())?
+                .table_in_schema(&table_name, shape.schema_version())?
                 .clone();
-            let rows = self.current_rows_for_schema(&join.table, shape.schema_version(), tier)?;
-            sources.insert(join.table.clone(), inline_current_graph(&table, rows)?);
-            tables.insert(join.table.clone(), table);
+            let rows = self.current_rows_for_schema(&table_name, shape.schema_version(), tier)?;
+            sources.insert(table_name.clone(), inline_current_graph(&table, rows)?);
+            tables.insert(table_name, table);
         }
         for reachable in &shape.query().reachable {
             for table_name in [&reachable.access_table, &reachable.edge_table] {
@@ -2053,8 +2055,7 @@ where
     ) -> Result<(), Error> {
         collect_nullable_param_types(table, &query.filters, param_types)?;
         for join in &query.joins {
-            let join_table = self.table_in_schema(&join.table, schema_version)?;
-            collect_nullable_param_types(&join_table, &join.filters, param_types)?;
+            self.collect_join_nullable_param_types(join, schema_version, param_types)?;
         }
         for reachable in &query.reachable {
             if let Operand::Param(param) = &reachable.from {
@@ -2076,6 +2077,20 @@ where
                 schema_version,
                 param_types,
             )?;
+        }
+        Ok(())
+    }
+
+    fn collect_join_nullable_param_types(
+        &self,
+        join: &JoinVia,
+        schema_version: SchemaVersionId,
+        param_types: &mut BTreeMap<String, groove::schema::ColumnType>,
+    ) -> Result<(), Error> {
+        let join_table = self.table_in_schema(&join.table, schema_version)?;
+        collect_nullable_param_types(&join_table, &join.filters, param_types)?;
+        for nested in &join.nested_joins {
+            self.collect_join_nullable_param_types(nested, schema_version, param_types)?;
         }
         Ok(())
     }
@@ -2187,25 +2202,15 @@ where
         }
         for join in &shape.query().joins {
             if let Some(lookup) = &join.source_lookup {
-                let lookup_table = self.lowered_related_table(&lookup.table, &options)?;
-                let lookup_graph = options
-                    .source_overrides
-                    .get(&lookup.table)
-                    .cloned()
-                    .unwrap_or_else(|| visible_current_graph(lookup_table, options.tier));
                 let lookup_params = options.keep_binding_params_in_output.then(|| {
                     carried_params
                         .iter()
                         .map(|param| ProjectField::renamed(format!("left.{param}"), param.clone()))
                         .collect::<Vec<_>>()
                 });
-                graph = GraphBuilder::join(
-                    graph.unwrap_nullable(query_field(&lookup.row_id_source_column)),
-                    lookup_graph,
-                    [query_field(&lookup.row_id_source_column)],
-                    ["row_uuid".to_owned()],
-                )
-                .project_fields(
+                graph = self.apply_source_lookup_join(
+                    graph,
+                    lookup,
                     options
                         .output_fields
                         .iter()
@@ -2215,19 +2220,21 @@ where
                             query_field(&lookup.value_column),
                         )))
                         .chain(lookup_params.into_iter().flatten()),
-                );
+                    &options,
+                )?;
             }
             let join_table = self.lowered_related_table(&join.table, &options)?;
-            let join_key = join_key(join);
-            let left_key = if let Some(source_column) = &join.source_column {
+            let primary_join_key = join_key(join);
+            let primary_left_key = if let Some(source_column) = &join.source_column {
                 query_field(source_column)
             } else {
                 "row_uuid".to_owned()
             };
-            if matches!(join.target, JoinTarget::RowId)
-                && !matches!(join.source_column.as_deref(), None | Some("id"))
-            {
-                graph = graph.unwrap_nullable(left_key.clone());
+            if !matches!(join.source_column.as_deref(), None | Some("id")) {
+                graph = graph.unwrap_nullable(primary_left_key.clone());
+            }
+            for correlation in &join.correlated_filters {
+                graph = graph.unwrap_nullable(query_field(&correlation.source_column));
             }
             let mut join_graph = options
                 .source_overrides
@@ -2235,11 +2242,21 @@ where
                 .cloned()
                 .unwrap_or_else(|| visible_current_graph(join_table, options.tier));
             if join.source_column.is_none() {
-                join_graph = join_graph.unwrap_nullable(join_key.clone());
+                join_graph = join_graph.unwrap_nullable(primary_join_key.clone());
             } else {
-                join_graph = join_graph.filter(PredicateExpr::IsNotNull {
-                    field: join_key.clone(),
-                });
+                join_graph = join_graph
+                    .filter(PredicateExpr::IsNotNull {
+                        field: primary_join_key.clone(),
+                    })
+                    .unwrap_nullable(primary_join_key.clone());
+            }
+            for correlation in &join.correlated_filters {
+                let join_field = query_field(&correlation.join_column);
+                join_graph = join_graph
+                    .filter(PredicateExpr::IsNotNull {
+                        field: join_field.clone(),
+                    })
+                    .unwrap_nullable(join_field);
             }
             let join_params = if options.keep_binding_params_in_output
                 && !predicate_params(&join.filters).is_empty()
@@ -2257,6 +2274,18 @@ where
                 options.keep_binding_params_in_output,
                 &options.binding_source_shape,
             )?;
+            let (nested_join_graph, nested_join_params) = self.apply_nested_join_clauses(
+                join_graph,
+                join_table,
+                &join.nested_joins,
+                param_types,
+                &options,
+            )?;
+            join_graph = nested_join_graph;
+            let join_params = join_params
+                .into_iter()
+                .chain(nested_join_params)
+                .collect::<BTreeSet<_>>();
             let params = options.keep_binding_params_in_output.then(|| {
                 shape
                     .params()
@@ -2278,7 +2307,13 @@ where
                     })
                     .collect::<Vec<_>>()
             });
-            graph = GraphBuilder::join(graph, join_graph, [left_key], [join_key]).project_fields(
+            graph = GraphBuilder::join(
+                graph,
+                join_graph,
+                join_left_keys(join, &primary_left_key),
+                join_right_keys(join, &primary_join_key),
+            )
+            .project_fields(
                 options
                     .output_fields
                     .iter()
@@ -2340,6 +2375,147 @@ where
             }
         }
         Ok(graph)
+    }
+
+    fn apply_source_lookup_join(
+        &self,
+        graph: GraphBuilder,
+        lookup: &crate::query::JoinSourceLookup,
+        projected_fields: impl IntoIterator<Item = ProjectField>,
+        options: &LoweredQueryClauseOptions,
+    ) -> Result<GraphBuilder, Error> {
+        let lookup_table = self.lowered_related_table(&lookup.table, options)?;
+        let lookup_graph = options
+            .source_overrides
+            .get(&lookup.table)
+            .cloned()
+            .unwrap_or_else(|| visible_current_graph(lookup_table, options.tier));
+        Ok(GraphBuilder::join(
+            graph.unwrap_nullable(query_field(&lookup.row_id_source_column)),
+            lookup_graph,
+            [query_field(&lookup.row_id_source_column)],
+            ["row_uuid".to_owned()],
+        )
+        .project_fields(projected_fields))
+    }
+
+    fn apply_nested_join_clauses(
+        &self,
+        mut graph: GraphBuilder,
+        table: &TableSchema,
+        joins: &[JoinVia],
+        param_types: &BTreeMap<String, groove::schema::ColumnType>,
+        options: &LoweredQueryClauseOptions,
+    ) -> Result<(GraphBuilder, BTreeSet<String>), Error> {
+        let mut carried_params = BTreeSet::new();
+        for join in joins {
+            if let Some(lookup) = &join.source_lookup {
+                graph = self.apply_source_lookup_join(
+                    graph,
+                    lookup,
+                    current_row_fields(table)
+                        .into_iter()
+                        .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                        .chain(
+                            carried_params
+                                .iter()
+                                .cloned()
+                                .map(|param| ProjectField::renamed(format!("left.{param}"), param)),
+                        )
+                        .chain(std::iter::once(ProjectField::renamed(
+                            format!("right.{}", query_field(&lookup.value_column)),
+                            query_field(&lookup.value_column),
+                        ))),
+                    options,
+                )?;
+            }
+
+            let join_table = self.lowered_related_table(&join.table, options)?;
+            let primary_join_key = join_key(join);
+            let primary_left_key = if let Some(source_column) = &join.source_column {
+                query_field(source_column)
+            } else {
+                "row_uuid".to_owned()
+            };
+            if !matches!(join.source_column.as_deref(), None | Some("id")) {
+                graph = graph.unwrap_nullable(primary_left_key.clone());
+            }
+            for correlation in &join.correlated_filters {
+                graph = graph.unwrap_nullable(query_field(&correlation.source_column));
+            }
+            let mut join_graph = options
+                .source_overrides
+                .get(&join.table)
+                .cloned()
+                .unwrap_or_else(|| visible_current_graph(join_table, options.tier));
+            if join.source_column.is_none() {
+                join_graph = join_graph.unwrap_nullable(primary_join_key.clone());
+            } else {
+                join_graph = join_graph
+                    .filter(PredicateExpr::IsNotNull {
+                        field: primary_join_key.clone(),
+                    })
+                    .unwrap_nullable(primary_join_key.clone());
+            }
+            for correlation in &join.correlated_filters {
+                let join_field = query_field(&correlation.join_column);
+                join_graph = join_graph
+                    .filter(PredicateExpr::IsNotNull {
+                        field: join_field.clone(),
+                    })
+                    .unwrap_nullable(join_field);
+            }
+            join_graph = apply_filters_with_predicate_params(
+                join_graph,
+                join_table,
+                param_types,
+                &join.filters,
+                current_row_fields(join_table),
+                options.keep_binding_params_in_output,
+                &options.binding_source_shape,
+            )?;
+            let (nested_join_graph, nested_join_params) = self.apply_nested_join_clauses(
+                join_graph,
+                join_table,
+                &join.nested_joins,
+                param_types,
+                options,
+            )?;
+            join_graph = nested_join_graph;
+            let join_params = if options.keep_binding_params_in_output {
+                predicate_params(&join.filters)
+                    .into_iter()
+                    .chain(nested_join_params)
+                    .collect::<BTreeSet<_>>()
+            } else {
+                BTreeSet::new()
+            };
+            graph = GraphBuilder::join(
+                graph,
+                join_graph,
+                join_left_keys(join, &primary_left_key),
+                join_right_keys(join, &primary_join_key),
+            )
+            .project_fields(
+                current_row_fields(table)
+                    .into_iter()
+                    .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+                    .chain(
+                        carried_params
+                            .iter()
+                            .cloned()
+                            .map(|param| ProjectField::renamed(format!("left.{param}"), param)),
+                    )
+                    .chain(
+                        join_params
+                            .iter()
+                            .cloned()
+                            .map(|param| ProjectField::renamed(format!("right.{param}"), param)),
+                    ),
+            );
+            carried_params.extend(join_params);
+        }
+        Ok((graph, carried_params))
     }
 
     fn lowered_related_table<'a>(
@@ -3045,12 +3221,7 @@ where
             }
         }
         for join in &query.joins {
-            let join_table = self.table(&join.table)?.clone();
-            tables.insert(join_table.name.clone(), join_table.clone());
-            for target in join_table.references.values() {
-                let table = self.table(target)?.clone();
-                tables.insert(table.name.clone(), table);
-            }
+            self.collect_maintained_view_terminal_tables_for_join(join, tables)?;
         }
         for reachable in &query.reachable {
             let access_table = self.table(&reachable.access_table)?.clone();
@@ -3063,6 +3234,36 @@ where
                 &branch.as_query(&query.table),
                 tables,
             )?;
+        }
+        Ok(())
+    }
+
+    fn collect_maintained_view_terminal_tables_for_join(
+        &self,
+        join: &JoinVia,
+        tables: &mut BTreeMap<String, TableSchema>,
+    ) -> Result<(), Error> {
+        let join_table = self.table(&join.table)?.clone();
+        self.collect_terminal_table_and_references(join_table, tables)?;
+        if let Some(lookup) = &join.source_lookup {
+            let lookup_table = self.table(&lookup.table)?.clone();
+            self.collect_terminal_table_and_references(lookup_table, tables)?;
+        }
+        for nested in &join.nested_joins {
+            self.collect_maintained_view_terminal_tables_for_join(nested, tables)?;
+        }
+        Ok(())
+    }
+
+    fn collect_terminal_table_and_references(
+        &self,
+        table: TableSchema,
+        tables: &mut BTreeMap<String, TableSchema>,
+    ) -> Result<(), Error> {
+        tables.insert(table.name.clone(), table.clone());
+        for target in table.references.values() {
+            let table = self.table(target)?.clone();
+            tables.insert(table.name.clone(), table);
         }
         Ok(())
     }
@@ -3684,25 +3885,51 @@ where
         } else {
             root
         };
-        let left_key = join
+        let primary_left_key = join
             .source_column
             .as_ref()
             .map(|column| query_field(column))
             .unwrap_or_else(|| "row_uuid".to_owned());
-        let join_key = join_key(join);
+        let primary_join_key = join_key(join);
         let root = if matches!(join.target, JoinTarget::RowId)
             && !matches!(join.source_column.as_deref(), None | Some("id"))
         {
-            root.unwrap_nullable(left_key.clone())
+            root.unwrap_nullable(primary_left_key.clone())
         } else {
             root
         };
+        let root = join
+            .correlated_filters
+            .iter()
+            .fold(root, |root, correlation| {
+                root.unwrap_nullable(query_field(&correlation.source_column))
+            });
         let joined = if join.source_column.is_none() {
+            let root_fields = std::iter::once("row_uuid".to_owned())
+                .chain(
+                    join.correlated_filters
+                        .iter()
+                        .map(|correlation| query_field(&correlation.source_column)),
+                )
+                .collect::<Vec<_>>();
+            let join_current = join.correlated_filters.iter().fold(
+                join_current
+                    .clone()
+                    .unwrap_nullable(primary_join_key.clone()),
+                |join_current, correlation| {
+                    let join_field = query_field(&correlation.join_column);
+                    join_current
+                        .filter(PredicateExpr::IsNotNull {
+                            field: join_field.clone(),
+                        })
+                        .unwrap_nullable(join_field)
+                },
+            );
             let eligible = GraphBuilder::join(
-                root.project(["row_uuid"]),
-                join_current.clone().unwrap_nullable(join_key.clone()),
-                [left_key],
-                [join_key],
+                root.project(root_fields),
+                join_current.clone(),
+                join_left_keys(join, &primary_left_key),
+                join_right_keys(join, &primary_join_key),
             )
             .project_fields([ProjectField::renamed("right.row_uuid", "row_uuid")]);
             GraphBuilder::join(join_current, eligible, ["row_uuid"], ["row_uuid"]).project_fields(
@@ -3714,7 +3941,28 @@ where
                     })),
             )
         } else {
-            GraphBuilder::join(root, join_current, [left_key], [join_key]).project_fields(
+            let join_current = join.correlated_filters.iter().fold(
+                join_current
+                    .filter(PredicateExpr::IsNotNull {
+                        field: primary_join_key.clone(),
+                    })
+                    .unwrap_nullable(primary_join_key.clone()),
+                |join_current, correlation| {
+                    let join_field = query_field(&correlation.join_column);
+                    join_current
+                        .filter(PredicateExpr::IsNotNull {
+                            field: join_field.clone(),
+                        })
+                        .unwrap_nullable(join_field)
+                },
+            );
+            GraphBuilder::join(
+                root,
+                join_current,
+                join_left_keys(join, &primary_left_key),
+                join_right_keys(join, &primary_join_key),
+            )
+            .project_fields(
                 maintained_view_version_fields(&join_table)
                     .into_iter()
                     .map(|field| ProjectField::renamed(format!("right.{field}"), field))
@@ -4379,53 +4627,58 @@ where
                 groove::records::ValueType::Uuid,
             ),
         ]);
-        let seed_param = match &reachable.from {
-            Operand::Param(param) => param.clone(),
-            Operand::Literal(Value::Uuid(_)) => "__reachable_seed".to_owned(),
-            Operand::Claim(_) => {
-                return Err(Error::InvalidStoredValue(
-                    "query claims must be rewritten to params before lowering",
-                ));
-            }
-            Operand::Column(_) | Operand::Literal(_) => {
-                return Err(Error::InvalidStoredValue(
-                    "reachable_via currently supports uuid parameter/claim/literal seeds only",
-                ));
-            }
-        };
-        let seed = match &reachable.from {
-            Operand::Param(param) => {
-                let mut seed = GraphBuilder::binding_source(
-                    binding_source_shape.to_owned(),
-                    RecordDescriptor::new(
-                        param_types
-                            .iter()
-                            .map(|(name, column_type)| (name.clone(), column_type.value_type())),
-                    ),
-                );
-                if param_types.get(param).is_some_and(|column_type| {
-                    matches!(column_type.value_type(), ValueType::Nullable(_))
-                }) {
-                    seed = seed.unwrap_nullable(param.clone());
+        let seed_param = reachable_seed_param(reachable)?;
+        let seed = if let Some(seed) = &reachable.seed {
+            let seed_table = self.table(&seed.table)?;
+            let mut seed_graph = current_source_graph(&seed_table, tier, source_overrides)
+                .unwrap_nullable(query_field(&seed.team_column));
+            seed_graph = apply_filters_with_predicate_params(
+                seed_graph,
+                &seed_table,
+                param_types,
+                &seed.filters,
+                current_row_fields(&seed_table),
+                true,
+                binding_source_shape,
+            )?;
+            seed_graph.project_fields([
+                ProjectField::renamed(query_field(&seed.team_column), "team"),
+                ProjectField::renamed(query_field(&seed.team_column), "reachable_team"),
+            ])
+        } else {
+            match &reachable.from {
+                Operand::Param(param) => {
+                    let mut seed =
+                        GraphBuilder::binding_source(
+                            binding_source_shape.to_owned(),
+                            RecordDescriptor::new(param_types.iter().map(|(name, column_type)| {
+                                (name.clone(), column_type.value_type())
+                            })),
+                        );
+                    if param_types.get(param).is_some_and(|column_type| {
+                        matches!(column_type.value_type(), ValueType::Nullable(_))
+                    }) {
+                        seed = seed.unwrap_nullable(param.clone());
+                    }
+                    seed.project_fields([
+                        ProjectField::renamed(param.clone(), "team"),
+                        ProjectField::renamed(param.clone(), "reachable_team"),
+                    ])
                 }
-                seed.project_fields([
-                    ProjectField::renamed(param.clone(), "team"),
-                    ProjectField::renamed(param.clone(), "reachable_team"),
-                ])
-            }
-            Operand::Literal(Value::Uuid(seed)) => GraphBuilder::values(
-                team_desc.clone(),
-                [[Value::Uuid(*seed), Value::Uuid(*seed)]],
-            )?,
-            Operand::Claim(_) => {
-                return Err(Error::InvalidStoredValue(
-                    "query claims must be rewritten to params before lowering",
-                ));
-            }
-            Operand::Column(_) | Operand::Literal(_) => {
-                return Err(Error::InvalidStoredValue(
-                    "reachable_via currently supports uuid parameter/claim/literal seeds only",
-                ));
+                Operand::Literal(Value::Uuid(seed)) => GraphBuilder::values(
+                    team_desc.clone(),
+                    [[Value::Uuid(*seed), Value::Uuid(*seed)]],
+                )?,
+                Operand::Claim(_) => {
+                    return Err(Error::InvalidStoredValue(
+                        "query claims must be rewritten to params before lowering",
+                    ));
+                }
+                Operand::Column(_) | Operand::Literal(_) => {
+                    return Err(Error::InvalidStoredValue(
+                        "reachable_via currently supports uuid parameter/claim/literal seeds only",
+                    ));
+                }
             }
         };
         let frontier = GraphBuilder::frontier_source("reachable_frontier", team_desc);
@@ -4499,21 +4752,12 @@ where
                 .into_iter()
                 .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims)),
         );
-        query.joins.extend(policy.joins.into_iter().map(|join| {
-            JoinVia {
-                table: join.table,
-                on_column: join.on_column,
-                target: join.target,
-                source_column: join.source_column,
-                source_lookup: join.source_lookup,
-                filters: join
-                    .filters
-                    .into_iter()
-                    .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-                    .collect(),
-                nested_joins: join.nested_joins,
-            }
-        }));
+        query.joins.extend(
+            policy
+                .joins
+                .into_iter()
+                .map(|join| rewrite_claim_join_for_binding(join, claims)),
+        );
         query
             .reachable
             .extend(policy.reachable.into_iter().map(|mut reachable| {
@@ -4528,6 +4772,12 @@ where
                     .into_iter()
                     .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
                     .collect();
+                if let Some(seed) = &mut reachable.seed {
+                    seed.filters = std::mem::take(&mut seed.filters)
+                        .into_iter()
+                        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+                        .collect();
+                }
                 reachable
             }));
         query.includes.extend(policy.includes);
@@ -4551,7 +4801,7 @@ where
         table: &str,
         writer: AuthorId,
     ) -> Result<Option<(ValidatedQuery, Binding)>, Error> {
-        let Some(policy) = self.table(table)?.write_policy.clone() else {
+        let Some(policy) = self.table(table)?.write_policies.any() else {
             return Ok(None);
         };
         let claims = self.session_claims.get(&writer);
@@ -4564,19 +4814,7 @@ where
         query.joins = query
             .joins
             .into_iter()
-            .map(|join| JoinVia {
-                table: join.table,
-                on_column: join.on_column,
-                target: join.target,
-                source_column: join.source_column,
-                source_lookup: join.source_lookup,
-                filters: join
-                    .filters
-                    .into_iter()
-                    .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-                    .collect(),
-                nested_joins: join.nested_joins,
-            })
+            .map(|join| rewrite_claim_join_for_binding(join, claims))
             .collect();
         query.reachable = query
             .reachable
@@ -4593,6 +4831,12 @@ where
                     .into_iter()
                     .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
                     .collect();
+                if let Some(seed) = &mut reachable.seed {
+                    seed.filters = std::mem::take(&mut seed.filters)
+                        .into_iter()
+                        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+                        .collect();
+                }
                 reachable
             })
             .collect();
@@ -4711,12 +4955,17 @@ fn rewrite_claim_join_for_binding(
         target: join.target,
         source_column: join.source_column,
         source_lookup: join.source_lookup,
+        correlated_filters: join.correlated_filters,
         filters: join
             .filters
             .into_iter()
             .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
             .collect(),
-        nested_joins: join.nested_joins,
+        nested_joins: join
+            .nested_joins
+            .into_iter()
+            .map(|join| rewrite_claim_join_for_binding(join, claims))
+            .collect(),
     }
 }
 
@@ -4735,6 +4984,12 @@ fn rewrite_claim_reachable_for_binding(
         .into_iter()
         .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
         .collect();
+    if let Some(seed) = &mut reachable.seed {
+        seed.filters = std::mem::take(&mut seed.filters)
+            .into_iter()
+            .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+            .collect();
+    }
     reachable
 }
 
@@ -4967,8 +5222,27 @@ fn insert_claim_bindings(
 
 fn claim_binding_value(column_type: Option<&ColumnType>, value: Value) -> Value {
     match column_type {
+        Some(ColumnType::Uuid) => match value {
+            Value::String(value) => uuid::Uuid::parse_str(&value)
+                .map(Value::Uuid)
+                .unwrap_or(Value::String(value)),
+            other => other,
+        },
+        Some(ColumnType::Array(member_type)) => match value {
+            Value::Array(values) => Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| claim_binding_value(Some(member_type.as_ref()), value))
+                    .collect(),
+            ),
+            other => other,
+        },
         Some(ColumnType::Nullable(_)) if !matches!(value, Value::Nullable(_)) => {
-            Value::Nullable(Some(Box::new(value)))
+            let inner = match column_type {
+                Some(ColumnType::Nullable(inner)) => Some(inner.as_ref()),
+                _ => None,
+            };
+            Value::Nullable(Some(Box::new(claim_binding_value(inner, value))))
         }
         _ => value,
     }
@@ -5254,6 +5528,15 @@ fn lower_maintained_residual_predicate(
                 },
             ))
         }
+        Predicate::Contains(Operand::Param(param), Operand::Column(column)) => {
+            let _ = table_column_type(table, column)?;
+            Ok(LoweredMaintainedPredicate::Residual(
+                PredicateExpr::ContainsField {
+                    field: param.clone(),
+                    needle_field: query_field(column),
+                },
+            ))
+        }
         Predicate::Ne(Operand::Column(column), Operand::Param(param))
         | Predicate::Ne(Operand::Param(param), Operand::Column(column)) => {
             let _ = table_column_type(table, column)?;
@@ -5401,6 +5684,12 @@ fn attach_params_to_graph(
 }
 
 fn reachable_seed_param(reachable: &crate::query::ReachableVia) -> Result<String, Error> {
+    if let Some(seed) = &reachable.seed {
+        return Ok(predicate_params(&seed.filters)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "__reachable_seed".to_owned()));
+    }
     match &reachable.from {
         Operand::Param(param) => Ok(param.clone()),
         Operand::Literal(Value::Uuid(_)) => Ok("__reachable_seed".to_owned()),
@@ -5460,14 +5749,7 @@ fn maintained_view_bind_filter_literals_with_mode(
     query.joins = query
         .joins
         .into_iter()
-        .map(|mut join| {
-            join.filters = join
-                .filters
-                .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(join)
-        })
+        .map(|join| bind_join_filter_literals(join, binding, mode))
         .collect::<Result<Vec<_>, Error>>()?;
     query.reachable = query
         .reachable
@@ -5486,6 +5768,7 @@ fn maintained_view_bind_filter_literals_with_mode(
                 .into_iter()
                 .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?;
+            bind_reachable_seed_filters(&mut reachable, binding, mode)?;
             Ok(reachable)
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -5501,14 +5784,7 @@ fn maintained_view_bind_filter_literals_with_mode(
             branch.joins = branch
                 .joins
                 .into_iter()
-                .map(|mut join| {
-                    join.filters = join
-                        .filters
-                        .into_iter()
-                        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok(join)
-                })
+                .map(|join| bind_join_filter_literals(join, binding, mode))
                 .collect::<Result<Vec<_>, Error>>()?;
             branch.reachable = branch
                 .reachable
@@ -5528,6 +5804,7 @@ fn maintained_view_bind_filter_literals_with_mode(
                         .into_iter()
                         .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
                         .collect::<Result<Vec<_>, _>>()?;
+                    bind_reachable_seed_filters(&mut reachable, binding, mode)?;
                     Ok(reachable)
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -5563,19 +5840,8 @@ fn inline_snapshot_bind_filter_literals(
     query.joins = query
         .joins
         .into_iter()
-        .map(|mut join| {
-            join.filters = join
-                .filters
-                .into_iter()
-                .map(|predicate| {
-                    maintained_view_bind_predicate(
-                        predicate,
-                        binding,
-                        ParamBindingMode::InlineAllReachableSeeds,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(join)
+        .map(|join| {
+            bind_join_filter_literals(join, binding, ParamBindingMode::InlineAllReachableSeeds)
         })
         .collect::<Result<Vec<_>, Error>>()?;
     query.reachable = query
@@ -5609,6 +5875,11 @@ fn inline_snapshot_bind_filter_literals(
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            bind_reachable_seed_filters(
+                &mut reachable,
+                binding,
+                ParamBindingMode::InlineAllReachableSeeds,
+            )?;
             Ok(reachable)
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -5630,19 +5901,12 @@ fn inline_snapshot_bind_filter_literals(
             branch.joins = branch
                 .joins
                 .into_iter()
-                .map(|mut join| {
-                    join.filters = join
-                        .filters
-                        .into_iter()
-                        .map(|predicate| {
-                            maintained_view_bind_predicate(
-                                predicate,
-                                binding,
-                                ParamBindingMode::InlineAllReachableSeeds,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok(join)
+                .map(|join| {
+                    bind_join_filter_literals(
+                        join,
+                        binding,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                    )
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             branch.reachable = branch
@@ -5676,6 +5940,11 @@ fn inline_snapshot_bind_filter_literals(
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    bind_reachable_seed_filters(
+                        &mut reachable,
+                        binding,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                    )?;
                     Ok(reachable)
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -5743,14 +6012,74 @@ fn maintained_view_bind_predicate(
             maintained_view_bind_operand(left, binding, mode)?,
             maintained_view_bind_operand(right, binding, mode)?,
         ),
-        Predicate::Contains(left, right) => Predicate::Contains(
-            maintained_view_bind_operand(left, binding, mode)?,
-            maintained_view_bind_operand(right, binding, mode)?,
-        ),
+        Predicate::Contains(left, right) => {
+            let left = maintained_view_bind_operand(left, binding, mode)?;
+            let right = maintained_view_bind_operand(right, binding, mode)?;
+            match left {
+                Operand::Literal(Value::Array(values)) => {
+                    Predicate::In(right, values.into_iter().map(Operand::Literal).collect())
+                }
+                left => Predicate::Contains(left, right),
+            }
+        }
         Predicate::IsNull(operand) => {
             Predicate::IsNull(maintained_view_bind_operand(operand, binding, mode)?)
         }
     })
+}
+
+fn bind_reachable_seed_filters(
+    reachable: &mut crate::query::ReachableVia,
+    binding: &Binding,
+    mode: ParamBindingMode,
+) -> Result<(), Error> {
+    if let Some(seed) = &mut reachable.seed {
+        seed.filters = std::mem::take(&mut seed.filters)
+            .into_iter()
+            .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+    Ok(())
+}
+
+fn collect_join_source_tables(query: &crate::query::Query) -> BTreeSet<String> {
+    let mut tables = BTreeSet::new();
+    for join in &query.joins {
+        collect_join_source_tables_for_join(join, &mut tables);
+    }
+    for branch in &query.policy_branches {
+        let branch_query = branch.as_query(&query.table);
+        tables.extend(collect_join_source_tables(&branch_query));
+    }
+    tables
+}
+
+fn collect_join_source_tables_for_join(join: &JoinVia, tables: &mut BTreeSet<String>) {
+    tables.insert(join.table.clone());
+    if let Some(lookup) = &join.source_lookup {
+        tables.insert(lookup.table.clone());
+    }
+    for nested in &join.nested_joins {
+        collect_join_source_tables_for_join(nested, tables);
+    }
+}
+
+fn bind_join_filter_literals(
+    mut join: JoinVia,
+    binding: &Binding,
+    mode: ParamBindingMode,
+) -> Result<JoinVia, Error> {
+    join.filters = join
+        .filters
+        .into_iter()
+        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+        .collect::<Result<Vec<_>, _>>()?;
+    join.nested_joins = join
+        .nested_joins
+        .into_iter()
+        .map(|join| bind_join_filter_literals(join, binding, mode))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(join)
 }
 
 fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bool {
@@ -5763,14 +6092,16 @@ fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bo
 
 fn maintained_view_has_binding_dependent_reachable(shape: &ValidatedQuery) -> bool {
     fn query_has_binding_dependent_reachable(query: &crate::query::Query) -> bool {
-        query
-            .reachable
+        query.reachable.iter().any(|reachable| {
+            matches!(reachable.from, Operand::Param(_))
+                || reachable
+                    .seed
+                    .as_ref()
+                    .is_some_and(|seed| !predicate_params(&seed.filters).is_empty())
+        }) || query
+            .policy_branches
             .iter()
-            .any(|reachable| matches!(reachable.from, Operand::Param(_)))
-            || query
-                .policy_branches
-                .iter()
-                .any(|branch| query_has_binding_dependent_reachable(&branch.as_query(&query.table)))
+            .any(|branch| query_has_binding_dependent_reachable(&branch.as_query(&query.table)))
     }
 
     query_has_binding_dependent_reachable(shape.query())
@@ -5818,12 +6149,7 @@ fn collect_query_nullable_param_types_from_schema(
         .ok_or_else(|| Error::TableNotFound(query.table.clone()))?;
     collect_nullable_param_types(table, &query.filters, param_types)?;
     for join in &query.joins {
-        let join_table = schema
-            .tables
-            .iter()
-            .find(|table| table.name == join.table)
-            .ok_or_else(|| Error::TableNotFound(join.table.clone()))?;
-        collect_nullable_param_types(join_table, &join.filters, param_types)?;
+        collect_join_nullable_param_types_from_schema(join, schema, param_types)?;
     }
     for reachable in &query.reachable {
         if let Operand::Param(param) = &reachable.from {
@@ -5841,10 +6167,35 @@ fn collect_query_nullable_param_types_from_schema(
             .find(|table| table.name == reachable.edge_table)
             .ok_or_else(|| Error::TableNotFound(reachable.edge_table.clone()))?;
         collect_nullable_param_types(edge_table, &reachable.edge_filters, param_types)?;
+        if let Some(seed) = &reachable.seed {
+            let seed_table = schema
+                .tables
+                .iter()
+                .find(|table| table.name == seed.table)
+                .ok_or_else(|| Error::TableNotFound(seed.table.clone()))?;
+            collect_nullable_param_types(seed_table, &seed.filters, param_types)?;
+        }
     }
     for branch in &query.policy_branches {
         let branch_query = branch.as_query(&query.table).validate(schema)?;
         collect_query_nullable_param_types_from_schema(branch_query.query(), schema, param_types)?;
+    }
+    Ok(())
+}
+
+fn collect_join_nullable_param_types_from_schema(
+    join: &JoinVia,
+    schema: &JazzSchema,
+    param_types: &mut BTreeMap<String, groove::schema::ColumnType>,
+) -> Result<(), Error> {
+    let join_table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == join.table)
+        .ok_or_else(|| Error::TableNotFound(join.table.clone()))?;
+    collect_nullable_param_types(join_table, &join.filters, param_types)?;
+    for nested in &join.nested_joins {
+        collect_join_nullable_param_types_from_schema(nested, schema, param_types)?;
     }
     Ok(())
 }
@@ -6220,7 +6571,8 @@ fn predicate_params(predicates: &[Predicate]) -> BTreeSet<String> {
             | Predicate::Eq(Operand::Param(param), Operand::Column(_))
             | Predicate::Ne(Operand::Column(_), Operand::Param(param))
             | Predicate::Ne(Operand::Param(param), Operand::Column(_))
-            | Predicate::Contains(Operand::Column(_), Operand::Param(param)) => {
+            | Predicate::Contains(Operand::Column(_), Operand::Param(param))
+            | Predicate::Contains(Operand::Param(param), Operand::Column(_)) => {
                 params.insert(param.clone());
             }
             _ => {}
@@ -6781,6 +7133,26 @@ fn join_key(join: &JoinVia) -> String {
     }
 }
 
+fn join_left_keys(join: &JoinVia, primary_left_key: &str) -> Vec<String> {
+    std::iter::once(primary_left_key.to_owned())
+        .chain(
+            join.correlated_filters
+                .iter()
+                .map(|correlation| query_field(&correlation.source_column)),
+        )
+        .collect()
+}
+
+fn join_right_keys(join: &JoinVia, primary_join_key: &str) -> Vec<String> {
+    std::iter::once(primary_join_key.to_owned())
+        .chain(
+            join.correlated_filters
+                .iter()
+                .map(|correlation| query_field(&correlation.join_column)),
+        )
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -6792,7 +7164,9 @@ mod tests {
     use crate::node::{MergeableCommit, NodeState};
     use crate::peer::PeerState;
     use crate::protocol::{RegisterShapeOptions, ShapeAst, SyncMessage};
-    use crate::query::{Aggregate, OrderDirection, Query, col, eq, gt, in_list, lit, lte, param};
+    use crate::query::{
+        Aggregate, OrderDirection, Query, claim, col, contains, eq, gt, in_list, lit, lte, param,
+    };
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
@@ -7397,6 +7771,50 @@ mod tests {
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn policy_claim_array_string_ids_bind_as_uuid_array() {
+        let schema = JazzSchema::new([
+            TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new(
+                "issues",
+                [
+                    ColumnSchema::new("title", ColumnType::String),
+                    ColumnSchema::new("state", ColumnType::String),
+                    ColumnSchema::new("assignee", ColumnType::Uuid),
+                    ColumnSchema::new("priority", ColumnType::U64),
+                ],
+            )
+            .with_reference("assignee", "users")
+            .with_read_policy(
+                Query::from("issues").filter(contains(claim("team_ids"), col("assignee"))),
+            ),
+        ]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([8; 16]), schema.clone());
+        let alice = author(1);
+        let bob = author(2);
+        commit_issue(&mut node, 1, "open", alice);
+        commit_issue(&mut node, 2, "open", bob);
+
+        let reader = author(9);
+        node.set_session_claims(
+            reader,
+            BTreeMap::from([(
+                "team_ids".to_owned(),
+                Value::Array(vec![Value::String(alice.0.to_string())]),
+            )]),
+        );
+        let shape = Query::from("issues").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let visible = node
+            .query_rows_for_link(&shape, &binding, DurabilityTier::Local, reader)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(visible, BTreeSet::from([row(1)]));
     }
 
     #[test]

@@ -42,7 +42,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly completedTxs = new Map<string, CompletedTxState>();
   private readonly subscriptions = new Map<number, Function>();
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
-  private readonly subscriptionLocalHandles = new Map<number, number>();
   private authFailureCallback: ((reason: string) => void) | undefined;
   private connectionReady: Promise<unknown> | null = null;
   private nextCallId = 1;
@@ -209,9 +208,10 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     tier?: string | null,
     optionsJson?: string | null,
   ): Promise<unknown> {
+    const readFence = this.captureReadFence(optionsJson);
     await this.opened;
     this.assertReadTransactionOpen(optionsJson);
-    await this.settleWritesForRead(optionsJson);
+    await this.settleReadFence(readFence);
     const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
     if (requiresServerPropagation(tier, optionsJson)) {
       await this.connectionReady;
@@ -227,26 +227,23 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     optionsJson?: string | null,
   ): number {
     const localHandle = this.nextSubscriptionId++;
+    const readFence = this.captureReadFence(optionsJson);
     const remoteHandle = this.opened.then(async () => {
       this.assertReadTransactionOpen(optionsJson);
-      await this.settleWritesForRead(optionsJson);
+      await this.settleReadFence(readFence);
       const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
       if (requiresServerPropagation(tier, optionsJson)) {
         await this.connectionReady;
         await this.settleServerWaitsForRead(tier);
       }
-      return this.send("createSubscription", [
+      return this.send("createExecutedSubscription", [
+        localHandle,
         queryJson,
         sessionJson,
         tier,
         translatedOptionsJson,
       ]) as Promise<number>;
     });
-    void remoteHandle
-      .then((remote) => {
-        this.subscriptionLocalHandles.set(remote, localHandle);
-      })
-      .catch(ignoreExpectedShutdown);
     void remoteHandle.catch(ignoreExpectedShutdown);
     this.remoteSubscriptions.set(localHandle, remoteHandle);
     return localHandle;
@@ -254,11 +251,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
 
   executeSubscription(handle: number, onUpdate: Function): void {
     this.subscriptions.set(handle, onUpdate);
-    const remoteHandle = this.remoteSubscriptions.get(handle);
-    if (!remoteHandle) return;
-    void remoteHandle
-      .then((remote) => this.send("executeSubscription", [remote]))
-      .catch(ignoreExpectedShutdown);
   }
 
   unsubscribe(handle: number): void {
@@ -449,13 +441,16 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     return JSON.stringify({ ...parsed, transaction_batch_id: await workerTransactionId });
   }
 
-  private async settleWritesForRead(optionsJson: string | null | undefined): Promise<void> {
+  private captureReadFence(optionsJson: string | null | undefined): Promise<unknown>[] {
     const transactionId = transactionIdFromReadOptions(optionsJson);
     if (transactionId) {
-      await Promise.all(this.transactionWrites.get(transactionId) ?? []);
-      return;
+      return [...(this.transactionWrites.get(transactionId) ?? [])];
     }
-    await Promise.all(this.writes.values());
+    return [...this.writes.values()];
+  }
+
+  private async settleReadFence(fence: readonly Promise<unknown>[]): Promise<void> {
+    await Promise.all(fence);
   }
 
   private async settleServerWaitsForRead(tier: string | null | undefined): Promise<void> {
@@ -493,9 +488,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       return;
     }
     if ("subscription" in message) {
-      const callback = this.subscriptions.get(
-        this.subscriptionLocalHandles.get(message.subscription) ?? message.subscription,
-      );
+      const callback = this.subscriptions.get(message.subscription);
       callback?.(...message.args);
       return;
     }

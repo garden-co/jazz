@@ -470,10 +470,10 @@ where
         if author == AuthorId::SYSTEM {
             return Ok(true);
         }
-        let Some(policy) = table.write_policy.clone() else {
-            return Ok(true);
-        };
         if version.deletion().is_some() {
+            let Some(policy) = table.write_policies.delete_using.clone() else {
+                return Ok(true);
+            };
             let Some(row) = self.branch_delete_subject_row(branch, table, version)? else {
                 return Ok(false);
             };
@@ -489,6 +489,47 @@ where
                 |column| row.cell(table, column),
             );
         }
+        let previous = self.branch_delete_subject_row(branch, table, version)?;
+        if let Some(previous) = previous {
+            if let Some(policy) = table.write_policies.update_using.clone() {
+                if !self.branch_policy_allows(
+                    BranchPolicyRequest {
+                        table,
+                        policy: &policy,
+                        row_uuid: previous.row_uuid(),
+                        identity: author,
+                        branch,
+                    },
+                    context,
+                    |column| previous.cell(table, column),
+                )? {
+                    return Ok(false);
+                }
+            }
+            let Some(policy) = table.write_policies.update_check.clone() else {
+                return Ok(true);
+            };
+            return self.branch_policy_allows(
+                BranchPolicyRequest {
+                    table,
+                    policy: &policy,
+                    row_uuid: version.row_uuid(),
+                    identity: author,
+                    branch,
+                },
+                context,
+                |column| {
+                    table
+                        .columns
+                        .iter()
+                        .position(|candidate| candidate.name == column)
+                        .and_then(|idx| version.cell_at(idx))
+                },
+            );
+        }
+        let Some(policy) = table.write_policies.insert_check.clone() else {
+            return Ok(true);
+        };
         self.branch_policy_allows(
             BranchPolicyRequest {
                 table,

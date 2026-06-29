@@ -225,15 +225,41 @@ export function decodeNativeRowValues(
   });
 }
 
+export function decodeNativeRowValuesByColumn(
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): Map<string, Value> {
+  const descriptor = descriptorFromColumns(columns);
+  const valuesByColumn = new Map<string, Value>();
+
+  for (let i = 0; i < columns.length; i++) {
+    const column = columns[i];
+    if (!column) continue;
+    const bytes = decodeRecordValue(descriptor, raw, i);
+    valuesByColumn.set(
+      column.name,
+      bytes == null ? { type: "Null" } : decodeBytes(column.column_type, bytes),
+    );
+  }
+
+  return valuesByColumn;
+}
+
 export function decodeNativeRow(
   id: string,
   columns: readonly ColumnDescriptor[],
   raw: Uint8Array,
 ): WasmRow {
-  return {
+  const row = {
     id,
     values: decodeNativeRowValues(columns, raw),
   };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: decodeNativeRowValuesByColumn(columns, raw),
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
 }
 
 export function decodeNativeRowObject(

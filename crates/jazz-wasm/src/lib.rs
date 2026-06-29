@@ -428,7 +428,20 @@ impl WasmDbInner {
         }
     }
 
-    fn query_attachment_is_covered(&self, attachment: QueryAttachment) -> bool {
+    fn attach_query_for_identity(
+        &self,
+        query: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<QueryAttachment, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => db.attach_query_with_opts_for_identity(query, opts, author),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.attach_query_with_opts_for_identity(query, opts, author),
+        }
+    }
+
+    fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
         match self {
             Self::Memory(db) => db.query_attachment_is_covered(attachment),
             #[cfg(target_arch = "wasm32")]
@@ -853,14 +866,31 @@ impl WasmDb {
         })
     }
 
+    #[wasm_bindgen(js_name = attachQueryForIdentity)]
+    pub fn attach_query_for_identity(
+        &self,
+        query: &WasmPreparedQuery,
+        author: Vec<u8>,
+        opts: JsValue,
+    ) -> Result<WasmQueryAttachment, JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        let author = author_id_from_bytes(&author)?;
+        Ok(WasmQueryAttachment {
+            inner: self
+                .inner
+                .attach_query_for_identity(&query.inner, opts, author)
+                .map_err(to_js_error)?,
+        })
+    }
+
     #[wasm_bindgen(js_name = queryAttachmentIsCovered)]
     pub fn query_attachment_is_covered(&self, attachment: &WasmQueryAttachment) -> bool {
-        self.inner.query_attachment_is_covered(attachment.inner)
+        self.inner.query_attachment_is_covered(&attachment.inner)
     }
 
     #[wasm_bindgen(js_name = detachQuery)]
     pub fn detach_query(&self, attachment: &WasmQueryAttachment) {
-        self.inner.detach_query(attachment.inner);
+        self.inner.detach_query(attachment.inner.clone());
     }
 
     #[wasm_bindgen(js_name = setTickScheduler)]
@@ -1492,9 +1522,15 @@ fn claims_from_js(author: AuthorId, claims: JsValue) -> Result<BTreeMap<String, 
         _ => return Err(JsValue::from_str("identity claims must be an object")),
     };
     let subject = author.0.to_string();
-    claims.insert("subject".to_owned(), Value::String(subject.clone()));
-    claims.insert("sub".to_owned(), Value::String(subject.clone()));
-    claims.insert("user_id".to_owned(), Value::String(subject));
+    claims
+        .entry("subject".to_owned())
+        .or_insert_with(|| Value::String(subject.clone()));
+    claims
+        .entry("sub".to_owned())
+        .or_insert_with(|| Value::String(subject.clone()));
+    claims
+        .entry("user_id".to_owned())
+        .or_insert_with(|| Value::String(subject));
     Ok(claims)
 }
 

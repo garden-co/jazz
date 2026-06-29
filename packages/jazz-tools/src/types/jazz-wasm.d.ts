@@ -55,6 +55,11 @@ declare module "jazz-wasm" {
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
     attachQuery(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
+    attachQueryForIdentity(
+      query: WasmPreparedQuery,
+      author: Uint8Array,
+      opts: unknown,
+    ): QueryAttachment;
     queryAttachmentIsCovered(attachment: QueryAttachment): boolean;
     detachQuery(attachment: QueryAttachment): void;
     subscribe(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
