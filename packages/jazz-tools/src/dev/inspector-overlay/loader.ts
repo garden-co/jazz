@@ -1,6 +1,8 @@
 import { createRelay } from "./relay.js";
 import { attachDevTools } from "../../dev-tools/dev-tools.js";
 
+const ELEMENT_NAME = "jazz-inspector-overlay";
+
 const OPEN_KEY = "jazz-inspector-overlay:open";
 const HEIGHT_KEY = "jazz-inspector-overlay:height";
 const TOGGLE_POS_KEY = "jazz-inspector-overlay:toggle-pos";
@@ -63,19 +65,48 @@ const clampToggle = (left: number, top: number): { left: number; top: number } =
   top: Math.max(EDGE_MARGIN, Math.min(top, window.innerHeight - TOGGLE_SIZE - EDGE_MARGIN)),
 });
 
-// Scoped styles. Everything is namespaced under #jazz-inspector-overlay so the
-// overlay can't leak into — or be restyled by — the host app. The chrome is
-// tuned to the inspector's own dark theme (bg #0f141b, borders #1c2430, accent
-// #345273) and docks to the bottom edge like browser devtools.
+// pointerdown → capture → move-until-up, with cleanup on release. Shared by the
+// draggable toggle and the resize bar. `start` may return false to ignore the
+// gesture (wrong button, click landed on a child control). The pointerdown
+// listener is tied to `signal` so it's removed when the overlay tears down.
+interface DragHandlers {
+  start?: (e: PointerEvent) => boolean | void;
+  move: (e: PointerEvent) => void;
+  end?: () => void;
+}
+function onDrag(el: HTMLElement, handlers: DragHandlers, signal: AbortSignal): void {
+  el.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (handlers.start?.(e) === false) return;
+      el.setPointerCapture(e.pointerId);
+      const move = (ev: PointerEvent) => handlers.move(ev);
+      const up = () => {
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", up);
+        el.removeEventListener("pointercancel", up);
+        handlers.end?.();
+      };
+      el.addEventListener("pointermove", move);
+      el.addEventListener("pointerup", up);
+      el.addEventListener("pointercancel", up);
+    },
+    { signal },
+  );
+}
+
+// Styles live in the shadow root, so selectors need no host-app namespacing —
+// the shadow boundary keeps the overlay from leaking into (or being restyled
+// by) the page. The chrome is tuned to the inspector's own dark theme
+// (bg #0f141b, borders #1c2430, accent #345273) and docks to the bottom edge
+// like browser devtools.
 const STYLE = `
-#jazz-inspector-overlay {
+:host {
   position: fixed; inset: 0; z-index: 2147483647; pointer-events: none;
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
-#jazz-inspector-overlay *, #jazz-inspector-overlay *::before, #jazz-inspector-overlay *::after {
-  box-sizing: border-box;
-}
-#jazz-inspector-overlay .jzov-toggle {
+*, *::before, *::after { box-sizing: border-box; }
+.jzov-toggle {
   position: fixed; bottom: 16px; right: 16px; pointer-events: auto;
   display: flex; align-items: center; justify-content: center;
   width: 44px; height: 44px; padding: 8px; margin: 0;
@@ -87,26 +118,26 @@ const STYLE = `
   transition-duration: .18s;
   transition-timing-function: cubic-bezier(.22,1,.36,1);
 }
-#jazz-inspector-overlay .jzov-toggle:hover {
+.jzov-toggle:hover {
   background: #1c2430; border-color: #345273;
   /* Lift on hover: taller ambient, plus a faint brand-blue glow tying the mark to the chrome. */
   box-shadow: 0 1px 3px rgba(0,0,0,.30), 0 10px 26px rgba(0,0,0,.40), 0 0 18px rgba(20,106,255,.14);
 }
-#jazz-inspector-overlay .jzov-toggle:hover svg { filter: brightness(1.12); }
-#jazz-inspector-overlay .jzov-toggle:active {
+.jzov-toggle:hover svg { filter: brightness(1.12); }
+.jzov-toggle:active {
   /* Gentler press than a hard shrink; settle the elevation as it's depressed. */
   transform: scale(.95);
   box-shadow: 0 1px 2px rgba(0,0,0,.30), 0 3px 9px rgba(0,0,0,.34);
 }
-#jazz-inspector-overlay .jzov-toggle:focus-visible { outline: 2px solid #5b8fc7; outline-offset: 2px; }
-#jazz-inspector-overlay .jzov-toggle[hidden] { display: none; }
-#jazz-inspector-overlay .jzov-toggle svg {
+.jzov-toggle:focus-visible { outline: 2px solid #5b8fc7; outline-offset: 2px; }
+.jzov-toggle[hidden] { display: none; }
+.jzov-toggle svg {
   width: 100%; height: 100%; display: block;
   /* The mark's ink centroid sits up-and-right of its viewBox center; nudge it onto the optical center. */
   transform: translate(-1.4px, 1.1px);
   transition: filter .18s cubic-bezier(.22,1,.36,1);
 }
-#jazz-inspector-overlay .jzov-dock {
+.jzov-dock {
   position: fixed; left: 0; right: 0; bottom: 0; width: 100%; pointer-events: auto;
   display: flex; flex-direction: column;
   background: #0f141b; border-top: 1px solid #1c2430;
@@ -114,39 +145,39 @@ const STYLE = `
   transform: translateY(100%); visibility: hidden;
   transition: transform .24s cubic-bezier(.22,1,.36,1), visibility 0s linear .24s;
 }
-#jazz-inspector-overlay .jzov-dock[data-open="true"] {
+.jzov-dock[data-open="true"] {
   transform: translateY(0); visibility: visible;
   transition: transform .24s cubic-bezier(.22,1,.36,1), visibility 0s;
 }
-#jazz-inspector-overlay .jzov-bar {
+.jzov-bar {
   flex: 0 0 33px; height: 33px; display: flex; align-items: center; gap: 10px;
   padding: 0 8px 0 12px; background: #0f141b; border-bottom: 1px solid #1c2430;
   cursor: ns-resize; user-select: none; touch-action: none;
 }
-#jazz-inspector-overlay .jzov-brand { display: flex; align-items: center; gap: 8px; pointer-events: none; }
-#jazz-inspector-overlay .jzov-brand svg { width: 17px; height: 17px; display: block; }
-#jazz-inspector-overlay .jzov-title {
+.jzov-brand { display: flex; align-items: center; gap: 8px; pointer-events: none; }
+.jzov-brand svg { width: 17px; height: 17px; display: block; }
+.jzov-title {
   font-size: 12px; font-weight: 600; letter-spacing: .01em; color: #9ca8b9; white-space: nowrap;
 }
-#jazz-inspector-overlay .jzov-grip { flex: 1 1 auto; height: 100%; }
-#jazz-inspector-overlay .jzov-close {
+.jzov-grip { flex: 1 1 auto; height: 100%; }
+.jzov-close {
   flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; padding: 0; border-radius: 6px; border: 1px solid transparent;
   background: transparent; color: #9ca8b9; cursor: pointer;
   transition: background-color .15s ease, color .15s ease;
 }
-#jazz-inspector-overlay .jzov-close:hover { background: #1c2430; color: #dbe1ea; }
-#jazz-inspector-overlay .jzov-close:focus-visible { outline: 2px solid #5b8fc7; outline-offset: 1px; }
-#jazz-inspector-overlay .jzov-close svg { width: 15px; height: 15px; display: block; }
-#jazz-inspector-overlay .jzov-frame {
+.jzov-close:hover { background: #1c2430; color: #dbe1ea; }
+.jzov-close:focus-visible { outline: 2px solid #5b8fc7; outline-offset: 1px; }
+.jzov-close svg { width: 15px; height: 15px; display: block; }
+.jzov-frame {
   flex: 1 1 auto; width: 100%; min-height: 0; border: 0; display: block; background: #0f141b;
 }
 @media (prefers-reduced-motion: reduce) {
-  #jazz-inspector-overlay .jzov-toggle { transition: background-color .01s, border-color .01s; }
-  #jazz-inspector-overlay .jzov-toggle:active { transform: none; }
-  #jazz-inspector-overlay .jzov-toggle svg { transition: none; }
-  #jazz-inspector-overlay .jzov-dock { transition: visibility 0s; transform: translateY(100%); }
-  #jazz-inspector-overlay .jzov-dock[data-open="true"] { transform: translateY(0); transition: visibility 0s; }
+  .jzov-toggle { transition: background-color .01s, border-color .01s; }
+  .jzov-toggle:active { transform: none; }
+  .jzov-toggle svg { transition: none; }
+  .jzov-dock { transition: visibility 0s; transform: translateY(100%); }
+  .jzov-dock[data-open="true"] { transform: translateY(0); transition: visibility 0s; }
 }`;
 
 // The Jazz logo mark (cropped from the wordmark), in brand blue.
@@ -160,173 +191,194 @@ const CLOSE_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
   'aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6 6 18"/></svg>';
 
-function mount(): void {
-  const w = window as unknown as Record<string, unknown>;
-  if (w.__jazzInspectorOverlayMounted) return;
-  w.__jazzInspectorOverlayMounted = true;
+// Static structure built once into the shadow root, then wired up by ref. The
+// embedded Vite build emits embedded.html, not index.html.
+const TEMPLATE = `
+<div class="jzov-dock" id="jzov-dock" role="dialog" aria-label="Jazz inspector">
+  <div class="jzov-bar" aria-label="Drag to resize the inspector">
+    <div class="jzov-brand">${JAZZ_MARK}<span class="jzov-title">Inspector</span></div>
+    <div class="jzov-grip"></div>
+    <button type="button" class="jzov-close" aria-label="Close inspector" title="Close (Esc)">${CLOSE_SVG}</button>
+  </div>
+  <iframe class="jzov-frame" title="Jazz inspector" src="/__jazz/embedded/embedded.html"></iframe>
+</div>
+<button type="button" class="jzov-toggle"
+  title="Jazz inspector — click to open, drag to move (Alt+Shift+J)"
+  aria-label="Open Jazz inspector" aria-haspopup="dialog" aria-controls="jzov-dock" aria-expanded="false"
+>${JAZZ_MARK}</button>`;
 
-  const style = document.createElement("style");
-  style.id = "jazz-inspector-overlay-style";
-  style.textContent = STYLE;
-  document.head.appendChild(style);
+// Constructed once and shared by adoptedStyleSheets, so the (large) CSS is
+// parsed a single time rather than re-injected as a <style> per mount.
+let sheet: CSSStyleSheet | undefined;
+function overlayStyleSheet(): CSSStyleSheet {
+  if (!sheet) {
+    sheet = new CSSStyleSheet();
+    sheet.replaceSync(STYLE);
+  }
+  return sheet;
+}
 
-  const container = document.createElement("div");
-  container.id = "jazz-inspector-overlay";
+// The overlay chrome: a floating toggle + a bottom dock hosting the inspector
+// iframe, isolated from the host page by its shadow root. All listeners are
+// registered against #ac.signal so disconnectedCallback() removes them at once.
+class JazzInspectorOverlay extends HTMLElement {
+  #ac = new AbortController();
+  #wired = false;
 
-  const dock = document.createElement("div");
-  dock.className = "jzov-dock";
-  dock.id = "jazz-inspector-overlay-dock";
-  dock.setAttribute("role", "dialog");
-  dock.setAttribute("aria-label", "Jazz inspector");
-  dock.style.height =
-    clampHeight(readHeight() ?? Math.round(window.innerHeight * DEFAULT_RATIO)) + "px";
+  connectedCallback(): void {
+    if (this.#wired) return;
+    this.#wired = true;
+    const { signal } = this.#ac;
 
-  const bar = document.createElement("div");
-  bar.className = "jzov-bar";
-  bar.setAttribute("aria-label", "Drag to resize the inspector");
+    const root = this.attachShadow({ mode: "open" });
+    root.adoptedStyleSheets = [overlayStyleSheet()];
+    root.innerHTML = TEMPLATE;
 
-  const brand = document.createElement("div");
-  brand.className = "jzov-brand";
-  brand.innerHTML = JAZZ_MARK + '<span class="jzov-title">Inspector</span>';
+    const dock = root.querySelector<HTMLDivElement>(".jzov-dock")!;
+    const bar = root.querySelector<HTMLDivElement>(".jzov-bar")!;
+    const closeBtn = root.querySelector<HTMLButtonElement>(".jzov-close")!;
+    const iframe = root.querySelector<HTMLIFrameElement>(".jzov-frame")!;
+    const toggle = root.querySelector<HTMLButtonElement>(".jzov-toggle")!;
 
-  const grip = document.createElement("div");
-  grip.className = "jzov-grip";
+    dock.style.height =
+      clampHeight(readHeight() ?? Math.round(window.innerHeight * DEFAULT_RATIO)) + "px";
 
-  const closeBtn = document.createElement("button");
-  closeBtn.type = "button";
-  closeBtn.className = "jzov-close";
-  closeBtn.setAttribute("aria-label", "Close inspector");
-  closeBtn.title = "Close (Esc)";
-  closeBtn.innerHTML = CLOSE_SVG;
+    // The toggle is draggable; restore a saved position (default CSS bottom-right).
+    let togglePos = readTogglePos();
+    const applyTogglePos = (pos: { left: number; top: number } | null): void => {
+      if (!pos) return;
+      const clamped = clampToggle(pos.left, pos.top);
+      toggle.style.left = clamped.left + "px";
+      toggle.style.top = clamped.top + "px";
+      toggle.style.right = "auto";
+      toggle.style.bottom = "auto";
+      togglePos = clamped;
+    };
+    applyTogglePos(togglePos);
 
-  bar.append(brand, grip, closeBtn);
+    let open = readOpen();
+    const apply = (): void => {
+      dock.dataset.open = open ? "true" : "false";
+      toggle.hidden = open;
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    };
+    const setOpen = (next: boolean): void => {
+      if (open === next) return;
+      open = next;
+      writeOpen(open);
+      apply();
+      if (!open) toggle.focus();
+    };
 
-  const iframe = document.createElement("iframe");
-  iframe.className = "jzov-frame";
-  iframe.title = "Jazz inspector";
-  // The embedded Vite build emits embedded.html, not index.html.
-  iframe.src = "/__jazz/embedded/embedded.html";
+    // Drag to reposition; a click that didn't drag opens the inspector.
+    let dragMoved = false;
+    let offsetX = 0;
+    let offsetY = 0;
+    let startX = 0;
+    let startY = 0;
+    onDrag(
+      toggle,
+      {
+        start: (e) => {
+          if (e.pointerType === "mouse" && e.button !== 0) return false;
+          dragMoved = false;
+          const rect = toggle.getBoundingClientRect();
+          offsetX = e.clientX - rect.left;
+          offsetY = e.clientY - rect.top;
+          startX = e.clientX;
+          startY = e.clientY;
+        },
+        move: (ev) => {
+          if (!dragMoved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < DRAG_THRESHOLD)
+            return;
+          dragMoved = true;
+          applyTogglePos({ left: ev.clientX - offsetX, top: ev.clientY - offsetY });
+        },
+        end: () => {
+          if (dragMoved && togglePos) writeTogglePos(togglePos.left, togglePos.top);
+        },
+      },
+      signal,
+    );
+    toggle.addEventListener(
+      "click",
+      (e) => {
+        if (dragMoved) {
+          // Suppress the click the browser fires after a drag-release.
+          e.preventDefault();
+          e.stopPropagation();
+          dragMoved = false;
+          return;
+        }
+        setOpen(true);
+      },
+      { signal },
+    );
+    closeBtn.addEventListener("click", () => setOpen(false), { signal });
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        if (e.altKey && e.shiftKey && e.key.toLowerCase() === "j") {
+          e.preventDefault();
+          setOpen(!open);
+        } else if (e.key === "Escape" && open) {
+          setOpen(false);
+        }
+      },
+      { signal },
+    );
 
-  dock.append(bar, iframe);
+    // Drag the top bar to resize the dock height (from the top edge).
+    onDrag(
+      bar,
+      {
+        start: (e) => {
+          if (closeBtn.contains(e.target as Node)) return false;
+          e.preventDefault();
+        },
+        move: (ev) => {
+          dock.style.height = clampHeight(window.innerHeight - ev.clientY) + "px";
+        },
+        end: () => {
+          writeHeight(dock.getBoundingClientRect().height);
+        },
+      },
+      signal,
+    );
 
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.className = "jzov-toggle";
-  toggle.title = "Jazz inspector — click to open, drag to move (Alt+Shift+J)";
-  toggle.setAttribute("aria-label", "Open Jazz inspector");
-  toggle.setAttribute("aria-haspopup", "dialog");
-  toggle.setAttribute("aria-controls", dock.id);
-  toggle.setAttribute("aria-expanded", "false");
-  toggle.innerHTML = JAZZ_MARK;
+    // Keep the dock within the viewport when it shrinks.
+    window.addEventListener(
+      "resize",
+      () => {
+        dock.style.height = clampHeight(dock.getBoundingClientRect().height) + "px";
+        if (togglePos) applyTogglePos(togglePos);
+      },
+      { signal },
+    );
 
-  // The toggle is draggable; restore a saved position (default CSS bottom-right).
-  let togglePos = readTogglePos();
-  const applyTogglePos = (pos: { left: number; top: number } | null): void => {
-    if (!pos) return;
-    const clamped = clampToggle(pos.left, pos.top);
-    toggle.style.left = clamped.left + "px";
-    toggle.style.top = clamped.top + "px";
-    toggle.style.right = "auto";
-    toggle.style.bottom = "auto";
-    togglePos = clamped;
-  };
-  applyTogglePos(togglePos);
-
-  let open = readOpen();
-  const apply = () => {
-    dock.dataset.open = open ? "true" : "false";
-    toggle.hidden = open;
-    toggle.setAttribute("aria-expanded", open ? "true" : "false");
-  };
-  const setOpen = (next: boolean) => {
-    if (open === next) return;
-    open = next;
-    writeOpen(open);
     apply();
-    if (!open) toggle.focus();
-  };
 
-  // Drag to reposition; a click that didn't drag opens the inspector.
-  let dragMoved = false;
-  toggle.addEventListener("pointerdown", (e) => {
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-    dragMoved = false;
-    const rect = toggle.getBoundingClientRect();
-    const offsetX = e.clientX - rect.left;
-    const offsetY = e.clientY - rect.top;
-    const startX = e.clientX;
-    const startY = e.clientY;
-    toggle.setPointerCapture(e.pointerId);
-    const onMove = (ev: PointerEvent) => {
-      if (!dragMoved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < DRAG_THRESHOLD)
-        return;
-      dragMoved = true;
-      applyTogglePos({ left: ev.clientX - offsetX, top: ev.clientY - offsetY });
-    };
-    const onUp = () => {
-      toggle.removeEventListener("pointermove", onMove);
-      toggle.removeEventListener("pointerup", onUp);
-      toggle.removeEventListener("pointercancel", onUp);
-      if (dragMoved && togglePos) writeTogglePos(togglePos.left, togglePos.top);
-    };
-    toggle.addEventListener("pointermove", onMove);
-    toggle.addEventListener("pointerup", onUp);
-    toggle.addEventListener("pointercancel", onUp);
-  });
-  toggle.addEventListener("click", (e) => {
-    if (dragMoved) {
-      // Suppress the click the browser fires after a drag-release.
-      e.preventDefault();
-      e.stopPropagation();
-      dragMoved = false;
-      return;
-    }
-    setOpen(true);
-  });
-  closeBtn.addEventListener("click", () => setOpen(false));
-  window.addEventListener("keydown", (e) => {
-    if (e.altKey && e.shiftKey && e.key.toLowerCase() === "j") {
-      e.preventDefault();
-      setOpen(!open);
-    } else if (e.key === "Escape" && open) {
-      setOpen(false);
-    }
-  });
+    // Relay wired regardless of dock visibility: the iframe announces/subscribes on load.
+    const relay = createRelay({
+      topWindow: window,
+      iframeWindow: iframe.contentWindow!,
+      origin: window.location.origin,
+    });
+    window.addEventListener("message", (event) => relay.handle(event), { signal });
+  }
 
-  // Drag the top bar to resize the dock height (from the top edge).
-  bar.addEventListener("pointerdown", (e) => {
-    if (closeBtn.contains(e.target as Node)) return;
-    e.preventDefault();
-    bar.setPointerCapture(e.pointerId);
-    const onMove = (ev: PointerEvent) => {
-      dock.style.height = clampHeight(window.innerHeight - ev.clientY) + "px";
-    };
-    const onUp = () => {
-      bar.removeEventListener("pointermove", onMove);
-      bar.removeEventListener("pointerup", onUp);
-      writeHeight(dock.getBoundingClientRect().height);
-    };
-    bar.addEventListener("pointermove", onMove);
-    bar.addEventListener("pointerup", onUp);
-  });
+  disconnectedCallback(): void {
+    this.#ac.abort();
+  }
+}
 
-  // Keep the dock within the viewport when it shrinks.
-  window.addEventListener("resize", () => {
-    dock.style.height = clampHeight(dock.getBoundingClientRect().height) + "px";
-    if (togglePos) applyTogglePos(togglePos);
-  });
-
-  apply();
-  container.append(dock, toggle);
-  document.body.appendChild(container);
-
-  // Relay wired regardless of dock visibility: the iframe announces/subscribes on load.
-  const relay = createRelay({
-    topWindow: window,
-    iframeWindow: iframe.contentWindow!,
-    origin: window.location.origin,
-  });
-  window.addEventListener("message", (event) => relay.handle(event));
+function mount(): void {
+  if (!customElements.get(ELEMENT_NAME)) {
+    customElements.define(ELEMENT_NAME, JazzInspectorOverlay);
+  }
+  if (!document.querySelector(ELEMENT_NAME)) {
+    document.body.appendChild(document.createElement(ELEMENT_NAME));
+  }
 }
 
 /**
