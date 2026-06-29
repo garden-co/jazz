@@ -457,6 +457,52 @@ describe("raw websocket private read gate", () => {
       Array.from(fileBytes),
     );
 
+    const rawFileBytes = new Uint8Array([9, 8, 7, 6]);
+    const rawFile = await withTimeout(
+      alice
+        .insert(camelChatApp.files, {
+          mime_type: "application/x-raw-file-proof",
+          data: rawFileBytes,
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice raw private file edge wait",
+    );
+    await expect(
+      waitForQuery(
+        bob,
+        camelChatApp.files.where({ id: rawFile.id }),
+        (rows) => rows.length === 0,
+        "Bob should not read a raw files row before a readable attachment references it",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    await withTimeout(
+      alice
+        .insert(camelChatApp.attachments, {
+          messageId: bobMessage.id,
+          type: "file",
+          name: "raw-private-proof.bin",
+          fileId: rawFile.id,
+          size: rawFileBytes.byteLength,
+        })
+        .wait({ tier: "edge" }),
+      15_000,
+      "Alice raw attachment edge wait",
+    );
+    const [visibleRawFile] = await waitForQuery(
+      bob,
+      camelChatApp.files.where({ id: rawFile.id }),
+      (rows) => rows.length === 1,
+      "Bob should read a raw files row after a readable attachment references it",
+      15_000,
+      "edge",
+    );
+    expect(visibleRawFile.mime_type).toBe("application/x-raw-file-proof");
+    expect(Array.from(visibleRawFile.data)).toEqual(Array.from(rawFileBytes));
+
     const subscriptionQueries = [
       {
         label: "chat list memberships with included chat",
