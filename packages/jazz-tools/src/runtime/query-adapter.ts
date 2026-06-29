@@ -188,12 +188,8 @@ function includeRequirementForRelation(
   return relation.isArray ? "MatchCorrelationCardinality" : "AtLeastOne";
 }
 
-function visibleSelectColumns(
-  resolvedSelect: readonly string[],
-  includeProjectionColumns: readonly string[] = [],
-): string[] | null {
-  const columns = [...resolvedSelect, ...includeProjectionColumns];
-  return columns.length > 0 ? columns : null;
+function visibleSelectColumns(resolvedSelect: readonly string[]): string[] | null {
+  return resolvedSelect.length > 0 ? [...resolvedSelect] : null;
 }
 
 function validateIncludeBuilderSpec(
@@ -299,9 +295,6 @@ function toArraySubqueries(
     const resolvedSelectColumns = hasExplicitSelect
       ? resolveSelectedColumns(rel.toTable, schema, spec.select)
       : [];
-    const includeProjectionColumns = hasExplicitSelect
-      ? Object.keys(spec.includes).map((relationName) => hiddenIncludeColumnName(relationName))
-      : [];
     const filters = spec.conditions.map((condition) =>
       conditionToArraySubqueryFilter(condition, schema, rel.toTable),
     );
@@ -313,7 +306,7 @@ function toArraySubqueries(
       hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: spec.requireIncludes,
     });
-    const selectColumns = visibleSelectColumns(resolvedSelectColumns, includeProjectionColumns);
+    const selectColumns = visibleSelectColumns(resolvedSelectColumns);
 
     // Build the subquery based on relation type
     if (rel.type === "forward") {
@@ -805,10 +798,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const selectColumns = hasExplicitSelect
     ? resolveSelectedColumns(builder.table, schema, builder.select)
     : [];
-  const includeProjectionColumns = hasExplicitSelect
-    ? Object.keys(builder.includes).map((relationName) => hiddenIncludeColumnName(relationName))
-    : [];
-  const projectedColumns = visibleSelectColumns(selectColumns, includeProjectionColumns);
+  const projectedColumns = visibleSelectColumns(selectColumns);
   const query = {
     table: builder.table,
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {

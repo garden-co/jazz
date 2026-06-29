@@ -111,6 +111,16 @@ root row membership unless the array subquery has an explicit requirement.
 Unreadable child rows and their edges are omitted, while readable parents remain
 visible for optional array subqueries (`INV-QUERY-21`).
 
+Alpha-style relation traversal also has an output-changing query surface:
+`hopTo` returns rows from the terminal hop table, and `gather` returns the
+recursive relation's reached rows. That surface is distinct from the current
+`JoinVia` and `ReachableVia` fields: those fields filter a fixed root query and
+collect witnesses for that root, but they do not retarget the public output
+table. The replacement API must therefore lower `hopTo`/`gather` to a native
+core relation-query surface (or extend `Query` with an explicit relation root)
+rather than emulating them in TypeScript or encoding them as ordinary
+root-filtering joins.
+
 ## 6.5 Query-driven sync
 
 A subscription binds a shape to one binding and is addressed by
@@ -184,11 +194,20 @@ API (ch. 7, ch. 13), **not** `$canRead`-style magic columns.
   result set exists.
   Decide whether the rule is API-level only, partial-node-only, or an
   implementation change.
-- 🔶 **Maintained array-subquery subscriptions.** One-shot reads and local-tier
-  subscription snapshots can materialize `array_subqueries` as relation row
-  batches plus edges. Global-tier maintained subscriptions still need a
-  groove-maintained relation-edge terminal stream; until that exists, global
-  relation subscriptions must fail explicitly rather than returning root-only
-  subscription material.
+- 🔶 **Maintained array-subquery subscriptions.** One-shot reads and
+  subscriptions can materialize `array_subqueries` as relation row batches plus
+  edges. The current global-tier path uses the maintained root view as the wake
+  and coverage source, then materializes the relation snapshot in core so the
+  public stream never returns root-only subscription material. The target
+  design is still a groove-maintained relation-edge terminal stream, so relation
+  edge deltas do not require full snapshot materialization after every relevant
+  wake.
+- 🔶 **Output-changing relation queries.** The alpha-compatible `hopTo` and
+  `gather` surfaces produce rows whose output table may differ from the seed
+  table. Current Rust `Query::{joins, reachable}` are fixed-root filters, so
+  they are not a faithful encoding for this API. Add a core relation-query root
+  (or equivalent native API) that owns `TableScan`, `Filter`, `Project`, `Join`,
+  `Union`, `Gather`, `OrderBy`, `Offset`, and `Limit`, then route TS/WASM/NAPI
+  `all`/`one`/`subscribeAll` through that single path.
 - 🔶 **Relay coarser covering shapes.** Upstream subscription collapse onto
   coarser covering shapes is a design direction, not a current MUST (ch. 8).

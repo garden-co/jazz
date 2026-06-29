@@ -1067,6 +1067,9 @@ where
         for order in &subquery.order_by {
             query = query.order_by(order.column.clone(), order.direction);
         }
+        if let Some(select) = &subquery.select {
+            query = query.select(select.clone());
+        }
         if let Some(limit) = subquery.limit {
             query = query.limit(limit);
         }
