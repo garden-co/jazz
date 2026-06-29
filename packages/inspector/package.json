@@ -1,16 +1,13 @@
 {
   "name": "jazz-inspector",
   "version": "2.0.0-alpha.52",
+  "private": true,
   "files": [
     "dist-embedded"
   ],
   "type": "module",
   "exports": {
     "./dist-embedded/*": "./dist-embedded/*"
-  },
-  "publishConfig": {
-    "access": "public",
-    "tag": "alpha"
   },
   "scripts": {
     "dev": "vite",
