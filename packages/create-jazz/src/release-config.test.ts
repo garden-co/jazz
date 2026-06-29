@@ -16,12 +16,16 @@ describe("release config", () => {
       fs.readFileSync(path.join(repoRoot, "packages", "create-jazz", "package.json"), "utf8"),
     ) as { version?: string };
 
-    const jazzFixedGroup = ["jazz-tools", "jazz-wasm", "jazz-napi", "jazz-rn", "create-jazz"];
+    // The original alpha train entered prerelease together at alpha.6.
+    const jazzAlphaTrain = ["jazz-tools", "jazz-wasm", "jazz-napi", "jazz-rn", "create-jazz"];
+    // jazz-inspector joined the fixed group later (it was 0.0.0 at pre-enter, so
+    // it has no alpha.6 baseline), but versions in lockstep from here on.
+    const jazzFixedGroup = [...jazzAlphaTrain, "jazz-inspector"];
 
     expect(config.fixed).toContainEqual(jazzFixedGroup);
     expect(createJazzPackage.version).toMatch(/^2\.0\.0-alpha\./);
 
-    for (const packageName of jazzFixedGroup) {
+    for (const packageName of jazzAlphaTrain) {
       expect(preState.initialVersions?.[packageName]).toBe("2.0.0-alpha.6");
     }
   });
