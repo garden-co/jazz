@@ -1269,6 +1269,7 @@ function rejectionReason(message: string): string {
 
 function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   const parsed = JSON.parse(queryJson) as {
+    array_subqueries?: unknown;
     conditions?: unknown;
     table?: unknown;
     limit?: unknown;
@@ -1279,6 +1280,9 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   };
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
+  }
+  if (hasArraySubqueries(parsed.array_subqueries)) {
+    throw unsupportedRelationQueryError("array_subqueries");
   }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
   return queryWithPredicates(
@@ -1295,10 +1299,14 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   );
 }
 
+function hasArraySubqueries(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
 function unsupportedRelationQueryError(operator?: string): Error {
   const detail = operator
-    ? ` Relation IR operator "${operator}" requires a relation-tree lowerer or native relation query API; the TS native runtime can currently lower only TableScan plus Filter/OrderBy/Offset/Limit into flat native predicates.`
-    : " The TS native runtime can currently lower only TableScan plus Filter/OrderBy/Offset/Limit into flat native predicates.";
+    ? ` Relation IR operator "${operator}" requires a relation-tree lowerer or native relation query API; the TS native runtime can currently lower only TableScan plus Filter/Project/OrderBy/Offset/Limit into flat native predicates.`
+    : " The TS native runtime can currently lower only TableScan plus Filter/Project/OrderBy/Offset/Limit into flat native predicates.";
   return new Error(`Native runtime cannot lower this relation IR.${detail}`);
 }
 

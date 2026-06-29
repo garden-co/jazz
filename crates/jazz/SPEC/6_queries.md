@@ -17,16 +17,27 @@ than to SQL, and it is not a second execution engine.
 The predicate surface is `Predicate::{All, Any, Not, Eq, Ne, In, Gt, Gte, Lt,
 Lte, Contains, IsNull}` over `Operand`s. Relationship traversal is expressed by
 `JoinVia` for reference joins, `ReachableVia` for recursive reachability, and
-`Include` for reference expansion. Result shaping is expressed by `select`,
-`order_by`, `aggregate`, `limit`, and `offset`. Every form listed here is part
-of the `Query` contract; a form not yet implemented is marked at its definition,
-and there is no out-of-band gate list. `order_by`/`aggregate`/general
-`limit`/`offset` are applied by the node _after_ row materialization for
-ordinary reads, rather than pushed into groove lowering (ch. 14,
-`INV-LOWER-13`). Maintained subscription exceptions are unordered `limit(1)`
-with offset `0`, which lowers through groove `ArgMinBy` over `row_uuid`, and
-finite ordered windows, which lower through groove `TopBy` (ch. 14). `!=`
-against a parameter is rejected until supported (`INV-LOWER-11`).
+`Include` for forward reference expansion. Reverse one-to-many relations and
+nested relation payloads are expressed by `array_subqueries`; they are distinct
+from `Include` and must not be represented as include paths. Result shaping is
+expressed by `select`, `order_by`, `aggregate`, `limit`, and `offset`. Every
+form listed here is part of the `Query` contract; a form not yet implemented is
+marked at its definition, and there is no out-of-band gate list.
+`order_by`/`aggregate`/general `limit`/`offset` are applied by the node _after_
+row materialization for ordinary reads, rather than pushed into groove lowering
+(ch. 14, `INV-LOWER-13`). Maintained subscription exceptions are unordered
+`limit(1)` with offset `0`, which lowers through groove `ArgMinBy` over
+`row_uuid`, and finite ordered windows, which lower through groove `TopBy`
+(ch. 14). `!=` against a parameter is rejected until supported
+(`INV-LOWER-11`).
+
+An `array_subquery` names an output relation (`column_name`), an inner table,
+and a correlation from a parent-scope column to an inner-table column. It may
+carry child-local filters, select columns, ordering, limit, requirement, and
+nested array subqueries. The MVP supports direct correlations and rejects
+subquery joins until their semantics are specified. `array_subqueries` are
+canonicalized into shape identity separately from includes; sibling ordering is
+not semantic, but duplicate sibling `column_name`s are rejected.
 
 ## 6.2 Shapes: validated, content-addressed, schema-stamped
 
@@ -66,7 +77,7 @@ authenticated `AuthorId`; additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
 
-## 6.4 Result sets and matched include paths
+## 6.4 Result sets, include paths, and relation payloads
 
 A result set is the authoritative row membership for a particular
 `(ShapeId, BindingId)`. It is multi-table: each entry is a `ResultRowEntry =
@@ -88,6 +99,17 @@ mode by requiring include matches. `require_includes` does not broaden the
 subscription payload. Sync membership keeps holes first-class: a readable parent
 is never dropped from sync solely because an included target is absent or
 unreadable (`INV-QUERY-10`).
+
+Array subqueries produce relation payload material, not nested row values inside
+core rows. A relation payload is a set of row batches plus edges:
+`(source_table, source_row_uuid, relation, target_table, target_row_uuid)`.
+For a reverse relation array, the edge source is the parent row and the target
+is each visible correlated child row. For nested array subqueries, child rows
+become the source for the next relation level. Child filters, select columns,
+ordering, and limits affect only the child relation material; they do not change
+root row membership unless the array subquery has an explicit requirement.
+Unreadable child rows and their edges are omitted, while readable parents remain
+visible for optional array subqueries (`INV-QUERY-21`).
 
 ## 6.5 Query-driven sync
 
@@ -162,8 +184,10 @@ API (ch. 7, ch. 13), **not** `$canRead`-style magic columns.
   result set exists.
   Decide whether the rule is API-level only, partial-node-only, or an
   implementation change.
-- 🔶 **Reverse relations / nested result shapes.** Current result-set entries are
-  flat multi-table rows; nested result payloads and reverse relations are
-  undecided — likely a ch. 13 surface question.
+- 🔶 **Array subquery execution completeness.** The AST/result contract above is
+  the target for alpha-style reverse relations and nested result shapes, but the
+  current engine still lacks a first-class `Query::array_subqueries` evaluator.
+  The interim TS adapter must reject unsupported array subqueries rather than
+  lowering them to forward `Include`.
 - 🔶 **Relay coarser covering shapes.** Upstream subscription collapse onto
   coarser covering shapes is a design direction, not a current MUST (ch. 8).
