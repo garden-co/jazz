@@ -30,7 +30,7 @@ test.describe("inspector overlay (embedded + relay end-to-end)", () => {
   test.beforeAll(() => {
     // The embedded entry is a separate Vite build. Build it on demand so
     // `pnpm test:browser` works from a clean checkout; rebuild manually with
-    // `pnpm --filter jazz-inspector run build:embedded` to refresh the assets.
+    // `pnpm --filter inspector run build:embedded` to refresh the assets.
     if (!existsSync(join(distEmbedded, "embedded.html"))) {
       execFileSync("pnpm", ["run", "build:embedded"], {
         cwd: packageRoot,
