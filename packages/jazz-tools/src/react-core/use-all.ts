@@ -12,7 +12,13 @@ type UseAllOptions = {
 // its entry promise — opened during render so a suspended effect can't strand it.
 const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
 
-function useAllBase<T extends { id: string }>(
+/**
+ * Shared implementation behind {@link useAll}/{@link useAllSuspense} and the
+ * `useOne` bindings. Not part of the public API.
+ *
+ * @internal
+ */
+export function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,
   queryOptions?: QueryOptions,
   options?: UseAllOptions,

@@ -19,6 +19,7 @@
  */
 
 export { applyDelta, reconcileArray } from "../reconcile-array.js";
+export { limitQueryToOne } from "../runtime/limit-query.js";
 export { RowChangeKind } from "../runtime/subscription-manager.js";
 export type { RowDelta, SubscriptionDelta } from "../runtime/subscription-manager.js";
 export type {

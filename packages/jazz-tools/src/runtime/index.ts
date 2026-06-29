@@ -41,6 +41,7 @@ export {
   type TableProxy,
 } from "./db.js";
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
+export { limitQueryToOne } from "./limit-query.js";
 export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
