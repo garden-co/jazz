@@ -4,7 +4,7 @@ import { app } from "../schema.js";
 import { renderTodoItem } from "./TodoItem.js";
 
 const db = await createDb({
-  appId: "<your-app-id>",
+  appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
 });
 // use db.shutdown() to clean up when finished
 // #endregion setup-ts

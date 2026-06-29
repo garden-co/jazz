@@ -1,0 +1,81 @@
+---
+title: Quickstart
+description: Build a local-first to-do app with Jazz and plain TypeScript, step by step.
+reviewedAt: "3b151c2e4"
+---
+
+Build a local-first to-do app with Jazz using the low-level client API&hairsp;—&hairsp;no
+framework bindings. For the full set of options and the framework adapters, see
+[Install](/docs/install/client).
+
+## Create a project
+
+```bash title="Terminal"
+mkdir my-jazz-app && cd my-jazz-app
+pnpm init
+pnpm add vite typescript
+```
+
+## Install
+
+```bash title="Terminal"
+pnpm add jazz-tools@alpha
+```
+
+## Get an app ID
+
+Your app ID namespaces your data for storage and sync. Generate one on
+[Jazz Cloud](https://v2.dashboard.jazz.tools) (sync URL: `https://v2.sync.jazz.tools/`).
+
+<GenerateAppId />
+
+## Define your schema
+
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/schema.ts#schema-react
+</include>
+
+[Learn more about schemas, optional validation, and migrations](/docs/schemas/defining-tables).
+
+## Set up your app
+
+<include cwd lang="html" meta='title="index.html"'>
+  ../examples/docs/todo-client-localfirst-ts/src/quickstart-setup.html
+</include>
+
+Create `src/main.ts` and initialise the database:
+
+<include cwd lang="ts" meta='title="src/main.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#setup-ts
+</include>
+
+## Add a to-do
+
+Use `db.insert` to create a new row.
+
+<include cwd lang="ts" meta='title="src/main.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#add-ts
+</include>
+
+## Display and edit a to-do
+
+Display a to-do with toggle and delete controls.
+
+<include cwd lang="ts" meta='title="src/TodoItem.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/TodoItem.ts
+</include>
+
+## List to-dos
+
+Subscribe to a query to get real-time updates as data changes, regardless of where the change
+originates.
+
+<include cwd lang="ts" meta='title="src/main.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#list-ts
+</include>
+
+The callback receives a `{ all, delta }` object&hairsp;—&hairsp;`all` is the current full result
+set, and `delta` is an array of row-level changes (each with a `kind`: added, removed, or
+updated).

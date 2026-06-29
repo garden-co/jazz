@@ -7,7 +7,7 @@ export function App() {
   return (
     <JazzProvider
       config={{
-        appId: "<your-app-id>",
+        appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
       }}
     >
       <SafeAreaView style={{ flex: 1 }}>

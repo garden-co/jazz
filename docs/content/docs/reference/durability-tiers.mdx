@@ -36,9 +36,11 @@ These options apply to:
 - `useAll(query, options?)` (Vue)
 - `useAll(() => ({ query, options }))` (Solid)
 
+<OtherFrameworks />
+
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript", "Rust"]}
+  items={["React", "Svelte", "Expo", "TypeScript", "Rust"]}
   persist
   updateAnchor
 >
@@ -47,19 +49,9 @@ These options apply to:
       ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-tier-react
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/docs-snippets.ts#reading-tier-vue
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#reading-tier-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/docs-snippets.ts#reading-tier-solid
     </include>
   </Tab>
   <Tab value="Expo">

@@ -1,0 +1,53 @@
+---
+title: Reference
+description: React binding reference — provider, query subscriptions, database access, and sessions.
+reviewedAt: "3b151c2e4"
+---
+
+The React (and Expo) bindings live in `jazz-tools/react`. See
+[Overview](/docs/reference/supported-frameworks/overview) for the cross-framework API table.
+
+## Provider setup
+
+Wrap your app in a provider to make the database available to every component. See
+[Client setup](/docs/getting-started/client-setup).
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/framework-pattern-snippets.tsx#provider-react
+</include>
+
+## Query subscriptions
+
+Subscribe to query results reactively. React re-renders with a fresh array on each
+change&hairsp;—&hairsp;it uses React's own diffing rather than the in-place reconciliation the
+Vue, Svelte, and Solid bindings use. See [Reading Data](/docs/reading/queries) for loading states
+and Suspense.
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/framework-pattern-snippets.tsx#live-query-react
+</include>
+
+## Accessing the database for writes
+
+Get a handle to the database for inserts, updates, and deletes. See
+[Writing Data](/docs/writing/writing-data).
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/framework-pattern-snippets.tsx#db-access-react
+</include>
+
+## Session and user identity
+
+Access the current user's session. See [Sessions](/docs/auth/sessions) for details on
+authentication modes and identity linking.
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/framework-pattern-snippets.tsx#session-react
+</include>
+
+## Local-first auth
+
+`useLocalFirstAuth()` from `jazz-tools/react` returns `{ secret, isLoading, login, signOut }`: it
+loads the device secret (or generates one on first run), and `login` / `signOut` switch or clear
+accounts. See [Local-first auth](/docs/auth/local-first-auth) for the full flows, including
+recovery passphrase and passkey backup.

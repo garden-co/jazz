@@ -1,0 +1,50 @@
+---
+title: Reference
+description: Svelte binding reference — provider, query subscriptions, database access, and sessions.
+reviewedAt: "3b151c2e4"
+---
+
+The Svelte bindings live in `jazz-tools/svelte`. See
+[Overview](/docs/reference/supported-frameworks/overview) for the cross-framework API table.
+
+## Provider setup
+
+Wrap your app in `JazzSvelteProvider` to make the database available to every component. See
+[Client setup](/docs/getting-started/client-setup).
+
+<include cwd lang="svelte" meta='title="App.svelte"'>
+  ../examples/docs/todo-client-localfirst-svelte/src/ProviderExample.svelte#provider-svelte
+</include>
+
+## Query subscriptions
+
+Subscribe to query results reactively with `QuerySubscription`. See
+[Reading Data](/docs/reading/queries) for loading states and fine-grained update behaviour.
+
+<include cwd lang="svelte" meta='title="App.svelte"'>
+  ../examples/docs/todo-client-localfirst-svelte/src/QuerySubscriptionExample.svelte#query-subscription-svelte
+</include>
+
+## Accessing the database for writes
+
+Get a handle to the database for inserts, updates, and deletes. See
+[Writing Data](/docs/writing/writing-data).
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-svelte/src/DbSessionExamples.svelte#db-access-svelte
+</include>
+
+## Session and user identity
+
+Access the current user's session. See [Sessions](/docs/auth/sessions) for details on
+authentication modes and identity linking.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-svelte/src/DbSessionExamples.svelte#session-svelte
+</include>
+
+## Local-first auth
+
+`LocalFirstAuth` from `jazz-tools/svelte` exposes `secret`, `isLoading`, and `login` / `signOut`
+to switch or clear accounts. See [Local-first auth](/docs/auth/local-first-auth) for the full
+flows, including recovery passphrase and passkey backup.

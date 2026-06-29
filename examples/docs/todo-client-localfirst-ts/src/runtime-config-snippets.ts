@@ -2,7 +2,7 @@ import { createDb } from "jazz-tools";
 
 // #region context-setup-ts-runtime-sources
 const db = await createDb({
-  appId: "my-app",
+  appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
   serverUrl: "https://my-jazz-server.example.com",
   runtimeSources: {
     wasmUrl: "/static/jazz/jazz_wasm_bg.wasm",

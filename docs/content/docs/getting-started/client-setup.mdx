@@ -12,9 +12,11 @@ import CreateJazzClientReference from "../../partials/create-jazz-client-referen
 
 Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/local-first-auth). Without `secret`, the client runs in anonymous mode and every write is rejected with `AnonymousWriteDeniedError`. Add a `serverUrl` to enable sync. For the full auth matrix (anonymous, local-first, external JWT), see [Authentication](/docs/auth/authentication).
 
+<OtherFrameworks />
+
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
+  items={["React", "Svelte", "Expo", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -26,28 +28,12 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
     `useLocalFirstAuth()` from `jazz-tools/react` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthLocalfirst.vue
-    </include>
-
-    `useLocalFirstAuth()` from `jazz-tools/vue` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
-
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/AuthLocalfirst.svelte#auth-localfirst-svelte
     </include>
 
     `LocalFirstAuth` from `jazz-tools/svelte` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
-
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/AuthLocalfirst.tsx
-    </include>
-
-    `useLocalFirstAuth()` from `jazz-tools/solid` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
   </Tab>
   <Tab value="Expo">
@@ -126,11 +112,11 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
 
 <Tabs
   groupId="jazz-framework"
-  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "Solid (Vite)", "SvelteKit", "Next.js", "Expo"]}
+  items={["React", "Svelte", "SvelteKit", "Next.js", "Expo"]}
   persist
   updateAnchor
 >
-  <Tab value="React (Vite)">
+  <Tab value="React">
     ```ts title="vite.config.ts"
     import { defineConfig } from "vite";
     import react from "@vitejs/plugin-react";
@@ -144,21 +130,7 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
 
   </Tab>
-  <Tab value="Vue (Vite)">
-    ```ts title="vite.config.ts"
-    import { defineConfig } from "vite";
-    import vue from "@vitejs/plugin-vue";
-    import { jazzPlugin } from "jazz-tools/dev/vite";
-
-    export default defineConfig({
-      plugins: [vue(), jazzPlugin()],
-    });
-    ```
-
-    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
-
-  </Tab>
-  <Tab value="Svelte (Vite)">
+  <Tab value="Svelte">
     ```ts title="vite.config.ts"
     import { defineConfig } from "vite";
     import { svelte } from "@sveltejs/vite-plugin-svelte";
@@ -170,20 +142,6 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     ```
 
     Injects `PUBLIC_JAZZ_APP_ID` and `PUBLIC_JAZZ_SERVER_URL`. Use `jazzSvelteKit` for both Vite+Svelte and SvelteKit projects.
-
-  </Tab>
-  <Tab value="Solid (Vite)">
-    ```ts title="vite.config.ts"
-    import { defineConfig } from "vite";
-    import solid from "vite-plugin-solid";
-    import { jazzPlugin } from "jazz-tools/dev/vite";
-
-    export default defineConfig({
-      plugins: [solid(), jazzPlugin()],
-    });
-    ```
-
-    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
 
   </Tab>
   <Tab value="SvelteKit">
@@ -303,30 +261,15 @@ Jazz resolves these in this order:
 
 The config is the same across frameworks. Plain TypeScript uses `createDb(...)` directly.
 
-<Tabs
-  groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
-  persist
-  updateAnchor
->
+<Tabs groupId="jazz-framework" items={["React", "Svelte", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx" meta='title="App.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-runtime-sources
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/RuntimeConfigExample.vue#context-setup-vue-runtime-sources
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/RuntimeConfigExample.svelte#context-setup-svelte-runtime-sources
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/RuntimeConfigExample.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">
@@ -350,7 +293,7 @@ If your platform hands you raw bytes instead of a compiled module, use `runtimeS
 
 ```ts title="worker.ts"
 const db = await createDb({
-  appId: "my-app",
+  appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
   runtimeSources: {
     wasmSource: wasmBytes,
   },
