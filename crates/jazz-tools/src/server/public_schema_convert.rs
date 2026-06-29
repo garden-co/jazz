@@ -194,10 +194,7 @@ fn convert_column_type(
             format!("$.{}.{}", table.as_str(), column),
             "BatchId columns are not supported by core schema conversion yet",
         )),
-        ColumnType::Json { .. } => Err(err(
-            format!("$.{}.{}", table.as_str(), column),
-            "Json columns are not supported by core schema conversion yet",
-        )),
+        ColumnType::Json { .. } => Ok(GrooveColumnType::String),
         ColumnType::Row { .. } => Err(err(
             format!("$.{}.{}", table.as_str(), column),
             "nested Row columns are not supported by core schema conversion yet",
@@ -1066,6 +1063,53 @@ mod tests {
     }
 
     #[test]
+    fn converts_public_json_as_core_string_storage() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("events")
+                    .column(
+                        "payload",
+                        ColumnType::Json {
+                            schema: Some(serde_json::json!({
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "type": "string" }
+                                }
+                            })),
+                        },
+                    )
+                    .nullable_column("metadata", ColumnType::Json { schema: None }),
+            )
+            .build();
+
+        let table = convert_public_schema(&schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "events")
+            .unwrap();
+
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "payload")
+                .unwrap()
+                .column_type,
+            GrooveColumnType::String
+        );
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "metadata")
+                .unwrap()
+                .column_type,
+            GrooveColumnType::String.nullable()
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_public_column_types() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::BigInt))
@@ -1074,6 +1118,22 @@ mod tests {
         let error = convert_public_schema(&schema).unwrap_err();
         assert_eq!(error.path, "$.todos.count");
         assert!(error.message.contains("BIGINT is signed"));
+
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("todos").column(
+                "payload",
+                ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                        "title",
+                        ColumnType::Text,
+                    )])),
+                },
+            ))
+            .build();
+
+        let error = convert_public_schema(&schema).unwrap_err();
+        assert_eq!(error.path, "$.todos.payload");
+        assert!(error.message.contains("nested Row columns"));
     }
 
     #[test]
