@@ -11,7 +11,8 @@ use crate::protocol::{
     VersionRecord,
 };
 use crate::query::{
-    Binding, BindingId, Query, ShapeId, ValidatedQuery, claim, col, eq, gt, lit, ne, param,
+    ArraySubquery, Binding, BindingId, Query, ShapeId, ValidatedQuery, claim, col, eq, gt, lit, ne,
+    param,
 };
 use crate::schema::{MergeStrategy, Policy};
 use crate::tx::MergeAspect;
