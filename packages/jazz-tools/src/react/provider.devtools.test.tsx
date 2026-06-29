@@ -17,7 +17,6 @@ import { JazzProvider } from "./provider.js";
 describe("JazzProvider dev auto-attach", () => {
   beforeEach(() => {
     startSpy.mockClear();
-    // Fresh db each test so the once-per-db guard (markDevToolsAttached) doesn't carry over.
     currentDb = {};
     (process.env as Record<string, string>).NODE_ENV = "development";
     // The overlay is experimental: a dev plugin injects this public flag to
