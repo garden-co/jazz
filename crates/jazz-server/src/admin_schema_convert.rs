@@ -143,7 +143,7 @@ fn convert_column(
     let object = value
         .as_object()
         .ok_or_else(|| err(path, "column definition must be an object"))?;
-    reject_present(object, &["default", "policies"], path)?;
+    reject_present(object, &["policies"], path)?;
     reject_truthy(
         object,
         "json",
@@ -532,11 +532,11 @@ mod tests {
     }
 
     #[test]
-    fn converts_integer_as_u32_and_rejects_unsupported_types_and_defaults() {
+    fn converts_integer_as_u32_and_rejects_unsupported_types() {
         let schema = convert_admin_schema(&json!({
             "todos": {
                 "columns": [
-                    { "name": "count", "column_type": "Integer" }
+                    { "name": "count", "column_type": "Integer", "default": 0 }
                 ]
             }
         }))
@@ -552,15 +552,5 @@ mod tests {
         }))
         .unwrap_err();
         assert!(err.to_string().contains("I64"));
-
-        let err = convert_admin_schema(&json!({
-            "todos": {
-                "columns": [
-                    { "name": "title", "column_type": "Text", "default": "" }
-                ]
-            }
-        }))
-        .unwrap_err();
-        assert!(err.to_string().contains("default"));
     }
 }
