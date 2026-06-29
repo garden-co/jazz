@@ -155,6 +155,46 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  it("encodes indexed columns and counter merge strategies in native schemas", () => {
+    const schemaBytes = encodeSchema({
+      counters: {
+        columns: [
+          {
+            name: "count",
+            column_type: { type: "Integer" },
+            nullable: false,
+            merge_strategy: "Counter",
+          },
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+        indexed_columns: ["title", "done"],
+      },
+    });
+
+    expect(readSchemaTableMetadata(schemaBytes, "counters")).toEqual({
+      indexedColumns: ["done", "title"],
+      mergeStrategies: [{ column: "count", strategy: "Counter" }],
+    });
+  });
+
+  it("rejects unsupported native schema merge strategies instead of dropping them", () => {
+    expect(() =>
+      encodeSchema({
+        docs: {
+          columns: [
+            {
+              name: "tags",
+              column_type: { type: "Array", element: { type: "Text" } },
+              nullable: false,
+              merge_strategy: "GSet",
+            },
+          ],
+        },
+      }),
+    ).toThrow("GSet merge strategies");
+  });
+
   it("resolves connect only after the owned native transport has pumped", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -2931,6 +2971,55 @@ function readSchemaColumnLargeValues(
   reader.option(() => undefined);
   reader.option(() => undefined);
   return tables.find((table) => table.table === tableName)?.columns ?? [];
+}
+
+function readSchemaTableMetadata(
+  schemaBytes: Uint8Array,
+  tableName: string,
+): {
+  indexedColumns: string[];
+  mergeStrategies: Array<{ column: string; strategy: "Lww" | "Counter" }>;
+} {
+  const reader = new PostcardReader(schemaBytes);
+  const tables = reader.readVec((tableReader) => {
+    const table = tableReader.string();
+    tableReader.readVec((columnReader) => {
+      columnReader.string();
+      skipSchemaValueType(columnReader);
+      columnReader.option(() => undefined);
+    });
+    const referenceCount = tableReader.u64();
+    for (let index = 0; index < referenceCount; index += 1) {
+      tableReader.string();
+      tableReader.string();
+    }
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.option(readPolicyQueryForTest);
+    tableReader.option(readPolicyQueryForTest);
+    const indexedColumns = tableReader.readVec((indexReader) => indexReader.string());
+    const mergeStrategyCount = tableReader.u64();
+    const mergeStrategies: Array<{ column: string; strategy: "Lww" | "Counter" }> = [];
+    for (let index = 0; index < mergeStrategyCount; index += 1) {
+      const column = tableReader.string();
+      const tag = tableReader.u64();
+      const strategy = tag === 0 ? "Lww" : tag === 1 ? "Counter" : null;
+      if (strategy == null) {
+        throw new Error(`unsupported merge strategy tag ${tag}`);
+      }
+      mergeStrategies.push({ column, strategy });
+    }
+    return { table, indexedColumns, mergeStrategies };
+  });
+  reader.option(() => undefined);
+  reader.option(() => undefined);
+  const table = tables.find((entry) => entry.table === tableName);
+  expect(table).toBeDefined();
+  return {
+    indexedColumns: table!.indexedColumns,
+    mergeStrategies: table!.mergeStrategies,
+  };
 }
 
 function readPolicyQueryForTest(reader: PostcardReader): {

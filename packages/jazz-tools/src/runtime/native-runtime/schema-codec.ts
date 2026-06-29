@@ -90,8 +90,8 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
     writePolicy(table, schema, tableName, definition.policies?.update?.using);
     writePolicy(table, schema, tableName, definition.policies?.update?.with_check);
     writePolicy(table, schema, tableName, definition.policies?.delete?.using);
-    table.set(0);
-    table.map(0);
+    writeIndexedColumns(table, definition.indexed_columns);
+    writeMergeStrategies(table, definition.columns);
   }, tables.length);
   writer.none();
   writer.none();
@@ -113,6 +113,33 @@ function writeLargeValueKind(writer: PostcardWriter, column: ColumnDescriptor) {
     throw new Error(`large_value is only supported on Bytea columns: ${column.name}`);
   }
   writer.some((kind) => kind.enumUnit(largeValue === "Text" ? 0 : 1));
+}
+
+function writeIndexedColumns(writer: PostcardWriter, indexedColumns: string[] | undefined): void {
+  const columns = [...(indexedColumns ?? [])].sort();
+  writer.set(columns.length);
+  for (const column of columns) {
+    writer.string(column);
+  }
+}
+
+function writeMergeStrategies(writer: PostcardWriter, columns: ColumnDescriptor[]): void {
+  const mergeColumns = columns
+    .filter((column) => column.merge_strategy != null)
+    .sort((left, right) => left.name.localeCompare(right.name));
+  writer.map(mergeColumns.length);
+  for (const column of mergeColumns) {
+    writer.string(column.name);
+    switch (column.merge_strategy) {
+      case "Counter":
+        writer.enumUnit(1);
+        break;
+      case "GSet":
+        throw new Error("Core runtime does not encode GSet merge strategies yet");
+      default:
+        throw new Error(`Unsupported merge strategy for ${column.name}`);
+    }
+  }
 }
 
 export function columnTypeToValueType(type: ColumnType): ValueType {
