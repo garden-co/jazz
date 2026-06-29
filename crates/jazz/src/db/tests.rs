@@ -29,7 +29,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 fn opened_rows(event: SubscriptionEvent) -> Vec<CurrentRow> {
     match event {
         SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            current
+            current.rows
         }
         other => panic!("expected subscription snapshot event, got {other:?}"),
     }

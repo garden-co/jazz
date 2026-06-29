@@ -184,10 +184,11 @@ API (ch. 7, ch. 13), **not** `$canRead`-style magic columns.
   result set exists.
   Decide whether the rule is API-level only, partial-node-only, or an
   implementation change.
-- 🔶 **Array subquery execution completeness.** The AST/result contract above is
-  the target for alpha-style reverse relations and nested result shapes, but the
-  current engine still lacks a first-class `Query::array_subqueries` evaluator.
-  The interim TS adapter must reject unsupported array subqueries rather than
-  lowering them to forward `Include`.
+- 🔶 **Maintained array-subquery subscriptions.** One-shot reads and local-tier
+  subscription snapshots can materialize `array_subqueries` as relation row
+  batches plus edges. Global-tier maintained subscriptions still need a
+  groove-maintained relation-edge terminal stream; until that exists, global
+  relation subscriptions must fail explicitly rather than returning root-only
+  subscription material.
 - 🔶 **Relay coarser covering shapes.** Upstream subscription collapse onto
   coarser covering shapes is a design direction, not a current MUST (ch. 8).

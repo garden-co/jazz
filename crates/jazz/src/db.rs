@@ -23,7 +23,7 @@ pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlan,
-    RelationSnapshot,
+    RelationEdge, RelationSnapshot,
 };
 use crate::peer::PeerState;
 use crate::protocol::{
@@ -693,7 +693,13 @@ where
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
         let read_tier = effective_read_tier(opts);
-        let (maintained_subscription, rows) = if read_tier == DurabilityTier::Global {
+        let (maintained_subscription, snapshot) = if read_tier == DurabilityTier::Global {
+            if !prepared.shape.query().array_subqueries.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "global relation subscriptions require maintained relation edges",
+                ));
+            }
             let (subscription, rows) = self
                 .node
                 .node
@@ -703,15 +709,18 @@ where
                     &prepared.binding,
                     author,
                 )?;
-            (Some(subscription), rows)
+            (
+                Some(subscription),
+                subscription_snapshot_for_rows(&prepared.shape, rows),
+            )
         } else {
-            let rows = self.node.node.borrow_mut().query_rows_for_link(
+            let snapshot = self.node.node.borrow_mut().subscription_snapshot_for_link(
                 &prepared.shape,
                 &prepared.binding,
                 read_tier,
                 author,
             )?;
-            (None, rows)
+            (None, snapshot)
         };
         let settled = subscription_is_settled(
             &self.node.node.borrow(),
@@ -725,7 +734,7 @@ where
             binding: prepared.binding.clone(),
             author,
             read_tier,
-            rows: rows.clone(),
+            snapshot: snapshot.clone(),
             settled,
             maintained_subscription,
             sender,
@@ -734,7 +743,7 @@ where
             .borrow()
             .sender
             .unbounded_send(SubscriptionEvent::Opened {
-                current: rows,
+                current: snapshot,
                 settled,
                 tier: read_tier,
             })
@@ -2013,14 +2022,14 @@ where
             let state = state.borrow();
             (
                 state.read_tier,
-                state.rows.clone(),
+                state.snapshot.clone(),
                 state.settled,
                 state.shape.clone(),
                 state.binding.clone(),
                 state.author,
             )
         };
-        let maybe_rows = {
+        let maybe_snapshot = {
             let mut state_ref = state.borrow_mut();
             if let Some(maintained) = state_ref.maintained_subscription.as_mut() {
                 let update = {
@@ -2029,6 +2038,7 @@ where
                 };
                 if let Some(update) = update {
                     let mut rows_by_id = previous
+                        .rows
                         .iter()
                         .cloned()
                         .map(|row| (subscription_row_key(&row), row))
@@ -2042,21 +2052,21 @@ where
                     }
                     let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
                     node.borrow().apply_query_order(shape.query(), &mut rows)?;
-                    rows
+                    subscription_snapshot_for_rows(&shape, rows)
                 } else {
                     previous.clone()
                 }
             } else {
                 node.borrow_mut()
-                    .query_rows_for_link(&shape, &binding, read_tier, author)?
+                    .subscription_snapshot_for_link(&shape, &binding, read_tier, author)?
             }
         };
-        let rows = maybe_rows;
+        let snapshot = maybe_snapshot;
         let settled = subscription_is_settled(&node.borrow(), &shape, &binding, read_tier);
-        if rows != previous || settled != previous_settled {
+        if snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
-            let event = subscription_delta_event(read_tier, settled, &previous, &rows);
-            state.rows = rows;
+            let event = subscription_delta_event(read_tier, settled, &previous, &snapshot);
+            state.snapshot = snapshot;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
                 changed += 1;
@@ -3624,7 +3634,7 @@ struct SubscriptionState {
     binding: Binding,
     author: AuthorId,
     read_tier: DurabilityTier,
-    rows: Vec<CurrentRow>,
+    snapshot: RelationSnapshot,
     settled: bool,
     maintained_subscription: Option<LocalMaintainedViewSubscription>,
     sender: UnboundedSender<SubscriptionEvent>,
@@ -3639,13 +3649,16 @@ pub struct RemovedRow {
     pub row_uuid: RowUuid,
 }
 
+/// Materialized relation edge removed from a subscription result.
+pub type RemovedRelationEdge = RelationEdge;
+
 /// Materialized event emitted by a database subscription stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionEvent {
     /// Initial materialized result for the subscription.
     Opened {
         /// Complete materialized rows visible at subscription open.
-        current: Vec<CurrentRow>,
+        current: RelationSnapshot,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -3654,13 +3667,17 @@ pub enum SubscriptionEvent {
     /// Incremental materialized result change.
     Delta {
         /// Complete materialized rows after applying this change.
-        current: Vec<CurrentRow>,
+        current: RelationSnapshot,
         /// Rows newly visible to the subscription.
         added: Vec<CurrentRow>,
         /// Rows still visible with changed projected cells.
         updated: Vec<CurrentRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
+        /// Relation edges newly visible to the subscription.
+        added_edges: Vec<RelationEdge>,
+        /// Relation edges no longer visible to the subscription.
+        removed_edges: Vec<RemovedRelationEdge>,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -3670,7 +3687,7 @@ pub enum SubscriptionEvent {
     /// internal invalidation cases where a precise delta is unavailable.
     Reset {
         /// Complete replacement materialized rows.
-        current: Vec<CurrentRow>,
+        current: RelationSnapshot,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -3683,6 +3700,14 @@ pub enum SubscriptionEvent {
 impl SubscriptionEvent {
     /// Return full materialized rows for snapshot-like events.
     pub fn current_rows(&self) -> Option<&[CurrentRow]> {
+        match self {
+            Self::Opened { current, .. } | Self::Reset { current, .. } => Some(&current.rows),
+            Self::Delta { .. } | Self::Closed => None,
+        }
+    }
+
+    /// Return the complete materialized relation snapshot for snapshot-like events.
+    pub fn current_snapshot(&self) -> Option<&RelationSnapshot> {
         match self {
             Self::Opened { current, .. } | Self::Reset { current, .. } => Some(current),
             Self::Delta { .. } | Self::Closed => None,
@@ -3767,22 +3792,32 @@ fn should_install_prepared_plan(shape: &ValidatedQuery) -> bool {
 fn subscription_delta_event(
     tier: DurabilityTier,
     settled: bool,
-    previous: &[CurrentRow],
-    current: &[CurrentRow],
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
 ) -> SubscriptionEvent {
     let mut previous_by_id = BTreeMap::new();
-    for row in previous {
+    for row in &previous.rows {
         previous_by_id.insert(subscription_row_key(row), row);
     }
 
     let mut current_by_id = BTreeMap::new();
-    for row in current {
+    for row in &current.rows {
         current_by_id.insert(subscription_row_key(row), row);
     }
 
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut removed = Vec::new();
+    let previous_edges = previous.edges.iter().cloned().collect::<BTreeSet<_>>();
+    let current_edges = current.edges.iter().cloned().collect::<BTreeSet<_>>();
+    let added_edges = current_edges
+        .difference(&previous_edges)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed_edges = previous_edges
+        .difference(&current_edges)
+        .cloned()
+        .collect::<Vec<_>>();
 
     for (key, row) in &current_by_id {
         match previous_by_id.get(key) {
@@ -3802,12 +3837,28 @@ fn subscription_delta_event(
     }
 
     SubscriptionEvent::Delta {
-        current: current.to_vec(),
+        current: current.clone(),
         added,
         updated,
         removed,
+        added_edges,
+        removed_edges,
         settled,
         tier,
+    }
+}
+
+fn subscription_snapshot_for_rows(
+    shape: &ValidatedQuery,
+    rows: Vec<CurrentRow>,
+) -> RelationSnapshot {
+    debug_assert!(
+        shape.query().array_subqueries.is_empty(),
+        "maintained relation subscriptions must produce relation edges"
+    );
+    RelationSnapshot {
+        rows,
+        edges: Vec::new(),
     }
 }
 

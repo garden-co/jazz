@@ -123,6 +123,10 @@ Maintained-lowering gaps:
 
 - aggregate lowering is not yet represented as a groove-maintained graph
   fragment for subscription deltas;
+- `array_subqueries` have one-shot and local-tier relation snapshot
+  materialization, but global-tier maintained subscriptions do not yet emit
+  relation-edge terminal deltas. They must be rejected at subscription open
+  until maintained relation edges are represented in groove;
 - application-column projection is a materialization concern layered over the
   maintained membership/version stream; projected subscription payloads must not
   become a second diff engine;

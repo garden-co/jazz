@@ -161,6 +161,7 @@ type RuntimeSession = {
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
+  rootTable: string;
   opened: boolean;
   callback?: Function;
   cancelled: boolean;
@@ -544,9 +545,6 @@ export class NativeRuntimeAdapter implements Runtime {
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
     const identity = session?.identity;
-    if (queryHasArraySubqueries(queryJson)) {
-      throw unsupportedRelationQueryError("array_subqueries");
-    }
     const query = this.prepareQuery(queryJson);
     let nativeSubscription: ReadableStream<unknown> | Subscription;
     try {
@@ -559,6 +557,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       rows: [],
+      rootTable: queryTable(queryJson),
       opened: false,
       cancelled: false,
     });
@@ -964,7 +963,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const previousRows = subscription.rows;
     if (chunk.type === "snapshot") {
-      subscription.rows = rowsFromBatches(chunk.rows, this.schema);
+      subscription.rows = rowsFromRelationSnapshot(
+        chunk.snapshot,
+        this.schema,
+        subscription.rootTable,
+      );
       subscription.opened = true;
     } else {
       subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
@@ -2342,7 +2345,7 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
 }
 
 function normalizeSubscriptionChunk(chunk: unknown):
-  | { type: "snapshot"; rows: NativeRowBatch[]; settled?: boolean }
+  | { type: "snapshot"; snapshot: NativeRelationSubscriptionSnapshot; settled?: boolean }
   | {
       type: "delta";
       delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
@@ -2357,7 +2360,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
   if (record.type === "snapshot" || record.type === "Snapshot") {
     return {
       type: "snapshot",
-      rows: readRowBatches(assertBytes(record.rows, "subscription rows")),
+      snapshot: readRelationSnapshot(assertBytes(record.rows, "subscription rows")),
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }

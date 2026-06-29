@@ -901,6 +901,22 @@ where
         Ok(snapshot)
     }
 
+    pub(crate) fn subscription_snapshot_for_link(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<RelationSnapshot, Error> {
+        if shape.query().array_subqueries.is_empty() {
+            return Ok(RelationSnapshot {
+                rows: self.query_rows_for_link(shape, binding, tier, identity)?,
+                edges: Vec::new(),
+            });
+        }
+        self.query_relation_snapshot_for_link(shape, binding, tier, identity)
+    }
+
     pub(crate) fn query_rows_for_link_including_deleted(
         &mut self,
         shape: &ValidatedQuery,
