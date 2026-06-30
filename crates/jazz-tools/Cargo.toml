@@ -183,6 +183,10 @@ harness = false
 name = "subscription_benchmark"
 harness = false
 
+[[test]]
+name = "large_blob_permissions"
+required-features = ["test"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
