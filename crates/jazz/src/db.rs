@@ -1030,6 +1030,17 @@ where
         self.write_mergeable_as_session_subject(made_by, table, row, cells, Vec::new(), None)
     }
 
+    /// Insert a row while evaluating write policy as `identity`.
+    pub fn insert_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id_for_identity(identity, table, row, cells)
+    }
+
     /// Insert a caller-id row with an explicit millisecond provenance time.
     pub fn insert_with_id_at_ms(
         &self,
