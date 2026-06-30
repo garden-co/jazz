@@ -1,38 +1,70 @@
-import { use, useEffect, useMemo } from "react";
+import { use, useEffect, useMemo, useState } from "react";
 import { MemoryRouter } from "react-router";
-import { JazzClientProvider, type JazzClient } from "jazz-tools/react";
-import { getRegisteredWasmSchema, onDevToolsPortDisconnect } from "jazz-tools";
+import { JazzClientProvider, createJazzClient, type JazzClient } from "jazz-tools/react";
 import { DevtoolsProvider } from "./contexts/devtools-context";
+import {
+  readInspectorHostConfig,
+  readInspectorHostSchema,
+  useHostSubscriptions,
+} from "./contexts/host-link";
 import { InspectorRoutes } from "./routes";
 
 /**
- * The inspector React tree for the bridge-connected entrypoints (the extension
- * devtools panel and the dev-overlay iframe). Both connect over the same bridge
- * and only differ in how the client is created, which they pass in here.
+ * The dev-overlay inspector. Same-origin with the host page, it reads the
+ * connection config the loader published on `window.__jazzInspectorHost`, opens
+ * its OWN worker connection (like the standalone build), and shows the host's
+ * active subscriptions from the one-way push. No devtools bridge.
  */
-export function InspectorApp({
-  client,
-  isOverlay = false,
-}: {
-  client: Promise<JazzClient>;
-  isOverlay?: boolean;
-}) {
-  const resolvedClient = use(client);
-  const wasmSchema = useMemo(() => getRegisteredWasmSchema(), [resolvedClient]);
+export function InspectorApp() {
+  const config = useMemo(() => readInspectorHostConfig(), []);
 
+  // Schema is plain data injected by the host; it may not be ready until the
+  // host has run a query, so poll briefly until it resolves.
+  const [wasmSchema, setWasmSchema] = useState(() => readInspectorHostSchema());
   useEffect(() => {
-    return onDevToolsPortDisconnect(() => {
-      window.location.reload();
-    });
-  }, []);
+    if (wasmSchema) return;
+    const timer = setInterval(() => {
+      const next = readInspectorHostSchema();
+      if (next) {
+        setWasmSchema(next);
+        clearInterval(timer);
+      }
+    }, 250);
+    return () => clearInterval(timer);
+  }, [wasmSchema]);
 
-  if (!resolvedClient || !wasmSchema) {
-    return <p>Waiting for runtime devtools connection...</p>;
+  const clientPromise = useMemo<Promise<JazzClient> | null>(() => {
+    if (!config) return null;
+    return createJazzClient({
+      appId: config.appId,
+      serverUrl: config.serverUrl,
+      env: config.env,
+      userBranch: config.userBranch,
+      adminSecret: config.adminSecret,
+      driver: { type: "memory" },
+    });
+  }, [config]);
+
+  const hostSubscriptions = useHostSubscriptions();
+
+  // `use` may be called conditionally (unlike other hooks).
+  const client = clientPromise ? use(clientPromise) : null;
+
+  if (!config) {
+    return <p style={{ padding: 16 }}>Inspector not attached (no host dev plugin detected).</p>;
+  }
+  if (!client || !wasmSchema) {
+    return <p style={{ padding: 16 }}>Connecting…</p>;
   }
 
   return (
-    <JazzClientProvider client={resolvedClient}>
-      <DevtoolsProvider wasmSchema={wasmSchema} runtime="extension" isOverlay={isOverlay}>
+    <JazzClientProvider client={client}>
+      <DevtoolsProvider
+        wasmSchema={wasmSchema}
+        runtime="overlay"
+        isOverlay
+        hostSubscriptions={hostSubscriptions}
+      >
         <MemoryRouter>
           <InspectorRoutes />
         </MemoryRouter>

@@ -4,16 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LiveQuery } from "./index";
 
 const mockFetchServerSubscriptions = vi.fn();
-const mockGetActiveQuerySubscriptions = vi.fn();
-const mockOnActiveQuerySubscriptionsChange = vi.fn();
 const mockUseDevtoolsContext = vi.fn();
 const mockUseStandaloneContext = vi.fn();
 
 vi.mock("jazz-tools", () => ({
   fetchServerSubscriptions: (...args: unknown[]) => mockFetchServerSubscriptions(...args),
-  getActiveQuerySubscriptions: () => mockGetActiveQuerySubscriptions(),
-  onActiveQuerySubscriptionsChange: (listener: (subscriptions: unknown[]) => void) =>
-    mockOnActiveQuerySubscriptionsChange(listener),
 }));
 
 vi.mock("../../contexts/devtools-context.js", () => ({
@@ -24,6 +19,18 @@ vi.mock("../../contexts/standalone-context.js", () => ({
   useStandaloneContext: () => mockUseStandaloneContext(),
 }));
 
+// Overlay subscriptions arrive (stack-less) via the host push, surfaced on the
+// devtools context as `hostSubscriptions`.
+function overlayContext(hostSubscriptions: unknown[], extraTables: string[] = []) {
+  return {
+    runtime: "overlay",
+    wasmSchema: Object.fromEntries(
+      ["projects", "todos", ...extraTables].map((t) => [t, { columns: [] }]),
+    ),
+    hostSubscriptions,
+  };
+}
+
 describe("LiveQuery", () => {
   afterEach(() => {
     cleanup();
@@ -31,17 +38,9 @@ describe("LiveQuery", () => {
 
   beforeEach(() => {
     mockFetchServerSubscriptions.mockReset();
-    mockGetActiveQuerySubscriptions.mockReset();
-    mockOnActiveQuerySubscriptionsChange.mockReset();
     mockUseDevtoolsContext.mockReset();
     mockUseStandaloneContext.mockReset();
-    mockUseDevtoolsContext.mockReturnValue({
-      runtime: "extension",
-      wasmSchema: {
-        projects: { columns: [] },
-        todos: { columns: [] },
-      },
-    });
+    mockUseDevtoolsContext.mockReturnValue(overlayContext([]));
     mockUseStandaloneContext.mockReturnValue({
       connection: {
         serverUrl: "http://localhost:1625",
@@ -49,8 +48,6 @@ describe("LiveQuery", () => {
         adminSecret: "admin-secret",
       },
     });
-    mockGetActiveQuerySubscriptions.mockReturnValue([]);
-    mockOnActiveQuerySubscriptionsChange.mockImplementation(() => vi.fn());
     mockFetchServerSubscriptions.mockResolvedValue({
       appId: "test-app",
       generatedAt: 1741600800000,
@@ -58,7 +55,7 @@ describe("LiveQuery", () => {
     });
   });
 
-  it("renders an empty state when there are no active extension subscriptions", () => {
+  it("renders an empty state when there are no active overlay subscriptions", () => {
     render(
       <MemoryRouter>
         <LiveQuery />
@@ -68,20 +65,20 @@ describe("LiveQuery", () => {
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
   });
 
-  it("renders traced subscriptions from the extension bridge", async () => {
-    mockGetActiveQuerySubscriptions.mockReturnValue([
-      {
-        id: "sub-1",
-        table: "todos",
-        tier: "local",
-        propagation: "full",
-        branches: ["main"],
-        createdAt: "2026-03-10T10:00:00.000Z",
-        query: '{"table":"todos"}',
-        stack:
-          "Error\n    at useAll (http://localhost:5173/@fs/.../use-all.js:37:12)\n    at TodoList (http://localhost:5173/src/TodoList.tsx:34:17)\n    at renderWithHooks (http://localhost:5173/node_modules/.vite/deps/react-dom_client.js:5652:24)",
-      },
-    ]);
+  it("renders subscriptions pushed from the host (no stack column)", async () => {
+    mockUseDevtoolsContext.mockReturnValue(
+      overlayContext([
+        {
+          id: "sub-1",
+          table: "todos",
+          tier: "edge",
+          propagation: "full",
+          branches: ["main"],
+          createdAt: "2026-03-10T10:00:00.000Z",
+          query: '{"table":"todos"}',
+        },
+      ]),
+    );
 
     render(
       <MemoryRouter>
@@ -92,37 +89,33 @@ describe("LiveQuery", () => {
     expect(await screen.findByRole("cell", { name: "todos" })).not.toBeNull();
     expect(await screen.findByRole("cell", { name: "full" })).not.toBeNull();
     expect(await screen.findByText('{"table":"todos"}')).not.toBeNull();
-    const summary = await screen.findByText(/TodoList\.tsx:34:17/, { selector: "summary" });
-    expect(summary).not.toBeNull();
+    // No stack column anymore.
+    expect(screen.queryByRole("columnheader", { name: "Stack" })).toBeNull();
+  });
 
-    fireEvent.click(summary);
-
-    expect(await screen.findByText(/at useAll/)).not.toBeNull();
-  }, 15_000);
-
-  it("filters extension rows by table and tier", () => {
-    mockGetActiveQuerySubscriptions.mockReturnValue([
-      {
-        id: "sub-1",
-        table: "todos",
-        tier: "local",
-        propagation: "full",
-        branches: ["main"],
-        createdAt: "2026-03-10T10:00:00.000Z",
-        query: '{"table":"todos"}',
-        stack: "Error\n    at TodoList (http://localhost:5173/src/TodoList.tsx:34:17)",
-      },
-      {
-        id: "sub-2",
-        table: "projects",
-        tier: "edge",
-        propagation: "local-only",
-        branches: ["main"],
-        createdAt: "2026-03-10T11:00:00.000Z",
-        query: '{"table":"projects"}',
-        stack: "Error\n    at ProjectList (http://localhost:5173/src/ProjectList.tsx:10:8)",
-      },
-    ]);
+  it("filters overlay rows by table and tier", () => {
+    mockUseDevtoolsContext.mockReturnValue(
+      overlayContext([
+        {
+          id: "sub-1",
+          table: "todos",
+          tier: "local",
+          propagation: "full",
+          branches: ["main"],
+          createdAt: "2026-03-10T10:00:00.000Z",
+          query: '{"table":"todos"}',
+        },
+        {
+          id: "sub-2",
+          table: "projects",
+          tier: "edge",
+          propagation: "local-only",
+          branches: ["main"],
+          createdAt: "2026-03-10T11:00:00.000Z",
+          query: '{"table":"projects"}',
+        },
+      ]),
+    );
 
     render(
       <MemoryRouter>
@@ -130,61 +123,49 @@ describe("LiveQuery", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.change(screen.getByLabelText("Filter by table"), {
-      target: { value: "projects" },
-    });
-
+    fireEvent.change(screen.getByLabelText("Filter by table"), { target: { value: "projects" } });
     expect(screen.queryByRole("cell", { name: "todos" })).toBeNull();
     expect(screen.getByRole("cell", { name: "projects" })).not.toBeNull();
 
-    fireEvent.change(screen.getByLabelText("Filter by tier"), {
-      target: { value: "local" },
-    });
-
+    fireEvent.change(screen.getByLabelText("Filter by tier"), { target: { value: "local" } });
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
   });
 
-  it("sorts extension rows by started date and tier, and allows toggling started order", () => {
-    mockGetActiveQuerySubscriptions.mockReturnValue([
-      {
-        id: "sub-1",
-        table: "todos",
-        tier: "global",
-        propagation: "full",
-        branches: ["main"],
-        createdAt: "2026-03-10T10:00:00.000Z",
-        query: '{"table":"todos"}',
-        stack: "Error\n    at TodoList (http://localhost:5173/src/TodoList.tsx:34:17)",
-      },
-      {
-        id: "sub-2",
-        table: "projects",
-        tier: "edge",
-        propagation: "local-only",
-        branches: ["main"],
-        createdAt: "2026-03-10T11:00:00.000Z",
-        query: '{"table":"projects"}',
-        stack: "Error\n    at ProjectList (http://localhost:5173/src/ProjectList.tsx:10:8)",
-      },
-      {
-        id: "sub-3",
-        table: "users",
-        tier: "local",
-        propagation: "full",
-        branches: ["main"],
-        createdAt: "2026-03-10T11:00:00.000Z",
-        query: '{"table":"users"}',
-        stack: "Error\n    at UserList (http://localhost:5173/src/UserList.tsx:10:8)",
-      },
-    ]);
-    mockUseDevtoolsContext.mockReturnValue({
-      runtime: "extension",
-      wasmSchema: {
-        projects: { columns: [] },
-        todos: { columns: [] },
-        users: { columns: [] },
-      },
-    });
+  it("sorts overlay rows by started date and tier, and toggles started order", () => {
+    mockUseDevtoolsContext.mockReturnValue(
+      overlayContext(
+        [
+          {
+            id: "sub-1",
+            table: "todos",
+            tier: "global",
+            propagation: "full",
+            branches: ["main"],
+            createdAt: "2026-03-10T10:00:00.000Z",
+            query: '{"table":"todos"}',
+          },
+          {
+            id: "sub-2",
+            table: "projects",
+            tier: "edge",
+            propagation: "local-only",
+            branches: ["main"],
+            createdAt: "2026-03-10T11:00:00.000Z",
+            query: '{"table":"projects"}',
+          },
+          {
+            id: "sub-3",
+            table: "users",
+            tier: "local",
+            propagation: "full",
+            branches: ["main"],
+            createdAt: "2026-03-10T11:00:00.000Z",
+            query: '{"table":"users"}',
+          },
+        ],
+        ["users"],
+      ),
+    );
 
     render(
       <MemoryRouter>
@@ -204,10 +185,7 @@ describe("LiveQuery", () => {
   });
 
   it("fetches and renders grouped standalone server telemetry", async () => {
-    mockUseDevtoolsContext.mockReturnValue({
-      runtime: "standalone",
-      wasmSchema: {},
-    });
+    mockUseDevtoolsContext.mockReturnValue({ runtime: "standalone", wasmSchema: {} });
     mockFetchServerSubscriptions.mockResolvedValue({
       appId: "test-app",
       generatedAt: 1741600800000,
