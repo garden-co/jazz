@@ -61,20 +61,39 @@
   display: inline-flex;
   align-items: center;
   height: 24px;
-  padding: 0 9px;
-  border-radius: 4px;
+  padding: 0 10px;
+  border-radius: 5px;
   color: var(--jz-faint);
   text-decoration: none;
   font-size: 13px;
   font-weight: 500;
+  transition:
+    background-color 0.14s ease,
+    color 0.14s ease;
 }
 
 .tabLink:hover {
-  color: #b0bcc9;
+  background: var(--jz-surface);
+  color: var(--jz-text);
 }
 
-.tabLinkActive {
-  color: var(--jz-ink);
+.tabLink:focus-visible {
+  outline: 2px solid var(--jz-focus);
+  outline-offset: -2px;
+}
+
+/* Active tab reuses the app's selected-state fill (active table link / icon
+   button). After the :hover rule so an active+hovered tab keeps the fill. */
+.tabLinkActive,
+.tabLinkActive:hover {
+  background: var(--jz-selected);
+  color: var(--jz-ink-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tabLink {
+    transition: none;
+  }
 }
 
 .resetButton {
