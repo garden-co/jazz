@@ -12,9 +12,9 @@
   display: inline-flex;
   align-items: center;
   box-sizing: border-box;
-  border: 1px solid #2a3647;
-  background: #161d27;
-  color: #d7deea;
+  border: 1px solid var(--jz-border-control);
+  background: var(--jz-surface);
+  color: var(--jz-text);
   border-radius: 4px;
   padding: 6px 10px;
   font-size: 12px;
@@ -34,8 +34,8 @@
 
 .iconButton {
   justify-content: center;
-  inline-size: 31px;
-  block-size: 31px;
+  inline-size: 28px;
+  block-size: 28px;
   padding: 0;
 }
 
@@ -117,7 +117,7 @@
 
 .contentArea {
   min-height: 0;
-  border-top: 1px solid #232c3a;
+  border-top: 1px solid var(--jz-border-strong);
   overflow: hidden;
 }
 
@@ -125,13 +125,13 @@
   block-size: 100%;
   min-block-size: 0;
   border: 0;
-  background: #0f141b;
+  background: var(--jz-bg);
   color: #d6deea;
   font-size: 13px;
   --rdg-color: #d6deea;
   --rdg-border-color: #202a37;
-  --rdg-background-color: #0f141b;
-  --rdg-header-background-color: #0b1017;
+  --rdg-background-color: var(--jz-bg);
+  --rdg-header-background-color: var(--jz-bg-sunken);
   --rdg-header-draggable-background-color: #111823;
   --rdg-row-hover-background-color: #141b24;
   --rdg-row-selected-background-color: #17202b;
@@ -172,7 +172,7 @@
 }
 
 .dataGridCell {
-  color: #d7deea;
+  color: var(--jz-text);
 }
 
 .cellContent {
@@ -373,13 +373,13 @@
 }
 
 .actionsGridCell {
-  background: #0f141b;
+  background: var(--jz-bg);
 }
 
 .actionsCellContent {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   inline-size: 100%;
   block-size: 100%;
 }
@@ -393,47 +393,143 @@
   font-size: 12px;
 }
 
-.actionButton {
-  display: inline-flex;
+/* Loading skeleton — rendered in place of the DataGrid, so it owns the full
+   grid-frame width. A static header strip (mirroring the real sunken header)
+   plus shimmering body rows at the live row height. */
+.skeleton {
+  inline-size: 100%;
+  block-size: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--jz-bg);
+}
+
+.skeletonHeader {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  inline-size: 28px;
-  block-size: 28px;
-  border: 1px solid #293548;
-  background: #161e29;
-  color: #d7e1f1;
+  gap: 28px;
+  flex: 0 0 32px;
+  block-size: 32px;
+  padding: 0 12px;
+  background: var(--jz-bg-sunken);
+  border-bottom: 1px solid var(--jz-border-strong);
+}
+
+.skeletonHeaderBar {
+  block-size: 8px;
   border-radius: 4px;
+  background: var(--jz-border-strong);
+}
+
+.skeletonBody {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.skeletonRow {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  flex: 0 0 30px;
+  block-size: 30px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--jz-border);
+}
+
+.skeletonBar {
+  block-size: 9px;
+  border-radius: 4px;
+  background-color: var(--jz-surface);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.05) 50%,
+    transparent 100%
+  );
+  background-size: 180% 100%;
+  background-repeat: no-repeat;
+  animation: skeletonShimmer 1.5s ease-in-out infinite;
+}
+
+.skeletonColId {
+  flex: 0 0 150px;
+}
+
+.skeletonColFlag {
+  flex: 0 0 16px;
+  block-size: 16px;
+  border-radius: 3px;
+  margin-inline-start: auto;
+}
+
+.visuallyHidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
   padding: 0;
-  font-size: 12px;
-  cursor: pointer;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
-.actionButton:hover {
-  background: #1d2734;
+@keyframes skeletonShimmer {
+  0% {
+    background-position: 180% 0;
+  }
+  100% {
+    background-position: -180% 0;
+  }
 }
 
-.rowActions {
-  display: inline-flex;
-  gap: 6px;
+@media (prefers-reduced-motion: reduce) {
+  .skeletonBar {
+    animation: none;
+    background-image: none;
+  }
 }
 
+/* Row-action buttons are ghosts: transparent and icon-only so they sit quietly
+   in the narrow actions column. Intent shows on hover — neutral for undo/cancel,
+   a red wash for the destructive delete. */
+.actionButton,
 .dangerActionButton {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  inline-size: 28px;
-  block-size: 28px;
-  border: 1px solid #55333d;
-  background: #311a21;
-  color: #f1d6dc;
+  inline-size: 26px;
+  block-size: 26px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #8593a8;
   border-radius: 4px;
   padding: 0;
   font-size: 12px;
   cursor: pointer;
+  transition:
+    background-color 0.14s ease,
+    color 0.14s ease;
+}
+
+.actionButton:hover {
+  background: var(--jz-border);
+  color: #d7e1f1;
 }
 
 .dangerActionButton:hover {
-  background: #3b2028;
+  background: rgba(200, 60, 60, 0.14);
+  color: #f0b6bf;
+}
+
+.actionButton:focus-visible,
+.dangerActionButton:focus-visible {
+  outline: 2px solid var(--jz-focus);
+  outline-offset: 1px;
 }
 
 .footer {
@@ -441,15 +537,15 @@
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  height: 40px;
-  min-height: 40px;
+  height: 32px;
+  min-height: 32px;
   padding: 0 12px;
 }
 
 .bottomRail {
   display: grid;
   gap: 1px;
-  border-top: 1px solid #232c3a;
+  border-top: 1px solid var(--jz-border-strong);
 }
 
 .paginationInfo {
@@ -472,9 +568,9 @@
 }
 
 .pageSizeSelect {
-  border: 1px solid #2a3647;
+  border: 1px solid var(--jz-border-control);
   border-radius: 4px;
-  background: #161d27;
+  background: var(--jz-surface);
   color: #d9e2f0;
   padding: 4px 6px;
 }
@@ -527,7 +623,7 @@
   }
 
   100% {
-    background: #0f141b;
+    background: var(--jz-bg);
   }
 }
 

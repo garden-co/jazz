@@ -308,7 +308,14 @@ export function TableFilterBuilder({
               Add where clause
             </button>
           </form>
-          {actions ? <div className={styles.toolbarActions}>{actions}</div> : null}
+          {actions ? (
+            <>
+              <span className={styles.toolbarDivider} aria-hidden="true" />
+              <div className={styles.toolbarActions} role="group" aria-label="Table actions">
+                {actions}
+              </div>
+            </>
+          ) : null}
         </div>
         {error ? <p className={styles.error}>{error}</p> : null}
         <div className={styles.clauses}>

@@ -1,0 +1,47 @@
+.wrap {
+  display: inline-flex;
+}
+
+/* The bubble lives in the top layer (popover), so it ignores ancestor
+   overflow/stacking. Positioned in JS via left/top; reset the UA centering. */
+.tooltip {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: max-content;
+  max-width: 260px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--jz-border-control);
+  background: var(--jz-surface);
+  color: var(--jz-ink);
+  font-size: 11px;
+  line-height: 1.35;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+}
+
+.tooltip:popover-open {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@starting-style {
+  .tooltip:popover-open {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tooltip,
+  .tooltip:popover-open {
+    transition: none;
+    transform: none;
+  }
+}

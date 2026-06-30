@@ -6,6 +6,6 @@ import "./index.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <InspectorApp client={createEmbeddedJazzClient()} />
+    <InspectorApp client={createEmbeddedJazzClient()} isOverlay />
   </StrictMode>,
 );

@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { NavLink, Outlet, useOutletContext, useParams } from "react-router";
+import { NavLink, Outlet, useNavigate, useOutletContext, useParams } from "react-router";
 import type { QueryPropagation } from "jazz-tools";
 import { useDevtoolsContext, type InspectorRuntime } from "../../contexts/devtools-context.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
@@ -44,7 +44,10 @@ function TablesSidebar({
       <div className={styles.sidebarHeader}>
         <h2 className={styles.sidebarTitle}>Tables</h2>
         {runtime === "extension" ? (
-          <label className={styles.propagationSwitch}>
+          <label
+            className={styles.propagationSwitch}
+            title="Only read data already synced to this device. Turn off to also fetch matching rows from the server."
+          >
             <span className={styles.propagationLabel}>Local-only</span>
             <input
               type="checkbox"
@@ -52,7 +55,7 @@ function TablesSidebar({
               onChange={(event) => {
                 onQueryPropagationChange(event.target.checked ? "local-only" : "full");
               }}
-              aria-label="Toggle query propagation between local-only and full"
+              aria-label="Local-only: read only data already on this device, don't fetch from the server"
             />
           </label>
         ) : null}
@@ -86,8 +89,18 @@ export function DataExplorer() {
   const isTablesPanelOpen =
     useOutletContext<DataExplorerOutletContext | null>()?.isTablesPanelOpen ?? true;
   const { table } = useParams();
+  const navigate = useNavigate();
 
   const tableNames = useMemo(() => Object.keys(schema ?? {}).sort(), [schema]);
+
+  // Land directly on the first table instead of an interstitial picker — opening
+  // the explorer to an empty pane is friction every single time. The real empty
+  // state below is reserved for a schema with no tables at all.
+  useEffect(() => {
+    if (!table && tableNames.length > 0) {
+      navigate(`/data-explorer/${tableNames[0]}/data`, { replace: true });
+    }
+  }, [table, tableNames, navigate]);
   const [tablesSidebarSize, setTablesSidebarSize] = useLocalStorageState(
     TABLES_SIDEBAR_SIZE_STORAGE_KEY,
     TABLES_SIDEBAR_DEFAULT_SIZE,
@@ -133,10 +146,10 @@ export function DataExplorer() {
         minSize={isTablesPanelOpen ? "40%" : "100%"}
       >
         <main className={styles.content}>
-          {!table ? (
+          {!table && tableNames.length === 0 ? (
             <section className={styles.emptyState}>
-              <h3 className={styles.emptyTitle}>Select a table</h3>
-              <p className={styles.emptyText}>Choose a table from the left sidebar to view rows.</p>
+              <h3 className={styles.emptyTitle}>No tables</h3>
+              <p className={styles.emptyText}>This schema doesn’t define any tables yet.</p>
             </section>
           ) : null}
           <Outlet />

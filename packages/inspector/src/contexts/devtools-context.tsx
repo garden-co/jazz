@@ -7,6 +7,14 @@ interface DevtoolsContextValue {
   wasmSchema: WasmSchema;
   storedPermissions: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
+  /**
+   * True only when the inspector is rendered inside the dev-overlay iframe (as
+   * opposed to the standalone app or the browser-extension panel). Gates
+   * overlay-specific UI such as the launcher-button setting. Kept separate from
+   * `runtime` so it doesn't disturb the runtime branches, which treat the
+   * overlay as "extension".
+   */
+  isOverlay: boolean;
   queryPropagation: QueryPropagation;
   setQueryPropagation: (value: QueryPropagation) => void;
 }
@@ -18,11 +26,13 @@ export function DevtoolsProvider({
   wasmSchema,
   storedPermissions = null,
   runtime,
+  isOverlay = false,
   queryPropagation,
 }: PropsWithChildren<{
   wasmSchema: WasmSchema;
   storedPermissions?: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
+  isOverlay?: boolean;
   queryPropagation?: QueryPropagation;
 }>) {
   const [extensionQueryPropagation, setExtensionQueryPropagation] = useState<QueryPropagation>(
@@ -40,6 +50,7 @@ export function DevtoolsProvider({
         wasmSchema,
         storedPermissions,
         runtime,
+        isOverlay,
         queryPropagation: resolvedPropagation,
         setQueryPropagation,
       }}

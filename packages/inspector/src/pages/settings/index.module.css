@@ -1,0 +1,200 @@
+.scroll {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  background: var(--jz-bg);
+}
+
+.page {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 20px 16px 32px;
+}
+
+.heading {
+  margin: 0 0 16px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--jz-ink);
+}
+
+.section + .section {
+  margin-top: 20px;
+}
+
+.sectionTitle {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--jz-muted);
+}
+
+.card {
+  border: 1px solid var(--jz-border);
+  border-radius: 8px;
+  background: #121822;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+}
+
+.row + .row {
+  border-top: 1px solid #1a2230;
+}
+
+.rowText {
+  min-width: 0;
+}
+
+.rowLabel {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--jz-ink);
+  cursor: pointer;
+}
+
+.rowDescription {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--jz-muted);
+}
+
+/* Keep the shortcut glyphs from breaking onto their own line mid-sentence. */
+.rowDescription .shortcut {
+  white-space: nowrap;
+}
+
+.shortcut {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  vertical-align: baseline;
+}
+
+.key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--jz-border-control);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #1a212c;
+  color: #c4cedd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* Switch: a native checkbox visually replaced by a track + thumb. The input
+   stays in the layout (opacity 0) so it remains focusable and hit-testable. */
+.switch {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.switchInput {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switchTrack {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--jz-border-strong);
+  border: 1px solid #2c3848;
+  transition:
+    background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.switchThumb {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #aeb9c8;
+  transform: translateY(-50%);
+  transition:
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.switchInput:checked + .switchTrack {
+  background: #27507c;
+  border-color: var(--jz-accent-line);
+}
+
+.switchInput:checked + .switchTrack .switchThumb {
+  transform: translate(18px, -50%);
+  background: #eef3f9;
+}
+
+.switchInput:focus-visible + .switchTrack {
+  outline: 2px solid var(--jz-focus);
+  outline-offset: 2px;
+}
+
+.emptyNote {
+  margin: 0;
+  font-size: 13px;
+  color: var(--jz-muted);
+}
+
+.shortcutList {
+  margin: 0;
+}
+
+.shortcutRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+}
+
+.shortcutRow + .shortcutRow {
+  border-top: 1px solid #1a2230;
+}
+
+.shortcutLabel {
+  font-size: 13px;
+  color: var(--jz-ink);
+}
+
+.shortcutKeys {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switchTrack,
+  .switchThumb {
+    transition: none;
+  }
+}
