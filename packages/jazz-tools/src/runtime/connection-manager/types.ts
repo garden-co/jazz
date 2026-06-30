@@ -130,6 +130,10 @@ export abstract class ConnectionManager {
 
   abstract ensureReady(tier?: DurabilityTier): Promise<void>;
 
+  abstract disconnect(): Promise<void>;
+
+  abstract reconnect(): Promise<void>;
+
   updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
     if ("jwtToken" in auth) {
       this.client?.updateAuthToken(auth.jwtToken);

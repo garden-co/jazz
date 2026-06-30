@@ -960,6 +960,32 @@ export class Db {
     await this.connection.ensureReady(tier);
   }
 
+  /**
+   * Temporarily disconnect this Db from its configured Jazz sync server.
+   *
+   * Local reads and writes can continue while disconnected. Call
+   * {@link reconnect} to resume sync using the same Db instance.
+   */
+  async disconnect(): Promise<void> {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot disconnect a Db that is shutting down.");
+    }
+
+    await this.connection.disconnect();
+  }
+
+  /**
+   * Reconnect this Db to its configured Jazz sync server after
+   * {@link disconnect}.
+   */
+  async reconnect(): Promise<void> {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot reconnect a Db that is shutting down.");
+    }
+
+    await this.connection.reconnect();
+  }
+
   private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
     const wait = handle.wait.bind(handle);
     handle.wait = (async (options: { tier: DurabilityTier }) => {
@@ -1682,6 +1708,14 @@ class ClientBackedDb extends Db {
       session: this.session,
       attribution: this.attribution,
     };
+  }
+
+  override async disconnect(): Promise<void> {
+    throw new Error("Db.disconnect() is not supported on scoped Db handles.");
+  }
+
+  override async reconnect(): Promise<void> {
+    throw new Error("Db.reconnect() is not supported on scoped Db handles.");
   }
 
   override async shutdown(): Promise<void> {

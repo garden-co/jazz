@@ -168,6 +168,32 @@ export class BrowserConnectionManager extends ConnectionManager {
     await this.activeRoleBridge?.ensureReady(tier);
   }
 
+  async disconnect(): Promise<void> {
+    if (!this.host.config.serverUrl) {
+      throw new Error("Db.disconnect() requires a configured serverUrl.");
+    }
+
+    await this.ensureBridgeReady();
+    const roleBridge = this.activeRoleBridge;
+    if (!roleBridge) {
+      throw new Error("Db.disconnect() requires an active browser connection.");
+    }
+    await roleBridge.disconnect();
+  }
+
+  async reconnect(): Promise<void> {
+    if (!this.host.config.serverUrl) {
+      throw new Error("Db.reconnect() requires a configured serverUrl.");
+    }
+
+    await this.ensureBridgeReady();
+    const roleBridge = this.activeRoleBridge;
+    if (!roleBridge) {
+      throw new Error("Db.reconnect() requires an active browser connection.");
+    }
+    await roleBridge.reconnect();
+  }
+
   override updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
     super.updateAuth(auth);
     if ("jwtToken" in auth) {
