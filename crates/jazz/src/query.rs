@@ -59,30 +59,13 @@ pub struct Query {
 
 /// Output-changing relation query used by alpha-compatible `hopTo`/`gather`.
 ///
-/// This is intentionally separate from [`Query`]: ordinary query joins filter a
-/// fixed root table, while relation queries own an explicit terminal row set.
+/// This is facade syntax only. The compiler boundary must normalize relation
+/// queries into the same row-set shape as ordinary queries before execution;
+/// relation queries must not grow a separate validated/cache/runtime identity.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct RelationQuery {
     pub rel: RelationExpr,
-}
-
-/// Validated relation query shape with inferred parameter types.
-///
-/// Relation queries share the same shape/binding identity machinery as ordinary
-/// queries so relation subscriptions do not grow a parallel cache model.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct ValidatedRelationQuery {
-    /// Canonical relation query.
-    pub query: RelationQuery,
-    /// Schema version this relation query was authored and validated against.
-    pub schema_version: SchemaVersionId,
-    /// Inferred parameter types by name.
-    pub params: BTreeMap<String, ColumnType>,
-    /// Canonical bytes used for shape identity.
-    pub canonical: Vec<u8>,
-    /// Content-addressed shape id, in a relation-discriminated namespace.
-    pub shape_id: ShapeId,
 }
 
 #[allow(missing_docs)]
@@ -1340,25 +1323,32 @@ impl ValidatedQuery {
 
     /// Validate a binding against this shape.
     pub fn bind(&self, values: BTreeMap<String, Value>) -> Result<Binding, QueryError> {
-        for required in self.params.keys() {
-            if !values.contains_key(required) {
-                return Err(QueryError::MissingParam(required.clone()));
-            }
-        }
-        for (name, value) in &values {
-            let Some(expected) = self.params.get(name) else {
-                return Err(QueryError::UnknownParam(name.clone()));
-            };
-            if !value_matches_type(value, expected) {
-                return Err(QueryError::ParamTypeMismatch {
-                    param: name.clone(),
-                    expected: expected.clone(),
-                });
-            }
-        }
-        let canonical = canonical_binding_bytes(&values);
-        Ok(Binding { values, canonical })
+        validate_binding_values(&self.params, values)
     }
+}
+
+fn validate_binding_values(
+    params: &BTreeMap<String, ColumnType>,
+    values: BTreeMap<String, Value>,
+) -> Result<Binding, QueryError> {
+    for required in params.keys() {
+        if !values.contains_key(required) {
+            return Err(QueryError::MissingParam(required.clone()));
+        }
+    }
+    for (name, value) in &values {
+        let Some(expected) = params.get(name) else {
+            return Err(QueryError::UnknownParam(name.clone()));
+        };
+        if !value_matches_type(value, expected) {
+            return Err(QueryError::ParamTypeMismatch {
+                param: name.clone(),
+                expected: expected.clone(),
+            });
+        }
+    }
+    let canonical = canonical_binding_bytes(&values);
+    Ok(Binding { values, canonical })
 }
 
 /// Validated binding values for a query shape.
@@ -1445,6 +1435,14 @@ pub enum QueryError {
     BadIncludePath {
         /// Include path.
         path: String,
+    },
+    /// Permission-introspection columns are not executable yet.
+    #[error(
+        "unsupported query magic column {column}: permission introspection columns are not executable yet"
+    )]
+    UnsupportedMagicColumn {
+        /// Column name.
+        column: String,
     },
 }
 
@@ -1679,8 +1677,8 @@ fn validate_aggregate_order_by(
 
 fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), QueryError> {
     match column {
-        "id" | "$canRead" | "$canEdit" | "$canDelete" | "$createdAt" | "$createdBy"
-        | "$updatedAt" | "$updatedBy" => Ok(()),
+        "id" => Ok(()),
+        name if executable_magic_column_type(name)?.is_some() => Ok(()),
         name if name.starts_with('$') => Err(QueryError::UnknownColumn {
             table: table.name.clone(),
             column: name.to_owned(),
@@ -1726,7 +1724,7 @@ fn planner_column_type<'a>(
     if column == "id" {
         return Ok(&ColumnType::Uuid);
     }
-    if let Some(column_type) = magic_column_type(column) {
+    if let Some(column_type) = executable_magic_column_type(column)? {
         return Ok(column_type);
     }
     let column = column_schema(table, column)?;
@@ -1739,13 +1737,21 @@ fn planner_column_type<'a>(
     Ok(&column.column_type)
 }
 
-fn magic_column_type(column: &str) -> Option<&'static ColumnType> {
-    match column {
-        "$canRead" | "$canEdit" | "$canDelete" => Some(&ColumnType::Bool),
-        "$createdBy" | "$updatedBy" => Some(&ColumnType::Uuid),
-        "$createdAt" | "$updatedAt" => Some(&ColumnType::U64),
-        _ => None,
+fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
+    if is_permission_introspection_magic_column(column) {
+        return Err(QueryError::UnsupportedMagicColumn {
+            column: column.to_owned(),
+        });
     }
+    match column {
+        "$createdBy" | "$updatedBy" => Ok(Some(&ColumnType::Uuid)),
+        "$createdAt" | "$updatedAt" => Ok(Some(&ColumnType::U64)),
+        _ => Ok(None),
+    }
+}
+
+fn is_permission_introspection_magic_column(column: &str) -> bool {
+    matches!(column, "$canRead" | "$canEdit" | "$canDelete")
 }
 
 fn validate_include(schema: &JazzSchema, root: &TableSchema, path: &str) -> Result<(), QueryError> {
@@ -2849,14 +2855,7 @@ mod tests {
                 is_null(col("snoozed_until")),
             ]))
             .include_with(Include::new("project.org").join_mode(JoinMode::Holes))
-            .select([
-                "title",
-                "state",
-                "$canRead",
-                "$canEdit",
-                "$canDelete",
-                "$createdAt",
-            ])
+            .select(["title", "state", "$createdAt"])
             .offset(5)
             .limit(10);
 
@@ -2868,9 +2867,6 @@ mod tests {
             validated.query().select.as_deref(),
             Some(
                 [
-                    "$canDelete".to_owned(),
-                    "$canEdit".to_owned(),
-                    "$canRead".to_owned(),
                     "$createdAt".to_owned(),
                     "state".to_owned(),
                     "title".to_owned()

@@ -843,6 +843,35 @@ fn authority_parks_child_until_unknown_exclusive_parent_rejects() {
         BTreeMap::from([(row, title_cells("old"))])
     );
 }
+
+fn register_shape_binding_for_receiver(
+    node: &mut crate::node::NodeState<groove::storage::RocksDbStorage>,
+    shape: &crate::query::ValidatedQuery,
+    binding: &crate::query::Binding,
+) {
+    node.apply_sync_message(SyncMessage::RegisterShape {
+        shape_id: shape.shape_id(),
+        ast: crate::protocol::ShapeAst::from_validated(shape),
+        opts: crate::protocol::RegisterShapeOptions::default(),
+    })
+    .unwrap();
+    let values = shape
+        .params()
+        .keys()
+        .map(|name| binding.values().get(name).cloned().unwrap())
+        .collect();
+    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+        shape_id: shape.shape_id(),
+        subscription: crate::protocol::SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: Default::default(),
+        },
+        values,
+    }))
+    .unwrap();
+}
+
 #[test]
 fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
@@ -876,7 +905,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     let SyncMessage::ViewUpdate {
         subscription,
         mut version_bundles,
-        result_row_adds,
+        result_member_adds,
         ..
     } = update
     else {
@@ -888,17 +917,20 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     assert_eq!(bundle.tx.n_total_writes, 2);
     assert_eq!(bundle.versions.len(), 1);
     assert_eq!(bundle.versions[0].row_uuid(), row(1));
-    assert_eq!(result_row_adds, vec![("todos".to_owned().into(), row(1), bundle.tx.tx_id)]);
+    assert_eq!(result_member_adds, vec![("todos".to_owned().into(), row(1), bundle.tx.tx_id)]);
     assert!(peer.shipped_complete_tx_payloads().is_empty());
 
+    register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
             reset_result_set: false,
             version_bundles: vec![bundle],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_row_adds,
-            result_row_removes: Vec::new(),
+            result_member_adds,
+            result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
         })
         .unwrap();
     assert!(reader
@@ -966,8 +998,10 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
             reset_result_set: false,
             version_bundles,
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_row_adds: vec![("todos".to_owned().into(), row(2), tx_id)],
-            result_row_removes: Vec::new(),
+            result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
+            result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
         })
         .unwrap_err();
 
@@ -1081,7 +1115,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     let SyncMessage::ViewUpdate {
         version_bundles,
-        result_row_adds,
+        result_member_adds,
         ..
     } = &update_a
     else {
@@ -1093,7 +1127,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
     assert_eq!(
-        result_row_adds,
+        result_member_adds,
         &vec![("todos".to_owned().into(), row(1), version_bundles[0].tx.tx_id)]
     );
     assert!(link_a.shipped_complete_tx_payloads().is_empty());

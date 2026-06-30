@@ -4,8 +4,8 @@ struct CanonicalViewUpdate {
     reset_result_set: bool,
     version_bundles: Vec<CanonicalVersionBundle>,
     peer_payload_inventory: Vec<TxId>,
-    result_row_adds: Vec<ResultRowEntry>,
-    result_row_removes: Vec<ResultRowEntry>,
+    result_member_adds: Vec<ResultRowEntry>,
+    result_member_removes: Vec<ResultRowEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -76,8 +76,9 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory {
             complete_tx_payloads: complete_tx_payload_refs,
         },
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
+        ..
     } = update
     else {
         panic!("expected view update");
@@ -90,18 +91,24 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
     version_bundles.sort();
     let mut complete_tx_payload_refs = complete_tx_payload_refs;
     complete_tx_payload_refs.sort();
-    let mut result_row_adds = result_row_adds;
-    result_row_adds.sort();
-    let mut result_row_removes = result_row_removes;
-    result_row_removes.sort();
+    let mut result_member_adds = result_member_adds
+        .into_iter()
+        .filter_map(crate::protocol::ResultMemberEntry::into_row)
+        .collect::<Vec<_>>();
+    result_member_adds.sort();
+    let mut result_member_removes = result_member_removes
+        .into_iter()
+        .filter_map(crate::protocol::ResultMemberEntry::into_row)
+        .collect::<Vec<_>>();
+    result_member_removes.sort();
 
     CanonicalViewUpdate {
         subscription: format!("{subscription:?}"),
         reset_result_set,
         version_bundles,
         peer_payload_inventory: complete_tx_payload_refs,
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
     }
 }
 
@@ -207,8 +214,8 @@ fn apply_capture_result_delta(
 ) {
     let SyncMessage::ViewUpdate {
         reset_result_set,
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = update
     else {
@@ -217,10 +224,17 @@ fn apply_capture_result_delta(
     if *reset_result_set {
         result_set.clear();
     }
-    for entry in result_row_removes {
-        result_set.remove(entry);
+    for entry in result_member_removes
+        .iter()
+        .filter_map(crate::protocol::ResultMemberEntry::as_row)
+    {
+        result_set.remove(&entry);
     }
-    result_set.extend(result_row_adds.iter().cloned());
+    result_set.extend(
+        result_member_adds
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row),
+    );
 }
 
 fn apply_capture_delivery_state(
@@ -265,7 +279,8 @@ fn assert_maintained_view_capture_tick(
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    };
+    read_view: Default::default(),
+};
     let peer_complete_tx_payload_refs = peer.shipped_complete_tx_payloads().clone();
     core.reset_storage_read_metrics();
     let full_recompute = peer.query_update(core, shape, binding).unwrap();
@@ -296,8 +311,8 @@ fn assert_maintained_view_capture_tick(
         maintained_view_full_bundle_count
     );
     let SyncMessage::ViewUpdate {
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = &maintained_view
     else {
@@ -327,7 +342,7 @@ fn assert_maintained_view_capture_tick(
         query_versions_for_tx_calls, 0,
         "maintained_view serializer called query_versions_for_tx for seed {seed:#x}, identity {identity:?}, tick {tick}"
     );
-    if !result_row_adds.is_empty() && result_row_removes.is_empty() {
+    if !result_member_adds.is_empty() && result_member_removes.is_empty() {
         assert!(
             add_bundle_stats.stream_b_bundles > 0,
             "maintained_view serializer did not use Stream B add bundles for seed {seed:#x}, identity {identity:?}, tick {tick}"
@@ -361,7 +376,12 @@ impl MaintainedSubscriptionViewSubscription {
         identity: AuthorId,
     ) -> (Self, SyncMessage) {
         let (subscription, maintained, transitions, tables) = core
-            .maintained_subscription_view_from_cold_snapshot(shape, binding, identity)
+            .maintained_subscription_view_from_cold_snapshot(
+                shape,
+                binding,
+                identity,
+                DurabilityTier::Global,
+            )
             .unwrap();
         assert!(
             transitions.removes.is_empty(),
@@ -375,16 +395,21 @@ impl MaintainedSubscriptionViewSubscription {
             peer_complete_tx_payloads: BTreeSet::new(),
         };
         let output_tables = core.maintained_view_terminal_tables(shape).unwrap();
-        let result_row_adds: Vec<ResultRowEntry> = transitions
+        let result_member_adds: Vec<ResultRowEntry> = transitions
             .adds
             .into_iter()
-            .filter(|entry| output_tables.contains_key(entry.0.as_str()))
+            .filter(|member| {
+                member
+                    .table_name()
+                    .is_some_and(|table| output_tables.contains_key(table))
+            })
+            .filter_map(|member| member.as_row())
             .collect();
-        let result_row_adds = core
+        let result_member_adds = core
             .expand_maintained_view_result_rows(
                 shape,
                 binding,
-                result_row_adds,
+                result_member_adds,
                 identity,
                 DurabilityTier::Global,
             )
@@ -397,7 +422,7 @@ impl MaintainedSubscriptionViewSubscription {
                 core,
                 shape,
                 subscription_key,
-                result_row_adds,
+                result_member_adds,
                 Vec::new(),
                 false,
                 identity,
@@ -427,14 +452,20 @@ impl MaintainedSubscriptionViewSubscription {
                         .maintained
                         .apply_tagged_deltas(&deltas, &self.tables, &core.node_aliases)
                         .unwrap();
-                    for entry in transitions.adds {
+                    for member in transitions.adds {
+                        let Some(entry) = member.as_row() else {
+                            continue;
+                        };
                         let before = self.previous_result_set.contains(&entry);
                         states
                             .entry(entry)
                             .and_modify(|(_, after)| *after = true)
                             .or_insert((before, true));
                     }
-                    for entry in transitions.removes {
+                    for member in transitions.removes {
+                        let Some(entry) = member.as_row() else {
+                            continue;
+                        };
                         let before = self.previous_result_set.contains(&entry);
                         states
                             .entry(entry)
@@ -448,15 +479,15 @@ impl MaintainedSubscriptionViewSubscription {
                 }
             }
         }
-        let mut result_row_adds = Vec::new();
-        let mut result_row_removes = Vec::new();
+        let mut result_member_adds = Vec::new();
+        let mut result_member_removes = Vec::new();
         for (entry, (before, after)) in states {
             if !output_tables.contains_key(entry.0.as_str()) {
                 continue;
             }
             match (before, after) {
-                (false, true) => result_row_adds.push(entry),
-                (true, false) => result_row_removes.push(entry),
+                (false, true) => result_member_adds.push(entry),
+                (true, false) => result_member_removes.push(entry),
                 _ => {}
             }
         }
@@ -465,8 +496,8 @@ impl MaintainedSubscriptionViewSubscription {
                 core,
                 shape,
                 subscription_key,
-                result_row_adds,
-                result_row_removes,
+                result_member_adds,
+                result_member_removes,
                 false,
                 identity,
             )
@@ -484,8 +515,8 @@ impl MaintainedSubscriptionViewSubscription {
         core: &mut NodeState<RocksDbStorage>,
         _shape: &ValidatedQuery,
         subscription_key: SubscriptionKey,
-        result_row_adds: Vec<ResultRowEntry>,
-        result_row_removes: Vec<ResultRowEntry>,
+        result_member_adds: Vec<ResultRowEntry>,
+        result_member_removes: Vec<ResultRowEntry>,
         reset_result_set: bool,
         identity: AuthorId,
     ) -> Result<SyncMessage, Error> {
@@ -500,8 +531,14 @@ impl MaintainedSubscriptionViewSubscription {
                 peer_complete_tx_payloads: self.peer_complete_tx_payloads.clone(),
                 complete_exclusive_payloads: false,
                 previous_result_set,
-                result_row_adds,
-                result_row_removes,
+                result_member_adds: result_member_adds
+                    .into_iter()
+                    .map(crate::protocol::ResultMemberEntry::from)
+                    .collect(),
+                result_member_removes: result_member_removes
+                    .into_iter()
+                    .map(crate::protocol::ResultMemberEntry::from)
+                    .collect(),
                 identity,
                 tier: DurabilityTier::Global,
                 versions_by_tx: |tx_id| self.maintained.versions_by_tx(tx_id),
@@ -564,23 +601,25 @@ fn assert_retraction_without_replacement_leak(
     let SyncMessage::ViewUpdate {
         version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = update
     else {
         panic!("expected view update");
     };
     assert!(
-        result_row_removes
+        result_member_removes
             .iter()
-            .any(|(_, row, tx_id)| *row == row_uuid && *tx_id == old_tx_id),
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .any(|(_, row, tx_id)| row == row_uuid && tx_id == old_tx_id),
         "revocation update did not retract row {row_uuid:?} at tx {old_tx_id:?}"
     );
     assert!(
-        !result_row_adds
+        !result_member_adds
             .iter()
-            .any(|(_, row, tx_id)| *row == row_uuid && *tx_id == unreadable_tx_id),
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .any(|(_, row, tx_id)| row == row_uuid && tx_id == unreadable_tx_id),
         "revocation update re-added unreadable row {row_uuid:?} at tx {unreadable_tx_id:?}"
     );
     assert!(
@@ -607,7 +646,8 @@ fn assert_maintained_subscription_view_capture_tick(
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    };
+    read_view: Default::default(),
+};
     let full_recompute = peer.query_update(core, shape, binding).unwrap();
     let maintained_update = maintained.update(core, shape, subscription, identity);
     let maintained_capture = capture_view_update(maintained_update.clone());
@@ -850,7 +890,8 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    };
+    read_view: Default::default(),
+};
 
     let full_recompute_initial = peer.query_update(&mut core, &shape, &binding).unwrap();
     let (mut maintained, maintained_initial) = MaintainedSubscriptionViewSubscription::new(
@@ -1263,7 +1304,8 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    };
+    read_view: Default::default(),
+};
     let mut peer = if identity == AuthorId::SYSTEM {
         PeerState::new()
     } else {
@@ -1473,7 +1515,8 @@ fn seeded_maintained_subscription_view_multitable_capture(
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    };
+    read_view: Default::default(),
+};
     let mut peer = if identity == AuthorId::SYSTEM {
         PeerState::new()
     } else {
@@ -1815,7 +1858,8 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    };
+    read_view: Default::default(),
+};
     let mut peer = PeerState::for_author(alice);
     peer.force_full_recompute_path_for_test(true);
     peer.track_query_for_test(&mut core, &shape, &binding)

@@ -3,9 +3,9 @@ use groove::schema::ColumnType;
 use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::node::content_store::Extent;
 use jazz::protocol::{
-    CatalogueAck, ContentExtent, CurrentWriteSchema, LensOp, MigrationLens, PeerPayloadInventory,
-    RegisterShapeOptions, ResultRowEntry, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
-    SyncMessage, TableLens,
+    CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp, MigrationLens,
+    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, SchemaVersion, ShapeAst, Subscribe,
+    SubscriptionKey, SyncMessage, TableLens,
 };
 use jazz::query::{BindingId, Query, ShapeId};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
@@ -53,6 +53,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     let subscription = SubscriptionKey {
         shape_id,
         binding_id,
+        read_view: Default::default(),
     };
     let content_extent = Extent {
         writer: author,
@@ -101,8 +102,10 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                 },
-                result_row_adds: vec![result_row_entry(tx_id)],
-                result_row_removes: Vec::new(),
+                result_member_adds: vec![result_row_entry(tx_id).into()],
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
             },
         ),
         (
@@ -189,7 +192,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "fetch_content_extent_body",
             "FetchContentExtent",
             SyncMessage::FetchContentExtent {
-                row,
+                owner: LargeValueOwnerRef::current_row(row),
                 extent: content_extent.clone(),
             },
         ),
@@ -198,6 +201,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "ContentExtents",
             SyncMessage::ContentExtents {
                 extents: vec![ContentExtent {
+                    owner: LargeValueOwnerRef::current_row(row),
                     extent: content_extent,
                     bytes: b"hello world!".to_vec(),
                 }],

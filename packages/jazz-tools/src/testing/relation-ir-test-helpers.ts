@@ -164,7 +164,7 @@ export function toAssertionRelExprForTest(value: unknown): any {
 
   switch (variant) {
     case "TableScan":
-      return { type: "TableScan", table: payload.table };
+      return { type: "TableScan", table: payload.table, alias: payload.alias };
     case "Filter":
       return {
         type: "Filter",
@@ -203,7 +203,7 @@ export function toAssertionRelExprForTest(value: unknown): any {
         seed: toAssertionRelExprForTest(payload.seed),
         step: toAssertionRelExprForTest(payload.step),
         frontierKey: toAssertionRelKeyRefForTest(payload.frontier_key),
-        maxDepth: payload.max_depth,
+        maxDepth: readMaxDepthForTest(payload),
         dedupeKey: Array.isArray(payload.dedupe_key)
           ? payload.dedupe_key.map((key) => toAssertionRelKeyRefForTest(key))
           : [],
@@ -237,6 +237,12 @@ export function toAssertionRelExprForTest(value: unknown): any {
     default:
       return value;
   }
+}
+
+function readMaxDepthForTest(payload: Record<string, unknown>): unknown {
+  const bound = payload.bound;
+  if (isRecord(bound) && typeof bound.MaxDepth === "number") return bound.MaxDepth;
+  return undefined;
 }
 
 export function toAssertionPolicyExprWithRelForTest(value: unknown): any {

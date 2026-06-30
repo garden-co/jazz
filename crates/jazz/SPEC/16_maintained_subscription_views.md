@@ -15,7 +15,7 @@ terminology. The intended abstraction is a **maintained subscription view**.
 For a peer identity, query shape, and binding, a maintained subscription view
 MUST lower to a groove graph whose terminal rows describe:
 
-- result membership: visible `ResultRowEntry` additions and removals;
+- result membership: visible typed result-member additions and removals;
 - matched include path rows and join witnesses required for the result set;
 - version payload witnesses: content/deletion versions that may need to be
   shipped when a result becomes visible;
@@ -38,11 +38,19 @@ subscription tier. Local subscriptions are desired and first-class: they are the
 application/UI-facing maintained view over the local read frontier, including the
 node's own pending committed writes. Edge and global subscriptions are maintained
 views over their corresponding accepted-state frontiers, with additional
-settlement/completeness requirements. Tiers select the source/frontier and
-delivery contract; they must not select a different query engine. A facade-local
+settlement/completeness requirements. Tiers select the source/frontier
+expression and runtime consumption policy; they must not select a different
+query engine. A facade-local
 full `query_rows` refresh/diff loop is permitted only as explicitly named
 migration scaffolding for alpha-compatible local live reads, not as the target
 semantics.
+
+The maintained view is a consumer preset over the shared lowered query program.
+It requests result-membership facts, path/correlation facts,
+payload/replacement/version witnesses, policy witnesses, and settled-frontier
+facts as needed, then maps those terminal rows to subscription or sync events.
+App-row projection and internal fact emission are separate outputs of the same
+program; projection must not become a second diffing path.
 
 ## 16.2 Policy composition
 
@@ -106,9 +114,10 @@ surface is tier-agnostic: local, edge, and global subscriptions use the same
 lowering and maintained terminal contracts, differing only in source/frontier
 selection and settlement/completeness rules. Supported maintained shapes include
 unordered `limit(1)` with offset `0` lowered through `ArgMinBy` over `row_uuid`,
-and ordered finite windows lowered through groove `TopBy`. Ordered windows
-preserve the user `order_by` terms, append `row_uuid` as the stable tie field,
-and retain the requested `offset + limit` window incrementally.
+and ordered windows lowered through groove `TopBy`. Ordered windows preserve
+the user `order_by` terms, append `row_uuid` as the stable tie field, and retain
+the requested finite `offset + limit` window or unbounded ordered suffix
+incrementally.
 
 Known gaps fall into distinct buckets:
 
@@ -134,10 +143,11 @@ Maintained-lowering gaps:
   fragment for subscription deltas;
 - `array_subqueries` have one-shot and local-tier relation snapshot
   materialization, but maintained subscriptions do not yet emit relation-edge
-  terminal deltas across all tiers. A subscription shape that requires
-  maintained relation-edge deltas must be rejected at subscription open until
-  those edges are represented in groove; local snapshot materialization is
-  staging debt, not a separate relation subscription engine;
+  terminal deltas across all tiers. A subscription shape with
+  `array_subqueries` must be rejected at subscription open until unified
+  relation/path lowering or relation-edge terminal deltas are represented in
+  groove. Serving code must not compensate by recursively subscribing to
+  coarse child shapes for sync coverage;
 - application-column projection is a materialization concern layered over the
   maintained membership/version stream; projected subscription payloads must not
   become a second diff engine;
@@ -148,7 +158,7 @@ Window limitations:
 
 - unordered `limit > 1` and unordered nonzero `offset` remain unsupported in
   Jazz maintained subscriptions; callers must provide explicit ordering for a
-  finite window to lower through `TopBy`.
+  window or ordered suffix to lower through `TopBy`.
 
 Maintained error debt after a supported maintained path fails:
 
@@ -171,8 +181,9 @@ The next maintained-subscription expansion should be expressed as new groove
 operators or maintained graph fragments, not as Jazz-side refresh/diff loops.
 Current and next Jazz lowering targets are:
 
-- `order_by ... limit ... offset` lowers to groove `TopBy` when the ordered
-  query has a finite `limit`.
+- `order_by ... limit ... offset` lowers to groove `TopBy`; missing `limit`
+  means an unbounded ordered suffix after `offset`, not a Jazz-side full
+  recompute.
 - `group_by` and scalar aggregate projections lower to groove `Aggregate` when
   every aggregate function is in the maintained operator surface.
 - "latest per object" and unordered `limit(1)` keep their narrower existing
@@ -191,17 +202,19 @@ window edge.
 `TopBy` terminal deltas are membership deltas over the retained window, not
 whole-window replacements. A row whose rank changes but remains inside the
 window does not affect Jazz result membership unless the future API explicitly
-projects rank metadata. This keeps `ViewUpdate.result_row_adds/removes` aligned
-with the existing settled result-set model.
+projects rank metadata. This keeps `ViewUpdate.result_member_adds/removes`
+aligned with the settled typed result-member model.
 
 `Aggregate` is the target for grouped summaries. Jazz lowers each group to a
 stable result-row identity derived from the group key and lowers scalar global
 aggregates to a single synthetic group identity. The terminal row contains the
 group fields and aggregate values; result membership appears when a group first
-has output and disappears when the group no longer has output. A changed summary
-is represented as replacement of the aggregate result row: the maintained stream
-must provide enough version/replacement witness information for the peer state
-machine to emit the same net `ViewUpdate` as a full rehydrate.
+has output and disappears when the group no longer has output. The group fields
+and aggregate values travel as a `ResultPayload` program fact keyed by the
+synthetic result member. A changed summary is represented as replacement of the
+aggregate result row: the maintained stream must provide enough payload and
+replacement witness information for the peer state machine to emit the same net
+`ViewUpdate` as a full rehydrate.
 
 Aggregate functions are capability-gated by groove support. Maintained Jazz
 subscriptions should initially accept only deterministic, retractable summaries

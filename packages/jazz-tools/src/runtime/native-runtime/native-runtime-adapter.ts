@@ -112,13 +112,6 @@ type NativeDb = {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
-  canUpdateEncodedForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author: Uint8Array,
-  ): boolean;
-  canDeleteForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
@@ -235,7 +228,6 @@ type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
   rootTable: string | null;
-  requestedMagicColumns: Map<string, Set<string>>;
   session: RuntimeSession | null;
   opts: unknown;
   opened: boolean;
@@ -582,39 +574,22 @@ export class NativeRuntimeAdapter implements Runtime {
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
     this.applySessionClaims(session);
-    const postFilters = rootMagicPostFilters(queryJson);
-    const withoutMagicFilters =
-      postFilters.length > 0 ? stripRootMagicPostFilters(queryJson) : queryJson;
-    const coreQueryJson = addNestedOuterColumns(stripMagicSelectColumns(withoutMagicFilters));
+    assertNoUnsupportedPermissionIntrospection(queryJson);
+    const coreQueryJson = addNestedOuterColumns(queryJson);
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
-    const requestedMagicColumns = requestedMagicColumnsByTable(queryJson);
-    if (queryUsesNativeRelationApi(coreQueryJson)) {
+    if (queryHasRelationIr(coreQueryJson)) {
       if (session) {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support session-scoped relation queries");
         }
         const payload = this.db.allRelationQueryForIdentity(coreQueryJson, session.identity, opts);
-        return applyMagicPostFilters(
-          this.materializeMagicColumns(
-            rowsFromBatches(readRowBatches(payload), this.schema),
-            requestedMagicColumns,
-            session,
-          ),
-          postFilters,
-        );
+        return rowsFromBatches(readRowBatches(payload), this.schema);
       }
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
       const payload = this.db.allRelationQuery(coreQueryJson, opts);
-      return applyMagicPostFilters(
-        this.materializeMagicColumns(
-          rowsFromBatches(readRowBatches(payload), this.schema),
-          requestedMagicColumns,
-          session,
-        ),
-        postFilters,
-      );
+      return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
@@ -626,47 +601,26 @@ export class NativeRuntimeAdapter implements Runtime {
             throw new Error("Native runtime does not support session-scoped relation snapshots");
           }
           const payload = this.db.allRelationSnapshotForIdentity(query, session.identity, opts);
-          return applyMagicPostFilters(
-            this.materializeMagicColumns(
-              rowsFromRelationSnapshot(
-                readRelationSnapshot(payload),
-                this.schema,
-                queryTable(coreQueryJson),
-              ),
-              requestedMagicColumns,
-              session,
-            ),
-            postFilters,
+          return rowsFromRelationSnapshot(
+            readRelationSnapshot(payload),
+            this.schema,
+            queryTable(coreQueryJson),
           );
         }
         if (!this.db.allRelationSnapshot) {
           throw new Error("Native runtime does not support relation snapshots");
         }
         const payload = this.db.allRelationSnapshot(query, opts);
-        return applyMagicPostFilters(
-          this.materializeMagicColumns(
-            rowsFromRelationSnapshot(
-              readRelationSnapshot(payload),
-              this.schema,
-              queryTable(coreQueryJson),
-            ),
-            requestedMagicColumns,
-            session,
-          ),
-          postFilters,
+        return rowsFromRelationSnapshot(
+          readRelationSnapshot(payload),
+          this.schema,
+          queryTable(coreQueryJson),
         );
       }
       const rows = session
         ? this.db.allForIdentity(query, session.identity, opts)
         : this.db.all(query, opts);
-      return applyMagicPostFilters(
-        this.materializeMagicColumns(
-          rowsFromBatches(readRowBatches(rows), this.schema),
-          requestedMagicColumns,
-          session,
-        ),
-        postFilters,
-      );
+      return rowsFromBatches(readRowBatches(rows), this.schema);
     } finally {
       if (attachment !== undefined) this.db.detachQuery?.(attachment);
     }
@@ -679,11 +633,14 @@ export class NativeRuntimeAdapter implements Runtime {
     optionsJson?: string | null,
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
+    if (queryIncludesDeleted(queryJson)) {
+      throw new Error("Native runtime does not support include_deleted subscriptions yet");
+    }
     const session = readSession(sessionJson);
     this.applySessionClaims(session);
-    const usesNativeRelationApi =
-      queryUsesNativeRelationApi(queryJson) || queryContainsPermissionPredicate(queryJson);
-    if (usesNativeRelationApi) {
+    assertNoUnsupportedPermissionIntrospection(queryJson);
+    const hasRelationIr = queryHasRelationIr(queryJson);
+    if (hasRelationIr) {
       if (!this.db.subscribeRelationQuery) {
         throw new Error("Native runtime does not support relation query subscriptions");
       }
@@ -695,7 +652,7 @@ export class NativeRuntimeAdapter implements Runtime {
     } else if (!this.db.subscribe) {
       throw new Error("Native runtime does not support subscriptions");
     }
-    if (!usesNativeRelationApi && session && !this.db.subscribeForIdentity) {
+    if (!hasRelationIr && session && !this.db.subscribeForIdentity) {
       throw new Error("Native runtime does not support session-scoped subscriptions");
     }
     const handle = this.nextSubscriptionId++;
@@ -703,7 +660,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const identity = session?.identity;
     let nativeSubscription: ReadableStream<unknown> | Subscription;
     try {
-      if (usesNativeRelationApi) {
+      if (hasRelationIr) {
         nativeSubscription = identity
           ? this.db.subscribeRelationQueryForIdentity!(queryJson, identity, opts)
           : this.db.subscribeRelationQuery!(queryJson, opts);
@@ -719,8 +676,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       rows: [],
-      rootTable: usesNativeRelationApi ? null : queryTable(queryJson),
-      requestedMagicColumns: requestedMagicColumnsByTable(queryJson),
+      rootTable: hasRelationIr ? null : queryTable(queryJson),
       session,
       opts,
       opened: false,
@@ -1153,105 +1109,16 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const previousRows = subscription.rows;
     if (chunk.type === "snapshot") {
-      subscription.rows = this.materializeMagicColumns(
-        rowsFromRelationSnapshot(chunk.snapshot, this.schema, subscription.rootTable),
-        subscription.requestedMagicColumns,
-        subscription.session,
+      subscription.rows = rowsFromRelationSnapshot(
+        chunk.snapshot,
+        this.schema,
+        subscription.rootTable,
       );
       subscription.opened = true;
     } else {
-      subscription.rows = this.materializeMagicColumns(
-        applySubscriptionDelta(subscription.rows, chunk.delta, this.schema),
-        subscription.requestedMagicColumns,
-        subscription.session,
-      );
+      subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
     }
     subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
-  }
-
-  private materializeMagicColumns(
-    rows: RowState[],
-    requestedByTable: Map<string, Set<string>>,
-    session: RuntimeSession | null,
-  ): RowState[] {
-    if (requestedByTable.size === 0) return rows;
-    for (const row of rows) {
-      this.materializeRowMagicColumns(row, requestedByTable, session);
-    }
-    return rows;
-  }
-
-  private materializeRowMagicColumns(
-    row: RowState,
-    requestedByTable: Map<string, Set<string>>,
-    session: RuntimeSession | null,
-  ): void {
-    const valuesByColumn = new Map(row.valuesByColumn ?? []);
-    const requested = requestedByTable.get(row.table);
-    let changed = false;
-    if (requested) {
-      for (const column of requested) {
-        if (valuesByColumn.has(column)) continue;
-        if (isPermissionIntrospectionColumn(column)) {
-          valuesByColumn.set(column, {
-            type: "Boolean",
-            value: this.materializePermissionMagic(row.table, row.id, column, session),
-          });
-          changed = true;
-        }
-      }
-    }
-
-    for (const value of valuesByColumn.values()) {
-      this.materializeNestedMagicColumns(value, requestedByTable, session);
-    }
-
-    if (changed) {
-      withValuesByColumn(row, valuesByColumn);
-    }
-  }
-
-  private materializeNestedMagicColumns(
-    value: Value,
-    requestedByTable: Map<string, Set<string>>,
-    session: RuntimeSession | null,
-  ): void {
-    if (value.type !== "Array") return;
-    for (const entry of value.value) {
-      if (entry.type !== "Row") continue;
-      const rowValue = entry.value as {
-        id?: string;
-        values: Value[];
-        valuesByColumn?: Map<string, Value>;
-        table?: string;
-      };
-      if (!rowValue.id || !rowValue.table) continue;
-      this.materializeRowMagicColumns(rowValue as RowState, requestedByTable, session);
-    }
-  }
-
-  private materializePermissionMagic(
-    table: string,
-    id: string,
-    column: string,
-    session: RuntimeSession | null,
-  ): boolean {
-    if (column === "$canRead") return true;
-    const identity = session?.identity ?? this.peerIdentity;
-    if (column === "$canEdit") {
-      if (!this.db.canUpdateEncodedForIdentity) return false;
-      return this.db.canUpdateEncodedForIdentity(
-        table,
-        parseUuid(id),
-        encodeCellsForPatch(this.table(table), {}),
-        identity,
-      );
-    }
-    if (column === "$canDelete") {
-      if (!this.db.canDeleteForIdentity) return false;
-      return this.db.canDeleteForIdentity(table, parseUuid(id), identity);
-    }
-    return false;
   }
 
   private scheduleServerPump(): void {
@@ -1512,6 +1379,9 @@ function closeSubscriptionSource(source: SubscriptionSourceState["source"]): voi
 
 function readSupportedReadOptions(optionsJson: string): void {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
+  if (parsed.read_view != null || parsed.readView != null) {
+    throw new Error("Native runtime does not support non-default read_view yet");
+  }
   const propagation = parsed.propagation;
   if (propagation != null && propagation !== "full" && propagation !== "local-only") {
     throw new Error(
@@ -1537,22 +1407,38 @@ function queryHasArraySubqueries(queryJson: string): boolean {
   }
 }
 
-function queryUsesNativeRelationApi(queryJson: string): boolean {
+function queryHasRelationIr(queryJson: string): boolean {
   try {
     const relationIr = (JSON.parse(queryJson) as { relation_ir?: unknown }).relation_ir;
-    return relationIrContainsNativeOperator(relationIr);
+    return relationIr != null;
   } catch {
     return false;
   }
 }
 
-function queryContainsPermissionPredicate(queryJson: string): boolean {
-  try {
-    const relationIr = (JSON.parse(queryJson) as { relation_ir?: unknown }).relation_ir;
-    return relationIrContainsPermissionPredicate(relationIr);
-  } catch {
-    return false;
-  }
+function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
+  if (!queryContainsPermissionIntrospection(queryJson)) return;
+  throw new Error(
+    "Native runtime does not support permission-introspection query columns or predicates " +
+      "($canRead, $canEdit, $canDelete) until unified policy lowering exists.",
+  );
+}
+
+function queryContainsPermissionIntrospection(queryJson: string): boolean {
+  const parsed = JSON.parse(queryJson) as {
+    conditions?: unknown;
+    relation_ir?: unknown;
+    select?: unknown;
+    select_columns?: unknown;
+    array_subqueries?: unknown;
+  };
+  return (
+    selectedColumnsContainPermissionIntrospection(parsed.select_columns ?? parsed.select) ||
+    flatConditionsContainPermissionIntrospection(parsed.conditions) ||
+    relationIrContainsPermissionPredicate(parsed.relation_ir) ||
+    relationIrContainsPermissionProjection(parsed.relation_ir) ||
+    arraySubqueriesContainPermissionIntrospection(parsed.array_subqueries)
+  );
 }
 
 function relationIrContainsPermissionPredicate(value: unknown): boolean {
@@ -1569,18 +1455,96 @@ function relationIrContainsPermissionPredicate(value: unknown): boolean {
   return Object.values(record).some(relationIrContainsPermissionPredicate);
 }
 
+function relationIrContainsPermissionProjection(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(relationIrContainsPermissionProjection);
+  const record = value as Record<string, unknown>;
+  const project = record.Project;
+  if (project && typeof project === "object") {
+    const columns = (project as { columns?: unknown }).columns;
+    if (Array.isArray(columns)) {
+      for (const entry of columns) {
+        if (!entry || typeof entry !== "object") continue;
+        const projection = entry as { expr?: unknown; source?: unknown };
+        const column = readProjectedColumnRef(projection.expr ?? projection.source);
+        if (column && isPermissionIntrospectionColumn(column)) return true;
+      }
+    }
+  }
+  return Object.values(record).some(relationIrContainsPermissionProjection);
+}
+
 function readMagicPredicateColumn(value: unknown): string | null {
   if (!value || typeof value !== "object") return null;
   const record = value as { left?: unknown; column?: unknown };
   return readColumnRef(record.left ?? record.column);
 }
 
-function relationIrContainsNativeOperator(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(relationIrContainsNativeOperator);
-  const record = value as Record<string, unknown>;
-  if ("Join" in record || "Gather" in record || "Union" in record) return true;
-  return Object.values(record).some(relationIrContainsNativeOperator);
+function readProjectedColumnRef(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  if ("Column" in value) {
+    return readColumnRef((value as { Column?: unknown }).Column);
+  }
+  return readColumnRef(value);
+}
+
+function selectedColumnsContainPermissionIntrospection(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some(
+    (column) =>
+      typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column)),
+  );
+}
+
+function flatConditionsContainPermissionIntrospection(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const column = (entry as { column?: unknown }).column;
+    return typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column));
+  });
+}
+
+function arraySubqueriesContainPermissionIntrospection(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const record = entry as {
+      filters?: unknown;
+      nested_arrays?: unknown;
+      select?: unknown;
+      select_columns?: unknown;
+    };
+    return (
+      selectedColumnsContainPermissionIntrospection(record.select_columns ?? record.select) ||
+      arrayFiltersContainPermissionIntrospection(record.filters) ||
+      arraySubqueriesContainPermissionIntrospection(record.nested_arrays)
+    );
+  });
+}
+
+function arrayFiltersContainPermissionIntrospection(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const record = entry as Record<string, unknown>;
+    for (const key of ["Eq", "Ne", "Gt", "Ge", "Lt", "Le", "IsNull", "IsNotNull", "Contains"]) {
+      const predicate = record[key];
+      if (!predicate || typeof predicate !== "object") continue;
+      const column = (predicate as { column?: unknown }).column;
+      if (
+        typeof column === "string" &&
+        isPermissionIntrospectionColumn(unqualifiedColumn(column))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  });
+}
+
+function unqualifiedColumn(column: string): string {
+  return column.split(".").at(-1) ?? column;
 }
 
 function queryTable(queryJson: string): string {
@@ -1589,66 +1553,6 @@ function queryTable(queryJson: string): string {
     throw new Error("Native runtime only supports table queries in this slice");
   }
   return table;
-}
-
-function requestedMagicColumnsByTable(queryJson: string): Map<string, Set<string>> {
-  const parsed = JSON.parse(queryJson) as {
-    table?: unknown;
-    select_columns?: unknown;
-    select?: unknown;
-    array_subqueries?: unknown;
-  };
-  const requested = new Map<string, Set<string>>();
-  if (typeof parsed.table === "string") {
-    addRequestedMagicColumns(requested, parsed.table, parsed.select_columns ?? parsed.select);
-  }
-  collectSubqueryMagicColumns(requested, parsed.array_subqueries);
-  return requested;
-}
-
-type MagicPostFilter = { column: string; op: string; value: Value };
-
-function rootMagicPostFilters(queryJson: string): MagicPostFilter[] {
-  const parsed = JSON.parse(queryJson) as { relation_ir?: unknown };
-  const filters: MagicPostFilter[] = [];
-  collectMagicPostFilters(parsed.relation_ir, filters);
-  return filters;
-}
-
-function collectMagicPostFilters(value: unknown, filters: MagicPostFilter[]): void {
-  if (!value || typeof value !== "object") return;
-  const record = value as Record<string, unknown>;
-  const cmp = record.Cmp;
-  if (cmp && typeof cmp === "object") {
-    const cmpRecord = cmp as { left?: unknown; op?: unknown; right?: unknown };
-    const column = readColumnRef(cmpRecord.left);
-    const literal = readLiteral(cmpRecord.right);
-    if (column && literal && isPermissionIntrospectionColumn(column)) {
-      filters.push({ column, op: String(cmpRecord.op), value: literal as Value });
-      return;
-    }
-  }
-  for (const child of Object.values(record)) {
-    collectMagicPostFilters(child, filters);
-  }
-}
-
-function stripRootMagicPostFilters(queryJson: string): string {
-  const parsed = JSON.parse(queryJson) as { relation_ir?: unknown };
-  parsed.relation_ir = stripMagicPredicates(parsed.relation_ir);
-  return JSON.stringify(parsed);
-}
-
-function stripMagicSelectColumns(queryJson: string): string {
-  const parsed = JSON.parse(queryJson) as {
-    select_columns?: unknown;
-    select?: unknown;
-    array_subqueries?: unknown;
-  };
-  parsed.select_columns = withoutMagicSelectColumns(parsed.select_columns);
-  parsed.select = withoutMagicSelectColumns(parsed.select);
-  stripSubqueryMagicSelectColumns(parsed.array_subqueries);
-  return JSON.stringify(parsed);
 }
 
 function addNestedOuterColumns(queryJson: string): string {
@@ -1677,106 +1581,6 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
       }
     }
     addNestedOuterColumnsToSubqueries(record.nested_arrays);
-  }
-}
-
-function stripSubqueryMagicSelectColumns(subqueries: unknown): void {
-  if (!Array.isArray(subqueries)) return;
-  for (const entry of subqueries) {
-    if (!entry || typeof entry !== "object") continue;
-    const record = entry as { select_columns?: unknown; nested_arrays?: unknown };
-    record.select_columns = withoutMagicSelectColumns(record.select_columns);
-    stripSubqueryMagicSelectColumns(record.nested_arrays);
-  }
-}
-
-function withoutMagicSelectColumns(select: unknown): unknown {
-  if (!Array.isArray(select)) return select;
-  return select.filter(
-    (column) => typeof column !== "string" || !isPermissionIntrospectionColumn(column),
-  );
-}
-
-function stripMagicPredicates(value: unknown): unknown {
-  if (!value || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(stripMagicPredicates);
-  const record = value as Record<string, unknown>;
-  if (record.Cmp && typeof record.Cmp === "object") {
-    const column = readColumnRef((record.Cmp as { left?: unknown }).left);
-    if (column && isPermissionIntrospectionColumn(column)) {
-      return "True";
-    }
-  }
-  if (Array.isArray(record.And)) {
-    const children = record.And.map(stripMagicPredicates).filter((child) => child !== "True");
-    return children.length === 0 ? "True" : { And: children };
-  }
-  const next: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(record)) {
-    next[key] = stripMagicPredicates(child);
-  }
-  return next;
-}
-
-function applyMagicPostFilters(rows: RowState[], filters: MagicPostFilter[]): RowState[] {
-  if (filters.length === 0) return rows;
-  return rows.filter((row) =>
-    filters.every((filter) => magicPostFilterMatches(row.valuesByColumn, filter)),
-  );
-}
-
-function magicPostFilterMatches(
-  valuesByColumn: Map<string, Value> | undefined,
-  filter: MagicPostFilter,
-): boolean {
-  const value = valuesByColumn?.get(filter.column);
-  if (!value || !("value" in value)) return false;
-  const left = value.value instanceof Date ? value.value.getTime() : value.value;
-  const right = "value" in filter.value ? filter.value.value : null;
-  switch (filter.op) {
-    case "Eq":
-      return left === right;
-    case "Le":
-      return typeof left === "number" && typeof right === "number" && left <= right;
-    default:
-      return false;
-  }
-}
-
-function collectSubqueryMagicColumns(
-  requested: Map<string, Set<string>>,
-  subqueries: unknown,
-): void {
-  if (!Array.isArray(subqueries)) return;
-  for (const entry of subqueries) {
-    if (!entry || typeof entry !== "object") continue;
-    const record = entry as {
-      table?: unknown;
-      select_columns?: unknown;
-      nested_arrays?: unknown;
-    };
-    if (typeof record.table === "string") {
-      addRequestedMagicColumns(requested, record.table, record.select_columns);
-    }
-    collectSubqueryMagicColumns(requested, record.nested_arrays);
-  }
-}
-
-function addRequestedMagicColumns(
-  requested: Map<string, Set<string>>,
-  table: string,
-  select: unknown,
-): void {
-  if (!Array.isArray(select)) return;
-  for (const column of select) {
-    if (typeof column === "string" && isPermissionIntrospectionColumn(column)) {
-      let columns = requested.get(table);
-      if (!columns) {
-        columns = new Set();
-        requested.set(table, columns);
-      }
-      columns.add(column);
-    }
   }
 }
 
@@ -1875,83 +1679,34 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     limit?: unknown;
     relation_ir?: unknown;
     offset?: unknown;
+    order_by?: unknown;
     select?: unknown;
     select_columns?: unknown;
   };
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
   }
-  const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
+  if (parsed.relation_ir != null) {
+    throw new Error("Relation IR must be handled by the native relation query API");
+  }
+  const rootPredicates = readFlatConditions(parsed.conditions);
+  if (!rootPredicates) throw unsupportedQueryEncodingError();
   return queryWithPredicates(
     parsed.table,
-    encoded.predicates,
-    encoded.hasPostFilter
-      ? {}
-      : {
-          limit: readLimitIfPresent(parsed.limit ?? encoded.limit),
-          offset: encoded.offset,
-          orderBy: encoded.orderBy,
-          select: readSelectColumns(parsed.select_columns ?? parsed.select ?? encoded.select),
-          arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema),
-        },
+    rootPredicates.map((filter) => coerceQueryPredicate(parsed.table as string, filter, schema)),
+    {
+      limit: readLimitIfPresent(parsed.limit),
+      offset: readOffset(parsed.offset),
+      orderBy: readRootOrderBy(parsed.order_by),
+      select: readSelectColumns(parsed.select_columns ?? parsed.select),
+      arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema),
+    },
   );
 }
 
-function unsupportedRelationQueryError(operator?: string): Error {
-  const detail = operator
-    ? ` Relation IR operator "${operator}" requires a relation-tree lowerer or native relation query API; the TS native runtime can currently lower only TableScan plus Filter/Project/OrderBy/Offset/Limit into flat native predicates.`
-    : " The TS native runtime can currently lower only TableScan plus Filter/Project/OrderBy/Offset/Limit into flat native predicates.";
-  return new Error(`Native runtime cannot lower this relation IR.${detail}`);
-}
-
-function encodeSimpleRelationQuery(
-  table: string,
-  query: {
-    conditions?: unknown;
-    relation_ir?: unknown;
-    limit?: unknown;
-    offset?: unknown;
-  },
-  schema: WasmSchema,
-): {
-  predicates: QueryPredicate[];
-  hasPostFilter: boolean;
-  limit?: number;
-  offset: number;
-  orderBy: QueryOrder[];
-  select?: string[];
-} {
-  const unwrapped = unwrapSimpleQuery(table, query);
-  if (!unwrapped) throw unsupportedRelationQueryError(relationOperator(query.relation_ir));
-  const rootPredicates = readFlatConditions(query.conditions);
-  if (!rootPredicates) throw unsupportedRelationQueryError();
-  return {
-    hasPostFilter: false,
-    limit: unwrapped.limit,
-    offset: unwrapped.offset,
-    orderBy: unwrapped.orderBy,
-    select: unwrapped.select,
-    predicates: unwrapped.predicates
-      .concat(rootPredicates)
-      .map((filter) => coerceQueryPredicate(table, filter, schema)),
-  };
-}
-
-function relationOperator(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const record = value as Record<string, unknown>;
-  for (const operator of ["Join", "Project", "Gather", "Union"]) {
-    if (operator in record) return operator;
-  }
-  for (const operator of ["Limit", "Offset", "OrderBy", "Filter"]) {
-    const child = record[operator];
-    if (child && typeof child === "object") {
-      const input = (child as { input?: unknown }).input;
-      const nested = relationOperator(input);
-      if (nested) return nested;
-    }
-  }
-  return undefined;
+function unsupportedQueryEncodingError(context?: string): Error {
+  const suffix = context ? ` (${context})` : "";
+  return new Error(`Native runtime cannot encode this query shape${suffix}.`);
 }
 
 function coerceQueryPredicate(
@@ -1972,115 +1727,31 @@ function coerceQueryPredicate(
   };
 }
 
-function unwrapSimpleQuery(
-  table: string,
-  query: {
-    relation_ir?: unknown;
-    limit?: unknown;
-    offset?: unknown;
-  },
-): {
-  predicates: QueryPredicate[];
-  limit?: number;
-  offset: number;
-  orderBy: QueryOrder[];
-  select?: string[];
-} | null {
-  if (query.relation_ir == null) return { predicates: [], offset: 0, orderBy: [] };
-  return unwrapSimpleRelation(table, query.relation_ir);
-}
-
-function unwrapSimpleRelation(
-  table: string,
-  relationIr: unknown,
-): {
-  predicates: QueryPredicate[];
-  limit?: number;
-  offset: number;
-  orderBy: QueryOrder[];
-  select?: string[];
-} | null {
-  if (relationIr == null) return { predicates: [], offset: 0, orderBy: [] };
-  if (typeof relationIr !== "object") return null;
-  const relation = relationIr as Record<string, unknown>;
-  const tableScan = relation.TableScan;
-  if (
-    tableScan &&
-    typeof tableScan === "object" &&
-    (tableScan as { table?: unknown }).table === table
-  ) {
-    return { predicates: [], offset: 0, orderBy: [] };
-  }
-  const limit = relation.Limit;
-  if (limit && typeof limit === "object") {
-    const limitRecord = limit as { input?: unknown; limit?: unknown };
-    const input = unwrapSimpleRelation(table, limitRecord.input);
-    if (!input) return null;
-    return { ...input, limit: readLimit(limitRecord.limit) };
-  }
-  const offset = relation.Offset;
-  if (offset && typeof offset === "object") {
-    const offsetRecord = offset as { input?: unknown; offset?: unknown };
-    const input = unwrapSimpleRelation(table, offsetRecord.input);
-    if (!input) return null;
-    return { ...input, offset: readOffset(offsetRecord.offset) };
-  }
-  const orderBy = relation.OrderBy;
-  if (orderBy && typeof orderBy === "object") {
-    const orderByRecord = orderBy as { input?: unknown; terms?: unknown };
-    const input = unwrapSimpleRelation(table, orderByRecord.input);
-    const terms = readOrderByTerms(orderByRecord.terms);
-    if (!input || !terms) return null;
-    return { ...input, orderBy: input.orderBy.concat(terms) };
-  }
-  const project = relation.Project;
-  if (project && typeof project === "object") {
-    const projectRecord = project as { input?: unknown; columns?: unknown };
-    const input = unwrapSimpleRelation(table, projectRecord.input);
-    const columns = readProjectColumns(projectRecord.columns);
-    if (!input || !columns) return null;
-    return { ...input, select: columns };
-  }
-  const filter = relation.Filter;
-  if (!filter || typeof filter !== "object") return null;
-  const filterRecord = filter as { input?: unknown; predicate?: unknown };
-  const input = unwrapSimpleRelation(table, filterRecord.input);
-  if (!input) return null;
-  const predicates = predicateToFilters(filterRecord.predicate);
-  return predicates ? { ...input, predicates: input.predicates.concat(predicates) } : null;
-}
-
-function readProjectColumns(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
-  const columns: string[] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object") return null;
-    const record = entry as { alias?: unknown; expr?: unknown; source?: unknown };
-    const expr = record.expr ?? record.source;
-    if (!expr || typeof expr !== "object") return null;
-    const column = readColumnProjectExpr(expr);
-    if (!column) return null;
-    if (record.alias != null && record.alias !== column) return null;
-    columns.push(column);
-  }
-  return columns;
-}
-
-function readColumnProjectExpr(value: unknown): string | null {
-  if (!value || typeof value !== "object") return null;
-  const record = value as { Column?: unknown; column?: unknown };
-  if (record.Column != null) return readColumnRef(record.Column);
-  if (record.column != null) return readColumnRef(record);
-  return null;
-}
-
 function readSelectColumns(value: unknown): string[] | undefined {
   if (value == null) return undefined;
-  if (!Array.isArray(value)) throw unsupportedRelationQueryError();
+  if (!Array.isArray(value)) throw unsupportedQueryEncodingError();
   if (!value.every((column): column is string => typeof column === "string")) {
-    throw unsupportedRelationQueryError();
+    throw unsupportedQueryEncodingError();
   }
   return value;
+}
+
+function readRootOrderBy(value: unknown): QueryOrder[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw unsupportedQueryEncodingError("order_by");
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object") {
+      throw unsupportedQueryEncodingError("order_by");
+    }
+    const record = entry as { column?: unknown; direction?: unknown };
+    if (typeof record.column !== "string") {
+      throw unsupportedQueryEncodingError("order_by");
+    }
+    if (record.direction !== "Asc" && record.direction !== "Desc") {
+      throw unsupportedQueryEncodingError("order_by");
+    }
+    return { column: record.column, direction: record.direction };
+  });
 }
 
 function readQueryArraySubqueries(
@@ -2089,7 +1760,7 @@ function readQueryArraySubqueries(
   schema: WasmSchema,
 ): QueryArraySubquery[] | undefined {
   if (value == null) return undefined;
-  if (!Array.isArray(value)) throw unsupportedRelationQueryError("array_subqueries");
+  if (!Array.isArray(value)) throw unsupportedQueryEncodingError("array_subqueries");
   return value.map((entry) => readQueryArraySubquery(entry, parentTable, schema));
 }
 
@@ -2098,7 +1769,7 @@ function readQueryArraySubquery(
   parentTable: string,
   schema: WasmSchema,
 ): QueryArraySubquery {
-  if (!value || typeof value !== "object") throw unsupportedRelationQueryError("array_subqueries");
+  if (!value || typeof value !== "object") throw unsupportedQueryEncodingError("array_subqueries");
   const record = value as {
     column_name?: unknown;
     table?: unknown;
@@ -2118,10 +1789,10 @@ function readQueryArraySubquery(
     typeof record.inner_column !== "string" ||
     typeof record.outer_column !== "string"
   ) {
-    throw unsupportedRelationQueryError("array_subqueries");
+    throw unsupportedQueryEncodingError("array_subqueries");
   }
   if (Array.isArray(record.joins) && record.joins.length > 0) {
-    throw unsupportedRelationQueryError("array_subqueries.joins");
+    throw unsupportedQueryEncodingError("array_subqueries.joins");
   }
   const filters = readArraySubqueryFilters(record.filters, record.table, schema);
   const select = readSelectColumns(record.select_columns);
@@ -2147,11 +1818,11 @@ function readArraySubqueryFilters(
   schema: WasmSchema,
 ): QueryPredicate[] {
   if (value == null) return [];
-  if (!Array.isArray(value)) throw unsupportedRelationQueryError("array_subqueries.filters");
+  if (!Array.isArray(value)) throw unsupportedQueryEncodingError("array_subqueries.filters");
   const filters: QueryPredicate[] = [];
   for (const entry of value) {
     const next = arraySubqueryFilterToPredicates(entry);
-    if (!next) throw unsupportedRelationQueryError("array_subqueries.filters");
+    if (!next) throw unsupportedQueryEncodingError("array_subqueries.filters");
     filters.push(...next.map((filter) => coerceQueryPredicate(table, filter, schema)));
   }
   return filters;
@@ -2198,13 +1869,13 @@ function arraySubqueryFilterToPredicates(value: unknown): QueryPredicate[] | nul
 
 function readArraySubqueryOrder(value: unknown): QueryOrder[] {
   if (value == null) return [];
-  if (!Array.isArray(value)) throw unsupportedRelationQueryError("array_subqueries.order_by");
+  if (!Array.isArray(value)) throw unsupportedQueryEncodingError("array_subqueries.order_by");
   return value.map((entry) => {
     if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") {
-      throw unsupportedRelationQueryError("array_subqueries.order_by");
+      throw unsupportedQueryEncodingError("array_subqueries.order_by");
     }
     if (entry[1] !== "Ascending" && entry[1] !== "Descending") {
-      throw unsupportedRelationQueryError("array_subqueries.order_by");
+      throw unsupportedQueryEncodingError("array_subqueries.order_by");
     }
     return { column: entry[0], direction: entry[1] === "Ascending" ? "Asc" : "Desc" };
   });
@@ -2213,25 +1884,12 @@ function readArraySubqueryOrder(value: unknown): QueryOrder[] {
 function readArraySubqueryRequirement(value: unknown): QueryArraySubquery["requirement"] {
   if (value == null || value === "Optional") return "Optional";
   if (value === "AtLeastOne" || value === "MatchCorrelationCardinality") return value;
-  throw unsupportedRelationQueryError("array_subqueries.requirement");
+  throw unsupportedQueryEncodingError("array_subqueries.requirement");
 }
 
 function stripParentQualifier(column: string, parentTable: string): string {
   const prefix = `${parentTable}.`;
   return column.startsWith(prefix) ? column.slice(prefix.length) : column;
-}
-
-function readOrderByTerms(value: unknown): QueryOrder[] | null {
-  if (!Array.isArray(value)) return null;
-  const terms: QueryOrder[] = [];
-  for (const term of value) {
-    if (!term || typeof term !== "object") return null;
-    const record = term as { column?: unknown; direction?: unknown };
-    const column = readColumnRef(record.column);
-    if (!column || (record.direction !== "Asc" && record.direction !== "Desc")) return null;
-    terms.push({ column, direction: record.direction });
-  }
-  return terms;
 }
 
 function coerceQueryLiteral(
@@ -2304,59 +1962,6 @@ function readByteLiteral(value: QueryLiteral): number {
   return value.value;
 }
 
-function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
-  if (predicate === "True") return [];
-  if (predicate === "False") return [{ column: "id", op: "In", values: [] }];
-  if (!predicate || typeof predicate !== "object") return null;
-  const record = predicate as Record<string, unknown>;
-  if (Array.isArray(record.And)) {
-    const filters: QueryPredicate[] = [];
-    for (const child of record.And) {
-      const childFilters = predicateToFilters(child);
-      if (!childFilters) return null;
-      filters.push(...childFilters);
-    }
-    return filters;
-  }
-  if (Array.isArray(record.Or)) return null;
-  if (record.Not) return null;
-  const isNull = record.IsNull;
-  if (isNull && typeof isNull === "object") {
-    const column = readColumnRef((isNull as { column?: unknown }).column);
-    return column ? [{ column, op: "IsNull" }] : null;
-  }
-  const isNotNull = record.IsNotNull;
-  if (isNotNull && typeof isNotNull === "object") {
-    const column = readColumnRef((isNotNull as { column?: unknown }).column);
-    return column ? [{ column, op: "IsNotNull" }] : null;
-  }
-  const contains = record.Contains;
-  if (contains && typeof contains === "object") {
-    const containsRecord = contains as { left?: unknown; right?: unknown };
-    const column = readColumnRef(containsRecord.left);
-    const value = readLiteral(containsRecord.right);
-    return column && value ? [{ column, op: "Contains", value }] : null;
-  }
-  const inPredicate = record.In;
-  if (inPredicate && typeof inPredicate === "object") {
-    const inRecord = inPredicate as { left?: unknown; values?: unknown };
-    const column = readColumnRef(inRecord.left);
-    if (!column || !Array.isArray(inRecord.values)) return null;
-    const values = inRecord.values.map(readLiteral);
-    return values.every((value): value is QueryLiteral => value != null)
-      ? [{ column, op: "In", values }]
-      : null;
-  }
-  const cmp = record.Cmp;
-  if (!cmp || typeof cmp !== "object") return null;
-  const cmpRecord = cmp as { left?: unknown; op?: unknown; right?: unknown };
-  const op = readPredicateOp(cmpRecord.op);
-  if (!op) return null;
-  const column = readColumnRef(cmpRecord.left);
-  const value = readLiteral(cmpRecord.right);
-  return column && value ? [{ column, op: op as QueryPredicateOp, value }] : null;
-}
-
 function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
   if (conditions == null) return [];
   if (!Array.isArray(conditions)) return null;
@@ -2424,7 +2029,7 @@ function valueToQueryLiteral(value: unknown): QueryLiteral {
     return isUuidString(value) ? { type: "Uuid", value } : { type: "Text", value };
   if (value instanceof Uint8Array) return { type: "Bytea", value };
   if (Array.isArray(value)) return { type: "Array", value: value.map(valueToQueryLiteral) };
-  throw unsupportedRelationQueryError();
+  throw unsupportedQueryEncodingError();
 }
 
 function readPredicateOp(value: unknown): QueryPredicateOp | null {
@@ -2521,6 +2126,7 @@ function readLimitIfPresent(value: unknown): number | undefined {
 }
 
 function readOffset(value: unknown): number {
+  if (value == null) return 0;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new Error("query offset must be a non-negative safe integer");
   }

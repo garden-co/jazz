@@ -339,6 +339,7 @@ fn evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate() {
     let bytes = core.content_store().read(&extent).unwrap();
 
     edge.apply_content_extents(vec![crate::protocol::ContentExtent {
+        owner: crate::protocol::LargeValueOwnerRef::current_row(extent.row),
         extent: extent.clone(),
         bytes,
     }])
@@ -367,7 +368,7 @@ fn evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate() {
         .handle_content_extent_fetch(
             &mut core,
             SyncMessage::FetchContentExtent {
-                row: row_uuid,
+                owner: crate::protocol::LargeValueOwnerRef::current_row(row_uuid),
                 extent: extent.clone(),
             },
         )
@@ -457,6 +458,7 @@ fn commit_units_with_missing_large_value_content_are_parked_until_extents_arrive
                         content: TextContent::Ref(extent),
                         ..
                     } => Some(crate::protocol::ContentExtent {
+                        owner: crate::protocol::LargeValueOwnerRef::current_row(extent.row),
                         bytes: writer.content_store().read(&extent).unwrap(),
                         extent,
                     }),
@@ -813,6 +815,7 @@ fn large_value_extents(
                 content: TextContent::Ref(extent),
                 ..
             } => Some(crate::protocol::ContentExtent {
+                owner: crate::protocol::LargeValueOwnerRef::current_row(extent.row),
                 bytes: source.content_store().read(&extent).unwrap(),
                 extent,
             }),

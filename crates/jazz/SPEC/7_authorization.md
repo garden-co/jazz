@@ -146,11 +146,11 @@ that identity's read policy (ch. 12).
 Exclusive transaction view shipping protects recipients from seeing an incomplete
 policy-visible fragment for the maintained subscription view. It is
 **policy-atomic per recipient and per view**: a non-system recipient receives a
-result row from an exclusive transaction only when every version required for
-that view is readable to it (`INV-RLS-12`). Versions outside that view need not be
-shipped or readable for the view to advance. This is distinct from exclusive
-serializability (ch. 3) and from write authorization: it governs only read/view
-shipping.
+result member or program fact from an exclusive transaction only when every
+version required for that view is readable to it (`INV-RLS-12`). Versions
+outside that view need not be shipped or readable for the view to advance. This
+is distinct from exclusive serializability (ch. 3) and from write authorization:
+it governs only read/view shipping.
 
 Historical/as-of reads served for a link evaluate read policy **at the requested
 cut**. An ownership change across cuts therefore changes visibility at those

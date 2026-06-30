@@ -64,9 +64,9 @@ function firstQueryJson(query: QuerySpy): string {
 
 function rootLimit(queryJson: string): number | undefined {
   const parsed = JSON.parse(queryJson) as {
-    relation_ir?: { Limit?: { limit?: unknown } };
+    limit?: unknown;
   };
-  const limit = parsed.relation_ir?.Limit?.limit;
+  const limit = parsed.limit;
   return typeof limit === "number" ? limit : undefined;
 }
 

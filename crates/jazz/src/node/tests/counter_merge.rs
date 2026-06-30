@@ -29,15 +29,15 @@ fn core_creates_merge_versions_for_concurrent_heads() {
     let update = core.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate {
         version_bundles,
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = update
     else {
         panic!("expected view update");
     };
-    assert_eq!(result_row_adds.len(), 1);
-    assert!(result_row_removes.is_empty());
+    assert_eq!(result_member_adds.len(), 1);
+    assert!(result_member_removes.is_empty());
     let merge = version_bundles
         .iter()
         .find(|bundle| bundle.tx.tx_id.node == node(9))
@@ -58,7 +58,7 @@ fn core_creates_merge_versions_for_concurrent_heads() {
         ])
     );
     assert_eq!(
-        result_row_adds,
+        result_member_adds,
         vec![("todos".to_owned().into(), row, merge.tx.tx_id)]
     );
 }

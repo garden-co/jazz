@@ -538,7 +538,11 @@ impl WasmDbInner {
         }
     }
 
-    fn attach_query(&self, query: &PreparedQuery, opts: ReadOpts) -> QueryAttachment {
+    fn attach_query(
+        &self,
+        query: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<QueryAttachment, jazz::db::Error> {
         match self {
             Self::Memory(db) => db.attach_query_with_opts(query, opts),
             #[cfg(target_arch = "wasm32")]
@@ -1210,7 +1214,10 @@ impl WasmDb {
     ) -> Result<WasmQueryAttachment, JsValue> {
         let opts = read_opts_from_js(opts)?;
         Ok(WasmQueryAttachment {
-            inner: self.inner.attach_query(&query.inner, opts),
+            inner: self
+                .inner
+                .attach_query(&query.inner, opts)
+                .map_err(to_js_error)?,
         })
     }
 
@@ -2101,6 +2108,7 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
     if value.is_undefined() || value.is_null() {
         return Ok(opts);
     }
+    reject_unsupported_non_default_read_view(&value)?;
     if let Some(tier) = optional_string_prop(&value, "tier")? {
         opts.tier = durability_tier_from_str(&tier)?;
     }
@@ -2122,6 +2130,18 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         opts.include_deleted = include_deleted;
     }
     Ok(opts)
+}
+
+fn reject_unsupported_non_default_read_view(value: &JsValue) -> Result<(), JsValue> {
+    for name in ["read_view", "readView"] {
+        let prop = js_sys::Reflect::get(value, &JsValue::from_str(name))?;
+        if !prop.is_undefined() && !prop.is_null() {
+            return Err(JsValue::from_str(
+                "non-default read_view is not supported yet",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
