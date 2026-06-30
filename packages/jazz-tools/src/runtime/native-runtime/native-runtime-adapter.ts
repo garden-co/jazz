@@ -36,7 +36,7 @@ import { createRecord, decodeRecordValue } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
 import {
   isPermissionIntrospectionColumn,
-  isProvenanceMagicTimestampColumn,
+  isProvenanceMagicColumn,
   magicColumnType,
 } from "../../magic-columns.js";
 
@@ -282,7 +282,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly writes = new Map<string, Write>();
   private readonly serverPumpObservedWrites = new WeakSet<Write>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
-  private readonly provenanceFallbackTimes = new Map<string, number>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private serverTransport: Transport | null = null;
   private serverCarrier: WebSocketCarrier | null = null;
@@ -1192,17 +1191,6 @@ export class NativeRuntimeAdapter implements Runtime {
     let changed = false;
     if (requested) {
       for (const column of requested) {
-        if (isProvenanceMagicTimestampColumn(column)) {
-          const updatedAt = this.materializeProvenanceTimestamp(
-            row,
-            valuesByColumn.get("$updatedAt"),
-          );
-          if (updatedAt) {
-            valuesByColumn.set(column, updatedAt);
-            changed = true;
-          }
-          continue;
-        }
         if (valuesByColumn.has(column)) continue;
         if (isPermissionIntrospectionColumn(column)) {
           valuesByColumn.set(column, {
@@ -1264,21 +1252,6 @@ export class NativeRuntimeAdapter implements Runtime {
       return this.db.canDeleteForIdentity(table, parseUuid(id), identity);
     }
     return false;
-  }
-
-  private materializeProvenanceTimestamp(
-    row: RowState,
-    value: Value | undefined,
-  ): Value | undefined {
-    if (!value || value.type !== "Timestamp") return value;
-    if (value.value > 1_000_000_000_000) return value;
-    const key = `${row.table}\0${row.id}`;
-    let fallback = this.provenanceFallbackTimes.get(key);
-    if (fallback === undefined) {
-      fallback = Date.now() * 1_000;
-      this.provenanceFallbackTimes.set(key, fallback);
-    }
-    return { type: "Timestamp", value: fallback };
   }
 
   private scheduleServerPump(): void {
@@ -1417,7 +1390,7 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
 }
 
 function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
-  return updatedAtMsFromWriteContext(writeContext) ?? null;
+  return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
 }
 
 function txStateMessage(transactionId: string, completedTxs: Map<string, CompletedTx>): string {
@@ -1650,11 +1623,7 @@ function collectMagicPostFilters(value: unknown, filters: MagicPostFilter[]): vo
     const cmpRecord = cmp as { left?: unknown; op?: unknown; right?: unknown };
     const column = readColumnRef(cmpRecord.left);
     const literal = readLiteral(cmpRecord.right);
-    if (
-      column &&
-      literal &&
-      (isPermissionIntrospectionColumn(column) || isProvenanceMagicTimestampColumn(column))
-    ) {
+    if (column && literal && isPermissionIntrospectionColumn(column)) {
       filters.push({ column, op: String(cmpRecord.op), value: literal as Value });
       return;
     }
@@ -1724,9 +1693,7 @@ function stripSubqueryMagicSelectColumns(subqueries: unknown): void {
 function withoutMagicSelectColumns(select: unknown): unknown {
   if (!Array.isArray(select)) return select;
   return select.filter(
-    (column) =>
-      typeof column !== "string" ||
-      (!isPermissionIntrospectionColumn(column) && !isProvenanceMagicTimestampColumn(column)),
+    (column) => typeof column !== "string" || !isPermissionIntrospectionColumn(column),
   );
 }
 
@@ -1736,10 +1703,7 @@ function stripMagicPredicates(value: unknown): unknown {
   const record = value as Record<string, unknown>;
   if (record.Cmp && typeof record.Cmp === "object") {
     const column = readColumnRef((record.Cmp as { left?: unknown }).left);
-    if (
-      column &&
-      (isPermissionIntrospectionColumn(column) || isProvenanceMagicTimestampColumn(column))
-    ) {
+    if (column && isPermissionIntrospectionColumn(column)) {
       return "True";
     }
   }
@@ -1805,10 +1769,7 @@ function addRequestedMagicColumns(
 ): void {
   if (!Array.isArray(select)) return;
   for (const column of select) {
-    if (
-      typeof column === "string" &&
-      (isPermissionIntrospectionColumn(column) || isProvenanceMagicTimestampColumn(column))
-    ) {
+    if (typeof column === "string" && isPermissionIntrospectionColumn(column)) {
       let columns = requested.get(table);
       if (!columns) {
         columns = new Set();
@@ -2787,32 +2748,19 @@ function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowStat
           name,
           value: decodeField(batch.table, field, batch.descriptor, row.raw, index, schema),
         }));
-      const updatedAt = decodeUpdatedAt(batch.descriptor, row.raw);
-      if (updatedAt) {
-        decoded.push({ name: "$updatedAt", value: updatedAt });
-      }
       const valuesByColumn = new Map(decoded.map(({ name, value }) => [name, value]));
       return withValuesByColumn(
         {
           table: batch.table,
           id: formatUuid(row.rowId),
           values: decoded
-            .filter(({ name }) => !isHiddenIncludeColumn(name))
+            .filter(({ name }) => !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name))
             .map(({ value }) => value),
         },
         valuesByColumn,
       );
     }),
   );
-}
-
-function decodeUpdatedAt(descriptor: DescriptorField[], raw: Uint8Array): Value | undefined {
-  const index = descriptor.findIndex((field) => field.name === "tx_time");
-  if (index < 0) return undefined;
-  const bytes = decodeRecordValue(descriptor, raw, index);
-  if (!bytes || bytes.length < 8) return undefined;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return { type: "Timestamp", value: Number(view.getBigUint64(0, true) >> 16n) * 1_000 };
 }
 
 function rowsFromRelationSnapshot(
@@ -2960,14 +2908,17 @@ function decodeField(
 ): Value {
   const fieldName = publicFieldName(field.name ?? "");
   const column = schema[table]?.columns.find((candidate) => candidate.name === fieldName);
-  const type = magicColumnType(fieldName) ?? column?.column_type;
+  const type =
+    fieldName === "$createdBy" || fieldName === "$updatedBy"
+      ? ({ type: "Uuid" } as const)
+      : (magicColumnType(fieldName) ?? column?.column_type);
   const bytes = decodeRecordValue(descriptor, raw, index);
   if (bytes == null) return { type: "Null" };
   if (!type) return { type: "Bytea", value: bytes };
-  return decodeBytes(type, bytes);
+  return decodeBytes(type, bytes, fieldName);
 }
 
-function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
+function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): Value {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   switch (type.type) {
     case "Boolean":
@@ -2979,7 +2930,12 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":
-      return { type: "Timestamp", value: Number(view.getBigUint64(0, true)) };
+      return {
+        type: "Timestamp",
+        value:
+          Number(view.getBigUint64(0, true)) *
+          (fieldName && isProvenanceMagicColumn(fieldName) ? 1_000 : 1),
+      };
     case "Text":
     case "Json":
     case "Enum":

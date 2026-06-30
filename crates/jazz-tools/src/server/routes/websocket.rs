@@ -1373,7 +1373,7 @@ mod tests {
             (query, attachment)
         }
 
-        fn edge_attachment_is_covered(&self, attachment: QueryAttachment) -> bool {
+        fn edge_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
             self.db.query_attachment_is_covered(attachment)
         }
 
@@ -1522,7 +1522,7 @@ mod tests {
         let mut frames_sent_to_server = 0;
         let mut frames_received_from_server = 0;
         let start = tokio::time::Instant::now();
-        while !client_b.edge_attachment_is_covered(client_b_todos_attachment)
+        while !client_b.edge_attachment_is_covered(&client_b_todos_attachment)
             && start.elapsed() < WS_PUMP_DEADLINE
         {
             let (sent, received) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
@@ -1566,14 +1566,14 @@ mod tests {
         let (client_b_todos, client_b_todos_attachment) = client_b.attach_todos_query();
 
         let start = tokio::time::Instant::now();
-        while !client_b.edge_attachment_is_covered(client_b_todos_attachment)
+        while !client_b.edge_attachment_is_covered(&client_b_todos_attachment)
             && start.elapsed() < WS_PUMP_DEADLINE
         {
             let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
-            client_b.edge_attachment_is_covered(client_b_todos_attachment),
+            client_b.edge_attachment_is_covered(&client_b_todos_attachment),
             "reader query must be covered by the initial empty server response"
         );
         assert!(
@@ -1654,7 +1654,7 @@ mod tests {
         let (client_b_docs, client_b_docs_attachment) = client_b.attach_table_query("docs");
 
         let start = tokio::time::Instant::now();
-        while !client_b.edge_attachment_is_covered(client_b_docs_attachment)
+        while !client_b.edge_attachment_is_covered(&client_b_docs_attachment)
             && start.elapsed() < WS_PUMP_DEADLINE
         {
             let _ = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
@@ -1662,7 +1662,7 @@ mod tests {
         }
 
         assert!(
-            client_b.edge_attachment_is_covered(client_b_docs_attachment),
+            client_b.edge_attachment_is_covered(&client_b_docs_attachment),
             "Bob's docs query must be covered by the websocket route"
         );
         assert!(

@@ -23,7 +23,7 @@ pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlan,
-    RelationEdge, RelationSnapshot,
+    RelationEdge, RelationSnapshot, RowProvenance,
 };
 use crate::peer::PeerState;
 use crate::protocol::{
@@ -433,6 +433,15 @@ where
     /// ```
     pub fn one(&self, prepared: &PreparedQuery) -> Result<Option<CurrentRow>, Error> {
         Ok(self.read(prepared)?.into_iter().next())
+    }
+
+    /// Resolve creator/updater provenance for a row returned by this database.
+    pub fn row_provenance(&self, row: &CurrentRow) -> Result<Option<RowProvenance>, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .row_provenance(row)
+            .map_err(Into::into)
     }
 
     /// Read local settled history at an exact global sequence cut.
