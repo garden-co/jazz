@@ -1,211 +1,218 @@
 #![allow(dead_code)]
 
-//! Unified Jazz query compiler vocabulary.
+//! Destination vocabulary for the unified Jazz query engine.
 //!
-//! This module is intentionally type-first. It names the destination shape for
-//! the ongoing cleanup: every public Jazz query surface is normalized into one
-//! semantic IR, composed with source/frontier and policy context, augmented with
-//! an explicit terminal contract, then lowered onto groove IVM graphs. Existing
-//! query code can move here incrementally, but new row-producing paths should
-//! target these types instead of creating another evaluator.
+//! The intended shape is deliberately small:
+//!
+//! 1. public query surfaces validate into [`QuerySurface`],
+//! 2. callers choose one [`ReadView`] and one [`PolicySubject`],
+//! 3. callers choose a semantic [`TerminalProgram`],
+//! 4. one lowering pass resolves sources, policy, relation semantics, and
+//!    terminal payloads into groove IVM graphs.
+//!
+//! This module is type-first scaffolding for that cleanup. It should not grow a
+//! second evaluator or a second relation AST; `crate::query` owns public query
+//! syntax, while this module names the compiler boundary that all one-shot
+//! reads, subscriptions, sync-serving reads, dry-runs, branch reads, schema
+//! projections, and transaction reads should share.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use groove::db::GraphBuilder;
-use groove::ivm::PreparedShapeId;
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::ColumnType;
 
 use crate::ids::{AuthorId, BranchId, RowUuid, SchemaVersionId};
-use crate::protocol::{ResultRowEntry, SubscriptionKey};
-use crate::query::{
-    AggregateQuery, Binding, BindingId, OrderBy, Predicate, RelationKeyRef, RelationQuery, ShapeId,
-    ValidatedQuery,
-};
-use crate::time::GlobalSeq;
+use crate::protocol::SubscriptionKey;
+use crate::query::{Binding, BindingId, RelationQuery, ShapeId, ValidatedQuery};
+use crate::schema::TableSchema;
+use crate::time::{GlobalSeq, TxTime};
 use crate::tx::{DurabilityTier, Snapshot, TxId};
 
-/// One user/API request after public validation but before semantic lowering.
-#[derive(Clone, Debug)]
-pub(crate) struct QueryEngineRequest {
-    /// Query surface that entered the engine.
+/// One validated API request before semantic lowering.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct QueryProgramRequest {
+    /// User-facing query vocabulary that entered the engine.
     pub(crate) surface: QuerySurface,
-    /// Read, schema, branch, and policy context for this execution.
-    pub(crate) context: QueryContext,
-    /// How the lowered program will be consumed.
-    pub(crate) execution: ExecutionMode,
-    /// Which terminal facts the caller needs from the same semantics.
-    pub(crate) output: OutputContract,
+    /// Exact data view used for source resolution.
+    pub(crate) view: ReadView,
+    /// Identity and claims used by policy augmentation.
+    pub(crate) subject: PolicySubject,
+    /// Semantic terminal program requested from this query.
+    pub(crate) terminal: TerminalProgram,
 }
 
 /// Public query vocabulary accepted by the unified engine.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum QuerySurface {
-    /// Ordinary Jazz query shape plus binding.
+    /// Ordinary Jazz query shape plus binding values.
     Validated {
         /// Validated, schema-stamped query shape.
         shape: ValidatedQuery,
-        /// Binding values for the shape.
+        /// Binding values for this use of the shape.
         binding: Binding,
     },
     /// Output-changing relation query used by alpha-style `hopTo`/`gather`.
     Relation {
-        /// Relation query to normalize into the same relational IR.
+        /// Relation query to normalize and lower through the same source engine.
         query: RelationQuery,
     },
 }
 
-/// Context dimensions that must not create separate query engines.
-#[derive(Clone, Debug)]
-pub(crate) struct QueryContext {
-    /// Read frontier/source freshness requested by the caller.
-    pub(crate) frontier: ReadFrontier,
-    /// Schema/lens view used to interpret logical tables and columns.
-    pub(crate) schema: SchemaView,
-    /// Branch or base-data view used by source resolution.
-    pub(crate) branch: BranchView,
-    /// Policy/claims context used for read narrowing or dry-run checks.
-    pub(crate) policy: PolicyContext,
-}
-
-/// Read frontier selected before lowering query algebra.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ReadFrontier {
-    /// Local currency, including this node's pending committed writes.
-    Local,
-    /// Edge-accepted state.
-    Edge,
-    /// Globally accepted state.
-    Global,
-    /// Historical global cut.
+/// Concrete read view selected before source resolution.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ReadView {
+    /// Current rows at one durability tier and schema version.
+    Current {
+        /// Local, edge, or global source currency.
+        tier: DurabilityTier,
+        /// Schema version used to interpret logical tables and columns.
+        schema: SchemaVersionId,
+    },
+    /// Historical global cut at one schema version.
     Historical {
         /// Inclusive global sequence cut.
         position: GlobalSeq,
+        /// Schema version used to interpret logical tables and columns.
+        schema: SchemaVersionId,
     },
-    /// Dotted snapshot reference used by exclusive and future branch reads.
+    /// Dotted snapshot ref at one schema version.
     Snapshot {
         /// Snapshot frontier.
         snapshot: Snapshot,
+        /// Schema version used to interpret logical tables and columns.
+        schema: SchemaVersionId,
     },
-    /// Exclusive transaction read: snapshot base plus the transaction overlay.
-    TransactionOverlay {
+    /// Exclusive transaction read over a snapshot base plus overlay writes.
+    Transaction {
         /// Stable base snapshot for the transaction.
         base: Snapshot,
+        /// Overlay and read-tracking behavior for this transaction.
+        overlay: TransactionOverlay,
+        /// Schema version used to interpret logical tables and columns.
+        schema: SchemaVersionId,
+    },
+    /// Branch read. The branch record owns its frozen base snapshot.
+    Branch {
+        /// Branch identity.
+        branch: BranchId,
+        /// Schema version used to interpret logical tables and columns.
+        schema: SchemaVersionId,
+    },
+    /// Read through a maintained usage-site result set.
+    SettledResultSet {
+        /// Usage-site subscription whose settled rows are the root source.
+        subscription: SubscriptionKey,
+        /// Schema version used to interpret logical tables and columns.
+        schema: SchemaVersionId,
     },
 }
 
-impl ReadFrontier {
-    /// Return the current durability tier when this is a current read frontier.
-    pub(crate) fn durability_tier(&self) -> Option<DurabilityTier> {
+impl ReadView {
+    /// Return the schema version shared by this read view.
+    pub(crate) fn schema(&self) -> SchemaVersionId {
         match self {
-            Self::Local => Some(DurabilityTier::Local),
-            Self::Edge => Some(DurabilityTier::Edge),
-            Self::Global => Some(DurabilityTier::Global),
-            Self::Historical { .. } | Self::Snapshot { .. } | Self::TransactionOverlay { .. } => {
-                None
-            }
+            Self::Current { schema, .. }
+            | Self::Historical { schema, .. }
+            | Self::Snapshot { schema, .. }
+            | Self::Transaction { schema, .. }
+            | Self::Branch { schema, .. }
+            | Self::SettledResultSet { schema, .. } => *schema,
+        }
+    }
+
+    /// Return the current durability tier when this is a current read.
+    pub(crate) fn current_tier(&self) -> Option<DurabilityTier> {
+        match self {
+            Self::Current { tier, .. } => Some(*tier),
+            Self::Historical { .. }
+            | Self::Snapshot { .. }
+            | Self::Transaction { .. }
+            | Self::Branch { .. }
+            | Self::SettledResultSet { .. } => None,
         }
     }
 }
 
-/// Schema view used by source resolution.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SchemaView {
-    /// Node's current catalogue schema.
-    Current,
-    /// Query validated against a specific schema version.
-    Version {
-        /// Schema version used by the query.
-        version: SchemaVersionId,
-    },
-    /// Logical read projected through migration lenses into `to`.
-    Projected {
-        /// Stored/source schema version.
-        from: SchemaVersionId,
-        /// Requested/read schema version.
-        to: SchemaVersionId,
-    },
+/// Transaction overlay behavior selected by exclusive transaction reads.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TransactionOverlay {
+    /// Transaction whose pending writes are visible, when already minted.
+    pub(crate) tx_id: Option<TxId>,
+    /// Whether predicate/point reads must be recorded for serializability.
+    pub(crate) record_reads: bool,
 }
 
-/// Branch/base data view used by source resolution.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum BranchView {
-    /// Main/base branch.
-    Main,
-    /// Overlay branch over a base snapshot.
-    Branch {
-        /// Branch identity.
-        branch: BranchId,
-        /// Optional base snapshot ref for this branch.
-        base: Option<Snapshot>,
-    },
-}
-
-/// Authenticated policy context for read narrowing and dry-run APIs.
+/// Identity used by policy augmentation.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum PolicyContext {
-    /// System reads bypass RLS.
+pub(crate) enum PolicySubject {
+    /// Internal/system reads bypass row-level policy.
     System,
-    /// Non-system authenticated identity with trusted session/admission claims.
-    Authenticated {
-        /// Identity used to evaluate read/write policy.
-        identity: AuthorId,
-        /// Server-derived claims, never caller-supplied query bindings.
+    /// Authenticated identity plus trusted server/session claims.
+    Identity {
+        /// Identity whose permissions are being evaluated.
+        permission_subject: AuthorId,
+        /// Trusted claims available to policy queries.
         claims: BTreeMap<String, Value>,
-        /// Trust boundary for this policy context.
-        trust: PolicyTrust,
+        /// Author recorded on writes, when it differs from the permission subject.
+        attribution: Option<AuthorId>,
     },
 }
 
-/// Trust boundary attached to a policy context.
+/// Semantic terminal program requested from one lowered query.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TerminalProgram {
+    /// Ordinary row materialization for one-shot `query()` calls.
+    Rows,
+    /// Relation payload materialization for alpha-style relation APIs.
+    RelationSnapshot(RelationSnapshotTerminals),
+    /// Maintained application/sync view with explicit terminal payloads.
+    MaintainedView(MaintainedViewTerminals),
+    /// Dry-run policy probe over the same source and policy machinery.
+    PolicyProbe(PolicyProbe),
+}
+
+/// Terminal rows needed by relation snapshot queries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelationSnapshotTerminals {
+    /// Whether relation edges are part of the result payload.
+    pub(crate) relation_edges: bool,
+    /// Whether non-root payload rows are part of the result payload.
+    pub(crate) payload_rows: bool,
+}
+
+/// Maintained terminal contract for subscriptions and query-driven sync.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MaintainedViewTerminals {
+    /// Usage-site subscription, when this program is serving a concrete peer.
+    pub(crate) usage_site: Option<SubscriptionKey>,
+    /// First-delivery behavior for application callbacks.
+    pub(crate) delivery: SubscriptionDelivery,
+    /// Payload schemas emitted by terminal graphs.
+    pub(crate) payloads: TerminalPayloadSchemas,
+    /// Coverage facts required by the caller.
+    pub(crate) coverage: CoverageRequest,
+}
+
+/// Subscription delivery semantics that do not alter source lowering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PolicyTrust {
-    /// Ordinary client/session context.
-    Session,
-    /// Trusted backend context.
-    TrustedBackend,
-    /// Internal relay/system context.
-    System,
-}
-
-/// How the compiled program will be executed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ExecutionMode {
-    /// One-shot read over the chosen frontier.
-    OneShot,
-    /// Maintained application-facing subscription.
-    Subscription {
-        /// Subscription tier/source frontier.
-        tier: DurabilityTier,
-        /// First-delivery and subsequent event behavior.
-        delivery: SubscriptionDelivery,
-    },
-    /// Server-side query-driven sync for a usage-site subscription.
-    SyncServing {
-        /// Usage-site subscription key.
-        subscription: SubscriptionKey,
-        /// Whether this execution is a reset/rehydrate attach.
-        reset_result_set: bool,
-    },
-    /// Read inside an exclusive transaction, recording predicate reads.
-    TransactionRead,
-    /// Hypothetical policy evaluation without ingesting a mutation.
-    DryRun {
-        /// Policy operation being probed.
-        operation: DryRunOperation,
-    },
-}
-
-/// Delivery behavior for application-facing subscriptions.
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SubscriptionDelivery {
-    /// Local UI delivery, including synchronous local write visibility.
+    /// Publish synchronously for local UI work when local writes commit.
     LocalImmediate,
-    /// Wait until the requested upstream tier has settled before first event.
+    /// Wait for a tier to settle before the first publication.
     Settled {
-        /// Tier required for first publication.
+        /// Durability tier required before first delivery.
         tier: DurabilityTier,
     },
+}
+
+/// Operation tested by a dry-run policy probe.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PolicyProbe {
+    /// Policy operation being probed.
+    pub(crate) operation: DryRunOperation,
+    /// Candidate row/change evaluated by the policy program.
+    pub(crate) candidate: PolicyCandidate,
 }
 
 /// Operation tested by a dry-run policy probe.
@@ -221,387 +228,398 @@ pub(crate) enum DryRunOperation {
     Delete,
 }
 
-/// Terminal facts requested from one semantic program.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OutputContract {
-    /// Result shape expected by the caller.
-    pub(crate) shape: OutputShape,
-    /// Terminal events/facts required by the execution mode.
-    pub(crate) terminal: TerminalContract,
-}
-
-/// User-visible result material requested from a query.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OutputShape {
-    /// Root/current rows only.
-    Rows,
-    /// Root rows plus relation payload rows and edges.
-    RelationPayload,
-    /// Rows plus matched include path material.
-    MatchedPaths,
-    /// No user rows; caller only needs policy/dry-run answer.
-    PolicyDecision,
-}
-
-/// Side-output facts the maintained/sync layer needs.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TerminalContract {
-    /// Required terminal event kinds.
-    pub(crate) events: BTreeSet<TerminalEventKind>,
-}
-
-impl TerminalContract {
-    /// User rows only, with no maintained/sync side outputs.
-    pub(crate) fn rows_only() -> Self {
-        Self::default()
-    }
-
-    /// Maintained subscription/sync terminal contract.
-    pub(crate) fn maintained_subscription() -> Self {
-        Self {
-            events: [
-                TerminalEventKind::ResultMembership,
-                TerminalEventKind::MatchedPath,
-                TerminalEventKind::RelationEdge,
-                TerminalEventKind::VersionContent,
-                TerminalEventKind::VersionDeletion,
-                TerminalEventKind::ReplacementContent,
-                TerminalEventKind::ReplacementDeletion,
-                TerminalEventKind::PolicyWitness,
-                TerminalEventKind::CoverageFact,
-                TerminalEventKind::ExclusiveViewCompleteness,
-            ]
-            .into_iter()
-            .collect(),
-        }
-    }
-}
-
-/// Typed event classes emitted by maintained terminal graphs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum TerminalEventKind {
-    /// Result-set membership `(table, row_uuid, tx_id)`.
-    ResultMembership,
-    /// Matched include path or join witness.
-    MatchedPath,
-    /// Relation payload edge for array subqueries / relation roots.
-    RelationEdge,
-    /// Content version witness required for payload shipping.
-    VersionContent,
-    /// Deletion-register witness required for payload shipping.
-    VersionDeletion,
-    /// Replacement content winner required when a visible row leaves/changes.
-    ReplacementContent,
-    /// Replacement deletion winner required when a visible row leaves/changes.
-    ReplacementDeletion,
-    /// Policy dependency that can grant or revoke visibility.
-    PolicyWitness,
-    /// Source/table/key coverage fact.
-    CoverageFact,
-    /// View-scoped completeness for an exclusive transaction payload.
-    ExclusiveViewCompleteness,
-}
-
-/// Normalized Jazz relational IR before physical lowering to groove.
+/// Candidate row or mutation used by dry-run policy checks.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum JazzRel {
-    /// Scan a logical table through source resolution.
-    Source(SourceDescriptor),
-    /// Filter rows with a Jazz predicate.
-    Filter {
-        /// Input relation.
-        input: Box<JazzRel>,
-        /// Predicate to evaluate.
-        predicate: Predicate,
+pub(crate) enum PolicyCandidate {
+    /// Existing row visibility check.
+    Read {
+        /// Logical table.
+        table: String,
+        /// Row identity.
+        row: RowUuid,
     },
-    /// Project or retarget row fields.
-    Project {
-        /// Input relation.
-        input: Box<JazzRel>,
-        /// Projected fields.
-        fields: Vec<ProjectionField>,
+    /// Proposed insert.
+    Insert {
+        /// Logical table.
+        table: String,
+        /// Optional caller-chosen row identity.
+        row: Option<RowUuid>,
+        /// Proposed application cells.
+        new_values: BTreeMap<String, Value>,
     },
-    /// Relational join.
-    Join {
-        /// Left input.
-        left: Box<JazzRel>,
-        /// Right input.
-        right: Box<JazzRel>,
-        /// Join keys.
-        on: Vec<JoinCondition>,
-        /// Join kind.
-        kind: JoinKind,
+    /// Proposed update, with old and new cells available to policy clauses.
+    Update {
+        /// Logical table.
+        table: String,
+        /// Row identity.
+        row: RowUuid,
+        /// Visible cells before the update.
+        old_values: BTreeMap<String, Value>,
+        /// Proposed cells after the update.
+        new_values: BTreeMap<String, Value>,
     },
-    /// Anti-join.
-    AntiJoin {
-        /// Left input.
-        left: Box<JazzRel>,
-        /// Right input.
-        right: Box<JazzRel>,
-        /// Join keys.
-        on: Vec<JoinCondition>,
-    },
-    /// Union of compatible inputs.
-    Union {
-        /// Inputs to union.
-        inputs: Vec<JazzRel>,
-    },
-    /// Distinct rows by key.
-    Distinct {
-        /// Input relation.
-        input: Box<JazzRel>,
-        /// Stable distinct key.
-        key: Vec<KeyExpr>,
-    },
-    /// Recursive reachability/gather expression.
-    Recursive {
-        /// Initial seed relation.
-        seed: Box<JazzRel>,
-        /// Step relation using the frontier source.
-        step: Box<JazzRel>,
-        /// Frontier key.
-        frontier_key: Vec<KeyExpr>,
-        /// Maximum iteration count.
-        max_depth: usize,
-    },
-    /// Ordered finite window.
-    TopBy {
-        /// Input relation.
-        input: Box<JazzRel>,
-        /// User order terms plus stable ties.
-        order_by: Vec<OrderBy>,
-        /// Offset retained in the window.
-        offset: usize,
-        /// Finite limit retained in the window.
-        limit: usize,
-    },
-    /// Aggregate result.
-    Aggregate {
-        /// Input relation.
-        input: Box<JazzRel>,
-        /// Aggregate shape.
-        aggregate: AggregateQuery,
-    },
-    /// Attach typed terminal facts to an input relation.
-    Terminal {
-        /// Input relation.
-        input: Box<JazzRel>,
-        /// Terminal contract to emit.
-        contract: TerminalContract,
+    /// Proposed delete, with old cells available to policy clauses.
+    Delete {
+        /// Logical table.
+        table: String,
+        /// Row identity.
+        row: RowUuid,
+        /// Visible cells before deletion.
+        old_values: BTreeMap<String, Value>,
     },
 }
 
-/// Logical table source before it becomes a concrete groove graph.
+/// Typed terminal payload schemas emitted by maintained graphs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TerminalPayloadSchemas {
+    /// Root result-set membership rows.
+    pub(crate) result_membership: Option<ResultMembershipSchema>,
+    /// Matched include/join path rows.
+    pub(crate) matched_paths: Option<MatchedPathSchema>,
+    /// Relation edge rows for array subqueries and relation APIs.
+    pub(crate) relation_edges: Option<RelationEdgeSchema>,
+    /// Content/deletion version witnesses needed for payload shipping.
+    pub(crate) version_witnesses: Option<VersionWitnessSchemas>,
+    /// Replacement witnesses for visible rows that leave or change.
+    pub(crate) replacement_witnesses: Option<VersionWitnessSchemas>,
+    /// Policy dependency witnesses that can grant or revoke visibility.
+    pub(crate) policy_witnesses: Option<PolicyWitnessSchema>,
+}
+
+/// Root result membership terminal row schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourceDescriptor {
-    /// Logical table requested by the query.
+pub(crate) struct ResultMembershipSchema {
+    /// Logical table field in the terminal row.
+    pub(crate) table_field: String,
+    /// Row identity field in the terminal row.
+    pub(crate) row_field: String,
+    /// Retained binding/routing parameter fields.
+    pub(crate) routing_param_fields: BTreeSet<String>,
+}
+
+/// Matched include/join path terminal row schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MatchedPathSchema {
+    /// Root result row fields.
+    pub(crate) root: ResultMembershipSchema,
+    /// Witness row fields.
+    pub(crate) witness: ResultMembershipSchema,
+    /// Include or join path field.
+    pub(crate) path_field: String,
+    /// Whether a missing witness is represented as a hole.
+    pub(crate) allows_holes: bool,
+}
+
+/// Relation edge terminal row schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelationEdgeSchema {
+    /// Source row fields.
+    pub(crate) source: ResultMembershipSchema,
+    /// Relation/array-subquery name field.
+    pub(crate) relation_field: String,
+    /// Target row fields.
+    pub(crate) target: ResultMembershipSchema,
+    /// Stable edge order field, when ordering matters.
+    pub(crate) order_field: Option<String>,
+}
+
+/// Content/deletion terminal witness schemas.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VersionWitnessSchemas {
+    /// Content-register witness schema.
+    pub(crate) content: Option<VersionWitnessSchema>,
+    /// Deletion-register witness schema.
+    pub(crate) deletion: Option<VersionWitnessSchema>,
+}
+
+/// One version-witness terminal row schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VersionWitnessSchema {
+    /// Record descriptor emitted by the terminal graph.
+    pub(crate) descriptor: RecordDescriptor,
+    /// Fields that identify the concrete row version.
+    pub(crate) identity: VersionIdentityFields,
+}
+
+/// Field names needed to identify a concrete row version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VersionIdentityFields {
+    /// Logical table field.
+    pub(crate) table_field: String,
+    /// Row identity field.
+    pub(crate) row_field: String,
+    /// Transaction HLC field.
+    pub(crate) tx_time_field: String,
+    /// Transaction node field.
+    pub(crate) tx_node_field: String,
+    /// Schema version field.
+    pub(crate) schema_field: String,
+    /// Version layer field.
+    pub(crate) layer_field: String,
+}
+
+/// Policy dependency witness terminal row schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyWitnessSchema {
+    /// Policy clause or branch field.
+    pub(crate) policy_path_field: String,
+    /// Witness row fields.
+    pub(crate) witness: ResultMembershipSchema,
+}
+
+/// Coverage information requested from a maintained terminal graph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CoverageRequest {
+    /// Coverage identity shared by equivalent usage-site subscriptions.
+    pub(crate) key: Option<CoverageKey>,
+    /// Source/table coverage facts required by the peer or runtime.
+    pub(crate) source_rows: bool,
+    /// View-scoped completeness facts for partial exclusive transaction payloads.
+    pub(crate) view_complete_exclusive: bool,
+}
+
+/// Stable grouping key for equivalent maintained coverage work.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CoverageKey {
+    /// Registered shape id.
+    pub(crate) shape_id: ShapeId,
+    /// Registered binding id.
+    pub(crate) binding_id: BindingId,
+    /// Read view identity.
+    pub(crate) view: ReadView,
+}
+
+/// Logical source request made by query, policy, or terminal lowering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceRequest {
+    /// Logical table requested by the compiler.
     pub(crate) table: String,
-    /// Read source selected for that table.
-    pub(crate) source: ResolvedSource,
-    /// Output row descriptor expected after source resolution.
-    pub(crate) row_shape: RowShape,
+    /// Why this source is being read.
+    pub(crate) role: SourceRole,
+    /// Data view for this source.
+    pub(crate) view: ReadView,
+    /// Deletion visibility expected from this source.
+    pub(crate) deletion_scope: DeletionScope,
 }
 
-/// Concrete source category selected for a logical table.
+/// Role of a table source in the lowered program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceRole {
+    /// Root rows returned to the user.
+    Root,
+    /// Rows needed to prove joins/includes/payloads.
+    Witness,
+    /// Rows used only for policy augmentation.
+    Policy,
+    /// Rows emitted by relation subprograms.
+    Relation,
+    /// Rows needed to ship replacement winners.
+    Replacement,
+    /// Large-value/content extent authorization source.
+    LargeValue,
+}
+
+/// Deletion visibility for source resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeletionScope {
+    /// Only currently visible rows.
+    VisibleOnly,
+    /// Include deletion markers at the root result source.
+    IncludeDeletedRoot,
+    /// Include deletion markers for witness/replacement source work.
+    IncludeDeletedWitness,
+}
+
+/// Resolver that turns logical Jazz source requests into groove inputs.
+pub(crate) trait SourceResolver {
+    /// Resolve a source request into a concrete source plan and row shape.
+    fn resolve_source(
+        &mut self,
+        request: &SourceRequest,
+    ) -> Result<ResolvedSource, SourceResolutionError>;
+}
+
+/// Concrete source selected for one logical source request.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ResolvedSource {
+    /// Logical table schema after schema/lens resolution.
+    pub(crate) table_schema: TableSchema,
+    /// Groove-level source composition.
+    pub(crate) plan: SourcePlan,
+    /// Canonical row shape emitted by the source plan.
+    pub(crate) row_shape: SourceRowShape,
+}
+
+/// Groove source composition before operator lowering.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SourcePlan {
+    /// Concrete groove graph source.
+    Graph {
+        /// Source graph.
+        graph: GraphBuilder,
+    },
+    /// Union of schema partitions or compatible source fragments.
+    Union {
+        /// Source fragments.
+        inputs: Vec<SourcePlan>,
+    },
+    /// Overlay source over a base source, used for branches and transactions.
+    Overlay {
+        /// Overlay kind.
+        kind: SourceOverlayKind,
+        /// Overlay rows.
+        overlay: Box<SourcePlan>,
+        /// Base rows.
+        base: Box<SourcePlan>,
+    },
+    /// Schema/lens projection over one source.
+    Projected {
+        /// Source before projection.
+        input: Box<SourcePlan>,
+        /// Lens path used to project rows.
+        lens: SchemaLensPath,
+        /// Target schema version.
+        target_schema: SchemaVersionId,
+    },
+    /// Settled result-set source for rehydrate/reset and query-driven sync.
+    SettledResultSet {
+        /// Usage-site subscription.
+        subscription: SubscriptionKey,
+    },
+    /// Capability-gated placeholder for a source shape not yet lowered.
+    Unsupported {
+        /// Explicit source gap.
+        gap: SourceGap,
+    },
+}
+
+/// Overlay source category.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ResolvedSource {
-    /// Current visible rows at a durability tier.
-    VisibleCurrent {
-        /// Durability tier.
-        tier: DurabilityTier,
-    },
-    /// Current root rows including deletion marker.
-    IncludeDeletedCurrent {
-        /// Durability tier.
-        tier: DurabilityTier,
-    },
-    /// Historical visible rows at a global cut.
-    HistoricalCurrent {
-        /// Inclusive global sequence cut.
-        position: GlobalSeq,
-    },
-    /// Branch overlay rows.
-    BranchOverlay {
-        /// Branch identity.
-        branch: BranchId,
-    },
-    /// Exclusive transaction overlay rows.
-    TransactionOverlay,
-    /// Inline rows used as a staging representation for source gaps.
-    InlineSnapshot,
+pub(crate) enum SourceOverlayKind {
+    /// Branch overlay rows over the branch base.
+    Branch(BranchId),
+    /// Exclusive transaction overlay rows over its snapshot base.
+    Transaction(Option<TxId>),
+}
+
+/// Schema/lens path followed by a projected source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SchemaLensPath {
+    /// Source schema version.
+    pub(crate) from: SchemaVersionId,
+    /// Intermediate lens/schema versions, in application order.
+    pub(crate) via: Vec<SchemaVersionId>,
+    /// Target schema version.
+    pub(crate) to: SchemaVersionId,
 }
 
 /// Canonical row shape emitted by source resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RowShape {
+pub(crate) struct SourceRowShape {
+    /// Logical table emitted by this source.
+    pub(crate) table: String,
     /// Descriptor of the record emitted by this source.
     pub(crate) descriptor: RecordDescriptor,
     /// Field containing row identity.
     pub(crate) row_uuid_field: String,
-    /// Field containing content transaction time when present.
-    pub(crate) content_tx_time_field: Option<String>,
-    /// Field containing content transaction node alias when present.
-    pub(crate) content_tx_node_field: Option<String>,
-    /// Whether this source includes a deletion marker field.
+    /// Field containing schema version, when present.
+    pub(crate) schema_version_field: Option<String>,
+    /// Field containing content transaction time, when present.
+    pub(crate) tx_time_field: Option<String>,
+    /// Field containing content transaction node, when present.
+    pub(crate) tx_node_field: Option<String>,
+    /// Whether this source carries deletion marker state.
     pub(crate) includes_deletion_marker: bool,
 }
 
-/// Projected output field.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ProjectionField {
-    /// Source expression.
-    pub(crate) expr: ValueExpr,
-    /// Output field name.
-    pub(crate) alias: String,
-}
-
-/// Value expression used by normalized relational nodes.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ValueExpr {
-    /// Named column.
-    Column(String),
-    /// Stable row id.
-    RowId,
-    /// Literal value.
-    Literal(Value),
-    /// Query binding parameter.
-    Param(String),
-    /// Server-derived claim.
-    Claim(String),
-}
-
-/// Join condition between two inputs.
+/// Source resolution failure that must not fall back to a different engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct JoinCondition {
-    /// Left key expression.
-    pub(crate) left: KeyExpr,
-    /// Right key expression.
-    pub(crate) right: KeyExpr,
+pub(crate) struct SourceResolutionError {
+    /// Source request that failed.
+    pub(crate) request: Box<SourceRequest>,
+    /// Explicit unsupported source shape.
+    pub(crate) gap: SourceGap,
 }
 
-/// Join kind represented by the unified IR.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum JoinKind {
-    /// Inner join.
-    Inner,
-    /// Left join, capability-gated until maintained semantics are implemented.
-    Left,
-}
-
-/// Stable key expression for joins, distinct, and recursion.
+/// Source-resolution gap.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum KeyExpr {
-    /// Named column key.
-    Column(String),
-    /// Row id key.
-    RowId,
-    /// Relation key reference from alpha-style relation IR.
-    Relation(RelationKeyRef),
+pub(crate) enum SourceGap {
+    /// Historical source cannot yet be represented incrementally.
+    Historical,
+    /// Snapshot source includes local overlays or dots not yet represented.
+    SnapshotRef,
+    /// Schema/lens fanout or projection cannot yet be represented.
+    SchemaProjection,
+    /// Branch overlay source cannot yet be represented.
+    BranchOverlay,
+    /// Transaction overlay source cannot yet be represented.
+    TransactionOverlay,
+    /// Settled result-set source cannot yet be represented.
+    SettledResultSet,
 }
 
-/// Parameter domain for a prepared program.
+/// Parameter domains attached to one lowered graph.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ParameterDomain {
     /// User-supplied binding parameters.
     pub(crate) user_params: BTreeMap<String, ColumnType>,
     /// Server-derived hidden parameters such as claims.
     pub(crate) hidden_params: BTreeMap<String, ColumnType>,
-    /// Parameters retained in terminal rows for binding routing.
+    /// Parameters retained in terminal rows for usage-site routing.
     pub(crate) routing_params: BTreeSet<String>,
 }
 
-/// Capability verdict for the current implementation of a program.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CapabilityPlan {
-    /// Whether the program can be served as a maintained subscription.
-    pub(crate) maintained_subscription: Capability,
-    /// Whether the program can be executed as a one-shot read.
-    pub(crate) one_shot: Capability,
-    /// Whether the program can produce sync terminal facts.
-    pub(crate) sync_terminal: Capability,
-}
-
-/// Capability status for one execution mode.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Capability {
-    /// Supported by the unified lowering path.
-    Supported,
-    /// Not yet supported; caller must fail loudly instead of falling back.
-    Unsupported {
-        /// Stable diagnostic reason.
-        reason: UnsupportedReason,
-    },
-}
-
-/// Reason a shape is not yet supported by the unified maintained path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum UnsupportedReason {
-    /// Source/frontier is not yet representable as a maintained groove source.
-    Source(SourceGap),
-    /// Operator is not yet represented in maintained groove lowering.
-    Operator(String),
-    /// Terminal facts requested by the caller are not yet emitted.
-    Terminal(TerminalEventKind),
-    /// Policy composition for this shape is not yet lowered.
-    Policy(String),
-}
-
-/// Source-resolution gap.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SourceGap {
-    /// Historical source cannot yet be maintained incrementally.
-    Historical,
-    /// Schema-projected/lensed source cannot yet be maintained incrementally.
-    SchemaProjected,
-    /// Branch overlay source cannot yet be maintained incrementally.
-    BranchOverlay,
-    /// Transaction overlay source cannot yet be maintained incrementally.
-    TransactionOverlay,
-}
-
-/// Result of compiling one query request.
+/// Result of lowering one query program.
 #[derive(Clone, Debug)]
-pub(crate) struct CompiledQueryProgram {
+pub(crate) struct QueryProgram {
     /// Original request.
-    pub(crate) request: QueryEngineRequest,
-    /// Normalized semantic IR after policy/source composition.
-    pub(crate) logical: JazzRel,
-    /// Parameter domain used by any prepared/routed groove program.
-    pub(crate) parameters: ParameterDomain,
-    /// Concrete groove graphs for the requested execution.
-    pub(crate) physical: PhysicalProgram,
-    /// Capability verdicts for supported execution modes.
-    pub(crate) capabilities: CapabilityPlan,
-    /// Human-readable explain plan fragments for debugging and tests.
+    pub(crate) request: QueryProgramRequest,
+    /// Groove graph and its boundary contracts.
+    pub(crate) lowered: LoweredGraph,
+    /// Capability status for the exact requested program.
+    pub(crate) capability: CapabilityReport,
+    /// Human-readable debugging and test artifact.
     pub(crate) explain: ExplainPlan,
 }
 
-/// Groove-level program emitted by the Jazz compiler.
+/// Groove graph plus the semantic contracts needed to consume it.
 #[derive(Clone, Debug)]
-pub(crate) enum PhysicalProgram {
-    /// Single graph, used by one-shot reads and simple subscriptions.
-    Graph {
-        /// Executable groove graph.
-        graph: GraphBuilder,
-    },
-    /// Prepared graph with a groove binding shape.
-    Prepared {
-        /// Prepared shape id.
-        shape: PreparedShapeId,
-        /// Names in binding order.
-        param_names: Vec<String>,
-        /// Types in binding order.
-        param_types: Vec<ColumnType>,
-    },
-    /// Maintained terminal graph plus optional routing graph.
-    MaintainedTerminal {
-        /// Public terminal event graph.
-        terminal_graph: GraphBuilder,
-        /// Routing graph retaining binding parameters for multi-binding reuse.
-        routing_graph: Option<GraphBuilder>,
-        /// Terminal contract decoded from the terminal graph.
-        contract: TerminalContract,
-    },
+pub(crate) struct LoweredGraph {
+    /// Executable groove graph.
+    pub(crate) graph: GraphBuilder,
+    /// Parameter domains expected by the graph.
+    pub(crate) parameters: ParameterDomain,
+    /// Terminal payload schemas emitted by the graph.
+    pub(crate) terminals: TerminalPayloadSchemas,
+}
+
+/// Capability status for the requested program.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CapabilityReport {
+    /// Unsupported pieces. An empty list means the requested program is supported.
+    pub(crate) gaps: Vec<UnsupportedReason>,
+}
+
+impl CapabilityReport {
+    /// Whether the requested program can run on the unified lowering path.
+    pub(crate) fn is_supported(&self) -> bool {
+        self.gaps.is_empty()
+    }
+}
+
+/// Reason a request is not yet supported by unified lowering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UnsupportedReason {
+    /// Source/frontier/schema view is not yet representable.
+    Source(SourceGap),
+    /// Query/relation operator is not yet represented.
+    Operator(String),
+    /// Requested terminal payload is not yet emitted.
+    Terminal(String),
+    /// Policy composition is not yet lowered.
+    Policy(String),
+    /// Runtime contract is not yet connected to the lowered graph.
+    Runtime(String),
 }
 
 /// Debug artifact for query-engine tests and design audits.
@@ -613,93 +631,34 @@ pub(crate) struct ExplainPlan {
     pub(crate) sources: Vec<String>,
     /// Policy rewrite decisions.
     pub(crate) policy: Vec<String>,
+    /// Terminal payload decisions.
+    pub(crate) terminals: Vec<String>,
     /// Capability decisions.
     pub(crate) capabilities: Vec<String>,
     /// Physical graph summaries.
     pub(crate) physical: Vec<String>,
 }
 
-/// Subscriber-side result cache keyed by the same shape/binding vocabulary.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SettledResultCache {
-    /// Settled result entries by usage-site subscription.
-    pub(crate) by_subscription: BTreeMap<SubscriptionKey, BTreeSet<ResultRowEntry>>,
-    /// Binding ids represented by each shared coverage group.
-    pub(crate) coverage_groups: BTreeMap<(ShapeId, BindingId), BTreeSet<SubscriptionKey>>,
+/// Concrete row-version identity used by decoded terminal witnesses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct VersionIdentity {
+    /// Row identity.
+    pub(crate) row: RowUuid,
+    /// Transaction HLC.
+    pub(crate) tx_time: TxTime,
+    /// Transaction id.
+    pub(crate) tx_id: TxId,
+    /// Schema version of the stored version.
+    pub(crate) schema: SchemaVersionId,
+    /// Version layer.
+    pub(crate) layer: VersionLayer,
 }
 
-/// Typed maintained event after decoding a terminal row.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MaintainedEvent {
-    /// Result membership event.
-    Result(ResultRowEntry),
-    /// Matched include/join path witness.
-    MatchedPath {
-        /// Source result row.
-        source: ResultRowEntry,
-        /// Witness row.
-        witness: ResultRowEntry,
-    },
-    /// Relation payload edge.
-    RelationEdge {
-        /// Source table.
-        source_table: String,
-        /// Source row.
-        source_row: RowUuid,
-        /// Relation name.
-        relation: String,
-        /// Target table.
-        target_table: String,
-        /// Target row.
-        target_row: RowUuid,
-    },
-    /// Version witness.
-    Version {
-        /// Version transaction id.
-        tx_id: TxId,
-        /// Version layer.
-        layer: TerminalVersionLayer,
-    },
-    /// Replacement witness for a row.
-    Replacement {
-        /// Table containing the row.
-        table: String,
-        /// Row identity.
-        row: RowUuid,
-        /// Replacement layer.
-        layer: TerminalVersionLayer,
-    },
-    /// Coverage or completeness fact.
-    Coverage(CoverageFact),
-}
-
-/// Version layer carried by terminal witness events.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TerminalVersionLayer {
-    /// Content version.
+/// Version layer carried by terminal witness rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum VersionLayer {
+    /// Content-register version.
     Content,
     /// Deletion-register version.
     Deletion,
-}
-
-/// Query/source coverage fact.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CoverageFact {
-    /// A table/key set is covered for a subscription.
-    SourceRows {
-        /// Logical table.
-        table: String,
-        /// Covered row ids when known exactly.
-        rows: BTreeSet<RowUuid>,
-    },
-    /// A transaction is complete for this maintained view only.
-    ViewCompleteExclusive {
-        /// Exclusive transaction id.
-        tx_id: TxId,
-    },
-    /// Complete transaction payload has been shipped to a peer.
-    CompleteTransaction {
-        /// Transaction id.
-        tx_id: TxId,
-    },
 }
