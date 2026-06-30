@@ -192,6 +192,32 @@ fn joined_current_read_view() -> RequestedReadView {
     }
 }
 
+fn path_current_read_view() -> RequestedReadView {
+    let root = source("todos", SourceRole::Root);
+    let child = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
+    ReadView {
+        read_schema: schema(0x10),
+        policy_schema: schema(0x11),
+        sources: BTreeMap::from([
+            (root, requested_current_source(DurabilityTier::Global)),
+            (child, requested_current_source(DurabilityTier::Global)),
+        ]),
+    }
+}
+
+fn recursive_current_read_view() -> RequestedReadView {
+    let seed = source("todos", SourceRole::RecursiveSeed("seed".to_owned()));
+    let step = source("todos", SourceRole::RecursiveStep("step".to_owned()));
+    ReadView {
+        read_schema: schema(0x10),
+        policy_schema: schema(0x11),
+        sources: BTreeMap::from([
+            (seed, requested_current_source(DurabilityTier::Global)),
+            (step, requested_current_source(DurabilityTier::Global)),
+        ]),
+    }
+}
+
 fn snapshot() -> Snapshot {
     Snapshot {
         owner: NodeUuid::from_bytes([0x33; 16]),
@@ -329,7 +355,7 @@ fn compiler_boundary_has_no_usage_or_lifecycle_mode() {
         err.explain
             .capabilities
             .iter()
-            .any(|line| line.contains("table-rooted current"))
+            .any(|line| line.contains("current-source row-set"))
     );
 }
 
@@ -743,6 +769,234 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                         && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
                 )
     ));
+}
+
+#[test]
+fn correlated_path_projection_lowers_with_path_fact_schemas() {
+    let parent_node = RowSetNodeId("parent".to_owned());
+    let child_node = RowSetNodeId("child".to_owned());
+    let path_node = RowSetNodeId("path".to_owned());
+    let parent_source = source("todos", SourceRole::Root);
+    let child_source = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
+    let path = ProgramPathId {
+        owner: parent_source.clone(),
+        child: child_source.clone(),
+    };
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(path_current_read_view()),
+        policy: system_policy_context(),
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x75),
+                    canonical: vec![0x75],
+                },
+                root: path_node.clone(),
+                result: ResultId::RealRow {
+                    table: "todos".to_owned(),
+                    row: ResultRowRef::Source(parent_source.clone()),
+                },
+                nodes: BTreeMap::from([
+                    (
+                        parent_node.clone(),
+                        RowSetExpr::Source {
+                            source: parent_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        child_node.clone(),
+                        RowSetExpr::Source {
+                            source: child_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        path_node.clone(),
+                        RowSetExpr::CorrelatedPathProjection {
+                            input: parent_node,
+                            child_input: child_node,
+                            path,
+                            correlation: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    parent_source.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: child_source.clone(),
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                            requirement: CorrelationRequirement::MatchCorrelationCardinality,
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x75; 16])),
+                values: BTreeMap::new(),
+            },
+        },
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([
+                ProgramFactKey::PathEdges,
+                ProgramFactKey::PathCorrelationCoverage,
+            ]),
+        },
+    };
+
+    let mut resolver = FakeSourceResolver::default();
+    let program =
+        lower_query_program(request, &mut resolver).expect("correlated path should lower");
+
+    assert_eq!(resolver.requests.len(), 2);
+    assert!(resolver.requests.iter().all(|request| {
+        request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::VersionWitnesses)
+    }));
+    assert!(matches!(
+        program.lowered.graph,
+        GraphBuilder::Join {
+            ref left_on,
+            ref right_on,
+            ..
+        } if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+            && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+    ));
+    let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
+    assert_eq!(terminals.len(), 2);
+    assert!(terminals.iter().any(|terminal| {
+        matches!(
+            terminal,
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::PathEdges,
+                schema: ProgramFactSchema::PathEdges(PathEdgeSchema {
+                    role_field: Some(_),
+                    depth_field: None,
+                    ..
+                }),
+            })
+        )
+    }));
+    assert!(terminals.iter().any(|terminal| {
+        matches!(
+            terminal,
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::PathCorrelationCoverage,
+                schema: ProgramFactSchema::PathCorrelationCoverage(PathCorrelationCoverageSchema {
+                    expected_count_field: Some(_),
+                    ..
+                }),
+            })
+        )
+    }));
+}
+
+#[test]
+fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
+    let seed_node = RowSetNodeId("seed".to_owned());
+    let step_node = RowSetNodeId("step".to_owned());
+    let relation_node = RowSetNodeId("relation".to_owned());
+    let frontier = FrontierId("reachable".to_owned());
+    let seed_source = source("todos", SourceRole::RecursiveSeed("seed".to_owned()));
+    let step_source = source("todos", SourceRole::RecursiveStep("step".to_owned()));
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(recursive_current_read_view()),
+        policy: system_policy_context(),
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x76),
+                    canonical: vec![0x76],
+                },
+                root: relation_node.clone(),
+                result: ResultId::RealRow {
+                    table: "todos".to_owned(),
+                    row: ResultRowRef::Source(seed_source.clone()),
+                },
+                nodes: BTreeMap::from([
+                    (
+                        seed_node.clone(),
+                        RowSetExpr::Source {
+                            source: seed_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        step_node.clone(),
+                        RowSetExpr::Source {
+                            source: step_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        relation_node.clone(),
+                        RowSetExpr::RecursiveRelation {
+                            seed: seed_node,
+                            step: step_node,
+                            frontier: frontier.clone(),
+                            frontier_key: NormalizedValueRef::RowId(RowIdRef::Source(
+                                seed_source.clone(),
+                            )),
+                            dedupe_keys: vec![NormalizedValueRef::RowId(RowIdRef::Source(
+                                step_source.clone(),
+                            ))],
+                            bound: RecursionBound::MaxDepth(4),
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x76; 16])),
+                values: BTreeMap::new(),
+            },
+        },
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([
+                ProgramFactKey::PathEdges,
+                ProgramFactKey::PathCorrelationCoverage,
+            ]),
+        },
+    };
+
+    let mut resolver = FakeSourceResolver::default();
+    let program =
+        lower_query_program(request, &mut resolver).expect("recursive relation should lower");
+
+    assert!(matches!(
+        program.lowered.graph,
+        GraphBuilder::Recursive {
+            ref frontier,
+            max_iters: 4,
+            ..
+        } if frontier.0 == "reachable"
+    ));
+    let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
+    assert!(terminals.iter().any(|terminal| {
+        matches!(
+            terminal,
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::PathEdges,
+                schema: ProgramFactSchema::PathEdges(PathEdgeSchema {
+                    depth_field: Some(_),
+                    ..
+                }),
+            })
+        )
+    }));
+    assert!(terminals.iter().any(|terminal| {
+        matches!(
+            terminal,
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::PathCorrelationCoverage,
+                schema: ProgramFactSchema::PathCorrelationCoverage(_),
+            })
+        )
+    }));
 }
 
 #[test]
