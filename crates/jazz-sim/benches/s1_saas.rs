@@ -18,6 +18,7 @@ use jazz::peer::{MaintainedSubscriptionViewMetrics, PeerState};
 use jazz::protocol::{BindingDelta, RegisterShapeOptions, ShapeAst, SyncMessage};
 use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, ne, param};
 use jazz::schema::{JazzSchema, TableSchema};
+use jazz::time::TxTime;
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_sim::distributions::Lcg;
 use jazz_sim::fixture::{
@@ -1678,6 +1679,10 @@ fn naive_refetch_ceiling_bytes(schema: &JazzSchema, fixture: &Fixture) -> u64 {
                 schema.version_id(),
                 commit.row_uuid,
                 Vec::new(),
+                AuthorId::SYSTEM,
+                TxTime(0),
+                AuthorId::SYSTEM,
+                TxTime(0),
                 &positional,
                 None,
             )

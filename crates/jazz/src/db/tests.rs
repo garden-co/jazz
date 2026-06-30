@@ -214,6 +214,19 @@ fn owner_id_public_schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
+fn owner_blob_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "assets",
+        [
+            crate::schema::ColumnSchema::new("owner", ColumnType::Uuid),
+            crate::schema::ColumnSchema::new("mime_type", ColumnType::String),
+            crate::schema::ColumnSchema::blob("data"),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("assets", "owner"))
+    .with_write_policy(Policy::owner_only("assets", "owner"))])
+}
+
 fn relation_schema() -> JazzSchema {
     JazzSchema::new([
         TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
@@ -1931,6 +1944,16 @@ impl CoreDb {
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
+        self.update_attributed(self.author, table, row, patch)
+    }
+
+    fn update_attributed(
+        &self,
+        made_by: AuthorId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<RocksDbStorage>, Error> {
         let table_schema = self
             .schema
             .tables
@@ -1939,6 +1962,7 @@ impl CoreDb {
             .cloned()
             .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))?;
         let mut cells = BTreeMap::new();
+        let mut parent = None;
         if let Some(existing) = self
             .read(&Query::from(table))?
             .into_iter()
@@ -1949,9 +1973,25 @@ impl CoreDb {
                     cells.insert(column.name.clone(), value);
                 }
             }
+            parent = self.server.node().borrow_mut().current_row_tx_id(&existing);
         }
         cells.extend(patch);
-        self.insert_with_id(table, row, cells)
+        let node = self.server.node();
+        let mut commit = MergeableCommit::new(table, row, self.next_now_ms())
+            .made_by(made_by)
+            .permission_subject(self.author)
+            .cells(cells);
+        if let Some(parent) = parent {
+            commit = commit.parents(vec![parent]);
+        }
+        let tx_id = node.borrow_mut().commit_mergeable(commit)?;
+        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&node),
+            row_uuid: row,
+            tx_id,
+            local_tier: DurabilityTier::Global,
+        })
     }
 
     fn accept_subscriber(
@@ -2776,6 +2816,191 @@ fn db_sync_surface_round_trips_blob_large_value_to_reader() {
         prepared_read(&reader, &query)[0].cell(table, "data"),
         Some(Value::Bytes(payload))
     );
+}
+
+#[test]
+fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let receiver = open_db(0xc1, alice, &schema);
+
+    let write = server
+        .insert_attributed(alice, "todos", cells("created by alice", false, alice))
+        .unwrap();
+    let row = write.row_uuid();
+    let query = Query::from("todos");
+    let create_unit = server
+        .node()
+        .borrow_mut()
+        .commit_unit_for(write.mergeable_tx_id())
+        .unwrap();
+    receiver
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message(create_unit)
+        .unwrap();
+
+    server.next_now_ms.set(2);
+    let bob_update = server
+        .update_attributed(
+            bob,
+            "todos",
+            row,
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("updated by bob".to_owned()),
+            )]),
+        )
+        .unwrap();
+    block_on(bob_update.wait(DurabilityTier::Global)).unwrap();
+    let server_rows = server.read(&query).unwrap();
+    assert_eq!(server_rows.len(), 1);
+    assert_eq!(
+        server_rows[0].provenance().unwrap().unwrap().updated_by,
+        bob
+    );
+    let update_unit = server
+        .node()
+        .borrow_mut()
+        .commit_unit_for(bob_update.mergeable_tx_id())
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = update_unit else {
+        panic!("expected update commit unit");
+    };
+    assert_eq!(versions[0].created_by(), alice);
+    assert_eq!(versions[0].updated_by(), bob);
+    let receiver_updates = receiver
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
+        .unwrap();
+    assert!(
+        receiver_updates.iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::FateUpdate {
+                    fate: Fate::Accepted,
+                    ..
+                }
+            )
+        }),
+        "receiver should accept the update, got {receiver_updates:?}"
+    );
+    let receiver_unit = receiver
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(bob_update.mergeable_tx_id())
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        versions: receiver_versions,
+        ..
+    } = receiver_unit
+    else {
+        panic!("expected receiver commit unit");
+    };
+    assert_eq!(receiver_versions[0].created_by(), alice);
+    assert_eq!(receiver_versions[0].updated_by(), bob);
+
+    let alice_rows = prepared_read(&receiver, &query);
+    assert_eq!(alice_rows.len(), 1);
+    assert_eq!(alice_rows[0].row_uuid(), row);
+    let provenance = alice_rows[0]
+        .provenance()
+        .unwrap()
+        .expect("current rows should carry provenance");
+    assert_eq!(provenance.created_by, alice);
+    assert_eq!(provenance.updated_by, bob);
+    assert!(
+        provenance.created_at < provenance.updated_at,
+        "updating a row must preserve creator provenance while advancing updater provenance"
+    );
+}
+
+#[test]
+fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
+    // This is intentionally a core sync-surface test: the public jazz-tools
+    // query API does not yet expose blob values cleanly enough to assert the
+    // bytes there, but the behavior is still user-visible once that API lands.
+    let schema = owner_blob_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let mallory = AuthorId::from_bytes([0xc3; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice_db = open_db(0xa1, alice, &schema);
+    let bob_db = open_db(0xb2, bob, &schema);
+    let mallory_db = open_db(0xc3, mallory, &schema);
+
+    let spoof = mallory_db.insert(
+        "assets",
+        BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(alice.0)),
+            (
+                "mime_type".to_owned(),
+                Value::String("application/octet-stream".to_owned()),
+            ),
+            ("data".to_owned(), Value::Bytes(b"spoofed".to_vec())),
+        ]),
+    );
+    match spoof {
+        Ok(_) => panic!("foreign owner blob insert should be rejected locally"),
+        Err(error) => assert_eq!(error.code, ErrorCode::WriteRejected),
+    }
+
+    let (alice_transport, server_alice_transport) = duplex();
+    let _alice_upstream = alice_db.connect_upstream(alice_transport);
+    let _alice_subscriber = server.accept_subscriber(server_alice_transport, alice);
+
+    let payload = b"file-like payload stored as an ordinary row value"
+        .repeat(64)
+        .to_vec();
+    let write = alice_db
+        .insert(
+            "assets",
+            BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(alice.0)),
+                (
+                    "mime_type".to_owned(),
+                    Value::String("application/octet-stream".to_owned()),
+                ),
+                ("data".to_owned(), Value::Bytes(payload.clone())),
+            ]),
+        )
+        .unwrap();
+    let asset = write.row_uuid();
+    alice_db.tick().unwrap();
+    server.tick().unwrap();
+    alice_db.tick().unwrap();
+    block_on(write.wait(DurabilityTier::Global)).unwrap();
+
+    let query = Query::from("assets");
+    let table = &schema.tables[0];
+    let alice_rows = prepared_all(&alice_db, &query, global_subscribe_opts());
+    assert_eq!(alice_rows.len(), 1);
+    assert_eq!(alice_rows[0].row_uuid(), asset);
+    assert_eq!(
+        alice_rows[0].cell(table, "data"),
+        Some(Value::Bytes(payload))
+    );
+
+    let (bob_transport, server_bob_transport) = duplex();
+    let _bob_upstream = bob_db.connect_upstream(bob_transport);
+    let _bob_subscriber = server.accept_subscriber(server_bob_transport, bob);
+    let mut bob_subscription = prepared_subscribe(&bob_db, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(bob_subscription.next_event()).unwrap()).is_empty());
+    bob_db.tick().unwrap();
+    server.tick().unwrap();
+    bob_db.tick().unwrap();
+
+    assert!(prepared_all(&bob_db, &query, edge_subscribe_opts()).is_empty());
+    let (added, updated, removed) = delta_rows(block_on(bob_subscription.next_event()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
 }
 
 #[test]

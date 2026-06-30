@@ -157,6 +157,10 @@ where
                             write_schema_version,
                             row_uuid,
                             parents,
+                            winner.created_by(),
+                            winner.created_at(),
+                            winner.updated_by(),
+                            winner.updated_at(),
                             &cells,
                             winner.deletion(),
                         )

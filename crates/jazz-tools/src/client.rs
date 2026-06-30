@@ -1005,7 +1005,10 @@ fn core_identity(context: &AppContext, default_session: Option<&Session>) -> Cor
         .map(|id| id.0)
         .unwrap_or_else(Uuid::now_v7);
     let author_uuid = default_session
-        .map(|session| Uuid::new_v5(&Uuid::NAMESPACE_URL, session.user_id.as_bytes()))
+        .map(|session| {
+            Uuid::parse_str(session.user_id.trim())
+                .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_URL, session.user_id.as_bytes()))
+        })
         .unwrap_or(node_uuid);
     CoreDbIdentity {
         node: CoreNodeUuid(node_uuid),

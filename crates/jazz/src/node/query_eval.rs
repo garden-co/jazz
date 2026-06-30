@@ -3463,8 +3463,7 @@ where
 
         let readable_current = self
             .apply_maintained_view_filters(
-                GraphBuilder::table(global_current_table_name(&table.name))
-                    .project(current_row_fields(&table)),
+                normalized_global_current_graph(&table),
                 &policy_shape,
                 &table,
                 current_row_fields(&table),
@@ -3572,8 +3571,7 @@ where
 
         let readable_current = self
             .apply_maintained_view_filters(
-                GraphBuilder::table(global_current_table_name(&table.name))
-                    .project(current_row_fields(&table)),
+                normalized_global_current_graph(&table),
                 &policy_shape,
                 &table,
                 current_row_fields(&table),
@@ -4112,8 +4110,7 @@ where
 
         let readable_current = self
             .apply_maintained_view_filters(
-                GraphBuilder::table(global_current_table_name(&table.name))
-                    .project(current_row_fields(table)),
+                normalized_global_current_graph(table),
                 policy_shape,
                 table,
                 current_row_fields(table),
@@ -4812,8 +4809,7 @@ where
 
         let readable_current = self
             .apply_maintained_view_filters(
-                GraphBuilder::table(global_current_table_name(&table.name))
-                    .project(current_row_fields(table)),
+                normalized_global_current_graph(table),
                 policy_shape,
                 table,
                 current_row_fields(table),
@@ -5190,8 +5186,7 @@ where
 
         let readable_current = self
             .apply_maintained_view_filters(
-                GraphBuilder::table(global_current_table_name(&table.name))
-                    .project(current_row_fields(table)),
+                normalized_global_current_graph(table),
                 policy_shape,
                 table,
                 current_row_fields(table),
@@ -7558,6 +7553,45 @@ fn current_row_fields(table: &TableSchema) -> Vec<String> {
     fields.push("tx_time".to_owned());
     fields.push("tx_node_id".to_owned());
     fields
+}
+
+fn global_current_storage_fields(table: &TableSchema) -> Vec<String> {
+    let mut fields = vec!["row_uuid".to_owned()];
+    fields.extend(
+        table
+            .columns
+            .iter()
+            .map(|column| format!("user_{}", column.name)),
+    );
+    fields.push("created_by".to_owned());
+    fields.push("created_at".to_owned());
+    fields.push("updated_by".to_owned());
+    fields.push("updated_at".to_owned());
+    fields.push("tx_time".to_owned());
+    fields.push("tx_node_id".to_owned());
+    fields
+}
+
+fn normalized_global_current_graph(table: &TableSchema) -> GraphBuilder {
+    GraphBuilder::table(global_current_table_name(&table.name))
+        .project(global_current_storage_fields(table))
+        .project_fields(
+            std::iter::once(ProjectField::named("row_uuid"))
+                .chain(
+                    table
+                        .columns
+                        .iter()
+                        .map(|column| ProjectField::named(format!("user_{}", column.name))),
+                )
+                .chain([
+                    ProjectField::renamed("created_by", "$createdBy"),
+                    ProjectField::renamed("created_at", "$createdAt"),
+                    ProjectField::renamed("updated_by", "$updatedBy"),
+                    ProjectField::renamed("updated_at", "$updatedAt"),
+                    ProjectField::named("tx_time"),
+                    ProjectField::named("tx_node_id"),
+                ]),
+        )
 }
 
 fn current_row_fields_with_params(

@@ -173,6 +173,10 @@ impl VersionRecord {
         schema_version: SchemaVersionId,
         row_uuid: RowUuid,
         parents: Vec<TxId>,
+        created_by: AuthorId,
+        created_at: TxTime,
+        updated_by: AuthorId,
+        updated_at: TxTime,
         cells_by_position: &[Option<Value>],
         deletion: Option<DeletionEvent>,
     ) -> Result<Self, groove::records::Error> {
@@ -181,6 +185,10 @@ impl VersionRecord {
         let values = [
             Value::Uuid(row_uuid.0),
             Value::Array(parents.into_iter().map(tx_id_value).collect()),
+            Value::Uuid(created_by.0),
+            Value::U64(created_at.0),
+            Value::Uuid(updated_by.0),
+            Value::U64(updated_at.0),
             Value::Nullable(deletion.map(|deletion| {
                 Box::new(Value::Enum(match deletion {
                     DeletionEvent::Deleted => 0,
@@ -212,6 +220,10 @@ impl VersionRecord {
         schema_version: SchemaVersionId,
         row_uuid: RowUuid,
         parents: Vec<TxId>,
+        created_by: AuthorId,
+        created_at: TxTime,
+        updated_by: AuthorId,
+        updated_at: TxTime,
         cells: &BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
     ) -> Result<Self, groove::records::Error> {
@@ -225,6 +237,10 @@ impl VersionRecord {
             schema_version,
             row_uuid,
             parents,
+            created_by,
+            created_at,
+            updated_by,
+            updated_at,
             &positional,
             deletion,
         )
@@ -275,6 +291,46 @@ impl VersionRecord {
                 .expect("valid wire deletion"),
         )
         .expect("valid wire deletion")
+    }
+
+    /// Original author for this logical row.
+    pub fn created_by(&self) -> AuthorId {
+        AuthorId(
+            self.record
+                .borrowed()
+                .get_uuid(WireRowRecord::FIELD_CREATED_BY_IDX)
+                .expect("valid wire created_by"),
+        )
+    }
+
+    /// Original creation timestamp for this logical row.
+    pub fn created_at(&self) -> TxTime {
+        TxTime(
+            self.record
+                .borrowed()
+                .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
+                .expect("valid wire created_at"),
+        )
+    }
+
+    /// Author of this row version.
+    pub fn updated_by(&self) -> AuthorId {
+        AuthorId(
+            self.record
+                .borrowed()
+                .get_uuid(WireRowRecord::FIELD_UPDATED_BY_IDX)
+                .expect("valid wire updated_by"),
+        )
+    }
+
+    /// Update timestamp for this row version.
+    pub fn updated_at(&self) -> TxTime {
+        TxTime(
+            self.record
+                .borrowed()
+                .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
+                .expect("valid wire updated_at"),
+        )
     }
 
     /// Cell value by application-schema column position.
@@ -337,7 +393,11 @@ groove::define_record! {
     struct WireRowRecord {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
-        2 => _deletion: Option<Value>,
+        2 => created_by: AuthorId,
+        3 => created_at: TxTime,
+        4 => updated_by: AuthorId,
+        5 => updated_at: TxTime,
+        6 => _deletion: Option<Value>,
         .. user_cells,
     }
 }

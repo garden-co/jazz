@@ -181,7 +181,11 @@ groove::define_record! {
     pub(super) struct WireRowRecord {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
-        2 => _deletion: Option<Value>,
+        2 => created_by: AuthorId,
+        3 => created_at: TxTime,
+        4 => updated_by: AuthorId,
+        5 => updated_at: TxTime,
+        6 => _deletion: Option<Value>,
         .. user_cells,
     }
 }
@@ -321,6 +325,10 @@ impl VersionRecord {
             schema_version,
             commit.row_uuid,
             commit.parents.clone(),
+            commit.made_by,
+            TxTime(commit.now_ms),
+            commit.made_by,
+            TxTime(commit.now_ms),
             &positional,
             commit.deletion,
         )
@@ -345,6 +353,10 @@ impl VersionRecord {
             schema_version,
             stored.row_uuid(),
             stored.parents(),
+            stored.created_by(),
+            stored.created_at(),
+            stored.updated_by(),
+            stored.updated_at(),
             &cells,
             stored.deletion(),
         )
@@ -530,7 +542,6 @@ impl VersionRow {
         tx_node_alias: NodeAlias,
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
-        made_by: AuthorId,
         storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         let (storage_table, values) = if let Some(deletion) = version.deletion() {
@@ -543,7 +554,6 @@ impl VersionRow {
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
-                    made_by,
                     deletion,
                 ),
             )
@@ -558,7 +568,6 @@ impl VersionRow {
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
-                    made_by,
                 )?,
             )
         };
@@ -1212,7 +1221,6 @@ fn history_values_from_wire(
     tx_node_alias: NodeAlias,
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
-    made_by: AuthorId,
 ) -> Result<Vec<Value>, Error> {
     let mut values = Vec::with_capacity(HistoryRowRecord::USER_CELLS + table.columns.len());
     values.push(Value::Uuid(version.row_uuid().0));
@@ -1226,10 +1234,10 @@ fn history_values_from_wire(
             .map(|parent| tx_id_value(*parent))
             .collect(),
     ));
-    values.push(Value::Uuid(made_by.0));
-    values.push(Value::U64(tx_time.0));
-    values.push(Value::Uuid(made_by.0));
-    values.push(Value::U64(tx_time.0));
+    values.push(Value::Uuid(version.created_by().0));
+    values.push(Value::U64(version.created_at().0));
+    values.push(Value::Uuid(version.updated_by().0));
+    values.push(Value::U64(version.updated_at().0));
     for (idx, column) in table.columns.iter().enumerate() {
         let value = version.optional_cell_at(idx);
         if let Some(value) = value.as_ref() {
@@ -1269,7 +1277,6 @@ fn register_values_from_wire(
     tx_node_alias: NodeAlias,
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
-    made_by: AuthorId,
     deletion: DeletionEvent,
 ) -> Vec<Value> {
     vec![
@@ -1284,10 +1291,10 @@ fn register_values_from_wire(
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
-        Value::Uuid(made_by.0),
-        Value::U64(tx_time.0),
-        Value::Uuid(made_by.0),
-        Value::U64(tx_time.0),
+        Value::Uuid(version.created_by().0),
+        Value::U64(version.created_at().0),
+        Value::Uuid(version.updated_by().0),
+        Value::U64(version.updated_at().0),
         deletion_event_value(deletion),
     ]
 }

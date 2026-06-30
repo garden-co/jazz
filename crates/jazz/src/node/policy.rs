@@ -162,7 +162,7 @@ where
         let (table, cells) = self.policy_projection_for_version_record(version)?;
         if version.deletion() == Some(DeletionEvent::Deleted) {
             let Some(policy) = table.write_policies.delete_using.clone() else {
-                return Ok(false);
+                return Ok(true);
             };
             let current = match self.policy_delete_subject_row(&table, version)? {
                 Some(current) => current,
@@ -174,20 +174,22 @@ where
             .policy_previous_content_subject_row(&table, version)?
             .is_some();
         if is_update {
+            let Some(previous) = self.policy_previous_content_subject_row(&table, version)? else {
+                return Ok(false);
+            };
             if let Some(policy) = table.write_policies.update_using.clone() {
-                let Some(previous) = self.policy_previous_content_subject_row(&table, version)?
-                else {
-                    return Ok(false);
-                };
                 if !self.policy_allows_current_row(&table, &policy, &previous, author)? {
                     return Ok(false);
                 }
             }
             let Some(policy) = table.write_policies.update_check.clone() else {
-                return Ok(false);
+                return Ok(true);
             };
             return self.policy_allows(&table, &policy, version.row_uuid(), author, |column| {
-                cells.get(column).cloned()
+                cells
+                    .get(column)
+                    .cloned()
+                    .or_else(|| policy_join_row_value(&previous, &table, column))
             });
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {

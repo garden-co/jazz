@@ -1496,6 +1496,10 @@ fn seed_block_tree_fixture_bulk(
                 schema.version_id(),
                 page,
                 Vec::new(),
+                AuthorId::SYSTEM,
+                jazz::time::TxTime(0),
+                AuthorId::SYSTEM,
+                jazz::time::TxTime(0),
                 &page_cells,
                 None,
             )
@@ -1543,6 +1547,10 @@ fn seed_block_tree_fixture_bulk(
                     schema.version_id(),
                     row,
                     Vec::new(),
+                    AuthorId::SYSTEM,
+                    jazz::time::TxTime(0),
+                    AuthorId::SYSTEM,
+                    jazz::time::TxTime(0),
                     &cells,
                     None,
                 )

@@ -214,6 +214,10 @@ fn run_commit_unit(config: &Config) {
                         schema_version,
                         row(20_000 + iter * rows_per_unit + idx),
                         Vec::new(),
+                        AuthorId::SYSTEM,
+                        TxTime(iter as u64),
+                        AuthorId::SYSTEM,
+                        TxTime(iter as u64),
                         &cells(&format!("cu-{iter}-{idx}")),
                         None,
                     )
