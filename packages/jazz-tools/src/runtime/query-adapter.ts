@@ -11,7 +11,11 @@
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
-import { isProvenanceMagicTimestampColumn, magicColumnType } from "../magic-columns.js";
+import {
+  isProvenanceMagicColumn,
+  isProvenanceMagicTimestampColumn,
+  magicColumnType,
+} from "../magic-columns.js";
 import {
   normalizeBuiltQuery,
   type BuiltCondition,
@@ -30,6 +34,7 @@ import type {
 } from "../ir.js";
 
 function relColumn(column: string, scope?: string): RelColumnRef {
+  if (isProvenanceMagicColumn(column)) return { column };
   return scope ? { scope, column } : { column };
 }
 

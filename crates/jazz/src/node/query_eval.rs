@@ -7316,6 +7316,9 @@ fn nullable_cell_value(table: &TableSchema, column: &str, value: Value) -> Resul
     if column == "id" {
         return Ok(value);
     }
+    if is_magic_current_column(column) {
+        return Ok(value);
+    }
     let _ = table_column_type(table, column)?;
     if matches!(value, Value::Nullable(_)) {
         return Ok(value);
@@ -7330,12 +7333,27 @@ fn table_column_type<'a>(
     if column == "id" {
         return Ok(&groove::schema::ColumnType::Uuid);
     }
+    if let Some(column_type) = magic_current_column_type(column) {
+        return Ok(column_type);
+    }
     table
         .columns
         .iter()
         .find(|candidate| candidate.name == column)
         .map(|column| &column.column_type)
         .ok_or(Error::InvalidStoredValue("query column was not validated"))
+}
+
+fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::ColumnType> {
+    match column {
+        "$createdBy" | "$updatedBy" => Some(&groove::schema::ColumnType::Uuid),
+        "$createdAt" | "$updatedAt" => Some(&groove::schema::ColumnType::U64),
+        _ => None,
+    }
+}
+
+fn is_magic_current_column(column: &str) -> bool {
+    magic_current_column_type(column).is_some()
 }
 
 fn non_null_query_column_type(
@@ -7390,6 +7408,9 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
 fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Option<Value> {
     if column == "id" {
         return Some(Value::Uuid(row.row_uuid().0));
+    }
+    if is_magic_current_column(column) {
+        return row.raw_field(column);
     }
     row.cell(table, column)
 }
@@ -7512,6 +7533,9 @@ fn relation_outer_value(table: &TableSchema, row: &CurrentRow, column: &str) -> 
     if column == "id" {
         return Some(Value::Uuid(row.row_uuid().0));
     }
+    if is_magic_current_column(column) {
+        return row.raw_field(column);
+    }
     row.cell(table, column)
 }
 
@@ -7527,6 +7551,10 @@ fn current_row_fields(table: &TableSchema) -> Vec<String> {
             .iter()
             .map(|column| format!("user_{}", column.name)),
     );
+    fields.push("$createdBy".to_owned());
+    fields.push("$createdAt".to_owned());
+    fields.push("$updatedBy".to_owned());
+    fields.push("$updatedAt".to_owned());
     fields.push("tx_time".to_owned());
     fields.push("tx_node_id".to_owned());
     fields
@@ -7552,6 +7580,10 @@ fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
                 )
             }))
             .chain([
+                ("$createdBy".to_owned(), ValueType::Uuid),
+                ("$createdAt".to_owned(), ValueType::U64),
+                ("$updatedBy".to_owned(), ValueType::Uuid),
+                ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U64),
             ]),
@@ -7563,10 +7595,21 @@ fn inline_current_record(
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
 ) -> Result<Vec<u8>, Error> {
-    let mut values = Vec::with_capacity(table.columns.len() + 3);
+    let mut values = Vec::with_capacity(table.columns.len() + 7);
     values.push(Value::Uuid(row.row_uuid().0));
     for column in &table.columns {
         values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
+    }
+    if let Some(provenance) = row.provenance()? {
+        values.push(Value::Uuid(provenance.created_by.0));
+        values.push(Value::U64(provenance.created_at.0));
+        values.push(Value::Uuid(provenance.updated_by.0));
+        values.push(Value::U64(provenance.updated_at.0));
+    } else {
+        values.push(Value::Uuid(AuthorId::SYSTEM.0));
+        values.push(Value::U64(0));
+        values.push(Value::Uuid(AuthorId::SYSTEM.0));
+        values.push(Value::U64(0));
     }
     let (tx_time, tx_node_alias) = row
         .projected_tx_alias()
@@ -7598,6 +7641,10 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
                 )
             }))
             .chain([
+                ("$createdBy".to_owned(), ValueType::Uuid),
+                ("$createdAt".to_owned(), ValueType::U64),
+                ("$updatedBy".to_owned(), ValueType::Uuid),
+                ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U64),
             ])
@@ -7613,10 +7660,21 @@ fn inline_include_deleted_current_graph(
     let records = rows
         .iter()
         .map(|(row, deleted)| {
-            let mut values = Vec::with_capacity(table.columns.len() + 4);
+            let mut values = Vec::with_capacity(table.columns.len() + 8);
             values.push(Value::Uuid(row.row_uuid().0));
             for column in &table.columns {
                 values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
+            }
+            if let Some(provenance) = row.provenance()? {
+                values.push(Value::Uuid(provenance.created_by.0));
+                values.push(Value::U64(provenance.created_at.0));
+                values.push(Value::Uuid(provenance.updated_by.0));
+                values.push(Value::U64(provenance.updated_at.0));
+            } else {
+                values.push(Value::Uuid(AuthorId::SYSTEM.0));
+                values.push(Value::U64(0));
+                values.push(Value::Uuid(AuthorId::SYSTEM.0));
+                values.push(Value::U64(0));
             }
             let (tx_time, tx_node_alias) = row
                 .projected_tx_alias()
@@ -7647,10 +7705,30 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         .iter()
         .map(|column| format!("user_{}", column.name))
         .collect::<Vec<_>>();
-    let mut content_fields = vec!["row_uuid".to_owned()];
-    content_fields.extend(user_fields.iter().cloned());
-    content_fields.push("tx_time".to_owned());
-    content_fields.push("tx_node_id".to_owned());
+    let mut content_storage_fields = vec!["row_uuid".to_owned()];
+    content_storage_fields.extend(user_fields.iter().cloned());
+    content_storage_fields.push("created_by".to_owned());
+    content_storage_fields.push("created_at".to_owned());
+    content_storage_fields.push("updated_by".to_owned());
+    content_storage_fields.push("updated_at".to_owned());
+    content_storage_fields.push("tx_time".to_owned());
+    content_storage_fields.push("tx_node_id".to_owned());
+    let normalize_content_fields = |graph: GraphBuilder| {
+        graph.project_fields(
+            ["row_uuid".to_owned()]
+                .into_iter()
+                .chain(user_fields.iter().cloned())
+                .map(ProjectField::named)
+                .chain([
+                    ProjectField::renamed("created_by", "$createdBy"),
+                    ProjectField::renamed("created_at", "$createdAt"),
+                    ProjectField::renamed("updated_by", "$updatedBy"),
+                    ProjectField::renamed("updated_at", "$updatedAt"),
+                    ProjectField::named("tx_time"),
+                    ProjectField::named("tx_node_id"),
+                ]),
+        )
+    };
     let edge_visible_ahead = |table_name: String, fields: Vec<String>| {
         GraphBuilder::join(
             GraphBuilder::table(table_name).project(fields.clone()),
@@ -7674,23 +7752,30 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     };
     let (content_current, deletion_current) = if tier == DurabilityTier::Global {
         (
-            GraphBuilder::table(global_current_table_name(&table.name)).project(content_fields),
+            normalize_content_fields(
+                GraphBuilder::table(global_current_table_name(&table.name))
+                    .project(content_storage_fields.clone()),
+            ),
             GraphBuilder::table(register_global_current_table_name(&table.name)),
         )
     } else {
         let ahead_content = if tier == DurabilityTier::Edge {
-            edge_visible_ahead(
+            normalize_content_fields(edge_visible_ahead(
                 ahead_current_table_name(&table.name),
-                content_fields.clone(),
-            )
+                content_storage_fields.clone(),
+            ))
         } else {
-            GraphBuilder::table(ahead_current_table_name(&table.name))
-                .project(content_fields.clone())
+            normalize_content_fields(
+                GraphBuilder::table(ahead_current_table_name(&table.name))
+                    .project(content_storage_fields.clone()),
+            )
         };
         let ahead_deletion_fields = vec![
             "row_uuid".to_owned(),
             "tx_time".to_owned(),
             "tx_node_id".to_owned(),
+            "updated_by".to_owned(),
+            "updated_at".to_owned(),
             "_deletion".to_owned(),
         ];
         let ahead_deletion = if tier == DurabilityTier::Edge {
@@ -7704,14 +7789,16 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         (
             GraphBuilder::arg_max_by(
                 GraphBuilder::union([
-                    GraphBuilder::table(global_current_table_name(&table.name))
-                        .project(content_fields.clone()),
+                    normalize_content_fields(
+                        GraphBuilder::table(global_current_table_name(&table.name))
+                            .project(content_storage_fields.clone()),
+                    ),
                     ahead_content,
                 ]),
                 ["row_uuid"],
                 ["tx_time", "tx_node_id"],
             )
-            .project(content_fields),
+            .project(current_row_fields(table)),
             GraphBuilder::arg_max_by(
                 GraphBuilder::union([
                     GraphBuilder::table(register_global_current_table_name(&table.name)),
@@ -7724,7 +7811,13 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     };
     let deleted_winners = deletion_current
         .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
-        .project(["row_uuid", "tx_time", "tx_node_id"]);
+        .project_fields([
+            ProjectField::named("row_uuid"),
+            ProjectField::named("tx_time"),
+            ProjectField::named("tx_node_id"),
+            ProjectField::renamed("updated_by", "$updatedBy"),
+            ProjectField::renamed("updated_at", "$updatedAt"),
+        ]);
     let undeleted = GraphBuilder::anti_join(
         content_current.clone(),
         deleted_winners.clone(),
@@ -7743,7 +7836,9 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
                 .into_iter()
                 .map(|field| {
                     let source = match field.as_str() {
-                        "tx_time" | "tx_node_id" => format!("right.{field}"),
+                        "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
+                            format!("right.{field}")
+                        }
                         _ => format!("left.{field}"),
                     };
                     ProjectField::renamed(source, field)
@@ -8043,6 +8138,9 @@ pub(crate) fn maintained_view_tagged_user_field(table: &str, column: &str) -> St
 fn query_field(column: &str) -> String {
     if column == "id" {
         return "row_uuid".to_owned();
+    }
+    if is_magic_current_column(column) {
+        return column.to_owned();
     }
     format!("user_{column}")
 }

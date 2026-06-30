@@ -2091,6 +2091,56 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("preserves raw provenance timestamps from native rows without Date.now fallbacks", async () => {
+    const createdAtMs = 42;
+    const updatedAtMs = 43;
+    const rowId = "00000000-0000-0000-0000-000000000001";
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () =>
+              encodeRows([
+                {
+                  table: "todos",
+                  rowId: uuidBytes(rowId),
+                  title: "native provenance",
+                  createdAt: createdAtMs,
+                  updatedAt: updatedAtMs,
+                },
+              ]),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const [row] = (await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        select_columns: ["title", "$createdAt", "$updatedAt"],
+        relation_ir: { TableScan: { table: "todos" } },
+      }),
+    )) as Array<{ valuesByColumn?: Map<string, { type: string; value: number }> }>;
+
+    expect(row?.valuesByColumn?.get("$createdAt")).toEqual({
+      type: "Timestamp",
+      value: createdAtMs * 1_000,
+    });
+    expect(row?.valuesByColumn?.get("$updatedAt")).toEqual({
+      type: "Timestamp",
+      value: updatedAtMs * 1_000,
+    });
+  });
+
   it("encodes public id in conditions into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
@@ -3534,14 +3584,23 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
   return writer.finish();
 }
 
-function encodeRows(rows: Array<{ table: string; rowId: Uint8Array; title: string }>): Uint8Array {
+type EncodedTestRow = {
+  table: string;
+  rowId: Uint8Array;
+  title: string;
+  txTime?: number;
+  createdAt?: number;
+  updatedAt?: number;
+};
+
+function encodeRows(rows: EncodedTestRow[]): Uint8Array {
   const writer = new PostcardWriter();
   writeRowBatches(writer, rows);
   return writer.finish();
 }
 
 function encodeRelationSnapshot(
-  rows: Array<{ table: string; rowId: Uint8Array; title: string }>,
+  rows: EncodedTestRow[],
   edges: Array<{
     sourceTable: string;
     sourceRowId: Uint8Array;
@@ -3566,26 +3625,44 @@ function encodeRelationSnapshot(
   return writer.finish();
 }
 
-function writeRowBatches(
-  writer: PostcardWriter,
-  rows: Array<{ table: string; rowId: Uint8Array; title: string }>,
-): void {
-  const rowsByTable = new Map<string, Array<{ rowId: Uint8Array; title: string }>>();
+function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
+  const rowsByTable = new Map<string, EncodedTestRow[]>();
   for (const row of rows) {
     const tableRows = rowsByTable.get(row.table) ?? [];
     tableRows.push(row);
     rowsByTable.set(row.table, tableRows);
   }
-  const descriptor = [{ name: "title", valueType: { tag: 6 } }];
   writer.vec((batch, batchIndex) => {
     const [table, tableRows] = Array.from(rowsByTable.entries())[batchIndex]!;
+    const hasTxTime = tableRows.some((row) => row.txTime !== undefined);
+    const hasProvenance = tableRows.some(
+      (row) => row.createdAt !== undefined || row.updatedAt !== undefined,
+    );
+    const descriptor = [
+      { name: "title", valueType: { tag: 6 } },
+      ...(hasProvenance
+        ? [
+            { name: "$createdAt", valueType: { tag: 3 } },
+            { name: "$updatedAt", valueType: { tag: 3 } },
+          ]
+        : []),
+      ...(hasTxTime ? [{ name: "tx_time", valueType: { tag: 3 } }] : []),
+    ];
     batch.string(table);
     writeDescriptor(batch, descriptor);
     batch.vec((row, index) => {
       const source = tableRows[index]!;
       row.bytes(source.rowId);
       row.bool(false);
-      row.bytes(createRecord(descriptor, [new TextEncoder().encode(source.title)]));
+      const values: Uint8Array[] = [new TextEncoder().encode(source.title)];
+      if (hasProvenance) {
+        values.push(u64Bytes(source.createdAt ?? 0));
+        values.push(u64Bytes(source.updatedAt ?? 0));
+      }
+      if (hasTxTime) {
+        values.push(txTimeBytes(source.txTime ?? 0));
+      }
+      row.bytes(createRecord(descriptor, values));
     }, tableRows.length);
   }, rowsByTable.size);
 }
@@ -3710,6 +3787,18 @@ function formatUuidForTest(bytes: Uint8Array): string {
 function doubleBytes(value: number): Uint8Array {
   const bytes = new Uint8Array(8);
   new DataView(bytes.buffer).setFloat64(0, value, true);
+  return bytes;
+}
+
+function txTimeBytes(value: number): Uint8Array {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value) << 16n, true);
+  return bytes;
+}
+
+function u64Bytes(value: number): Uint8Array {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
   return bytes;
 }
 
