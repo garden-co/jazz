@@ -110,8 +110,8 @@ is never dropped from sync solely because an included target is absent or
 unreadable (`INV-QUERY-10`).
 
 Array subqueries produce relation payload material, not nested row values inside
-core rows. A relation payload is a set of row batches plus typed path facts. A
-path fact names source and target rows and can additionally carry edge kind,
+core rows. A relation payload is a set of row batches plus typed relation facts. A
+relation fact names source and target rows and can additionally carry edge kind,
 source/target version refs, recursion depth, multipath edge id, branch
 alternative, terminal role, order key, and matched-vs-hole state.
 For a reverse relation array, the edge source is the parent row and the target
@@ -147,7 +147,7 @@ supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 
 The serving authority maintains the settled result set for each
 program instance: the result member set plus its matched include paths,
-relation/path edges, and join witnesses (§6.4). In Rust this server-side state is named
+relation edges, and join witnesses (§6.4). In Rust this server-side state is named
 `maintained_subscription_views`.
 The subscriber receives and stores its own **settled subscription result set**:
 the rows, typed program facts, and matched include/relation material it can

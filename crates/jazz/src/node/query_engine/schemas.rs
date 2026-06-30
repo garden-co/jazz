@@ -46,8 +46,8 @@ impl ProgramFactOutput {
 pub(crate) enum ProgramFactSchema {
     /// Root result-set membership rows.
     ResultMembership(ResultMembershipSchema),
-    /// Path edge rows.
-    PathEdges(PathEdgeSchema),
+    /// Relation edge rows.
+    RelationEdges(RelationEdgeSchema),
     /// Per-path correlation/cardinality coverage rows.
     PathCorrelationCoverage(PathCorrelationCoverageSchema),
     /// Source/table coverage facts.
@@ -139,16 +139,16 @@ pub(crate) struct ContentVersionFields {
     pub(crate) tx_node_field: String,
 }
 
-/// Include/join/relation path edge row schema.
+/// Include/join/relation edge row schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PathEdgeSchema {
+pub(crate) struct RelationEdgeSchema {
     /// Source row fields.
     pub(crate) source: VersionedRowRefSchema,
     /// Canonical include/join/relation node id field.
     pub(crate) path_field: String,
     /// Target row fields.
     pub(crate) target: VersionedRowRefSchema,
-    /// Path edge kind field, for distinguishing includes, joins, relation
+    /// Relation edge kind field, for distinguishing includes, joins, relation
     /// traversals, recursive frontier edges, and policy branches.
     pub(crate) kind_field: String,
     /// Recursive depth field, when emitted by gather/reachability.

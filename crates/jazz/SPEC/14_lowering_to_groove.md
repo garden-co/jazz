@@ -94,7 +94,7 @@ Runtime lifecycle is outside that semantic request. A one-shot read,
 application live subscription, protocol sync view, or transaction-validation
 read may choose different callback, reset, retry, propagation, and waiting
 behavior, but the compiler-facing way to ask for evidence is only app rows plus
-named terminal facts such as result membership, path edges, read-frontier
+named terminal facts such as result membership, relation edges, read-frontier
 settlement, payload witnesses, policy decisions/witnesses, predicate output
 sets, and large-value extents.
 Those runtime choices MUST consume the same lowered program. They must not

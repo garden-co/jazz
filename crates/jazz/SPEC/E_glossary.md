@@ -66,7 +66,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   (`BindingId`) — its parameter assignment; **claim** (`claim(name)`) —
   server-injected identity data (ch. 7).
 - **result set** — typed `ResultMemberEntry` membership plus `ProgramFactEntry`
-  facts for matched include paths, relation/path edges, and join witnesses;
+  facts for matched include paths, relation edges, and join witnesses;
   real-row members expose `(table, row_uuid, tx_id)` only as their final/public
   row projection; **settled subscription result set** — the subscriber-side
   complete member/fact state and matched include material for one binding.

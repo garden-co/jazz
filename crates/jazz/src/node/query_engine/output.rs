@@ -59,7 +59,7 @@ pub(crate) struct AppPathProjection {
     pub(crate) fields: FieldProjection,
     /// Nested child path projections.
     pub(crate) children: Vec<AppPathProjection>,
-    /// What app projection does when hidden path facts show incomplete/null
+    /// What app projection does when hidden relation facts show incomplete/null
     /// child coverage.
     pub(crate) hole_policy: PathHolePolicy,
     /// Large-value materialization requested for this path child.
@@ -160,8 +160,8 @@ pub(crate) struct ProgramOutputKey {
 pub(crate) enum ProgramFactKey {
     /// Root result-set membership rows.
     ResultMembership,
-    /// Path edge rows.
-    PathEdges,
+    /// Relation edge rows.
+    RelationEdges,
     /// Per-path correlation/cardinality coverage rows.
     PathCorrelationCoverage,
     /// Source/table coverage facts for a scope.
