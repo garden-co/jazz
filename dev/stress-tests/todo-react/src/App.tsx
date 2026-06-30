@@ -1,34 +1,9 @@
 import { useState, useEffect, use, Suspense } from "react";
-import { JazzProvider, attachDevTools, useJazzClient } from "jazz-tools/react";
+import { JazzProvider } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { BrowserAuthSecretStore } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { GenerateData } from "./GenerateData.js";
-import { app } from "../schema";
-
-const devToolsAttachedClients = new WeakSet<object>();
-
-function DevToolsRegistration() {
-  const client = useJazzClient();
-
-  useEffect(() => {
-    if (devToolsAttachedClients.has(client as object)) {
-      return;
-    }
-
-    void attachDevTools(client, app.wasmSchema);
-    devToolsAttachedClients.add(client as object);
-
-    if (location.origin.includes("localhost")) {
-      Object.defineProperty(window, "jazzClient", {
-        value: client,
-        writable: true,
-      });
-    }
-  }, [client]);
-
-  return null;
-}
 
 function useHash() {
   const [hash, setHash] = useState(location.hash);
@@ -84,7 +59,6 @@ function AppInner() {
 
   return (
     <JazzProvider config={config} fallback={<p>Loading...</p>}>
-      <DevToolsRegistration />
       <Router />
     </JazzProvider>
   );
