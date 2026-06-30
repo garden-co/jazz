@@ -64,13 +64,12 @@ export function InspectorApp() {
       env: config.env,
       userBranch: config.userBranch,
       ...credential,
-      // Join the host's persistent store: same OPFS namespace (dbName) and the
-      // host's exact broker SharedWorker URL, so the overlay sees the host's
-      // local data — including unsynced local-only rows — and works offline.
-      driver: { type: "persistent", dbName: config.dbName ?? config.appId },
-      runtimeSources: config.brokerWorkerUrl
-        ? { brokerWorkerUrl: config.brokerWorkerUrl }
-        : undefined,
+      // Join the host's persistent store: the host's resolved OPFS namespace
+      // (dbName) and exact broker SharedWorker URL, so the overlay sees the
+      // host's local data — including unsynced local-only rows — and works
+      // offline.
+      driver: { type: "persistent", dbName: config.dbName },
+      runtimeSources: { brokerWorkerUrl: config.brokerWorkerUrl },
     })
       .then((c) => {
         if (cancelled) {
