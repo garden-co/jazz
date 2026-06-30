@@ -26,6 +26,7 @@ import {
 import { Link, Navigate, useParams, useSearchParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
+import { Tooltip } from "../tooltip/Tooltip.js";
 import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder.js";
 import {
   formatMutationFieldValue,
@@ -719,7 +720,13 @@ export function TableDataGrid() {
     [queryPropagation],
   );
 
-  const rows = useAll<DynamicTableRow>(queryBuilder, queryOptions) ?? EMPTY_ROWS;
+  // `undefined` means the live query hasn't resolved yet (loading); `[]` means
+  // it resolved and is genuinely empty. Collapsing both to EMPTY_ROWS made
+  // "loading" and "no rows" look identical — keep them apart so the grid can
+  // show a skeleton while the first result is in flight.
+  const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
+  const isInitialLoading = queryResult === undefined;
+  const rows = queryResult ?? EMPTY_ROWS;
 
   const gridColumns = useMemo<GridColumn[]>(
     () => [
@@ -925,64 +932,76 @@ export function TableDataGrid() {
         }}
         actions={
           <>
-            <Link
-              to={`/data-explorer/${table}/schema`}
-              className={`${styles.secondaryButton} ${styles.iconButton}`}
-              aria-label="Schema"
-              title="Schema"
+            <Tooltip label="Schema">
+              <Link
+                to={`/data-explorer/${table}/schema`}
+                className={`${styles.secondaryButton} ${styles.iconButton}`}
+                aria-label="Schema"
+              >
+                <CatalogIcon className={styles.buttonIcon} />
+              </Link>
+            </Tooltip>
+            <Tooltip label="Insert row">
+              <button
+                type="button"
+                className={`${styles.secondaryButton} ${styles.iconButton}`}
+                aria-label="Insert row"
+                onClick={() => {
+                  setQueuedSaveError(null);
+                  const stagedInsert = createStagedInsert(schemaColumns);
+                  setStagedInserts((current) => [...current, stagedInsert]);
+                  setPendingScrollToRowId(stagedInsert.id);
+                }}
+                disabled={isAnyMutationPending}
+              >
+                <PlusIcon className={styles.buttonIcon} />
+              </button>
+            </Tooltip>
+            <Tooltip
+              label={
+                selectedVisibleRowIds.size === 0 ? "Select rows to delete" : "Delete selected rows"
+              }
             >
-              <CatalogIcon className={styles.buttonIcon} />
-            </Link>
-            <button
-              type="button"
-              className={`${styles.secondaryButton} ${styles.iconButton}`}
-              aria-label="Insert row"
-              title="Insert row"
-              onClick={() => {
-                setQueuedSaveError(null);
-                const stagedInsert = createStagedInsert(schemaColumns);
-                setStagedInserts((current) => [...current, stagedInsert]);
-                setPendingScrollToRowId(stagedInsert.id);
-              }}
-              disabled={isAnyMutationPending}
-            >
-              <PlusIcon className={styles.buttonIcon} />
-            </button>
-            <button
-              type="button"
-              className={`${styles.secondaryButton} ${styles.iconButton}`}
-              aria-label="Delete row(s)"
-              title="Delete row(s)"
-              onClick={handleQueueSelectedDeletes}
-            >
-              <TrashIcon className={styles.buttonIcon} />
-            </button>
+              <button
+                type="button"
+                className={`${styles.secondaryButton} ${styles.iconButton}`}
+                aria-label="Delete row(s)"
+                onClick={handleQueueSelectedDeletes}
+                disabled={selectedVisibleRowIds.size === 0}
+              >
+                <TrashIcon className={styles.buttonIcon} />
+              </button>
+            </Tooltip>
           </>
         }
       />
       <div className={styles.contentArea}>
         <div className={styles.gridFrame}>
-          <PlainTableView
-            rows={visibleRows}
-            gridColumns={gridColumns}
-            sorting={sorting}
-            schema={schema}
-            queryOptions={queryOptions}
-            schemaColumnById={schemaColumnById}
-            queuedEdits={queuedEdits}
-            stagedInserts={stagedInserts}
-            selectedRowIds={selectedVisibleRowIds}
-            queuedDeletes={queuedDeletes}
-            pendingScrollToRowId={pendingScrollToRowId}
-            animationScopeKey={gridAnimationScopeKey}
-            onSortColumnsChange={handleSortColumnsChange}
-            onQueuedEditsChange={setQueuedEdits}
-            onStagedInsertsChange={setStagedInserts}
-            onSelectedRowIdsChange={setSelectedRowIds}
-            onQueuedSaveErrorChange={setQueuedSaveError}
-            onQueuedDeletesChange={setQueuedDeletes}
-            onPendingScrollToRowIdChange={setPendingScrollToRowId}
-          />
+          {isInitialLoading ? (
+            <GridSkeleton />
+          ) : (
+            <PlainTableView
+              rows={visibleRows}
+              gridColumns={gridColumns}
+              sorting={sorting}
+              schema={schema}
+              queryOptions={queryOptions}
+              schemaColumnById={schemaColumnById}
+              queuedEdits={queuedEdits}
+              stagedInserts={stagedInserts}
+              selectedRowIds={selectedVisibleRowIds}
+              queuedDeletes={queuedDeletes}
+              pendingScrollToRowId={pendingScrollToRowId}
+              animationScopeKey={gridAnimationScopeKey}
+              onSortColumnsChange={handleSortColumnsChange}
+              onQueuedEditsChange={setQueuedEdits}
+              onStagedInsertsChange={setStagedInserts}
+              onSelectedRowIdsChange={setSelectedRowIds}
+              onQueuedSaveErrorChange={setQueuedSaveError}
+              onQueuedDeletesChange={setQueuedDeletes}
+              onPendingScrollToRowIdChange={setPendingScrollToRowId}
+            />
+          )}
         </div>
       </div>
       <div className={styles.bottomRail}>
@@ -993,7 +1012,12 @@ export function TableDataGrid() {
             aria-live="polite"
           >
             <div className={styles.queuedBannerCopy}>
-              <span className={styles.queuedBannerLabel}>Queued</span>
+              <span
+                className={styles.queuedBannerLabel}
+                title="These changes are staged locally. Click Save changes to apply them, or Discard to drop them."
+              >
+                Queued
+              </span>
               {hasQueuedEdits ? (
                 <span>
                   {queuedEditCount} edit{queuedEditCount === 1 ? "" : "s"} across{" "}
@@ -1038,7 +1062,9 @@ export function TableDataGrid() {
         ) : null}
         <footer className={styles.footer}>
           <div className={styles.paginationInfo}>
-            Showing {visibleRows.length === 0 ? 0 : startRow + 1}-{endRow}
+            {isInitialLoading
+              ? "Loading…"
+              : `Showing ${visibleRows.length === 0 ? 0 : startRow + 1}-${endRow}`}
           </div>
           <div className={styles.paginationControls}>
             <label className={styles.pageSizeLabel}>
@@ -1488,6 +1514,39 @@ function RelationCell({
   );
 }
 
+// Stand-in for the grid while the first query result is in flight. Rendered in
+// place of the DataGrid (not as its no-rows fallback) so it owns the full body
+// width and keeps a header strip — no layout jump when the real grid arrives.
+// Width jitter is deterministic (keyed off row index) so the rows read as
+// organic data without depending on Math.random.
+const SKELETON_ROW_COUNT = 16;
+const SKELETON_VALUE_WIDTHS = ["54%", "38%", "66%", "45%", "59%", "33%", "71%", "48%"];
+
+function GridSkeleton() {
+  return (
+    <div className={styles.skeleton} role="status" aria-live="polite">
+      <span className={styles.visuallyHidden}>Loading rows…</span>
+      <div className={styles.skeletonHeader} aria-hidden="true">
+        <span className={`${styles.skeletonHeaderBar} ${styles.skeletonColId}`} />
+        <span className={styles.skeletonHeaderBar} style={{ width: "30%" }} />
+        <span className={styles.skeletonHeaderBar} style={{ width: "18%" }} />
+      </div>
+      <div className={styles.skeletonBody}>
+        {Array.from({ length: SKELETON_ROW_COUNT }, (_, rowIndex) => (
+          <div key={rowIndex} className={styles.skeletonRow} aria-hidden="true">
+            <span className={`${styles.skeletonBar} ${styles.skeletonColId}`} />
+            <span
+              className={styles.skeletonBar}
+              style={{ width: SKELETON_VALUE_WIDTHS[rowIndex % SKELETON_VALUE_WIDTHS.length] }}
+            />
+            <span className={`${styles.skeletonBar} ${styles.skeletonColFlag}`} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PlainTableView({
   rows,
   gridColumns,
@@ -1716,7 +1775,14 @@ function PlainTableView({
             : styles.dataGridCell,
         renderCell: ({ row }) => {
           if (isIdColumn && row.isStagedInsert) {
-            return <span className={styles.stagedInsertBadge}>staged</span>;
+            return (
+              <span
+                className={styles.stagedInsertBadge}
+                title="Staged row — not saved yet. Click Save changes to insert it."
+              >
+                staged
+              </span>
+            );
           }
 
           const rawValue = row.row[column.accessorKey];
@@ -2008,8 +2074,8 @@ function PlainTableView({
       }}
       rowClass={rowClass}
       renderers={renderers}
-      rowHeight={38}
-      headerRowHeight={40}
+      rowHeight={30}
+      headerRowHeight={32}
       enableVirtualization={false}
     />
   );

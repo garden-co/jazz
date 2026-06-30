@@ -309,7 +309,7 @@ function ExtensionLiveQuery() {
         <section className={styles.emptyState}>
           <p className={styles.emptyTitle}>No active subscriptions</p>
           <p className={styles.emptyText}>
-            Open a page with `devMode: true` and create a live query to see it here.
+            Create a live query in the inspected page to see it here.
           </p>
         </section>
       ) : (
