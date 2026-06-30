@@ -200,7 +200,7 @@ pub(crate) enum UnsupportedReason {
     /// Query/relation operator is not yet represented.
     Operator(String),
     /// Requested output fact is not yet emitted.
-    Output(ProgramFactKey),
+    Output(Box<ProgramFactKey>),
     /// Policy composition is not yet lowered.
     Policy(String),
     /// Runtime contract is not yet connected to the lowered graph.
