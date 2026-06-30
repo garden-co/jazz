@@ -87,7 +87,7 @@ export function InspectorApp() {
         autoAttachDevTools={false}
         fallback={<p style={{ padding: 16 }}>Connecting…</p>}
       >
-        <DevtoolsProvider wasmSchema={wasmSchema} runtime="overlay" isOverlay>
+        <DevtoolsProvider wasmSchema={wasmSchema} runtime="overlay">
           <MemoryRouter>
             <InspectorRoutes />
           </MemoryRouter>
