@@ -30,6 +30,7 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
         serverUrl: c.serverUrl,
         env: c.env ?? "",
         userBranch: c.userBranch,
+        secret: c.secret,
         adminSecret: c.adminSecret,
         jwtToken: c.jwtToken,
       };

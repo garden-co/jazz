@@ -14,6 +14,8 @@ export interface InspectorConnectionConfig {
   serverUrl: string;
   env: string;
   userBranch?: string;
+  /** Local-first auth seed — pass through so the overlay inherits the host identity. */
+  secret?: string;
   adminSecret?: string;
   jwtToken?: string;
 }
