@@ -92,7 +92,7 @@ vi.mock("jazz-tools/react", () => ({
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
     wasmSchema: mockWasmSchema,
-    runtime: "extension",
+    runtime: "overlay",
     queryPropagation: "local-only",
   }),
 }));
@@ -307,7 +307,7 @@ describe("TableDataGrid", () => {
           title: "zeta updated",
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "edge" });
     });
   });
 
@@ -447,7 +447,7 @@ describe("TableDataGrid", () => {
           meta: null,
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "edge" });
     });
   });
 
@@ -474,7 +474,7 @@ describe("TableDataGrid", () => {
           title: "zeta queued",
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "edge" });
     });
 
     expect(screen.queryByText(/queued change across/i)).toBeNull();
@@ -502,7 +502,7 @@ describe("TableDataGrid", () => {
           done: true,
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "edge" });
     });
   });
 
@@ -687,7 +687,7 @@ describe("TableDataGrid", () => {
           owner_id: null,
         }),
       );
-      expect(mockInsertWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockInsertWait).toHaveBeenCalledWith({ tier: "edge" });
     });
 
     expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("status");
@@ -851,7 +851,7 @@ describe("TableDataGrid", () => {
         expect.objectContaining({ _table: "todos" }),
         "row-2",
       );
-      expect(mockDeleteWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockDeleteWait).toHaveBeenCalledWith({ tier: "edge" });
     });
   });
 

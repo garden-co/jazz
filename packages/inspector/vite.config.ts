@@ -16,29 +16,15 @@ export default defineConfig(({ mode }): UserConfig => {
     };
   }
 
-  const isExtensionBuild = mode === "extension";
-
+  // The standalone "web" build (the default).
   return {
     plugins: [react()],
-    base: isExtensionBuild ? "./" : "/",
-    publicDir: isExtensionBuild ? "chrome-extension" : "public",
-    worker: {
-      format: "es",
+    base: "/",
+    publicDir: "public",
+    worker: { format: "es" },
+    build: {
+      outDir: "dist",
+      emptyOutDir: true,
     },
-    build: isExtensionBuild
-      ? {
-          outDir: "dist-extension",
-          emptyOutDir: true,
-          rollupOptions: {
-            input: {
-              index: resolve(__dirname, "devtools-tab.html"),
-              devtools: resolve(__dirname, "devtools.html"),
-            },
-          },
-        }
-      : {
-          outDir: "dist",
-          emptyOutDir: true,
-        },
   };
 });
