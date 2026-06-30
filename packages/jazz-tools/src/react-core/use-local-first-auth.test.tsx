@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
-import { createUseLocalFirstAuth } from "./use-local-first-auth.js";
+import { useLocalFirstAuthWithStore } from "./use-local-first-auth.js";
 import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 
 function makeInMemoryStore(): AuthSecretStore {
@@ -28,17 +28,15 @@ function makeInMemoryStore(): AuthSecretStore {
   };
 }
 
-describe("createUseLocalFirstAuth", () => {
+describe("useLocalFirstAuthWithStore", () => {
   let store: AuthSecretStore;
-  let useLocalFirstAuth: ReturnType<typeof createUseLocalFirstAuth>;
 
   beforeEach(() => {
     store = makeInMemoryStore();
-    useLocalFirstAuth = createUseLocalFirstAuth(store);
   });
 
   it("starts with isLoading=true and secret=null, then resolves", async () => {
-    const { result } = renderHook(() => useLocalFirstAuth());
+    const { result } = renderHook(() => useLocalFirstAuthWithStore(store));
     expect(result.current.isLoading).toBe(true);
     expect(result.current.secret).toBeNull();
 
@@ -47,7 +45,7 @@ describe("createUseLocalFirstAuth", () => {
   });
 
   it("login writes the store and updates secret", async () => {
-    const { result } = renderHook(() => useLocalFirstAuth());
+    const { result } = renderHook(() => useLocalFirstAuthWithStore(store));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     await act(async () => {
@@ -60,7 +58,7 @@ describe("createUseLocalFirstAuth", () => {
   });
 
   it("signOut clears the store and rotates the secret on re-resolve", async () => {
-    const { result } = renderHook(() => useLocalFirstAuth());
+    const { result } = renderHook(() => useLocalFirstAuthWithStore(store));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const before = result.current.secret;
 
@@ -74,13 +72,11 @@ describe("createUseLocalFirstAuth", () => {
     });
   });
 
-  it("two factory invocations have independent version scopes", async () => {
+  it("useLocalFirstAuthWithStore isolates different stores", async () => {
     const storeA = makeInMemoryStore();
     const storeB = makeInMemoryStore();
-    const useA = createUseLocalFirstAuth(storeA);
-    const useB = createUseLocalFirstAuth(storeB);
-    const { result: a } = renderHook(() => useA());
-    const { result: b } = renderHook(() => useB());
+    const { result: a } = renderHook(() => useLocalFirstAuthWithStore(storeA));
+    const { result: b } = renderHook(() => useLocalFirstAuthWithStore(storeB));
 
     await waitFor(() => expect(a.current.isLoading).toBe(false));
     await waitFor(() => expect(b.current.isLoading).toBe(false));
