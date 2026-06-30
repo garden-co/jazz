@@ -388,8 +388,18 @@ where
         {
             let mut node = self.node.node.borrow_mut();
             (
-                Some(node.prepared_query_plan(&shape, DurabilityTier::Local)?),
-                Some(node.prepared_query_plan(&shape, DurabilityTier::Global)?),
+                Some(node.prepared_query_plan(
+                    &shape,
+                    &binding,
+                    DurabilityTier::Local,
+                    AuthorId::SYSTEM,
+                )?),
+                Some(node.prepared_query_plan(
+                    &shape,
+                    &binding,
+                    DurabilityTier::Global,
+                    AuthorId::SYSTEM,
+                )?),
             )
         } else {
             (None, None)
