@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -118,7 +118,6 @@ describe("Invite Flow E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("invite-a"),
       serverUrl,
-      secret: await testSecret(`invite-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -266,7 +265,6 @@ describe("Invite Flow E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("invite-b"),
       serverUrl,
-      secret: await testSecret(`invite-user-b-${Date.now()}`),
     });
 
     // User B should see the secret message after joining via invite

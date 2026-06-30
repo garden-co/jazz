@@ -23,7 +23,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import { App } from "../../src/App";
 import { FUEL_TYPES } from "../../src/game/constants";
-import { ADMIN_SECRET, APP_ID, APP_ID_MULTI, TEST_PORT, testSecret } from "./test-constants";
+import { ADMIN_SECRET, APP_ID, APP_ID_MULTI, TEST_PORT } from "./test-constants";
 import {
   type MountEntry,
   pressKey,
@@ -369,16 +369,12 @@ describe("Moon Lander — Cross-Client Sync", () => {
      * within SYNC_TIMEOUT.
      */
     const serverUrl = await commands.startFreshTestServer("full-phase2");
-    const sharedToken = await testSecret(
-      `full-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    );
 
     try {
       const elA = await mountApp({
         appId: APP_ID_MULTI,
         dbName: uniqueDbName("full-a"),
         serverUrl,
-        localFirstSecret: sharedToken,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
       });
@@ -387,7 +383,6 @@ describe("Moon Lander — Cross-Client Sync", () => {
         appId: APP_ID_MULTI,
         dbName: uniqueDbName("full-b"),
         serverUrl,
-        localFirstSecret: sharedToken,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
       });

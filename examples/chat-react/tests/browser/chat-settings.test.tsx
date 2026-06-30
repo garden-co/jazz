@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -296,7 +296,6 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-alice"),
       serverUrl,
-      secret: await testSecret(`settings-alice-${Date.now()}`),
     });
 
     await waitFor(
@@ -319,7 +318,6 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-bob"),
       serverUrl,
-      secret: await testSecret(`settings-bob-${Date.now()}`),
     });
 
     // Wait for Bob to see the chat

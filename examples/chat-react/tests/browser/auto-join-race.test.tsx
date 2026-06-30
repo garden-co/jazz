@@ -24,7 +24,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -111,7 +111,6 @@ describe("auto-join race on first message send", () => {
             appId: APP_ID,
             dbName: uniqueDbName("autojoin-alice"),
             serverUrl,
-            secret: await testSecret(`autojoin-alice-${runId}`),
           }}
         />,
       );
@@ -178,7 +177,6 @@ describe("auto-join race on first message send", () => {
             appId: APP_ID,
             dbName: uniqueDbName("autojoin-bob"),
             serverUrl,
-            secret: await testSecret(`autojoin-bob-${runId}`),
           }}
         />,
       );
