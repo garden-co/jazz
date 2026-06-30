@@ -4,7 +4,6 @@ import type { DbConfig } from "../runtime/db.js";
 
 const mocks = vi.hoisted(() => {
   const createDb = vi.fn();
-  const createDbFromInspectedPage = vi.fn();
   const trackPromise = vi.fn(<T>(promise: Promise<T>) => promise);
   const orchestratorInstances: Array<{
     config: { appId: string };
@@ -33,7 +32,6 @@ const mocks = vi.hoisted(() => {
 
   return {
     createDb,
-    createDbFromInspectedPage,
     trackPromise,
     orchestratorInstances,
     MockSubscriptionsOrchestrator,
@@ -42,7 +40,6 @@ const mocks = vi.hoisted(() => {
     },
     reset() {
       createDb.mockReset();
-      createDbFromInspectedPage.mockReset();
       trackPromise.mockReset();
       orchestratorInstances.length = 0;
       initError = null;
@@ -60,11 +57,7 @@ vi.mock("../subscriptions-orchestrator.js", () => ({
   trackPromise: mocks.trackPromise,
 }));
 
-vi.mock("../dev-tools/index.js", () => ({
-  createDbFromInspectedPage: mocks.createDbFromInspectedPage,
-}));
-
-import { createJazzClient, createExtensionJazzClient } from "./create-jazz-client.js";
+import { createJazzClient } from "./create-jazz-client.js";
 
 function createMockDb(appId = "test-app", session: Session | null = null) {
   return {
@@ -157,44 +150,5 @@ describe("svelte/createJazzClient", () => {
     await createJazzClient(config);
 
     expect(mocks.createDb).toHaveBeenCalledWith(config);
-  });
-});
-
-describe("svelte/createExtensionJazzClient", () => {
-  beforeEach(() => {
-    mocks.reset();
-    mocks.trackPromise.mockImplementation((promise) => promise);
-  });
-
-  it("creates client from inspected page", async () => {
-    const db = createMockDb("devtools-app");
-    mocks.createDbFromInspectedPage.mockResolvedValue(db);
-
-    const client = await createExtensionJazzClient();
-
-    expect(mocks.createDbFromInspectedPage).toHaveBeenCalledTimes(1);
-    expect(db.getConfig).toHaveBeenCalledTimes(1);
-    expect(mocks.orchestratorInstances).toHaveLength(1);
-    expect(mocks.orchestratorInstances[0]!.config).toEqual({ appId: "devtools-app" });
-    expect(client.db).toBe(db);
-    expect(client.session).toBeNull();
-    expect(client.manager).toBe(mocks.orchestratorInstances[0]!);
-  });
-
-  it("rejects when config is missing", async () => {
-    const db = { shutdown: vi.fn(), getConfig: vi.fn(() => null) };
-    mocks.createDbFromInspectedPage.mockResolvedValue(db);
-
-    await expect(createExtensionJazzClient()).rejects.toThrow(
-      "DevTools bridge did not provide an inspected page config.",
-    );
-  });
-
-  it("wraps with trackPromise", async () => {
-    const db = createMockDb();
-    mocks.createDbFromInspectedPage.mockResolvedValue(db);
-
-    await createExtensionJazzClient();
-    expect(mocks.trackPromise).toHaveBeenCalledTimes(1);
   });
 });
