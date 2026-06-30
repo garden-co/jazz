@@ -154,14 +154,24 @@ where
         } else {
             snapshot_row.content_version
         };
-        self.open_tx_mut(tx_id)?.writes.push(PendingWrite {
+        let pending = PendingWrite {
             table: table.to_owned(),
             row_uuid,
             schema_version: write_schema_version,
             cells: positional_cells_from_map(&table_schema, &cells)?,
             deletion,
             parent,
-        });
+        };
+        let open_tx = self.open_tx_mut(tx_id)?;
+        if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
+            write.table == pending.table
+                && write.row_uuid == pending.row_uuid
+                && write.deletion.is_some() == pending.deletion.is_some()
+        }) {
+            *existing = pending;
+        } else {
+            open_tx.writes.push(pending);
+        }
         Ok(())
     }
 
