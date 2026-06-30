@@ -1676,6 +1676,9 @@ fn planner_column_type<'a>(
     if column == "id" {
         return Ok(&ColumnType::Uuid);
     }
+    if let Some(column_type) = magic_column_type(column) {
+        return Ok(column_type);
+    }
     let column = column_schema(table, column)?;
     if column.large_value.is_some() {
         return Err(QueryError::LargeValueColumnInQuery {
@@ -1684,6 +1687,15 @@ fn planner_column_type<'a>(
         });
     }
     Ok(&column.column_type)
+}
+
+fn magic_column_type(column: &str) -> Option<&'static ColumnType> {
+    match column {
+        "$canRead" | "$canEdit" | "$canDelete" => Some(&ColumnType::Bool),
+        "$createdBy" | "$updatedBy" => Some(&ColumnType::Uuid),
+        "$createdAt" | "$updatedAt" => Some(&ColumnType::U64),
+        _ => None,
+    }
 }
 
 fn validate_include(schema: &JazzSchema, root: &TableSchema, path: &str) -> Result<(), QueryError> {

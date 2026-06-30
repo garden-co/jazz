@@ -8,7 +8,7 @@ use super::codec::{
     tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_eval::maintained_view_tagged_user_field;
-use crate::ids::{NodeAlias, NodeUuid, RowUuid};
+use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::ResultRowEntry;
 use crate::schema::TableSchema;
 use crate::time::TxTime;
@@ -293,6 +293,7 @@ fn decode_tagged_terminal_version(
             cells.insert(column.name.clone(), value);
         }
     }
+    let tx_time = TxTime(record_u64(record, "tx_time")?);
     VersionRow::from_parts_with_schema_version(
         table,
         VersionRowParts {
@@ -303,8 +304,12 @@ fn decode_tagged_terminal_version(
                 record,
                 "schema_version",
             )?),
-            tx_time: TxTime(record_u64(record, "tx_time")?),
+            tx_time,
             parents: tx_ids_from_value(record.get_idx(field_idx(record, "parents")?)?)?,
+            created_by: AuthorId::SYSTEM,
+            created_at: tx_time,
+            updated_by: AuthorId::SYSTEM,
+            updated_at: tx_time,
             cells,
             deletion,
         },

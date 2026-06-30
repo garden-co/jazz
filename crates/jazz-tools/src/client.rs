@@ -303,6 +303,17 @@ impl Backend {
         }
     }
 
+    fn row_provenance(
+        &self,
+        row: &jazz::node::CurrentRow,
+    ) -> std::result::Result<Option<jazz::node::RowProvenance>, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.row_provenance(row),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.row_provenance(row),
+        }
+    }
+
     async fn all(
         &self,
         prepared: &jazz::db::PreparedQuery,
@@ -1082,22 +1093,6 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
     }
 }
 
-fn current_row_tx_time(row: &jazz::node::CurrentRow) -> Option<u64> {
-    let (descriptor, raw) = row.encoded_record();
-    let tx_time_idx = descriptor
-        .fields()
-        .iter()
-        .position(|field| field.name.as_deref() == Some("tx_time"))?;
-    let tx_node_idx = tx_time_idx + 1;
-    if descriptor.fields().get(tx_node_idx)?.name.as_deref() != Some("tx_node_id") {
-        return None;
-    }
-    let record = jazz::groove::records::BorrowedRecord::new(raw, descriptor);
-    let time = record.get_u64(tx_time_idx).ok()?;
-    let node = record.get_u64(tx_node_idx).ok()?;
-    (time != 0 || node != 0).then_some(jazz::time::TxTime(time).physical_ms())
-}
-
 fn core_batch_id(tx_id: CoreTxId) -> BatchId {
     let mut bytes = *tx_id.node.0.as_bytes();
     bytes[..8].copy_from_slice(&tx_id.time.0.to_be_bytes());
@@ -1233,18 +1228,26 @@ impl JazzClient {
                     .can_delete(table, row_id)
                     .map_err(|error| JazzError::Query(error.to_string()))?,
             ),
-            "$createdAt" | "$updatedAt" => {
-                let Some(time) = current_row_tx_time(row) else {
+            "$createdAt" | "$updatedAt" | "$createdBy" | "$updatedBy" => {
+                let provenance = self
+                    .db
+                    .inner
+                    .borrow()
+                    .db
+                    .row_provenance(row)
+                    .map_err(|error| JazzError::Query(error.to_string()))?;
+                let Some(provenance) = provenance else {
                     return Err(JazzError::Query(format!(
                         "row missing provenance for magic column {column} on table {table}"
                     )));
                 };
-                Value::Timestamp(time)
-            }
-            "$createdBy" | "$updatedBy" => {
-                return Err(JazzError::Query(format!(
-                    "magic column {column} is not available through the Rust public client yet"
-                )));
+                match column {
+                    "$createdAt" => Value::Timestamp(provenance.created_at.physical_ms()),
+                    "$updatedAt" => Value::Timestamp(provenance.updated_at.physical_ms()),
+                    "$createdBy" => Value::Text(provenance.created_by.0.to_string()),
+                    "$updatedBy" => Value::Text(provenance.updated_by.0.to_string()),
+                    _ => unreachable!("matched provenance magic column"),
+                }
             }
             _ => return Ok(None),
         };

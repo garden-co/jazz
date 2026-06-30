@@ -858,6 +858,21 @@ where
             let layer = VersionLayer::for_commit(&commit);
             let previous_current =
                 self.query_local_layer_winner(&table_schema.name, commit.row_uuid, layer)?;
+            let creator_source = if let Some(previous) = previous_current.as_ref() {
+                Some(previous.clone())
+            } else if layer == VersionLayer::Deletion {
+                self.query_local_layer_winner(
+                    &table_schema.name,
+                    commit.row_uuid,
+                    VersionLayer::Content,
+                )?
+            } else {
+                None
+            };
+            let (created_by, created_at) = creator_source
+                .as_ref()
+                .map(|version| (version.created_by(), version.created_at()))
+                .unwrap_or((commit.made_by, TxTime(commit.now_ms)));
 
             let implicit_parent = if table_schema
                 .columns
@@ -892,6 +907,10 @@ where
                     schema_version_alias,
                     tx_time: made_at,
                     parents,
+                    created_by,
+                    created_at,
+                    updated_by: commit.made_by,
+                    updated_at: TxTime(commit.now_ms),
                     cells,
                     deletion: commit.deletion,
                 },
@@ -984,6 +1003,10 @@ where
             edit.row_uuid,
             VersionLayer::Content,
         )?;
+        let (created_by, created_at) = previous_current
+            .as_ref()
+            .map(|version| (version.created_by(), version.created_at()))
+            .unwrap_or((edit.made_by, TxTime(edit.now_ms)));
         let parent_len = match previous_current.as_ref() {
             Some(parent) => self.large_value_column_len(&table_schema, parent, &edit.column)?,
             None => 0,
@@ -991,6 +1014,7 @@ where
         let table = edit.table.clone();
         let row_uuid = edit.row_uuid;
         let made_by = edit.made_by;
+        let updated_at = TxTime(edit.now_ms);
         let column_name = edit.column.clone();
         let inline_ops = edit.into_text_ops();
         validate_text_edit_ranges(parent_len, &inline_ops)?;
@@ -1012,6 +1036,10 @@ where
                 schema_version_alias,
                 tx_time: made_at,
                 parents,
+                created_by,
+                created_at,
+                updated_by: made_by,
+                updated_at,
                 cells,
                 deletion: None,
             },
@@ -2071,6 +2099,11 @@ where
             .map(|stored| stored.to_record())
     }
 
+    /// Resolve creator/updater provenance for a projected current row.
+    pub fn row_provenance(&mut self, row: &CurrentRow) -> Result<Option<RowProvenance>, Error> {
+        row.provenance()
+    }
+
     pub(crate) fn current_row_tx_id(&mut self, row: &CurrentRow) -> Option<TxId> {
         let (time, alias) = row.projected_tx_alias()?;
         Some(TxId::new(time, self.resolve_node_alias(alias).ok()??))
@@ -2790,6 +2823,19 @@ pub struct CurrentRow {
     deleted: bool,
 }
 
+/// User-visible row provenance resolved from commit authorship.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowProvenance {
+    /// Principal that created the row.
+    pub created_by: AuthorId,
+    /// Commit time of the row's first retained content version.
+    pub created_at: TxTime,
+    /// Principal that authored the visible row version.
+    pub updated_by: AuthorId,
+    /// Commit time of the visible row version.
+    pub updated_at: TxTime,
+}
+
 /// Directed relation edge emitted for an array-subquery payload.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RelationEdge {
@@ -2881,6 +2927,34 @@ impl CurrentRow {
         (self.record.descriptor(), self.record.raw())
     }
 
+    pub(crate) fn raw_field(&self, field: &str) -> Option<Value> {
+        let idx = self.record.descriptor().field_index(field)?;
+        self.record.borrowed().get_idx(idx).ok()
+    }
+
+    pub(crate) fn provenance(&self) -> Result<Option<RowProvenance>, Error> {
+        let descriptor = self.record.descriptor();
+        let borrowed = self.record.borrowed();
+        let Some(created_by_idx) = descriptor.field_index("$createdBy") else {
+            return Ok(None);
+        };
+        let Some(created_at_idx) = descriptor.field_index("$createdAt") else {
+            return Ok(None);
+        };
+        let Some(updated_by_idx) = descriptor.field_index("$updatedBy") else {
+            return Ok(None);
+        };
+        let Some(updated_at_idx) = descriptor.field_index("$updatedAt") else {
+            return Ok(None);
+        };
+        Ok(Some(RowProvenance {
+            created_by: AuthorId(borrowed.get_uuid(created_by_idx)?),
+            created_at: TxTime(borrowed.get_u64(created_at_idx)?),
+            updated_by: AuthorId(borrowed.get_uuid(updated_by_idx)?),
+            updated_at: TxTime(borrowed.get_u64(updated_at_idx)?),
+        }))
+    }
+
     pub(crate) fn project(&self, table: &TableSchema, columns: &[String]) -> Result<Self, Error> {
         let selected = columns.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let projected_columns = table
@@ -2899,6 +2973,10 @@ impl CurrentRow {
                     )
                 }))
                 .chain([
+                    ("$createdBy".to_owned(), records::ValueType::Uuid),
+                    ("$createdAt".to_owned(), records::ValueType::U64),
+                    ("$updatedBy".to_owned(), records::ValueType::Uuid),
+                    ("$updatedAt".to_owned(), records::ValueType::U64),
                     ("tx_time".to_owned(), records::ValueType::U64),
                     ("tx_node_id".to_owned(), records::ValueType::U64),
                 ]),
@@ -2908,6 +2986,17 @@ impl CurrentRow {
             values.push(Value::Nullable(
                 self.cell(table, &column.name).map(Box::new),
             ));
+        }
+        if let Some(provenance) = self.provenance()? {
+            values.push(Value::Uuid(provenance.created_by.0));
+            values.push(Value::U64(provenance.created_at.0));
+            values.push(Value::Uuid(provenance.updated_by.0));
+            values.push(Value::U64(provenance.updated_at.0));
+        } else {
+            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::U64(0));
+            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::U64(0));
         }
         if let Some((time, node)) = self.projected_tx_alias() {
             values.push(Value::U64(time.0));

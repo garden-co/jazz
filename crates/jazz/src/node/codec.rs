@@ -20,6 +20,10 @@ groove::define_record! {
         2 => tx_node_id: NodeAlias,
         3 => schema_version: SchemaVersionAlias,
         4 => parents: ParentRefs,
+        5 => created_by: AuthorId,
+        6 => created_at: TxTime,
+        7 => updated_by: AuthorId,
+        8 => updated_at: TxTime,
         .. user_cells,
     }
 }
@@ -31,7 +35,11 @@ groove::define_record! {
         2 => tx_node_id: NodeAlias,
         3 => schema_version: SchemaVersionAlias,
         4 => parents: ParentRefs,
-        5 => _deletion: DeletionEvent,
+        5 => created_by: AuthorId,
+        6 => created_at: TxTime,
+        7 => updated_by: AuthorId,
+        8 => updated_at: TxTime,
+        9 => _deletion: DeletionEvent,
     }
 }
 
@@ -40,6 +48,10 @@ groove::define_record! {
         0 => row_uuid: RowUuid,
         1 => tx_time: TxTime,
         2 => tx_node_id: NodeAlias,
+        3 => created_by: AuthorId,
+        4 => created_at: TxTime,
+        5 => updated_by: AuthorId,
+        6 => updated_at: TxTime,
         .. user_cells,
     }
 }
@@ -49,7 +61,11 @@ groove::define_record! {
         0 => row_uuid: RowUuid,
         1 => tx_time: TxTime,
         2 => tx_node_id: NodeAlias,
-        3 => _deletion: DeletionEvent,
+        3 => created_by: AuthorId,
+        4 => created_at: TxTime,
+        5 => updated_by: AuthorId,
+        6 => updated_at: TxTime,
+        7 => _deletion: DeletionEvent,
     }
 }
 
@@ -473,6 +489,10 @@ pub(super) struct VersionRowParts {
     pub(super) schema_version_alias: SchemaVersionAlias,
     pub(super) tx_time: TxTime,
     pub(super) parents: Vec<TxId>,
+    pub(super) created_by: AuthorId,
+    pub(super) created_at: TxTime,
+    pub(super) updated_by: AuthorId,
+    pub(super) updated_at: TxTime,
     pub(super) cells: BTreeMap<String, Value>,
     pub(super) deletion: Option<DeletionEvent>,
 }
@@ -510,6 +530,7 @@ impl VersionRow {
         tx_node_alias: NodeAlias,
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
+        made_by: AuthorId,
         storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         let (storage_table, values) = if let Some(deletion) = version.deletion() {
@@ -522,6 +543,7 @@ impl VersionRow {
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
+                    made_by,
                     deletion,
                 ),
             )
@@ -536,6 +558,7 @@ impl VersionRow {
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
+                    made_by,
                 )?,
             )
         };
@@ -594,6 +617,62 @@ impl VersionRow {
         };
         tx_ids_from_value(self.record.borrowed().get_idx(idx).expect("valid parents"))
             .expect("valid parent tx ids")
+    }
+
+    pub(super) fn created_by(&self) -> AuthorId {
+        let idx = if self.is_register_record() {
+            RegisterRowRecord::FIELD_CREATED_BY_IDX
+        } else {
+            HistoryRowRecord::FIELD_CREATED_BY_IDX
+        };
+        AuthorId(
+            self.record
+                .borrowed()
+                .get_uuid(idx)
+                .expect("valid created_by"),
+        )
+    }
+
+    pub(super) fn created_at(&self) -> TxTime {
+        let idx = if self.is_register_record() {
+            RegisterRowRecord::FIELD_CREATED_AT_IDX
+        } else {
+            HistoryRowRecord::FIELD_CREATED_AT_IDX
+        };
+        TxTime(
+            self.record
+                .borrowed()
+                .get_u64(idx)
+                .expect("valid created_at"),
+        )
+    }
+
+    pub(super) fn updated_by(&self) -> AuthorId {
+        let idx = if self.is_register_record() {
+            RegisterRowRecord::FIELD_UPDATED_BY_IDX
+        } else {
+            HistoryRowRecord::FIELD_UPDATED_BY_IDX
+        };
+        AuthorId(
+            self.record
+                .borrowed()
+                .get_uuid(idx)
+                .expect("valid updated_by"),
+        )
+    }
+
+    pub(super) fn updated_at(&self) -> TxTime {
+        let idx = if self.is_register_record() {
+            RegisterRowRecord::FIELD_UPDATED_AT_IDX
+        } else {
+            HistoryRowRecord::FIELD_UPDATED_AT_IDX
+        };
+        TxTime(
+            self.record
+                .borrowed()
+                .get_u64(idx)
+                .expect("valid updated_at"),
+        )
     }
 
     pub(super) fn schema_version_alias(&self) -> SchemaVersionAlias {
@@ -1111,6 +1190,10 @@ pub(super) fn history_values_from_parts(
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
+        Value::Uuid(version.created_by.0),
+        Value::U64(version.created_at.0),
+        Value::Uuid(version.updated_by.0),
+        Value::U64(version.updated_at.0),
     ];
     for column in &table.columns {
         if let Some(value) = version.cells.get(&column.name) {
@@ -1129,6 +1212,7 @@ fn history_values_from_wire(
     tx_node_alias: NodeAlias,
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
+    made_by: AuthorId,
 ) -> Result<Vec<Value>, Error> {
     let mut values = Vec::with_capacity(HistoryRowRecord::USER_CELLS + table.columns.len());
     values.push(Value::Uuid(version.row_uuid().0));
@@ -1142,6 +1226,10 @@ fn history_values_from_wire(
             .map(|parent| tx_id_value(*parent))
             .collect(),
     ));
+    values.push(Value::Uuid(made_by.0));
+    values.push(Value::U64(tx_time.0));
+    values.push(Value::Uuid(made_by.0));
+    values.push(Value::U64(tx_time.0));
     for (idx, column) in table.columns.iter().enumerate() {
         let value = version.optional_cell_at(idx);
         if let Some(value) = value.as_ref() {
@@ -1168,6 +1256,10 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
+        Value::Uuid(version.created_by.0),
+        Value::U64(version.created_at.0),
+        Value::Uuid(version.updated_by.0),
+        Value::U64(version.updated_at.0),
         deletion_event_value(deletion),
     ])
 }
@@ -1177,6 +1269,7 @@ fn register_values_from_wire(
     tx_node_alias: NodeAlias,
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
+    made_by: AuthorId,
     deletion: DeletionEvent,
 ) -> Vec<Value> {
     vec![
@@ -1191,6 +1284,10 @@ fn register_values_from_wire(
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
+        Value::Uuid(made_by.0),
+        Value::U64(tx_time.0),
+        Value::Uuid(made_by.0),
+        Value::U64(tx_time.0),
         deletion_event_value(deletion),
     ]
 }
@@ -1222,6 +1319,10 @@ pub(super) fn global_current_values(
         Value::Uuid(version.row_uuid().0),
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),
+        Value::Uuid(version.created_by().0),
+        Value::U64(version.created_at().0),
+        Value::Uuid(version.updated_by().0),
+        Value::U64(version.updated_at().0),
     ];
     for (idx, _column) in table.columns.iter().enumerate() {
         let field = HistoryRowRecord::USER_CELLS + idx;
@@ -1237,6 +1338,10 @@ pub(super) fn register_global_current_values(version: &VersionRow) -> Vec<Value>
         Value::Uuid(version.row_uuid().0),
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),
+        Value::Uuid(version.created_by().0),
+        Value::U64(version.created_at().0),
+        Value::Uuid(version.updated_by().0),
+        Value::U64(version.updated_at().0),
         deletion_event_value(
             version
                 .deletion()
@@ -1299,6 +1404,12 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
         .collect::<Vec<_>>();
     let mut content_fields = vec!["row_uuid".to_owned()];
     content_fields.extend(user_fields.iter().cloned());
+    content_fields.extend([
+        "created_by".to_owned(),
+        "created_at".to_owned(),
+        "updated_by".to_owned(),
+        "updated_at".to_owned(),
+    ]);
     content_fields.push("tx_time".to_owned());
     content_fields.push("tx_node_id".to_owned());
     let edge_visible_ahead = |table_name: String, fields: Vec<String>| {
@@ -1353,6 +1464,10 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
                     "row_uuid".to_owned(),
                     "tx_time".to_owned(),
                     "tx_node_id".to_owned(),
+                    "created_by".to_owned(),
+                    "created_at".to_owned(),
+                    "updated_by".to_owned(),
+                    "updated_at".to_owned(),
                     "_deletion".to_owned(),
                 ],
             )
@@ -1385,11 +1500,14 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
         .project_fields(
             std::iter::once(ProjectField::named("row_uuid"))
                 .chain(user_fields.into_iter().map(ProjectField::named))
-                .chain(
-                    ["tx_time", "tx_node_id"]
-                        .into_iter()
-                        .map(ProjectField::named),
-                ),
+                .chain([
+                    ProjectField::renamed("created_by", "$createdBy"),
+                    ProjectField::renamed("created_at", "$createdAt"),
+                    ProjectField::renamed("updated_by", "$updatedBy"),
+                    ProjectField::renamed("updated_at", "$updatedAt"),
+                    ProjectField::named("tx_time"),
+                    ProjectField::named("tx_node_id"),
+                ]),
         )
 }
 
@@ -1435,6 +1553,10 @@ pub(super) fn current_row_from_global_current_record(
                 )
             }))
             .chain([
+                ("$createdBy".to_owned(), records::ValueType::Uuid),
+                ("$createdAt".to_owned(), records::ValueType::U64),
+                ("$updatedBy".to_owned(), records::ValueType::Uuid),
+                ("$updatedAt".to_owned(), records::ValueType::U64),
                 ("tx_time".to_owned(), records::ValueType::U64),
                 ("tx_node_id".to_owned(), records::ValueType::U64),
             ]),
@@ -1444,6 +1566,10 @@ pub(super) fn current_row_from_global_current_record(
     for idx in 0..table.columns.len() {
         values.push(record.get_idx(GlobalCurrentRowRecord::USER_CELLS + idx)?);
     }
+    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_CREATED_BY_IDX)?);
+    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX)?);
+    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_UPDATED_BY_IDX)?);
+    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX)?);
     values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
     values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
     let raw = descriptor.create(&values)?;
@@ -1501,6 +1627,10 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
                 )
             }))
             .chain([
+                ("$createdBy".to_owned(), records::ValueType::Uuid),
+                ("$createdAt".to_owned(), records::ValueType::U64),
+                ("$updatedBy".to_owned(), records::ValueType::Uuid),
+                ("$updatedAt".to_owned(), records::ValueType::U64),
                 ("tx_time".to_owned(), records::ValueType::U64),
                 ("tx_node_id".to_owned(), records::ValueType::U64),
             ]),
@@ -1511,6 +1641,10 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
             cells.get(&column.name).cloned().map(Box::new),
         ));
     }
+    values.push(Value::Uuid(provenance.created_by().0));
+    values.push(Value::U64(provenance.created_at().0));
+    values.push(Value::Uuid(provenance.updated_by().0));
+    values.push(Value::U64(provenance.updated_at().0));
     values.push(Value::U64(provenance.tx_time().0));
     values.push(Value::U64(provenance.tx_node_alias().0));
     let raw = descriptor.create(&values)?;

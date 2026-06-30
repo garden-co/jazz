@@ -2,9 +2,9 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use jazz_tools::AppId;
 use jazz_tools::public_schema::SchemaHash;
 use jazz_tools::schema_lens::Lens;
-use jazz_tools::AppId;
 use jazz_tools::server::{JazzServer, ServerState};
 use jazz_tools::sync::ClientId;
 use jazz_tools::{
