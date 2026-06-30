@@ -53,7 +53,7 @@ export interface OverlayDevServer {
 // Announced so the overlay's toggle/shortcut is discoverable — there's no other
 // hint that it's there.
 export const OVERLAY_ENABLED_MESSAGE =
-  "[jazz] Inspector overlay enabled — click the ⚡ button in your app (Alt+Shift+J).";
+  "[jazz] Inspector overlay enabled — click the 🎵 button in your app (Alt+Shift+J).";
 
 /**
  * During dev, serve the inspector's embedded assets (/__jazz/embedded/*) and
