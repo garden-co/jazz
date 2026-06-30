@@ -178,6 +178,25 @@ impl Backend {
         }
     }
 
+    fn insert_for_identity(
+        &self,
+        identity: CoreAuthorId,
+        table: &str,
+        cells: jazz::db::RowCells,
+    ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
+        match self {
+            Self::Memory(db) => {
+                let write = db.insert_for_identity(identity, table, cells)?;
+                Ok((write.row_uuid(), write.mergeable_tx_id()))
+            }
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => {
+                let write = db.insert_for_identity(identity, table, cells)?;
+                Ok((write.row_uuid(), write.mergeable_tx_id()))
+            }
+        }
+    }
+
     fn insert_with_id(
         &self,
         table: &str,
@@ -188,6 +207,24 @@ impl Backend {
             Self::Memory(db) => Ok(db.insert_with_id(table, row_id, cells)?.mergeable_tx_id()),
             #[cfg(feature = "rocksdb")]
             Self::RocksDb(db) => Ok(db.insert_with_id(table, row_id, cells)?.mergeable_tx_id()),
+        }
+    }
+
+    fn insert_with_id_for_identity(
+        &self,
+        identity: CoreAuthorId,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: jazz::db::RowCells,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        match self {
+            Self::Memory(db) => Ok(db
+                .insert_with_id_for_identity(identity, table, row_id, cells)?
+                .mergeable_tx_id()),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => Ok(db
+                .insert_with_id_for_identity(identity, table, row_id, cells)?
+                .mergeable_tx_id()),
         }
     }
 
@@ -204,6 +241,24 @@ impl Backend {
         }
     }
 
+    fn upsert_for_identity(
+        &self,
+        identity: CoreAuthorId,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: jazz::db::RowCells,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        match self {
+            Self::Memory(db) => Ok(db
+                .upsert_for_identity(identity, table, row_id, cells)?
+                .mergeable_tx_id()),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => Ok(db
+                .upsert_for_identity(identity, table, row_id, cells)?
+                .mergeable_tx_id()),
+        }
+    }
+
     fn update(
         &self,
         table: &str,
@@ -214,6 +269,23 @@ impl Backend {
             Self::Memory(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
             #[cfg(feature = "rocksdb")]
             Self::RocksDb(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
+        }
+    }
+
+    fn delete_for_identity(
+        &self,
+        identity: CoreAuthorId,
+        table: &str,
+        row_id: CoreRowUuid,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        match self {
+            Self::Memory(db) => Ok(db
+                .delete_for_identity(identity, table, row_id)?
+                .mergeable_tx_id()),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => Ok(db
+                .delete_for_identity(identity, table, row_id)?
+                .mergeable_tx_id()),
         }
     }
 
@@ -490,21 +562,34 @@ impl ClientDb {
         table: String,
         row_id: Option<Uuid>,
         cells: jazz::db::RowCells,
+        identity: Option<CoreAuthorId>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
         let (row_uuid, tx_id) = match row_id {
             Some(uuid) => {
                 let row_uuid = CoreRowUuid(uuid);
-                let tx_id = inner
-                    .db
-                    .insert_with_id(&table, row_uuid, cells)
-                    .map_err(|error| JazzError::Write(error.to_string()))?;
+                let tx_id = match identity {
+                    Some(identity) => inner
+                        .db
+                        .insert_with_id_for_identity(identity, &table, row_uuid, cells),
+                    None => inner.db.insert_with_id(&table, row_uuid, cells),
+                }
+                .map_err(|error| JazzError::Write(error.to_string()))?;
                 (row_uuid, tx_id)
             }
-            None => inner
-                .db
-                .insert(&table, cells)
-                .map_err(|error| JazzError::Write(error.to_string()))?,
+            None => {
+                if let Some(identity) = identity {
+                    inner
+                        .db
+                        .insert_for_identity(identity, &table, cells)
+                        .map_err(|error| JazzError::Write(error.to_string()))?
+                } else {
+                    inner
+                        .db
+                        .insert(&table, cells)
+                        .map_err(|error| JazzError::Write(error.to_string()))?
+                }
+            }
         };
         JazzClient::check_core_write_not_rejected(&inner.db, tx_id)?;
         let object_id = ObjectId::from_uuid(row_uuid.0);
@@ -535,12 +620,23 @@ impl ClientDb {
         Ok(row_id)
     }
 
-    fn upsert(&self, table: String, row_id: Uuid, cells: jazz::db::RowCells) -> Result<CoreTxId> {
+    fn upsert(
+        &self,
+        table: String,
+        row_id: Uuid,
+        cells: jazz::db::RowCells,
+        identity: Option<CoreAuthorId>,
+    ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let write = inner
-            .db
-            .upsert(&table, CoreRowUuid(row_id), cells)
-            .map_err(|error| JazzError::Write(error.to_string()))?;
+        let write = match identity {
+            Some(identity) => {
+                inner
+                    .db
+                    .upsert_for_identity(identity, &table, CoreRowUuid(row_id), cells)
+            }
+            None => inner.db.upsert(&table, CoreRowUuid(row_id), cells),
+        }
+        .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
         let object_id = ObjectId::from_uuid(row_id);
         inner.remember_write(object_id, &table, write);
@@ -571,15 +667,25 @@ impl ClientDb {
         Ok(())
     }
 
-    fn update(&self, row_id: ObjectId, cells: jazz::db::RowCells) -> Result<CoreTxId> {
+    fn update(
+        &self,
+        row_id: ObjectId,
+        cells: jazz::db::RowCells,
+        identity: Option<CoreAuthorId>,
+    ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
-        let write = inner
-            .db
-            .update(&table, CoreRowUuid(*row_id.uuid()), cells)
-            .map_err(|error| JazzError::Write(error.to_string()))?;
+        let write = match identity {
+            Some(identity) => {
+                inner
+                    .db
+                    .upsert_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()), cells)
+            }
+            None => inner.db.update(&table, CoreRowUuid(*row_id.uuid()), cells),
+        }
+        .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
         inner.remember_write(row_id, &table, write);
         let tx_id = write;
@@ -609,15 +715,20 @@ impl ClientDb {
         Ok(())
     }
 
-    fn delete(&self, row_id: ObjectId) -> Result<CoreTxId> {
+    fn delete(&self, row_id: ObjectId, identity: Option<CoreAuthorId>) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
         })?;
-        let write = inner
-            .db
-            .delete(&table, CoreRowUuid(*row_id.uuid()))
-            .map_err(|error| JazzError::Write(error.to_string()))?;
+        let write = match identity {
+            Some(identity) => {
+                inner
+                    .db
+                    .delete_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()))
+            }
+            None => inner.db.delete(&table, CoreRowUuid(*row_id.uuid())),
+        }
+        .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
         inner.remember_write(row_id, &table, write);
         let tx_id = write;
@@ -1016,6 +1127,13 @@ fn core_identity(context: &AppContext, default_session: Option<&Session>) -> Cor
     }
 }
 
+fn core_author_from_principal(principal: &str) -> CoreAuthorId {
+    CoreAuthorId(
+        Uuid::parse_str(principal.trim())
+            .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_URL, principal.as_bytes())),
+    )
+}
+
 fn core_storage(schema: &jazz::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
     let column_families = schema.column_families();
     let refs = column_families
@@ -1110,6 +1228,14 @@ fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
 }
 
 impl JazzClient {
+    fn write_identity(&self) -> Option<CoreAuthorId> {
+        self.write_context
+            .as_ref()
+            .and_then(|context| context.session())
+            .or(self.default_session.as_ref())
+            .map(|session| core_author_from_principal(session.get_user_id()))
+    }
+
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
         let state = db
             .write_state(tx_id)
@@ -1452,7 +1578,12 @@ impl JazzClient {
                         .stage_insert(batch_id, table.to_string(), object_id.into(), cells)?;
                 Ok((row_id, row_values, batch_id))
             } else {
-                let (row_id, tx_id) = self.db.insert(table.to_string(), object_id.into(), cells)?;
+                let (row_id, tx_id) = self.db.insert(
+                    table.to_string(),
+                    object_id.into(),
+                    cells,
+                    self.write_identity(),
+                )?;
                 let batch_id = core_batch_id(tx_id);
                 Ok((row_id, row_values, batch_id))
             }
@@ -1473,7 +1604,9 @@ impl JazzClient {
                     .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
                 Ok(batch_id)
             } else {
-                let tx_id = self.db.upsert(table.to_string(), object_id, cells)?;
+                let tx_id =
+                    self.db
+                        .upsert(table.to_string(), object_id, cells, self.write_identity())?;
                 Ok(core_batch_id(tx_id))
             }
         }
@@ -1487,7 +1620,7 @@ impl JazzClient {
                 self.db.stage_update(batch_id, object_id, cells)?;
                 Ok(batch_id)
             } else {
-                let tx_id = self.db.update(object_id, cells)?;
+                let tx_id = self.db.update(object_id, cells, self.write_identity())?;
                 Ok(core_batch_id(tx_id))
             }
         }
@@ -1500,7 +1633,7 @@ impl JazzClient {
                 self.db.stage_delete(batch_id, object_id)?;
                 Ok(batch_id)
             } else {
-                let tx_id = self.db.delete(object_id)?;
+                let tx_id = self.db.delete(object_id, self.write_identity())?;
                 Ok(core_batch_id(tx_id))
             }
         }
