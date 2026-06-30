@@ -1049,7 +1049,7 @@ where
         context: &mut RelationEvalContext,
     ) -> Result<Vec<RelationEvalRow>, Error> {
         match expr {
-            RelationExpr::TableScan { table } => {
+            RelationExpr::TableScan { table, .. } => {
                 let shape = JazzQuery::from(table.as_str()).validate(&self.catalogue.schema)?;
                 let binding = shape.bind(BTreeMap::new())?;
                 let rows = self.query_rows_for_link(&shape, &binding, tier, identity)?;

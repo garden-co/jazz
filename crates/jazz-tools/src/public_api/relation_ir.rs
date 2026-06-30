@@ -61,6 +61,8 @@ pub enum PredicateExpr {
 pub enum RelExpr {
     TableScan {
         table: TableName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
     },
     Filter {
         input: Box<RelExpr>,
@@ -79,6 +81,7 @@ mod tests {
         let expr = RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
                 table: TableName::new("teams"),
+                alias: None,
             }),
             predicate: PredicateExpr::Cmp {
                 left: ColumnRef::unscoped("id"),
@@ -97,6 +100,7 @@ mod tests {
         let expr = RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
                 table: TableName::new("resources"),
+                alias: None,
             }),
             predicate: PredicateExpr::And(vec![
                 PredicateExpr::Cmp {
