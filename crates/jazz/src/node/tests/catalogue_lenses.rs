@@ -158,6 +158,10 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
                 evolved_id,
                 version.row_uuid(),
                 version.parents(),
+                version.created_by(),
+                version.created_at(),
+                version.updated_by(),
+                version.updated_at(),
                 &version_record_cells(&version, &base.tables[0]),
                 version.deletion(),
             )

@@ -149,6 +149,10 @@ fn version_record<V: Into<Value> + Clone>(
         schema.version_id(),
         row_uuid,
         parents,
+        AuthorId::SYSTEM,
+        TxTime(1),
+        AuthorId::SYSTEM,
+        TxTime(1),
         &cells,
         deletion,
     )

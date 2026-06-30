@@ -195,6 +195,10 @@ where
                     write.schema_version,
                     write.row_uuid,
                     write.parent.into_iter().collect(),
+                    made_by,
+                    made_at,
+                    made_by,
+                    made_at,
                     &write.cells,
                     write.deletion,
                 )?)

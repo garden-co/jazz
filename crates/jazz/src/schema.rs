@@ -820,11 +820,11 @@ impl TableSchema {
 
     /// Return the wire descriptor for replicated immutable row payloads.
     ///
-    /// Wire records contain only row payload data: `row_uuid`, `parents`,
-    /// `_deletion`, and nullable user cells. Receiver-local currentness and
-    /// authority-state columns are deliberately excluded. Schema changes change
-    /// this descriptor; v0 requires identical descriptors at sender and
-    /// receiver.
+    /// Wire records contain row payload data and immutable row provenance:
+    /// `row_uuid`, `parents`, provenance, `_deletion`, and nullable user cells.
+    /// Receiver-local currentness and authority-state columns are deliberately
+    /// excluded. Schema changes change this descriptor; v0 requires identical
+    /// descriptors at sender and receiver.
     pub fn wire_record_descriptor(&self) -> RecordDescriptor {
         RecordDescriptor::new(
             [
@@ -833,6 +833,10 @@ impl TableSchema {
                     "parents".to_owned(),
                     ValueType::Array(Box::new(tx_id_column().value_type())),
                 ),
+                ("created_by".to_owned(), ValueType::Uuid),
+                ("created_at".to_owned(), ValueType::U64),
+                ("updated_by".to_owned(), ValueType::Uuid),
+                ("updated_at".to_owned(), ValueType::U64),
                 (
                     "_deletion".to_owned(),
                     ValueType::Nullable(Box::new(deletion_column().value_type())),

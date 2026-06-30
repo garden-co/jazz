@@ -398,6 +398,10 @@ fn ingest_direct_version(
             schema.version_id(),
             row_uuid,
             parents,
+            AuthorId::SYSTEM,
+            TxTime(10),
+            AuthorId::SYSTEM,
+            TxTime(10),
             &cells,
             None,
         )

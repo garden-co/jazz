@@ -1,13 +1,21 @@
 #[cfg(feature = "test-utils")]
 use std::time::Duration;
 
+#[cfg(feature = "test-utils")]
+use crate::AppId;
 use crate::object::ObjectId;
 #[cfg(feature = "test-utils")]
 use crate::public_api::query::Query;
 #[cfg(feature = "test-utils")]
 use crate::public_api::types::Value;
 #[cfg(feature = "test-utils")]
-use crate::{DurabilityTier, JazzClient};
+use crate::public_schema::SchemaHash;
+#[cfg(feature = "test-utils")]
+use crate::schema_lens::Lens;
+#[cfg(feature = "test-utils")]
+use crate::server::ServerState;
+#[cfg(feature = "test-utils")]
+use crate::{DurabilityTier, JazzClient, Schema};
 
 #[cfg(feature = "test-utils")]
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
@@ -71,4 +79,51 @@ where
 
         tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
     }
+}
+
+/// Publishes schemas and lenses directly into an in-process test server's
+/// catalogue store.
+///
+/// This helper is intentionally scoped to `test-utils`: integration tests need
+/// to seed catalogue state before exercising public client behavior, but the
+/// catalogue storage itself remains a server-internal implementation detail.
+#[cfg(feature = "test-utils")]
+pub async fn push_catalogue_in_memory(
+    state: std::sync::Arc<ServerState>,
+    app_id: AppId,
+    env: &str,
+    user_branch: &str,
+    schemas: &[Schema],
+    lenses: &[Lens],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut schema_by_hash: std::collections::HashMap<SchemaHash, &Schema> =
+        std::collections::HashMap::with_capacity(schemas.len());
+    for schema in schemas {
+        schema_by_hash.insert(SchemaHash::compute(schema), schema);
+        state
+            .catalogue
+            .publish_schema(&state.catalogue_store, schema.clone())
+            .map_err(|error| format!("publish schema to server catalogue: {error}"))?;
+    }
+
+    for lens in lenses {
+        let source_schema = schema_by_hash.get(&lens.source_hash).ok_or_else(|| {
+            format!(
+                "No schema provided for lens source hash {}",
+                lens.source_hash
+            )
+        })?;
+        let _ = (source_schema, app_id, env, user_branch);
+        state
+            .catalogue
+            .publish_lens(&state.catalogue_store, lens)
+            .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
+    }
+
+    state
+        .catalogue
+        .flush(&state.catalogue_store)
+        .map_err(|error| format!("flush server catalogue: {error}"))?;
+
+    Ok(())
 }
