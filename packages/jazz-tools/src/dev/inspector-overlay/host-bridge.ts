@@ -1,5 +1,6 @@
 import { resolveBrokerWorkerUrl } from "../../runtime/browser-broker-client.js";
 import type { Db } from "../../runtime/db.js";
+import { resolveDefaultPersistentDbName } from "../../runtime/db.js";
 import { getRegisteredWasmSchema } from "../../typed-app.js";
 import {
   INSPECTOR_HOST_GLOBAL,
@@ -27,7 +28,10 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
         serverUrl: c.serverUrl,
         env: c.env ?? "",
         userBranch: c.userBranch,
-        dbName: c.dbName,
+        // The *resolved* OPFS namespace (e.g. `appId::user_id` for an
+        // authenticated session), not the raw `c.dbName` which is usually unset.
+        // Resolved in the host bundle so it matches the host Db's own store.
+        dbName: resolveDefaultPersistentDbName(c),
         // The overlay joins this exact broker (same OPFS store) to see local
         // data and work offline. Resolved here, in the host bundle, so it
         // matches the URL the host's own broker was constructed with.
@@ -38,11 +42,17 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
       };
     },
     getWasmSchema() {
-      // Prefer the statically-registered app schema (known at defineApp time) so
-      // the overlay renders even before any query has created a runtime client —
-      // e.g. on a write-only page (useDb/insert, no useAll). Fall back to the
-      // live client's schema if the app wasn't built via defineApp.
-      return getRegisteredWasmSchema() ?? db.getRuntimeSchema();
+      // The live client's schema is authoritative when a client exists (it's
+      // per-db and engine-normalized). Before any query has created one — e.g. a
+      // write-only page (useDb/insert, no useAll) — fall back to the statically-
+      // registered app schema (known at defineApp time).
+      try {
+        return db.getRuntimeSchema();
+      } catch {
+        const registered = getRegisteredWasmSchema();
+        if (registered) return registered;
+        throw new Error("Inspector: no schema available — no client and no defineApp() yet.");
+      }
     },
     getActiveSubscriptions() {
       return serializeActiveSubscriptions(db.getActiveQuerySubscriptions());

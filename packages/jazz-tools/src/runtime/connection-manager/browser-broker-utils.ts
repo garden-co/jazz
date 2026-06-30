@@ -7,6 +7,7 @@ import {
   createRuntimeSourceIdentity,
   type BrowserBrokerVisibility,
 } from "../browser-broker-protocol.js";
+import { resolveBrokerWorkerUrl } from "../browser-broker-client.js";
 
 export const BROKER_STORAGE_DELETE_MAX_RETRIES = 8;
 const BROKER_STORAGE_DELETE_RETRY_BASE_MS = 50;
@@ -106,6 +107,14 @@ export function createBrokerFingerprint(config: DbConfig, primaryDbName: string)
     serverUrl: config.serverUrl ?? null,
     schemaHash: null,
     authClass: resolveBrokerAuthClass(config),
-    runtimeSourceIdentity: createRuntimeSourceIdentity(config.runtimeSources),
+    // Key on the *resolved* broker worker URL, not the raw config shape, so two
+    // clients that load the same worker are compatible regardless of how they
+    // named it. This lets the inspector overlay (a separate bundle that must
+    // pass an explicit `brokerWorkerUrl`) join the host's broker, whose own
+    // config left it unset (resolved from its bundle to the same URL).
+    runtimeSourceIdentity: createRuntimeSourceIdentity({
+      ...config.runtimeSources,
+      brokerWorkerUrl: resolveBrokerWorkerUrl(config.runtimeSources),
+    }),
   });
 }
