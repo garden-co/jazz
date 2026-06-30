@@ -18,6 +18,25 @@ import { resolveRuntimeConfigBrokerWorkerUrl } from "./runtime-config.js";
 
 const DEFAULT_STORAGE_RESET_TIMEOUT_MS = 5_000;
 
+/**
+ * The broker-worker script URL the SharedWorker is constructed with. A
+ * SharedWorker's identity is `(script URL, name)`, so a second client (e.g. the
+ * inspector overlay, running in a different bundle) can only *join* this broker
+ * by constructing with this exact URL. Resolved against this module's
+ * `import.meta.url`, so callers in the same bundle agree; cross-bundle callers
+ * must forward the result and pass it back via `runtimeSources.brokerWorkerUrl`.
+ */
+export function resolveBrokerWorkerUrl(runtimeSources?: RuntimeSourcesConfig): string {
+  if (runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl) {
+    return resolveRuntimeConfigBrokerWorkerUrl(
+      import.meta.url,
+      typeof location !== "undefined" ? location.href : undefined,
+      runtimeSources,
+    );
+  }
+  return new URL("../worker/jazz-broker-worker.js", import.meta.url).href;
+}
+
 export interface BrowserBrokerClientSnapshot {
   brokerInstanceId: string | null;
   role: BrowserBrokerRole;
@@ -378,15 +397,7 @@ export class BrowserBrokerClient {
   private createSharedWorker(): SharedWorker {
     const globalLike = this.options.globalLike ?? (globalThis as BrowserBrokerCapabilityGlobal);
     const SharedWorkerCtor = globalLike.SharedWorker as SharedWorkerConstructor;
-    const workerUrl =
-      this.options.runtimeSources?.brokerWorkerUrl || this.options.runtimeSources?.baseUrl
-        ? resolveRuntimeConfigBrokerWorkerUrl(
-            import.meta.url,
-            typeof location !== "undefined" ? location.href : undefined,
-            this.options.runtimeSources,
-          )
-        : new URL("../worker/jazz-broker-worker.js", import.meta.url);
-    return new SharedWorkerCtor(workerUrl, {
+    return new SharedWorkerCtor(resolveBrokerWorkerUrl(this.options.runtimeSources), {
       type: "module",
       name: `jazz-broker:${this.options.appId}:${this.options.dbName}`,
     });

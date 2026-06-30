@@ -96,11 +96,15 @@ describe("installInspectorHost", () => {
     expect((window as any)[INSPECTOR_HOST_GLOBAL]).toBeUndefined();
   });
 
-  it("throws from getConnectionConfig when serverUrl is missing", () => {
+  it("omits serverUrl when the host has none (overlay runs on local storage)", () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
-    const fake = makeFakeDb({ getConfig: () => ({ appId: "a" }) });
+    const fake = makeFakeDb({ getConfig: () => ({ appId: "a", dbName: "a" }) });
     installInspectorHost(fake.db, iframeWindow, "http://localhost");
     const handle = (window as any)[INSPECTOR_HOST_GLOBAL];
-    expect(() => handle.getConnectionConfig()).toThrow(/serverUrl/);
+    const config = handle.getConnectionConfig();
+    expect(config.serverUrl).toBeUndefined();
+    expect(config).toMatchObject({ appId: "a", dbName: "a" });
+    // Always resolves a broker URL so the overlay can join the host's store.
+    expect(typeof config.brokerWorkerUrl).toBe("string");
   });
 });

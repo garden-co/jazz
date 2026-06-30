@@ -1,3 +1,4 @@
+import { resolveBrokerWorkerUrl } from "../../runtime/browser-broker-client.js";
 import type { Db } from "../../runtime/db.js";
 import {
   INSPECTOR_HOST_GLOBAL,
@@ -20,16 +21,16 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
   const handle: JazzInspectorHost = {
     getConnectionConfig() {
       const c = db.getConfig();
-      if (!c.serverUrl) {
-        throw new Error(
-          "Inspector: the host Db has no serverUrl — the overlay needs a synced connection.",
-        );
-      }
       return {
         appId: c.appId,
         serverUrl: c.serverUrl,
         env: c.env ?? "",
         userBranch: c.userBranch,
+        dbName: c.dbName,
+        // The overlay joins this exact broker (same OPFS store) to see local
+        // data and work offline. Resolved here, in the host bundle, so it
+        // matches the URL the host's own broker was constructed with.
+        brokerWorkerUrl: resolveBrokerWorkerUrl(c.runtimeSources),
         secret: c.secret,
         adminSecret: c.adminSecret,
         jwtToken: c.jwtToken,
