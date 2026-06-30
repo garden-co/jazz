@@ -10,7 +10,13 @@ import { InspectorRoutes } from "./routes";
  * devtools panel and the dev-overlay iframe). Both connect over the same bridge
  * and only differ in how the client is created, which they pass in here.
  */
-export function InspectorApp({ client }: { client: Promise<JazzClient> }) {
+export function InspectorApp({
+  client,
+  isOverlay = false,
+}: {
+  client: Promise<JazzClient>;
+  isOverlay?: boolean;
+}) {
   const resolvedClient = use(client);
   const wasmSchema = useMemo(() => getRegisteredWasmSchema(), [resolvedClient]);
 
@@ -26,7 +32,7 @@ export function InspectorApp({ client }: { client: Promise<JazzClient> }) {
 
   return (
     <JazzClientProvider client={resolvedClient}>
-      <DevtoolsProvider wasmSchema={wasmSchema} runtime="extension">
+      <DevtoolsProvider wasmSchema={wasmSchema} runtime="extension" isOverlay={isOverlay}>
         <MemoryRouter>
           <InspectorRoutes />
         </MemoryRouter>

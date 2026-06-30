@@ -15,7 +15,7 @@
 
 .sidebar {
   height: 100%;
-  background: #0f141b;
+  background: var(--jz-bg);
   padding: 0;
   overflow: auto;
 }
@@ -36,22 +36,22 @@
   bottom: 0;
   left: 0px;
   width: 1px;
-  background: #232c3a;
+  background: var(--jz-border-strong);
   transition: background 140ms ease;
 }
 
 .resizeHandle:hover::after,
 .resizeHandle:focus-visible::after,
 .resizeHandle[data-resize-handle-state="drag"]::after {
-  background: #345273;
+  background: var(--jz-accent);
 }
 
 .sidebarTitle {
   margin: 0;
-  font-size: 13px;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #8c9ab0;
+  letter-spacing: 0.06em;
+  color: var(--jz-muted);
 }
 
 .sidebarHeader {
@@ -60,7 +60,7 @@
   justify-content: space-between;
   gap: 12px;
   min-width: 0;
-  padding: 12px 12px 8px;
+  padding: 8px 10px 6px;
 }
 
 .propagationSwitch {
@@ -82,11 +82,11 @@
 
 .tableList {
   margin: 0;
-  padding: 0 12px 12px;
+  padding: 0 8px 8px;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .tableRow {
@@ -104,9 +104,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   text-decoration: none;
-  color: #8d9ab0;
-  border-radius: 6px;
-  padding: 6px 10px;
+  color: var(--jz-muted);
+  border-radius: 4px;
+  padding: 4px 8px;
   font-size: 12px;
 }
 
@@ -116,8 +116,8 @@
 }
 
 .tableLinkActive {
-  background: #1a2332;
-  color: #e8ecf2;
+  background: var(--jz-selected);
+  color: var(--jz-ink-strong);
 }
 
 .schemaLink {
@@ -135,7 +135,7 @@
 
 .schemaLink:hover {
   border-color: #283548;
-  background: #151b24;
+  background: var(--jz-surface);
   color: #d8e0eb;
 }
 
@@ -154,7 +154,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  padding-top: 8px;
+  padding-top: 6px;
 }
 
 .emptyState {
@@ -166,7 +166,7 @@
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  background: #0f141b;
+  background: var(--jz-bg);
 }
 
 .emptyTitle {

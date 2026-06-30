@@ -1,0 +1,36 @@
+/*
+ * Inspector design tokens — the single source of truth for the dark theme.
+ *
+ * Before this file the same palette was hand-copied as raw hex across every CSS
+ * module (and the overlay chrome in jazz-tools `loader.ts`, which mirrors these
+ * values on its shadow `:host`). Reach for a semantic token below instead of a
+ * literal; if a value genuinely has no role here, it's a deliberate one-off
+ * (component state tints, animation washes) and stays inline.
+ *
+ * Contrast note: text tokens are tuned against --jz-bg. --jz-faint is the floor
+ * that still clears WCAG AA (4.5:1) for normal text.
+ */
+:root {
+  /* Surfaces */
+  --jz-bg: #0f141b; /* app canvas / base panel */
+  --jz-bg-sunken: #0b1017; /* recessed fill (grid header) */
+  --jz-surface: #161d27; /* raised control fill (inputs, buttons) */
+
+  /* Lines — also double as the subtle hover fill where a fill shares the tone */
+  --jz-border: #1c2430; /* default hairline border */
+  --jz-border-strong: #232c3a; /* stronger divider */
+  --jz-border-control: #2a3647; /* input / button border */
+
+  /* Text */
+  --jz-ink: #dbe1ea; /* primary text */
+  --jz-ink-strong: #e8ecf2; /* emphasized / active text */
+  --jz-text: #d7deea; /* body text on controls */
+  --jz-muted: #8d9ab0; /* secondary text / labels */
+  --jz-faint: #7c8ba0; /* tertiary / inactive — AA floor on --jz-bg */
+
+  /* Accent (brand blue) */
+  --jz-accent: #345273; /* accent border / hover edge */
+  --jz-accent-line: #3a6ea5; /* brighter accent line (toggles) */
+  --jz-selected: #1a2332; /* selected row / nav fill */
+  --jz-focus: #5b8fc7; /* keyboard focus ring */
+}
