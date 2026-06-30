@@ -261,25 +261,16 @@ pub(crate) enum PolicySharingKey {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TerminalProgram {
     /// Row materialization for one-shot `query()` calls and relation snapshots.
-    Rows(RowsTerminal),
+    Rows(RowSetTerminalRequirements),
     /// Maintained application/sync view with explicit terminal requirements.
-    MaintainedView(MaintainedViewRequirements),
+    MaintainedView(RowSetTerminalRequirements),
     /// Policy dry-run decision.
     PolicyDecision,
 }
 
-/// One-shot row terminal options.
+/// Row-set terminal requirements shared by one-shot and maintained programs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RowsTerminal {
-    /// Deletion visibility for the root result source.
-    pub(crate) root_deletion: RootDeletionMode,
-    /// Extra terminal facts requested by one-shot materialization.
-    pub(crate) terminals: TerminalRequirements,
-}
-
-/// Maintained terminal requirements for subscriptions and query-driven sync.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MaintainedViewRequirements {
+pub(crate) struct RowSetTerminalRequirements {
     /// Deletion visibility for the root result source.
     pub(crate) root_deletion: RootDeletionMode,
     /// Semantic terminal facts requested by the caller.
@@ -343,8 +334,8 @@ pub(crate) enum PolicyProbe {
     CanInsert {
         /// Logical table.
         table: String,
-        /// Optional caller-chosen row identity.
-        row: Option<RowUuid>,
+        /// Row identity semantics for the proposed insert.
+        row: InsertRowId,
         /// Proposed application cells.
         new_values: BTreeMap<String, Value>,
     },
@@ -354,8 +345,8 @@ pub(crate) enum PolicyProbe {
         table: String,
         /// Row identity.
         row: RowUuid,
-        /// Proposed cells after the update.
-        new_values: BTreeMap<String, Value>,
+        /// Proposed update cells.
+        proposal: WriteProposal,
     },
     /// Proposed delete. The old row is resolved from `ReadView`.
     CanDelete {
@@ -364,6 +355,37 @@ pub(crate) enum PolicyProbe {
         /// Row identity.
         row: RowUuid,
     },
+}
+
+/// Row identity semantics for insert probes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum InsertRowId {
+    /// Caller supplied the row id before policy evaluation.
+    Provided(RowUuid),
+    /// Engine must allocate/bind the row id before policy evaluation.
+    GenerateBeforeProbe,
+    /// Probe is only valid when policy does not inspect row identity.
+    IdIndependentOnly,
+}
+
+/// Proposed write shape for update/upsert-style policy checks.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum WriteProposal {
+    /// Patch semantics: omitted fields keep their current value.
+    Patch(BTreeMap<String, Value>),
+    /// After-image semantics: supplied values are the complete proposed row.
+    AfterImage(BTreeMap<String, Value>),
+    /// Deletion/restoration intent with no cell patch.
+    StateChange(WriteStateChange),
+}
+
+/// Proposed row-state change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum WriteStateChange {
+    /// Delete the row.
+    Delete,
+    /// Restore a previously deleted row.
+    Restore,
 }
 
 /// Side effects requested from the same lowered query program.
@@ -390,14 +412,89 @@ pub(crate) enum PredicateReadMode {
 pub(crate) struct ProgramSharingKey {
     /// Query/probe identity.
     pub(crate) input: ProgramInputKey,
-    /// Read view identity.
-    pub(crate) view: ReadView,
+    /// Resolved read/source identity. This is post-catalogue resolution: no
+    /// `CompatiblePartitions` or other deferred choices may remain here.
+    pub(crate) read: ResolvedReadKey,
     /// Policy identity and claims.
     pub(crate) policy: PolicySharingKey,
     /// Terminal fact requirements.
     pub(crate) terminal: TerminalSharingKey,
     /// Side-effect requirements.
     pub(crate) effects: ProgramEffectsKey,
+}
+
+/// Resolved read identity used by shared maintained work.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ResolvedReadKey {
+    /// Schema identity after source/lens resolution.
+    pub(crate) schemas: ResolvedSchemaKey,
+    /// Concrete source identity after branch/catalogue/result-set resolution.
+    pub(crate) source: ResolvedSourceKey,
+}
+
+/// Resolved schema identity used by shared maintained work.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ResolvedSchemaKey {
+    /// Schema version exposed to the query and application rows.
+    pub(crate) read_schema: SchemaVersionId,
+    /// Schema version used to evaluate policies.
+    pub(crate) policy_schema: SchemaVersionId,
+    /// Schema version used to interpret proposed write cells, when present.
+    pub(crate) write_schema: Option<SchemaVersionId>,
+    /// Concrete storage partitions read by the source resolver.
+    pub(crate) storage_partitions: BTreeSet<SchemaVersionId>,
+    /// Canonical fingerprint of applied lens/projection path.
+    pub(crate) lens_path_fingerprint: Vec<u8>,
+    /// Catalogue/source-resolution epoch or fingerprint.
+    pub(crate) catalogue_fingerprint: Vec<u8>,
+}
+
+/// Resolved source identity used by shared maintained work.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ResolvedSourceKey {
+    /// Current rows at one durability tier.
+    Current {
+        /// Local, edge, or global source currency.
+        tier: DurabilityTier,
+    },
+    /// Historical global cut over a resolved source catalogue.
+    Historical {
+        /// Inclusive global sequence cut.
+        position: GlobalSeq,
+    },
+    /// Dotted snapshot ref.
+    Snapshot {
+        /// Snapshot frontier.
+        snapshot: Snapshot,
+    },
+    /// Exclusive transaction read over a snapshot base plus overlay writes.
+    Transaction {
+        /// Stable base snapshot for the transaction.
+        base: Snapshot,
+        /// Overlay identity and lifetime.
+        overlay: TransactionOverlay,
+    },
+    /// Branch read at a resolved branch metadata generation.
+    Branch {
+        /// Branch identity.
+        branch: BranchId,
+        /// Canonical branch metadata/source generation.
+        generation: Vec<u8>,
+    },
+    /// Merged branch-set read at a resolved merge generation.
+    MergedBranches {
+        /// Branches participating in the merged read.
+        branches: BTreeSet<BranchId>,
+        /// Canonical merge/source generation.
+        generation: Vec<u8>,
+    },
+    /// Read through a maintained usage-site result set.
+    SettledResultSet {
+        /// Usage-site subscription whose settled rows are the root source.
+        subscription: SubscriptionKey,
+        /// Result-set generation/fingerprint.
+        generation: Vec<u8>,
+    },
 }
 
 /// Stable input identity used by shared maintained work.
@@ -416,10 +513,23 @@ pub(crate) struct PolicyProbeKey {
     pub(crate) kind: PolicyProbeKind,
     /// Logical table.
     pub(crate) table: String,
-    /// Row identity, when the probe targets an existing row.
-    pub(crate) row: Option<RowUuid>,
+    /// Row identity semantics for the probe.
+    pub(crate) row: PolicyProbeRowKey,
     /// Canonical fingerprint of proposed values, when present.
     pub(crate) proposed_values_fingerprint: Option<Vec<u8>>,
+}
+
+/// Stable row identity component for policy-probe keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PolicyProbeRowKey {
+    /// Probe targets this concrete row.
+    Row(RowUuid),
+    /// Engine generated or must generate a row id before policy evaluation.
+    Generated,
+    /// Probe is only valid for id-independent policy.
+    IdIndependent,
+    /// Probe has no row identity component.
+    None,
 }
 
 /// Policy-probe category.
@@ -516,8 +626,8 @@ pub(crate) enum ResultMembershipVersionSchema {
     /// Include-deleted root identity. Tombstones may have no visible content
     /// winner, so the deletion-register version participates in membership.
     ContentOrDeletion {
-        /// Visible content version fields, when a content winner exists.
-        content: Option<ContentVersionFields>,
+        /// Nullable visible content version fields.
+        content: ContentVersionFields,
         /// Deletion-register version fields.
         deletion: VersionIdentityFields,
         /// Field carrying deleted vs live state.
@@ -552,10 +662,21 @@ pub(crate) struct MatchedPathSchema {
 pub(crate) struct RelationEdgeSchema {
     /// Source row fields.
     pub(crate) source: ResultMembershipSchema,
-    /// Relation/array-subquery name field.
+    /// Canonical traversal-node id field. For relation queries this identifies
+    /// the `RelationExpr` node; for array subqueries it identifies the relation name.
     pub(crate) relation_field: String,
     /// Target row fields.
     pub(crate) target: ResultMembershipSchema,
+    /// Recursive depth field, when emitted by gather/reachability.
+    pub(crate) depth_field: Option<String>,
+    /// Multipath/path-id field, when a relation can produce multiple paths to
+    /// the same target.
+    pub(crate) path_field: Option<String>,
+    /// Union/branch alternative field, when emitted by union or policy branches.
+    pub(crate) branch_field: Option<String>,
+    /// Terminal role field, for distinguishing intermediate, frontier, and
+    /// terminal-output edges.
+    pub(crate) role_field: Option<String>,
     /// Stable edge order field, when ordering matters.
     pub(crate) order_field: Option<String>,
 }

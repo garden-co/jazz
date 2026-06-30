@@ -96,7 +96,8 @@ pub enum RelationExpr {
         seed: Box<RelationExpr>,
         step: Box<RelationExpr>,
         frontier_key: RelationKeyRef,
-        max_depth: usize,
+        #[serde(default = "RecursionBound::default_max_depth")]
+        bound: RecursionBound,
         dedupe_key: Vec<RelationKeyRef>,
     },
     Distinct {
@@ -487,7 +488,7 @@ impl Query {
             edge_member_column: edge_member_column.into(),
             edge_parent_column: edge_parent_column.into(),
             edge_filters: edge_filters.into_iter().collect(),
-            max_depth: 8,
+            bound: RecursionBound::default_max_depth(),
             seed: None,
         });
         self
@@ -1024,8 +1025,9 @@ pub struct ReachableVia {
     pub edge_parent_column: String,
     /// Filters on recursive edges.
     pub edge_filters: Vec<Predicate>,
-    /// Iteration cap for v0 recursive policies.
-    pub max_depth: usize,
+    /// Recursion bound for reachable closure.
+    #[serde(default = "RecursionBound::default_max_depth")]
+    pub bound: RecursionBound,
     /// Optional relation that produces initial reachable team ids.
     ///
     /// When present, this replaces `from` as the initial recursive frontier.
@@ -1043,6 +1045,30 @@ pub struct ReachableSeed {
     pub team_column: String,
     /// Filters applied to seed rows.
     pub filters: Vec<Predicate>,
+}
+
+/// Recursion semantics for reachability and relation gather.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum RecursionBound {
+    /// Continue until the recursive frontier reaches a fixpoint.
+    Fixpoint,
+    /// Stop after at most this many recursive steps.
+    MaxDepth(usize),
+}
+
+impl RecursionBound {
+    /// Legacy/default recursion bound used by old v0 query helpers.
+    pub fn default_max_depth() -> Self {
+        Self::MaxDepth(8)
+    }
+
+    /// Conservative loop cap for old evaluator paths that are not true fixpoint.
+    pub(crate) fn legacy_iteration_cap(self) -> usize {
+        match self {
+            Self::Fixpoint => 128,
+            Self::MaxDepth(max_depth) => max_depth.max(1),
+        }
+    }
 }
 
 /// Query predicate.
@@ -2234,7 +2260,13 @@ fn canonical_reachable_key(reachable: &ReachableVia) -> Vec<u8> {
     put_str(&mut bytes, &reachable.edge_table);
     put_str(&mut bytes, &reachable.edge_member_column);
     put_str(&mut bytes, &reachable.edge_parent_column);
-    put_len(&mut bytes, reachable.max_depth);
+    match reachable.bound {
+        RecursionBound::Fixpoint => bytes.push(b'f'),
+        RecursionBound::MaxDepth(max_depth) => {
+            bytes.push(b'd');
+            put_len(&mut bytes, max_depth);
+        }
+    }
     for filter in &reachable.edge_filters {
         put_bytes(&mut bytes, &canonical_predicate_key(filter));
     }
