@@ -65,9 +65,11 @@ Restored}`) · **global-current overwrite table** — node-local derived current
 - **shape** (`ShapeId`) — a validated, schema-stamped query; **binding**
   (`BindingId`) — its parameter assignment; **claim** (`claim(name)`) —
   server-injected identity data (ch. 7).
-- **result set** — `ResultRowEntry = (table, row_uuid, tx_id)` plus matched
-  include paths and join witnesses; **settled subscription result set** — the
-  subscriber-side complete rows and matched include material for one binding.
+- **result set** — typed `ResultMemberEntry` membership plus `ProgramFactEntry`
+  facts for matched include paths, relation/path edges, and join witnesses;
+  real-row members expose `(table, row_uuid, tx_id)` only as their final/public
+  row projection; **settled subscription result set** — the subscriber-side
+  complete member/fact state and matched include material for one binding.
   Server-side
   `maintained_subscription_views` and the subscriber-side settled result set
   share the entry shape but play different roles.

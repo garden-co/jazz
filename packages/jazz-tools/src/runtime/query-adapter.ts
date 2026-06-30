@@ -4,8 +4,8 @@
  * QueryBuilder produces a compact JSON structure:
  * { table, conditions, includes, orderBy, limit, offset, hops?, gather? }
  *
- * Runtime semantics are driven by `relation_ir`. The wire payload keeps only
- * fields required for execution (`table`, `relation_ir`, and `array_subqueries`).
+ * Most queries are emitted as the flat runtime Query payload. Native relation IR
+ * is reserved for relation traversal shapes that cannot use the flat path.
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
@@ -525,7 +525,7 @@ function lowerHopsToRelExpr(
     currentExpr = {
       Join: {
         left: currentExpr,
-        right: { TableScan: { table: relation.toTable } },
+        right: { TableScan: { table: relation.toTable, alias: hopAlias } },
         on: [joinOn],
         join_kind: "Inner",
       },
@@ -602,7 +602,7 @@ function gatherToRelExpr(
   const stepJoined: RelExpr = {
     Join: {
       left: stepFiltered,
-      right: { TableScan: { table: hopRelation.toTable } },
+      right: { TableScan: { table: hopRelation.toTable, alias: recursiveHopAlias } },
       on: [
         {
           left: relColumn(hopRelation.fromColumn, gather.step_table),
@@ -625,7 +625,7 @@ function gatherToRelExpr(
       seed: seedExpr,
       step: stepProjected,
       frontier_key: { RowId: "Current" },
-      max_depth: gather.max_depth,
+      bound: { MaxDepth: gather.max_depth },
       dedupe_key: [{ RowId: "Current" }],
     },
   };
@@ -788,6 +788,39 @@ function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): 
   return relation;
 }
 
+function usesNativeRelationFeatures(builder: ReturnType<typeof normalizeBuiltQuery>): boolean {
+  return builder.hops.length > 0 || builder.gather !== undefined;
+}
+
+function toRuntimeOrderBy(
+  orderBy: Array<[string, "asc" | "desc"]>,
+  schema: WasmSchema,
+  table: string,
+): Array<{ column: string; direction: "Asc" | "Desc" }> {
+  return orderBy.map(([column, direction]) => {
+    const strippedColumn = stripQualifier(column);
+    const columnType = getColumnType(schema, table, strippedColumn);
+    if (columnType?.type === "Bytea") {
+      throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
+    }
+    if (columnType?.type === "Json") {
+      throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
+    }
+    return {
+      column: strippedColumn,
+      direction: direction === "desc" ? "Desc" : "Asc",
+    };
+  });
+}
+
+function toFlatConditions(conditions: BuiltCondition[]): BuiltCondition[] {
+  return conditions.map((condition) =>
+    condition.op === "isNull" && condition.value === undefined
+      ? { ...condition, value: true }
+      : condition,
+  );
+}
+
 /**
  * Translate QueryBuilder JSON to runtime query JSON.
  *
@@ -798,21 +831,37 @@ function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): 
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
   const builder = normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
-  const relation = translateBuilderToRelationIr(builderJson, schema);
   const hasExplicitSelect = builder.select.length > 0;
   const selectColumns = hasExplicitSelect
     ? resolveSelectedColumns(builder.table, schema, builder.select)
     : [];
   const projectedColumns = visibleSelectColumns(selectColumns);
+  const arraySubqueries = toArraySubqueries(builder.includes, builder.table, relations, schema, {
+    hideCurrentLevelColumnNames: hasExplicitSelect,
+    requireIncludes: builder.requireIncludes,
+  });
+
+  if (usesNativeRelationFeatures(builder)) {
+    const relation = translateBuilderToRelationIr(builderJson, schema);
+    return JSON.stringify({
+      table: builder.table,
+      array_subqueries: arraySubqueries,
+      relation_ir: relation,
+      ...(builder.includeDeleted ? { include_deleted: true } : {}),
+      ...(projectedColumns ? { select_columns: projectedColumns } : {}),
+    });
+  }
+
+  const orderBy = toRuntimeOrderBy(builder.orderBy, schema, builder.table);
   const query = {
     table: builder.table,
-    array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
-      hideCurrentLevelColumnNames: hasExplicitSelect,
-      requireIncludes: builder.requireIncludes,
-    }),
-    relation_ir: relation,
+    conditions: toFlatConditions(builder.conditions),
+    array_subqueries: arraySubqueries,
     ...(builder.includeDeleted ? { include_deleted: true } : {}),
     ...(projectedColumns ? { select_columns: projectedColumns } : {}),
+    ...(orderBy.length > 0 ? { order_by: orderBy } : {}),
+    ...(typeof builder.limit === "number" ? { limit: builder.limit } : {}),
+    ...(typeof builder.offset === "number" ? { offset: builder.offset } : {}),
   };
 
   return JSON.stringify(query);

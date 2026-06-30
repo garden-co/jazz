@@ -78,7 +78,9 @@ impl TxId {
 }
 
 /// The two transaction isolation/fate regimes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
 pub enum TxKind {
     /// Mergeable transaction validated by CRDT-style merge rules.
     Mergeable,
@@ -275,13 +277,12 @@ impl HistoryEntry {
         if !self.is_register_record() {
             return None;
         }
-        deletion_event_from_value(
+        deletion_from_value(
             self.version
                 .borrowed()
                 .get_idx(RegisterRowRecord::FIELD__DELETION_IDX)
                 .expect("valid history deletion"),
         )
-        .map(Some)
         .expect("valid history deletion")
     }
 
@@ -560,6 +561,10 @@ groove::define_record! {
         2 => tx_node_id: u64,
         3 => schema_version: u64,
         4 => parents: ParentRefs,
+        5 => created_by: AuthorId,
+        6 => created_at: u64,
+        7 => updated_by: AuthorId,
+        8 => updated_at: u64,
         .. user_cells,
     }
 }
@@ -571,7 +576,11 @@ groove::define_record! {
         2 => tx_node_id: u64,
         3 => schema_version: u64,
         4 => parents: ParentRefs,
-        5 => _deletion: Value,
+        5 => created_by: AuthorId,
+        6 => created_at: u64,
+        7 => updated_by: AuthorId,
+        8 => updated_at: u64,
+        9 => _deletion: Value,
     }
 }
 
@@ -684,19 +693,11 @@ fn tx_id_value(tx_id: TxId) -> Value {
 fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static str> {
     match value {
         Value::Nullable(None) => Ok(None),
-        Value::Nullable(Some(value)) => match *value {
-            Value::Enum(0) => Ok(Some(DeletionEvent::Deleted)),
-            Value::Enum(1) => Ok(Some(DeletionEvent::Restored)),
-            _ => Err("deletion"),
-        },
-        _ => Err("deletion"),
-    }
-}
-
-fn deletion_event_from_value(value: Value) -> Result<DeletionEvent, &'static str> {
-    match value {
-        Value::Enum(0) => Ok(DeletionEvent::Deleted),
-        Value::Enum(1) => Ok(DeletionEvent::Restored),
+        Value::Nullable(Some(value)) => deletion_from_value(*value),
+        Value::Enum(0) => Ok(Some(DeletionEvent::Deleted)),
+        Value::Enum(1) => Ok(Some(DeletionEvent::Restored)),
+        Value::U8(0) => Ok(Some(DeletionEvent::Deleted)),
+        Value::U8(1) => Ok(Some(DeletionEvent::Restored)),
         _ => Err("deletion"),
     }
 }

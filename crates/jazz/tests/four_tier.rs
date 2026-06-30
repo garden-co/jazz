@@ -116,6 +116,7 @@ fn permission_scope_key(schema: &JazzSchema, table: &str, writer: AuthorId) -> S
     SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
+        read_view: Default::default(),
     }
 }
 
@@ -125,6 +126,7 @@ fn whole_table_key(schema: &JazzSchema, table: &str) -> SubscriptionKey {
     SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
+        read_view: Default::default(),
     }
 }
 
@@ -812,6 +814,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         subscription: SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
+            read_view: Default::default(),
         },
         reset_result_set: false,
         version_bundles: vec![VersionBundle {
@@ -822,8 +825,10 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
             durability: DurabilityTier::Edge,
         }],
         peer_payload_inventory: PeerPayloadInventory::default(),
-        result_row_adds: Vec::new(),
-        result_row_removes: Vec::new(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
     })
     .unwrap();
 

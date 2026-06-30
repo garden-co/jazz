@@ -26,8 +26,9 @@ use crate::ids::{
     SchemaVersionId,
 };
 use crate::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, ResultRowEntry, SchemaVersion, ShapeAst, Subscribe,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ReadViewKey, ResultMemberEntry,
+    ResultRowEntry, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
+    VersionBundle, VersionRecord, ViewFactEntry,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, MergeStrategy, TableSchema, registered_column_transform};
@@ -333,10 +334,19 @@ struct QueryServing {
     tx_version_tables_cache_order_set: BTreeSet<TxId>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
-    /// Registered query binding values keyed by shape and binding ID.
-    registered_bindings: BTreeMap<ShapeId, BTreeMap<BindingId, Vec<Value>>>,
-    /// Subscriber-side settled subscription result-set/completeness state for query bindings.
-    settled_result_sets: BTreeMap<SubscriptionKey, BTreeSet<ResultRowEntry>>,
+    /// Registered query binding values keyed by shape and usage-site binding ID.
+    registered_bindings: BTreeMap<ShapeId, BTreeMap<BindingId, RegisteredBinding>>,
+    /// Subscriber-side settled result-member/completeness state by canonical query binding/view.
+    settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
+    /// Subscriber-side settled non-row facts by canonical query binding/view.
+    settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
+}
+
+/// One usage-site query binding registration.
+#[derive(Clone, Debug, PartialEq)]
+struct RegisteredBinding {
+    values: Vec<Value>,
+    read_view: ReadViewKey,
 }
 
 /// Locally open exclusive transactions and local-only permission attribution.
@@ -532,6 +542,7 @@ where
                 registered_shapes: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
+                settled_program_facts: BTreeMap::new(),
             },
             open_tx: OpenTxState {
                 open_exclusive: BTreeMap::new(),
@@ -651,6 +662,7 @@ where
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.settled_result_sets.clear();
+        self.query.settled_program_facts.clear();
         self.parking.parked_shape_registrations.clear();
         self.parking.parked_binding_deltas.clear();
         self.recover_from_storage()?;
@@ -2041,12 +2053,19 @@ where
             DurabilityTier::None | DurabilityTier::Local => self.current_rows(table, settled),
             DurabilityTier::Edge => self.current_rows(table, settled),
             DurabilityTier::Global => {
-                let Some(row_result_set) = self.query.settled_result_sets.get(&subscription) else {
+                let binding_view_key =
+                    BindingViewKey::from_canonical_subscription_key(subscription);
+                let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view_key)
+                else {
                     return Ok(Vec::new());
                 };
+                let row_entries = row_result_set
+                    .iter()
+                    .filter_map(ResultMemberEntry::as_row)
+                    .collect::<Vec<_>>();
                 let content_descriptor = table_schema.history_storage_table().record_schema();
                 let mut rows = Vec::new();
-                for (entry_table, row_uuid, tx_id) in row_result_set.clone() {
+                for (entry_table, row_uuid, tx_id) in row_entries {
                     if entry_table.as_str() != table {
                         continue;
                     }
@@ -3037,7 +3056,7 @@ impl CurrentRow {
             .enumerate()
             .skip(CurrentRowRecord::USER_CELLS)
             .filter_map(|(idx, field)| {
-                if matches!(field.name.as_deref(), Some("tx_time" | "tx_node_id")) {
+                if !matches!(field.value_type, records::ValueType::Nullable(_)) {
                     return None;
                 }
                 let name = field
@@ -3046,7 +3065,7 @@ impl CurrentRow {
                     .strip_prefix("user_")
                     .unwrap_or(field.name.as_ref()?)
                     .to_owned();
-                let value = self.cell_at(idx - CurrentRowRecord::USER_CELLS)?;
+                let value = nullable_value(self.record.borrowed().get_idx(idx).ok()?).ok()??;
                 Some((name, value))
             })
             .collect()
@@ -3315,8 +3334,10 @@ struct ViewUpdateParts {
     reset_result_set: bool,
     version_bundles: Vec<VersionBundle>,
     peer_complete_tx_payload_refs: Vec<TxId>,
-    result_row_adds: Vec<ResultRowEntry>,
-    result_row_removes: Vec<ResultRowEntry>,
+    result_member_adds: Vec<ResultMemberEntry>,
+    result_member_removes: Vec<ResultMemberEntry>,
+    program_fact_adds: Vec<ViewFactEntry>,
+    program_fact_removes: Vec<ViewFactEntry>,
 }
 
 #[derive(Default)]

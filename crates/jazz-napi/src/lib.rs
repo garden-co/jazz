@@ -756,7 +756,8 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => db.attach_query_with_opts(&query.inner, opts),
             NapiDbInnerStorage::Persistent(db) => db.attach_query_with_opts(&query.inner, opts),
-        };
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(QueryAttachment { inner })
     }
 
@@ -1671,6 +1672,16 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
     }
     if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
+    }
+    if value
+        .get("read_view")
+        .or_else(|| value.get("readView"))
+        .filter(|read_view| !read_view.is_null())
+        .is_some()
+    {
+        return Err(napi::Error::from_reason(
+            "non-default read_view is not supported yet",
+        ));
     }
     Ok(opts)
 }

@@ -43,13 +43,14 @@ base/fallback. An ordinary branch has a base snapshot that is **frozen at
 creation**: later parent commits do not appear in the branch except through the
 branch's own overlay writes (`INV-BRANCH-6`).
 
-The branch base is conceptually a full `SnapshotRef`: a global sequence cut plus
-the creator's local HLC and explicit dots, all pointing at a concrete database
-cut. The branch's effective base cut is the whole `SnapshotRef`, not only
+The branch base is conceptually a full `SnapshotRef`: an owner, a global
+sequence cut, the owner's local HLC cut, and explicit dots, all pointing at a
+concrete database cut. The branch's effective base cut is the whole `SnapshotRef`, not only
 `global_base`. v1 execution currently supports only global-only `SnapshotRef`s:
-`local_base` must be empty/zero-equivalent and `dots` must be empty. Persistence
-and protocol should still represent the full `SnapshotRef` shape and reject
-complex SnapshotRefs until branch reads can evaluate them. Schema-version/lens
+`local_base` must be empty/zero-equivalent for its owner and `dots` must be
+empty. Persistence and protocol should still represent the full `SnapshotRef`
+shape and reject complex SnapshotRefs until branch reads can evaluate them.
+Schema-version/lens
 partitions (ch. 10) are orthogonal to branch identity.
 
 Creating a branch records metadata only. It is O(1)-style and never copies base
@@ -156,7 +157,7 @@ merge-back and discard have graduated:
   per-shard-position question, ch. 15) before allowing it. Branch-of-branch
   multiplies this per level. The implementation does not allow this composition.
 - 🔶 **Branch base persistence.** The design base is a full `SnapshotRef`
-  (`global_base`, local HLC, and dots). The implementation persists only
+  (`owner`, `global_base`, `local_base`, and dots). The implementation persists only
   `base_global` and recovers a defaulted global-only base. v1 may continue to
   execute only global-only SnapshotRefs, but durable metadata should carry the
   full SnapshotRef shape and reject non-global-only bases until they are

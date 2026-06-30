@@ -374,6 +374,7 @@ class PermissionRelationBuilder implements PermissionRelation {
             right: {
               TableScan: {
                 table: this.state.outputTable,
+                alias: recursiveHopScope,
               },
             },
             on: [
@@ -402,7 +403,7 @@ class PermissionRelationBuilder implements PermissionRelation {
             seed,
             step: stepProjected,
             frontier_key: { RowId: "Current" },
-            max_depth: maxDepth,
+            bound: { MaxDepth: maxDepth },
             dedupe_key: [{ RowId: "Current" }],
           },
         },
@@ -1372,6 +1373,7 @@ function applyRelationTail(options: {
         right: {
           TableScan: {
             table: join.table,
+            alias: rightScope,
           },
         },
         on: [joinConditionFromSpec(join, defaultScope, rightScope)],

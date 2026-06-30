@@ -593,12 +593,18 @@ fn assert_settled_result_sets_unique(
     subscription_ordinal: u64,
     seed: u64,
 ) {
-    // Subscriber-side settled subscription result-set/completeness state, not peer shipped-state.
+    // Subscriber-side settled binding-view result-set/completeness state, not peer shipped-state.
     let subscription = node.whole_table_subscription_key("todos").unwrap();
-    let Some(result_set) = node.query.settled_result_sets.get(&subscription) else {
+    let binding_view_key =
+        crate::protocol::BindingViewKey::from_canonical_subscription_key(subscription);
+    let Some(result_set) = node.query.settled_result_sets.get(&binding_view_key) else {
         return;
     };
-    if let Some((table, row_uuid, first, second)) = duplicate_row_result_set(result_set) {
+    let row_result_set = result_set
+        .iter()
+        .filter_map(crate::protocol::ResultMemberEntry::as_row)
+        .collect::<BTreeSet<_>>();
+    if let Some((table, row_uuid, first, second)) = duplicate_row_result_set(&row_result_set) {
         panic!(
             "seed {seed}: subscription {subscription_ordinal} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
         );
@@ -648,7 +654,7 @@ impl PerNodeKnowledge {
         let SyncMessage::ViewUpdate {
             version_bundles,
             reset_result_set,
-            result_row_adds,
+            result_member_adds,
             ..
         } = message
         else {
@@ -657,9 +663,10 @@ impl PerNodeKnowledge {
         if *reset_result_set {
             self.subscription_entries.clear();
         }
-        let result_add_keys = result_row_adds
+        let result_add_keys = result_member_adds
             .iter()
-            .map(|(_, row_uuid, tx_id)| (*tx_id, *row_uuid))
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .map(|(_, row_uuid, tx_id)| (tx_id, row_uuid))
             .collect::<BTreeSet<_>>();
         let table_schema = owner_policy_schema().tables[0].clone();
         for bundle in version_bundles {
@@ -673,15 +680,21 @@ impl PerNodeKnowledge {
                 }
             }
         }
-        for (_, row_uuid, tx_id) in result_row_adds {
-            self.subscription_entries.insert((*tx_id, *row_uuid));
+        for (_, row_uuid, tx_id) in result_member_adds
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+        {
+            self.subscription_entries.insert((tx_id, row_uuid));
         }
         if let SyncMessage::ViewUpdate {
-            result_row_removes, ..
+            result_member_removes, ..
         } = message
         {
-            for (_, row_uuid, tx_id) in result_row_removes {
-                self.subscription_entries.remove(&(*tx_id, *row_uuid));
+            for (_, row_uuid, tx_id) in result_member_removes
+                .iter()
+                .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            {
+                self.subscription_entries.remove(&(tx_id, row_uuid));
             }
         }
         for bundle in version_bundles {
@@ -749,8 +762,8 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
     let SyncMessage::ViewUpdate {
         version_bundles: _,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = update
     else {
@@ -760,10 +773,11 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
         complete_tx_payload_refs.is_empty(),
         "full view recomputation should carry bundles for every visible member"
     );
-    assert!(result_row_removes.is_empty());
-    let result_rows = result_row_adds
+    assert!(result_member_removes.is_empty());
+    let result_rows = result_member_adds
         .iter()
-        .map(|(_, row_uuid, _)| *row_uuid)
+        .filter_map(crate::protocol::ResultMemberEntry::as_row)
+        .map(|(_, row_uuid, _)| row_uuid)
         .collect::<BTreeSet<_>>();
     let groove_rows = node
         .current_rows("todos", DurabilityTier::Local)
@@ -1035,7 +1049,8 @@ fn register_shape_binding(
         subscription: crate::protocol::SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
-        },
+        read_view: Default::default(),
+},
         values,
     }))
     .unwrap();
@@ -1096,15 +1111,16 @@ fn commit_core_owner_fixture(
 fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
     let SyncMessage::ViewUpdate {
         version_bundles,
-        result_row_adds,
+        result_member_adds,
         ..
     } = update
     else {
         panic!("expected view update");
     };
-    let result_txs = result_row_adds
+    let result_txs = result_member_adds
         .iter()
-        .map(|(_, _, tx_id)| *tx_id)
+        .filter_map(crate::protocol::ResultMemberEntry::as_row)
+        .map(|(_, _, tx_id)| tx_id)
         .collect::<BTreeSet<_>>();
     let referenced_rows = version_bundles
         .iter()

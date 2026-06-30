@@ -1,14 +1,15 @@
 //! View-update construction for subscribers and sync peers. This module owns
 //! current-row and query-result bundle assembly, closure expansion, settled
-//! subscription result-set/completeness state, and deduplicated version shipping; per-peer shipped
-//! state lives in [`crate::peer`], policy filtering in [`super::policy`], and
-//! query execution/planning in [`super::query_eval`]. It sits on the node side of
-//! the protocol boundary and emits [`crate::protocol::SyncMessage`] values.
+//! canonical binding-view result-set/completeness state, and deduplicated
+//! version shipping; per-peer shipped state lives in [`crate::peer`], policy
+//! filtering in [`super::policy`], and query execution/planning in
+//! [`super::query_eval`]. It sits on the node side of the protocol boundary and
+//! emits [`crate::protocol::SyncMessage`] values.
 
 use super::policy::ViewEvaluationContext;
 use super::query_eval::binding_for_shape;
 use super::*;
-use crate::protocol::PeerPayloadInventory;
+use crate::protocol::{PeerPayloadInventory, ResultMemberEntry};
 
 #[derive(Default)]
 struct ClosureExpansionMemo {
@@ -50,6 +51,26 @@ fn maintained_view_find_content_witness<'a>(
     })
 }
 
+fn content_row_members_for_bundle(
+    members: &[ResultMemberEntry],
+    context: &'static str,
+) -> Result<Vec<ResultRowEntry>, Error> {
+    members
+        .iter()
+        .map(|member| {
+            member.as_row().ok_or(Error::InvalidStoredValue(match member {
+                ResultMemberEntry::Row(_) => context,
+                ResultMemberEntry::Synthetic { .. } => {
+                    "synthetic result members require typed payload facts before row bundle shipping"
+                }
+                ResultMemberEntry::PathTuple { .. } => {
+                    "path tuple result members require typed payload facts before row bundle shipping"
+                }
+            }))
+        })
+        .collect()
+}
+
 pub(crate) struct MaintainedViewBundleInputs<V, R> {
     pub(crate) subscription: SubscriptionKey,
     /// Peer inventory of transactions whose full row-version payload has
@@ -60,8 +81,8 @@ pub(crate) struct MaintainedViewBundleInputs<V, R> {
     /// use refreshed rows as a write base for later exclusive transactions.
     pub(crate) complete_exclusive_payloads: bool,
     pub(crate) previous_result_set: BTreeSet<TxId>,
-    pub(crate) result_row_adds: Vec<ResultRowEntry>,
-    pub(crate) result_row_removes: Vec<ResultRowEntry>,
+    pub(crate) result_member_adds: Vec<ResultMemberEntry>,
+    pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) identity: AuthorId,
     pub(crate) tier: DurabilityTier,
     pub(crate) versions_by_tx: V,
@@ -100,7 +121,7 @@ where
         subscription: SubscriptionKey,
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
-        previous_row_result_set: impl IntoIterator<Item = ResultRowEntry>,
+        previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
     ) -> Result<SyncMessage, Error> {
         let (shape, binding) = self.whole_table_shape_binding(table)?;
@@ -110,7 +131,7 @@ where
             subscription,
             peer_complete_tx_payloads,
             previous_result_set,
-            previous_row_result_set,
+            previous_member_result_set,
             identity,
         )
     }
@@ -124,7 +145,7 @@ where
         subscription: SubscriptionKey,
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
-        previous_row_result_set: impl IntoIterator<Item = ResultRowEntry>,
+        previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
     ) -> Result<SyncMessage, Error> {
         self.view_update_for_query_binding_with_peer_payload_inventory_and_plan(
@@ -133,7 +154,7 @@ where
             subscription,
             peer_complete_tx_payloads,
             previous_result_set,
-            previous_row_result_set,
+            previous_member_result_set,
             identity,
             None,
         )
@@ -149,7 +170,7 @@ where
         subscription: SubscriptionKey,
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
-        previous_row_result_set: impl IntoIterator<Item = ResultRowEntry>,
+        previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
         prepared_plan: Option<(&ValidatedQuery, &Binding, &PreparedQueryPlan)>,
     ) -> Result<SyncMessage, Error> {
@@ -159,7 +180,7 @@ where
             subscription,
             peer_complete_tx_payloads,
             previous_result_set,
-            previous_row_result_set,
+            previous_member_result_set,
             identity,
             prepared_plan,
             DurabilityTier::Global,
@@ -173,7 +194,7 @@ where
         subscription: SubscriptionKey,
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
-        previous_row_result_set: impl IntoIterator<Item = ResultRowEntry>,
+        previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
         prepared_plan: Option<(&ValidatedQuery, &Binding, &PreparedQueryPlan)>,
         tier: DurabilityTier,
@@ -183,7 +204,13 @@ where
             .into_iter()
             .collect::<BTreeSet<_>>();
         let _previous_result_set = previous_result_set.into_iter().collect::<BTreeSet<_>>();
-        let previous_row_result_set = previous_row_result_set.into_iter().collect::<BTreeSet<_>>();
+        let previous_member_result_set = previous_member_result_set
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let previous_row_result_set = previous_member_result_set
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .collect::<BTreeSet<_>>();
         let degenerate_whole_table = is_degenerate_whole_table(shape, binding);
         let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
         let rows = if let Some((effective_shape, effective_binding, plan)) = prepared_plan {
@@ -256,7 +283,7 @@ where
             );
         let mut version_bundles = Vec::with_capacity(current_row_result_set.len());
         let mut peer_payload_inventory_refs = Vec::new();
-        let mut witnessed_result_row_adds = BTreeSet::new();
+        let mut witnessed_result_member_adds = BTreeSet::new();
         let mut emitted_versions = BTreeSet::new();
         for (entry_table, row_uuid, tx_id) in &current_row_result_set {
             if previous_row_result_set.contains(&(entry_table.clone(), *row_uuid, *tx_id)) {
@@ -264,7 +291,7 @@ where
             }
             if peer_complete_tx_payloads.contains(tx_id) {
                 peer_payload_inventory_refs.push(*tx_id);
-                witnessed_result_row_adds.insert((entry_table.clone(), *row_uuid, *tx_id));
+                witnessed_result_member_adds.insert((entry_table.clone(), *row_uuid, *tx_id));
                 continue;
             }
             if !emitted_versions.insert(*tx_id) {
@@ -305,7 +332,7 @@ where
                     &mut context,
                 )?);
                 for (table, row_uuid) in wanted_rows {
-                    witnessed_result_row_adds.insert((
+                    witnessed_result_member_adds.insert((
                         groove::Intern::new(table.clone()),
                         *row_uuid,
                         *tx_id,
@@ -375,25 +402,37 @@ where
                 }
             }
         }
-        let mut result_row_adds = Vec::with_capacity(current_row_result_set.len());
-        result_row_adds.extend(
-            current_row_result_set
-                .difference(&previous_row_result_set)
-                .filter(|entry| witnessed_result_row_adds.contains(*entry))
+        let current_member_result_set = current_row_result_set
+            .iter()
+            .cloned()
+            .map(ResultMemberEntry::from)
+            .collect::<BTreeSet<_>>();
+        let mut result_member_adds = Vec::with_capacity(current_member_result_set.len());
+        result_member_adds.extend(
+            current_member_result_set
+                .difference(&previous_member_result_set)
+                .filter(|member| {
+                    member
+                        .as_row()
+                        .is_some_and(|entry| witnessed_result_member_adds.contains(&entry))
+                })
                 .cloned(),
         );
-        let mut result_row_removes = Vec::with_capacity(previous_row_result_set.len());
-        result_row_removes.extend(
-            previous_row_result_set
-                .difference(&current_row_result_set)
+        let mut result_member_removes = Vec::with_capacity(previous_member_result_set.len());
+        result_member_removes.extend(
+            previous_member_result_set
+                .difference(&current_member_result_set)
                 .cloned(),
         );
-        for (entry_table, row_uuid, old_tx_id) in &result_row_removes {
+        for (entry_table, row_uuid, old_tx_id) in result_member_removes
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+        {
             if let Some(version) =
-                self.visible_global_content_version_now(entry_table.as_str(), *row_uuid)
+                self.visible_global_content_version_now(entry_table.as_str(), row_uuid)
             {
                 let tx_id = self.version_tx_id(&version)?;
-                if tx_id != *old_tx_id && !emitted_versions.contains(&tx_id) {
+                if tx_id != old_tx_id && !emitted_versions.contains(&tx_id) {
                     let table_schema = self.table(entry_table.as_str())?.clone();
                     if self.read_policy_allows_version_memo(
                         &table_schema,
@@ -415,14 +454,17 @@ where
                     }
                 }
             } else {
-                let Some(version) =
-                    self.query_global_layer_winner(entry_table, *row_uuid, VersionLayer::Deletion)?
+                let Some(version) = self.query_global_layer_winner(
+                    entry_table.as_str(),
+                    row_uuid,
+                    VersionLayer::Deletion,
+                )?
                 else {
                     continue;
                 };
                 let tx_id = self.version_tx_id(&version)?;
-                if tx_id != *old_tx_id && !emitted_versions.contains(&tx_id) {
-                    let table_schema = self.table(entry_table)?.clone();
+                if tx_id != old_tx_id && !emitted_versions.contains(&tx_id) {
+                    let table_schema = self.table(entry_table.as_str())?.clone();
                     if self.read_policy_allows_deletion_version_memo(
                         &table_schema,
                         &version,
@@ -463,40 +505,43 @@ where
             peer_payload_inventory: PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
             },
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
     }
 
-    /// Translate one query output delta record into the output-row result set entry.
+    /// Translate one query output delta record into the typed output member.
     pub(crate) fn query_output_entry_from_delta(
         &mut self,
         shape: &ValidatedQuery,
         record: groove::records::BorrowedRecord<'_>,
-    ) -> Result<ResultRowEntry, Error> {
+    ) -> Result<ResultMemberEntry, Error> {
         let table_name = shape.query().table.clone();
         let table = self.table(&table_name)?.clone();
         let row = decode_current_row(&table, record)?;
-        if let Some((time, alias)) = row.projected_tx_alias() {
+        let entry = if let Some((time, alias)) = row.projected_tx_alias() {
             let node = self
                 .resolve_node_alias(alias)?
                 .ok_or(Error::InvalidStoredValue(
                     "query output tx node alias must exist",
                 ))?;
-            Ok((
+            (
                 groove::Intern::new(table_name),
                 row.row_uuid(),
                 TxId::new(time, node),
-            ))
+            )
         } else {
             let tx_id = self
                 .visible_global_content_tx_id_now(&table_name, row.row_uuid())
                 .ok_or(Error::InvalidStoredValue("query output missing current tx"))?;
-            Ok((groove::Intern::new(table_name), row.row_uuid(), tx_id))
-        }
+            (groove::Intern::new(table_name), row.row_uuid(), tx_id)
+        };
+        Ok(ResultMemberEntry::from(entry))
     }
 
-    /// Translate one query output retraction record into the output-row result set
+    /// Translate one query output retraction record into the typed output member.
     /// entry. Retractions must carry their tx in the record itself: resolving
     /// against currently-visible state would name the wrong version (or none)
     /// for a row that just changed or vanished.
@@ -504,7 +549,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         record: groove::records::BorrowedRecord<'_>,
-    ) -> Result<ResultRowEntry, Error> {
+    ) -> Result<ResultMemberEntry, Error> {
         let table_name = shape.query().table.clone();
         let table = self.table(&table_name)?.clone();
         let row = decode_current_row(&table, record)?;
@@ -516,16 +561,16 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "query output tx node alias must exist",
             ))?;
-        Ok((
+        Ok(ResultMemberEntry::from((
             groove::Intern::new(table_name),
             row.row_uuid(),
             TxId::new(time, node),
-        ))
+        )))
     }
 
-    /// Compute the closure rows contributed by one output row.
+    /// Compute the typed result members contributed by one output member.
     ///
-    /// PeerState stores this per output-row entry. The map is bounded by the
+    /// PeerState stores this per output member. The map is bounded by the
     /// result set it already tracks for the subscription, and exists only so output
     /// removals can retract their exact closure contribution without full
     /// per-binding re-evaluation on the hot path.
@@ -533,9 +578,9 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        output: ResultRowEntry,
+        output: ResultMemberEntry,
         identity: AuthorId,
-    ) -> Result<BTreeSet<ResultRowEntry>, Error> {
+    ) -> Result<BTreeSet<ResultMemberEntry>, Error> {
         let mut memo = ClosureExpansionMemo::default();
         let mut context = ViewEvaluationContext::default();
         self.query_output_closure_contribution_with_memo(
@@ -552,9 +597,9 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        outputs: impl IntoIterator<Item = ResultRowEntry>,
+        outputs: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
-    ) -> Result<BTreeMap<ResultRowEntry, BTreeSet<ResultRowEntry>>, Error> {
+    ) -> Result<BTreeMap<ResultMemberEntry, BTreeSet<ResultMemberEntry>>, Error> {
         let mut memo = ClosureExpansionMemo::default();
         let mut context = ViewEvaluationContext::default();
         let mut contributions = BTreeMap::new();
@@ -562,7 +607,7 @@ where
             let contribution = self.query_output_closure_contribution_with_memo(
                 shape,
                 binding,
-                output,
+                output.clone(),
                 identity,
                 &mut memo,
                 &mut context,
@@ -576,16 +621,19 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        output: ResultRowEntry,
+        output: ResultMemberEntry,
         identity: AuthorId,
         memo: &mut ClosureExpansionMemo,
         context: &mut ViewEvaluationContext,
-    ) -> Result<BTreeSet<ResultRowEntry>, Error> {
-        let mut set = BTreeSet::from([output]);
+    ) -> Result<BTreeSet<ResultMemberEntry>, Error> {
+        let output_row = output.as_row().ok_or(Error::InvalidStoredValue(
+            "query output closure expansion requires a row-shaped result member",
+        ))?;
+        let mut set = BTreeSet::from([output_row]);
         let output_table = shape.query().table.clone();
         self.expand_reference_closure(
             &output_table,
-            output.1,
+            output_row.1,
             &shape.query().includes,
             &mut set,
             DurabilityTier::Global,
@@ -594,13 +642,13 @@ where
         self.expand_join_closure_for_output(
             shape,
             binding,
-            output.1,
+            output_row.1,
             &mut set,
             DurabilityTier::Global,
             memo,
         )?;
         self.retain_policy_atomic_rows(&mut set, identity, context)?;
-        Ok(set)
+        Ok(set.into_iter().map(ResultMemberEntry::from).collect())
     }
 
     /// Build a view update from already-computed result set adds/removes.
@@ -609,8 +657,8 @@ where
         subscription: SubscriptionKey,
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
-        result_row_adds: Vec<ResultRowEntry>,
-        result_row_removes: Vec<ResultRowEntry>,
+        result_member_adds: Vec<ResultMemberEntry>,
+        result_member_removes: Vec<ResultMemberEntry>,
         identity: AuthorId,
     ) -> Result<SyncMessage, Error> {
         let peer_complete_tx_payloads = peer_complete_tx_payloads
@@ -618,7 +666,15 @@ where
             .collect::<BTreeSet<_>>();
         let _previous_result_set = previous_result_set.into_iter().collect::<BTreeSet<_>>();
         let mut context = ViewEvaluationContext::default();
-        let wanted_rows_by_tx = result_row_adds
+        let row_result_adds = content_row_members_for_bundle(
+            &result_member_adds,
+            "real row result member is missing content transaction for delta bundle shipping",
+        )?;
+        let row_result_removes = content_row_members_for_bundle(
+            &result_member_removes,
+            "real row result member removal is missing content transaction for delta replacement shipping",
+        )?;
+        let wanted_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (*tx_id, (table.to_string(), *row_uuid)))
             .fold(
@@ -628,10 +684,10 @@ where
                     by_tx
                 },
             );
-        let mut version_bundles = Vec::with_capacity(result_row_adds.len());
+        let mut version_bundles = Vec::with_capacity(row_result_adds.len());
         let mut peer_payload_inventory_refs = Vec::new();
         let mut emitted_versions = BTreeSet::new();
-        for (entry_table, row_uuid, tx_id) in &result_row_adds {
+        for (entry_table, row_uuid, tx_id) in &row_result_adds {
             if peer_complete_tx_payloads.contains(tx_id) {
                 peer_payload_inventory_refs.push(*tx_id);
                 continue;
@@ -675,7 +731,7 @@ where
                 )?);
             }
         }
-        for (entry_table, row_uuid, content_tx_id) in &result_row_adds {
+        for (entry_table, row_uuid, content_tx_id) in &row_result_adds {
             let Some(version) =
                 self.query_global_layer_winner(entry_table, *row_uuid, VersionLayer::Deletion)?
             else {
@@ -704,7 +760,7 @@ where
                 }
             }
         }
-        for (entry_table, row_uuid, old_tx_id) in &result_row_removes {
+        for (entry_table, row_uuid, old_tx_id) in &row_result_removes {
             if let Some(version) = self.visible_global_content_version_now(entry_table, *row_uuid) {
                 let tx_id = self.version_tx_id(&version)?;
                 if tx_id != *old_tx_id && !emitted_versions.contains(&tx_id) {
@@ -777,8 +833,10 @@ where
             peer_payload_inventory: PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
             },
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
     }
 
@@ -795,16 +853,24 @@ where
             peer_complete_tx_payloads,
             complete_exclusive_payloads,
             previous_result_set: _previous_result_set,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
             identity,
             tier,
             mut versions_by_tx,
             replacement_for,
         } = inputs;
         let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
+        let row_result_adds = content_row_members_for_bundle(
+            &result_member_adds,
+            "real row result member is missing content transaction for bundle shipping",
+        )?;
+        let row_result_removes = content_row_members_for_bundle(
+            &result_member_removes,
+            "real row result member removal is missing content transaction for replacement shipping",
+        )?;
         let mut tx_versions_cache = BTreeMap::<TxId, Vec<VersionRow>>::new();
-        let wanted_add_rows_by_tx = result_row_adds
+        let wanted_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (*tx_id, (table.to_string(), *row_uuid)))
             .fold(
@@ -814,7 +880,7 @@ where
                     by_tx
                 },
             );
-        let mut version_bundles = Vec::with_capacity(result_row_adds.len());
+        let mut version_bundles = Vec::with_capacity(row_result_adds.len());
         let mut peer_payload_inventory_refs = Vec::new();
         let mut emitted_versions = BTreeSet::new();
         for (tx_id, wanted_rows) in &wanted_add_rows_by_tx {
@@ -876,7 +942,7 @@ where
                 "add result row missing Stream B content witness",
             ));
         }
-        for (entry_table, row_uuid, content_tx_id) in &result_row_adds {
+        for (entry_table, row_uuid, content_tx_id) in &row_result_adds {
             let (_, deletion_winner) = replacement_for(entry_table.to_string(), *row_uuid);
             let Some(version) = deletion_winner.as_ref() else {
                 continue;
@@ -912,7 +978,7 @@ where
                 }
             }
         }
-        for (entry_table, row_uuid, old_tx_id) in &result_row_removes {
+        for (entry_table, row_uuid, old_tx_id) in &row_result_removes {
             let (content_winner, deletion_winner) =
                 replacement_for(entry_table.to_string(), *row_uuid);
             for (version, missing_witness) in [
@@ -980,8 +1046,10 @@ where
             peer_payload_inventory: PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
             },
-            result_row_adds,
-            result_row_removes,
+            result_member_adds: result_member_adds.into_iter().collect(),
+            result_member_removes: result_member_removes.into_iter().collect(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
     }
 
@@ -1047,8 +1115,10 @@ where
             reset_result_set,
             version_bundles,
             peer_complete_tx_payload_refs,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
         } = update;
         let incoming_bundle_tx_ids = version_bundles
             .iter()
@@ -1056,8 +1126,16 @@ where
             .collect::<BTreeSet<_>>();
         let cold_bulk_loaded = reset_result_set
             && peer_complete_tx_payload_refs.is_empty()
-            && result_row_removes.is_empty()
+            && result_member_removes.is_empty()
             && self.ingest_cold_view_bundles_if_empty(&version_bundles)?;
+        let row_result_adds = result_member_adds
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .collect::<Vec<_>>();
+        let row_result_removes = result_member_removes
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .collect::<Vec<_>>();
         if !cold_bulk_loaded {
             for bundle in version_bundles {
                 self.ingest_view_bundle(bundle)?;
@@ -1066,8 +1144,8 @@ where
         if !cold_bulk_loaded {
             for tx_id in peer_complete_tx_payload_refs
                 .iter()
-                .chain(result_row_adds.iter().map(|(_, _, tx_id)| tx_id))
-                .chain(result_row_removes.iter().map(|(_, _, tx_id)| tx_id))
+                .chain(row_result_adds.iter().map(|(_, _, tx_id)| tx_id))
+                .chain(row_result_removes.iter().map(|(_, _, tx_id)| tx_id))
             {
                 if incoming_bundle_tx_ids.contains(tx_id) {
                     continue;
@@ -1081,36 +1159,37 @@ where
                 }
             }
         }
-        self.validate_result_row_adds_are_witnessed(
+        self.validate_result_member_adds_are_witnessed(
             &peer_complete_tx_payload_refs,
-            &result_row_adds,
+            &row_result_adds,
         )?;
+        let binding_view_key = self.binding_view_key_for_subscription(subscription)?;
         if reset_result_set {
-            self.query.settled_result_sets.remove(&subscription);
+            self.query.settled_result_sets.remove(&binding_view_key);
+            self.query.settled_program_facts.remove(&binding_view_key);
         }
-        let canonical_subscription = self.canonical_subscription_for_usage(subscription)?;
-        let mirrored_result_set = {
-            let row_result_set = self
-                .query
-                .settled_result_sets
-                .entry(subscription)
-                .or_default();
-            for member in result_row_removes {
-                row_result_set.remove(&member);
-            }
-            row_result_set.extend(result_row_adds);
-            row_result_set.clone()
-        };
-        if let Some(canonical_subscription) = canonical_subscription {
-            if reset_result_set {
-                self.query
-                    .settled_result_sets
-                    .remove(&canonical_subscription);
-            }
-            self.query
-                .settled_result_sets
-                .insert(canonical_subscription, mirrored_result_set.clone());
+        let row_result_set = self
+            .query
+            .settled_result_sets
+            .entry(binding_view_key)
+            .or_default();
+        for member in result_member_removes {
+            row_result_set.remove(&member);
         }
+        row_result_set.extend(result_member_adds);
+        let mirrored_result_set = row_result_set
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .collect::<BTreeSet<_>>();
+        let program_facts = self
+            .query
+            .settled_program_facts
+            .entry(binding_view_key)
+            .or_default();
+        for fact in program_fact_removes {
+            program_facts.remove(&fact);
+        }
+        program_facts.extend(program_fact_adds);
         // Diagnostic-only: the duplicate-content-version scan feeds a
         // debug_assert, so it is wasted work in release. Gate to debug builds.
         #[cfg(debug_assertions)]
@@ -1119,52 +1198,23 @@ where
         {
             debug_assert!(
                 first == second,
-                "settled subscription {subscription:?} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
+                "settled binding view {binding_view_key:?} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
             );
         }
         Ok(())
     }
 
-    fn canonical_subscription_for_usage(
-        &self,
-        subscription: SubscriptionKey,
-    ) -> Result<Option<SubscriptionKey>, Error> {
-        let Some(shape) = self.query.registered_shapes.get(&subscription.shape_id) else {
-            return Ok(None);
-        };
-        let Some(values) = self
-            .query
-            .registered_bindings
-            .get(&subscription.shape_id)
-            .and_then(|bindings| bindings.get(&subscription.binding_id))
-        else {
-            return Ok(None);
-        };
-        let value_map = shape
-            .params()
-            .keys()
-            .cloned()
-            .zip(values.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
-        let binding = shape.bind(value_map)?;
-        let canonical = SubscriptionKey {
-            shape_id: subscription.shape_id,
-            binding_id: binding.binding_id(),
-        };
-        Ok((canonical != subscription).then_some(canonical))
-    }
-
-    fn validate_result_row_adds_are_witnessed(
+    fn validate_result_member_adds_are_witnessed(
         &mut self,
         peer_complete_tx_payload_refs: &[TxId],
-        result_row_adds: &[ResultRowEntry],
+        result_member_adds: &[ResultRowEntry],
     ) -> Result<(), Error> {
         let peer_complete_tx_payload_refs = peer_complete_tx_payload_refs
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
         let mut partial_exclusive_keys = BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new();
-        for (table, row_uuid, tx_id) in result_row_adds {
+        for (table, row_uuid, tx_id) in result_member_adds {
             let Some(tx) = self.query_transaction(*tx_id)? else {
                 continue;
             };
@@ -1268,6 +1318,7 @@ where
         Ok(SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
+            read_view: Default::default(),
         })
     }
 

@@ -413,8 +413,10 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                 durability: DurabilityTier::Global,
             }],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_row_adds: vec![("todos".to_owned().into(), row(1), tx_id)],
-            result_row_removes: Vec::new(),
+            result_member_adds: vec![("todos".to_owned().into(), row(1), tx_id).into()],
+            result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
         })
         .unwrap();
     assert_eq!(
@@ -443,8 +445,10 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                 durability: DurabilityTier::Global,
             }],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_row_adds: vec![("todos".to_owned().into(), row(2), tx_id)],
-            result_row_removes: Vec::new(),
+            result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
+            result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
         })
         .unwrap();
     assert_eq!(
@@ -452,6 +456,40 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         vec![(row(1), title_cells("one")), (row(2), title_cells("two")),]
     );
 }
+
+#[test]
+fn view_updates_reject_unknown_usage_site_bindings() {
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let canonical = reader.whole_table_subscription_key("todos").unwrap();
+    let unknown_usage_site = SubscriptionKey {
+        binding_id: BindingId(uuid::uuid!("77777777-7777-4777-9777-777777777777")),
+        ..canonical
+    };
+
+    // Public APIs should never be able to create this packet; this is receiver
+    // hardening for malformed or late wire updates.
+    let error = reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription: unknown_usage_site,
+            reset_result_set: false,
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("subscription referenced unregistered shape")
+            | Error::InvalidStoredValue("subscription referenced unregistered binding")
+    ));
+    assert!(reader.query.settled_result_sets.is_empty());
+    assert!(reader.query.settled_program_facts.is_empty());
+}
+
 #[test]
 fn m3_seeded_sync_interleavings_converge_against_oracle() {
     // JAZZ_SEED_COUNT widens the sweep for soak runs (default: the 7
@@ -891,7 +929,7 @@ fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
         peer.handle_content_extent_fetch(
             &mut node,
             SyncMessage::FetchContentExtent {
-                row: other_row,
+                owner: crate::protocol::LargeValueOwnerRef::current_row(other_row),
                 extent: extent.clone(),
             },
         ),
@@ -903,7 +941,7 @@ fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
         peer.handle_content_extent_fetch(
             &mut node,
             SyncMessage::FetchContentExtent {
-                row: visible_row,
+                owner: crate::protocol::LargeValueOwnerRef::current_row(visible_row),
                 extent,
             },
         ),
@@ -942,9 +980,10 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
-            },
-        result_row_adds,
-        result_row_removes,
+        },
+        result_member_adds,
+        result_member_removes,
+        ..
     } = update
     else {
         panic!("expected view update");
@@ -954,8 +993,8 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         core.whole_table_subscription_key("todos").unwrap()
     );
     assert!(!reset_result_set);
-    assert_eq!(result_row_adds.len(), 1);
-    assert!(result_row_removes.is_empty());
+    assert_eq!(result_member_adds.len(), 1);
+    assert!(result_member_removes.is_empty());
     assert_eq!(version_bundles.len(), 1);
     assert!(peer_payload_inventory_refs.is_empty());
 
@@ -965,8 +1004,10 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
         .unwrap();
 
@@ -1004,9 +1045,10 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
-            },
-        result_row_adds,
-        result_row_removes,
+        },
+        result_member_adds,
+        result_member_removes,
+        ..
     } = initial
     else {
         panic!("expected view update");
@@ -1018,8 +1060,10 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
         .unwrap();
 
@@ -1039,8 +1083,8 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
             },
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = deduped
     else {
@@ -1049,18 +1093,20 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     assert!(version_bundles.is_empty());
     assert_eq!(peer_payload_inventory_refs, vec![tx_id]);
     assert_eq!(
-        result_row_adds,
+        result_member_adds,
         vec![("todos".to_owned().into(), row, tx_id)]
     );
-    assert!(result_row_removes.is_empty());
+    assert!(result_member_removes.is_empty());
     reader
         .apply_view_update(ViewUpdateParts {
             subscription: core.whole_table_subscription_key("todos").unwrap(),
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
         .unwrap();
 }
@@ -1078,8 +1124,10 @@ fn view_updates_reject_unknown_peer_payload_inventory_refs() {
             reset_result_set: false,
             version_bundles: Vec::new(),
             peer_complete_tx_payload_refs: vec![missing],
-            result_row_adds: Vec::new(),
-            result_row_removes: Vec::new(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
         .unwrap_err();
 
