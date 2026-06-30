@@ -4,7 +4,7 @@ import {
   INSPECTOR_SUBSCRIPTIONS_MESSAGE,
   serializeActiveSubscriptions,
   type JazzInspectorHost,
-} from "../../dev-tools/inspector-host-types.js";
+} from "./inspector-host-types.js";
 
 /**
  * Publish the host handle + push the active-subscription list to the overlay

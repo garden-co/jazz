@@ -1,6 +1,6 @@
 import { type Accessor } from "solid-js";
 import type { Db, DbConfig } from "../runtime/db.js";
-import { createExtensionJazzClient, createJazzClient } from "../web/create-jazz-client.js";
+import { createJazzClient } from "../web/create-jazz-client.js";
 import {
   JazzClientFactory,
   createSolidJazzClientInternal,
@@ -43,9 +43,6 @@ const makeCreateSolidJazzClient =
 
 export const createSolidJazzClient = makeCreateSolidJazzClient({
   factory: createJazzClient,
-});
-export const createSolidExtensionJazzClient = makeCreateSolidJazzClient({
-  factory: createExtensionJazzClient,
 });
 
 type Prettify<T> = {
