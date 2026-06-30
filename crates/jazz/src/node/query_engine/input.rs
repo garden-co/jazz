@@ -210,7 +210,7 @@ pub(crate) enum RowSetExpr {
         /// Predicate.
         predicate: PredicateExpr,
     },
-    /// Join/path edge.
+    /// Join/relation edge.
     Join {
         /// Left input node.
         left: RowSetNodeId,
@@ -256,7 +256,7 @@ pub(crate) enum RowSetExpr {
         /// Projected output columns.
         columns: Vec<RowProjection>,
     },
-    /// Correlated path/relation projection lowered as path edges plus
+    /// Correlated path/relation projection lowered as relation edges plus
     /// correlation coverage facts.
     CorrelatedPathProjection {
         /// Input node.

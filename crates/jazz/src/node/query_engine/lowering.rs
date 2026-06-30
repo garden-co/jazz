@@ -812,20 +812,20 @@ fn source_requirements(
                 },
             }));
         }
-        if let Some(path_fact) = output.facts.iter().find(|fact| {
+        if let Some(relation_fact) = output.facts.iter().find(|fact| {
             matches!(
                 (plan, fact),
                 (
                     AnalyzedQueryPlan::CorrelatedPath(_),
-                    ProgramFactKey::PathEdges | ProgramFactKey::PathCorrelationCoverage
+                    ProgramFactKey::RelationEdges | ProgramFactKey::PathCorrelationCoverage
                 )
             )
         }) {
             return Err(Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Output(Box::new(path_fact.clone()))],
+                gaps: vec![UnsupportedReason::Output(Box::new(relation_fact.clone()))],
                 explain: ExplainPlan {
                     capabilities: vec![
-                        "correlated path app rows lower to parent rows; path fact terminals require child path rows and cannot share that graph yet".to_owned(),
+                        "correlated path app rows lower to parent rows; relation fact terminals require child path rows and cannot share that graph yet".to_owned(),
                     ],
                     ..ExplainPlan::default()
                 },
@@ -858,7 +858,7 @@ fn source_requirements(
                     .metadata
                     .insert(SourceMetadataRequirement::Coverage);
             }
-            ProgramFactKey::PathEdges | ProgramFactKey::PathCorrelationCoverage => {
+            ProgramFactKey::RelationEdges | ProgramFactKey::PathCorrelationCoverage => {
                 for source_requirements in requirements.values_mut() {
                     source_requirements
                         .metadata
@@ -2533,8 +2533,8 @@ fn fact_output(
                 deletion: None,
             })
         }
-        ProgramFactKey::PathEdges => {
-            ProgramFactSchema::PathEdges(path_edge_schema(plan, source, resolved_sources)?)
+        ProgramFactKey::RelationEdges => {
+            ProgramFactSchema::RelationEdges(relation_edge_schema(plan, source, resolved_sources)?)
         }
         ProgramFactKey::PathCorrelationCoverage => ProgramFactSchema::PathCorrelationCoverage(
             path_correlation_coverage_schema(plan, source, resolved_sources)?,
@@ -2556,11 +2556,11 @@ fn fact_output(
     })
 }
 
-fn path_edge_schema(
+fn relation_edge_schema(
     plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-) -> CapabilityResult<PathEdgeSchema> {
+) -> CapabilityResult<RelationEdgeSchema> {
     let (source, target, depth_field) = match plan {
         AnalyzedQueryPlan::CorrelatedPath(path) => {
             let child = resolved_sources.get(&path.path.child).ok_or_else(|| {
@@ -2603,11 +2603,11 @@ fn path_edge_schema(
         AnalyzedQueryPlan::Linear(_) => {
             return Err(Box::new(CapabilityReport {
                 gaps: vec![UnsupportedReason::Output(Box::new(
-                    ProgramFactKey::PathEdges,
+                    ProgramFactKey::RelationEdges,
                 ))],
                 explain: ExplainPlan {
                     capabilities: vec![
-                        "path edge facts require a path or recursive relation node".to_owned(),
+                        "relation edge facts require a path or recursive relation node".to_owned(),
                     ],
                     ..ExplainPlan::default()
                 },
@@ -2615,7 +2615,7 @@ fn path_edge_schema(
         }
     };
 
-    Ok(PathEdgeSchema {
+    Ok(RelationEdgeSchema {
         source: versioned_row_ref_schema(source)?,
         path_field: "path".to_owned(),
         target: versioned_row_ref_schema(target)?,
