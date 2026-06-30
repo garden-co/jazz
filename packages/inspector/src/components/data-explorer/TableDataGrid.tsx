@@ -585,7 +585,7 @@ export function TableDataGrid() {
     return <Navigate to="/data-explorer" replace />;
   }
 
-  const { wasmSchema: schema, queryPropagation } = useDevtoolsContext();
+  const { wasmSchema: schema } = useDevtoolsContext();
   const db = useDb();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -711,13 +711,14 @@ export function TableDataGrid() {
   }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);
   const builtQuery = useMemo(() => queryBuilder._build(), [queryBuilder]);
   const mutationDurabilityTier = "edge";
+  // Both runtimes are server-backed, so reads always use full propagation.
   const queryOptions = useMemo(
     () =>
       ({
-        propagation: queryPropagation,
+        propagation: "full",
         visibility: "hidden_from_live_query_list",
       }) as const,
-    [queryPropagation],
+    [],
   );
 
   // `undefined` means the live query hasn't resolved yet (loading); `[]` means

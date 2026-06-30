@@ -95,7 +95,6 @@ export function InspectorApp() {
       <DevtoolsProvider
         wasmSchema={wasmSchema}
         runtime="overlay"
-        isOverlay
         hostSubscriptions={hostSubscriptions}
       >
         <MemoryRouter>

@@ -93,7 +93,6 @@ vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
     wasmSchema: mockWasmSchema,
     runtime: "overlay",
-    queryPropagation: "local-only",
   }),
 }));
 
@@ -255,13 +254,13 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("subscribes with local-only propagation in extension mode", () => {
+  it("subscribes with full propagation", () => {
     renderGrid();
 
     expect(mockUseAll).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({
-        propagation: "local-only",
+        propagation: "full",
         visibility: "hidden_from_live_query_list",
       }),
     );

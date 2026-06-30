@@ -98,15 +98,15 @@ function tierRank(tier: DurabilityTier): number {
   }
 }
 
-function useServerSubscriptionTelemetry(runtime: "standalone" | "overlay") {
+function useServerSubscriptionTelemetry() {
   const standaloneContext = useStandaloneContext();
   const [queries, setQueries] = useState<IntrospectionSubscriptionGroup[]>([]);
   const [generatedAt, setGeneratedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(runtime === "standalone");
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    if (runtime !== "standalone" || !standaloneContext) {
+    if (!standaloneContext) {
       setQueries([]);
       setGeneratedAt(null);
       setError(null);
@@ -154,7 +154,6 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "overlay") {
       window.clearInterval(intervalId);
     };
   }, [
-    runtime,
     standaloneContext?.connection.adminSecret,
     standaloneContext?.connection.appId,
     standaloneContext?.connection.serverUrl,
@@ -311,7 +310,7 @@ function OverlayLiveQuery() {
 }
 
 function StandaloneLiveQuery() {
-  const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry("standalone");
+  const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry();
   const [selectedTable, setSelectedTable] = useState("");
 
   const availableTables = useMemo(() => {

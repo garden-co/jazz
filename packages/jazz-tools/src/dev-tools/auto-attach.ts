@@ -23,11 +23,11 @@ function jazzDevPluginActive(): boolean {
 }
 
 /**
- * Mount the inspector overlay + attach the dev-tools bridge for a db. The
- * providers only call this in dev; it additionally no-ops unless the jazz dev
- * plugin is serving the inspector. Safe to call on every provider effect run
- * with no guard here: the overlay UI mounts once globally and the bridge
- * registers once per db (see attachDevTools), so repeat calls are idempotent.
+ * Mount the inspector overlay for a db. The providers only call this in dev; it
+ * no-ops unless the jazz dev plugin is serving the inspector. Safe to call on
+ * every provider effect run with no guard here: the overlay UI mounts once
+ * globally and the host handle is installed once per db, so repeat calls are
+ * idempotent.
  */
 export function startInspectorOnce(db: object): void {
   if (!jazzDevPluginActive()) return;
