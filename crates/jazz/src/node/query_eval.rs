@@ -703,23 +703,9 @@ fn normalize_reachable(
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<RowSetNodeId, Error> {
-    if reachable.seed.is_some() {
-        return Err(normalization_gap(
-            "reachable_via relation seeds are not represented in normalized row-set shapes yet",
-        ));
-    }
-
     let frontier = FrontierId(format!("reachable:{index}:frontier"));
-    let columns = reachable_frontier_columns(&reachable.from, param_types)?;
-    let seed_node = RowSetNodeId(format!("reachable:{index}:seed"));
-    nodes.insert(
-        seed_node.clone(),
-        RowSetExpr::ValueSource {
-            shape: binding_source_shape.to_owned(),
-            columns: columns.clone(),
-            mode: reachable_seed_value_source_mode(&reachable.from)?,
-        },
-    );
+    let (seed_node, columns) =
+        normalize_reachable_seed(nodes, reachable, index, binding_source_shape, param_types)?;
 
     let frontier_node = RowSetNodeId(format!("reachable:{index}:frontier"));
     nodes.insert(
@@ -878,6 +864,102 @@ fn normalize_reachable(
     Ok(root_join_node)
 }
 
+fn normalize_reachable_seed(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    reachable: &crate::query::ReachableVia,
+    index: usize,
+    binding_source_shape: &str,
+    param_types: &BTreeMap<String, ColumnType>,
+) -> Result<(RowSetNodeId, Vec<ValueSourceColumn>), Error> {
+    if let Some(seed) = &reachable.seed {
+        if !predicate_params(&seed.filters).is_empty() {
+            return Err(normalization_gap(
+                "reachable_via relation seed filters with retained params need binding-param filter lowering",
+            ));
+        }
+        let seed_source = reachable_seed_source_id(seed, index);
+        let columns = reachable_seed_frontier_columns(&seed_source, seed);
+        let seed_source_node = RowSetNodeId(format!("reachable:{index}:seed_source"));
+        nodes.insert(
+            seed_source_node.clone(),
+            RowSetExpr::Source {
+                source: seed_source.clone(),
+                visibility: RowVisibility::Visible,
+            },
+        );
+        let mut seed_current = seed_source_node;
+        if !seed.filters.is_empty() {
+            let seed_filter_node = RowSetNodeId(format!("reachable:{index}:seed_filter"));
+            nodes.insert(
+                seed_filter_node.clone(),
+                RowSetExpr::Filter {
+                    input: seed_current,
+                    predicate: normalize_predicates(&seed_source, &seed.filters)?,
+                },
+            );
+            seed_current = seed_filter_node;
+        }
+        let seed_project_node = RowSetNodeId(format!("reachable:{index}:seed_project"));
+        nodes.insert(
+            seed_project_node.clone(),
+            RowSetExpr::Project {
+                input: seed_current,
+                columns: vec![
+                    RowProjection {
+                        output: typed_output_field("team", ColumnType::Uuid),
+                        value: NormalizedValueRef::SourceField {
+                            source: seed_source.clone(),
+                            field: seed.team_column.clone(),
+                        },
+                    },
+                    RowProjection {
+                        output: typed_output_field("reachable_team", ColumnType::Uuid),
+                        value: NormalizedValueRef::SourceField {
+                            source: seed_source,
+                            field: seed.team_column.clone(),
+                        },
+                    },
+                ],
+            },
+        );
+        return Ok((seed_project_node, columns));
+    }
+
+    let columns = reachable_frontier_columns(&reachable.from, param_types)?;
+    let seed_node = RowSetNodeId(format!("reachable:{index}:seed"));
+    nodes.insert(
+        seed_node.clone(),
+        RowSetExpr::ValueSource {
+            shape: binding_source_shape.to_owned(),
+            columns: columns.clone(),
+            mode: reachable_seed_value_source_mode(&reachable.from)?,
+        },
+    );
+    Ok((seed_node, columns))
+}
+
+fn reachable_seed_frontier_columns(
+    source: &SourceId,
+    seed: &crate::query::ReachableSeed,
+) -> Vec<ValueSourceColumn> {
+    let value = NormalizedValueRef::SourceField {
+        source: source.clone(),
+        field: seed.team_column.clone(),
+    };
+    vec![
+        ValueSourceColumn {
+            name: "team".to_owned(),
+            value: value.clone(),
+            ty: ColumnType::Uuid,
+        },
+        ValueSourceColumn {
+            name: "reachable_team".to_owned(),
+            value,
+            ty: ColumnType::Uuid,
+        },
+    ]
+}
+
 fn reachable_frontier_columns(
     seed: &Operand,
     param_types: &BTreeMap<String, ColumnType>,
@@ -971,6 +1053,18 @@ fn reachable_access_source_id(reachable: &crate::query::ReachableVia, index: usi
                 "reachable:{index}:{}",
                 reachable.access_table
             ))],
+        },
+    }
+}
+
+fn reachable_seed_source_id(seed: &crate::query::ReachableSeed, index: usize) -> SourceId {
+    SourceId {
+        table: seed.table.clone(),
+        path: SourcePath {
+            components: vec![
+                SourceRole::Root,
+                SourceRole::RecursiveSeed(format!("{index}:{}", seed.table)),
+            ],
         },
     }
 }
@@ -9139,6 +9233,14 @@ mod tests {
             TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
             TableSchema::new("resources", [ColumnSchema::new("name", ColumnType::String)]),
             TableSchema::new(
+                "teamSeeds",
+                [
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                    ColumnSchema::new("kind", ColumnType::String),
+                ],
+            )
+            .with_reference("team", "teams"),
+            TableSchema::new(
                 "resourceAccess",
                 [
                     ColumnSchema::new("resource", ColumnType::Uuid),
@@ -9562,6 +9664,119 @@ mod tests {
                 .get(&(shape.shape_id(), DurabilityTier::Global)),
             Some(PreparedQueryPlan::Prepared { .. })
         ));
+    }
+
+    #[test]
+    fn reachable_relation_seed_query_rows_lowers_through_query_engine() {
+        let (_dir, mut node) = open_recursive_node();
+        let schema = recursive_schema();
+        let team1 = row(1);
+        let team2 = row(2);
+        let team3 = row(3);
+        let team4 = row(4);
+        let resource1 = row(101);
+        let resource2 = row(102);
+        commit_global_cells(
+            &mut node,
+            "resources",
+            resource1,
+            BTreeMap::from([("name".to_owned(), Value::String("r1".to_owned()))]),
+            10,
+            1,
+        );
+        commit_global_cells(
+            &mut node,
+            "resources",
+            resource2,
+            BTreeMap::from([("name".to_owned(), Value::String("r2".to_owned()))]),
+            11,
+            2,
+        );
+        commit_global_cells(
+            &mut node,
+            "resourceAccess",
+            row(201),
+            BTreeMap::from([
+                ("resource".to_owned(), Value::Uuid(resource1.0)),
+                ("team".to_owned(), Value::Uuid(team3.0)),
+            ]),
+            12,
+            3,
+        );
+        commit_global_cells(
+            &mut node,
+            "resourceAccess",
+            row(202),
+            BTreeMap::from([
+                ("resource".to_owned(), Value::Uuid(resource2.0)),
+                ("team".to_owned(), Value::Uuid(team4.0)),
+            ]),
+            13,
+            4,
+        );
+        commit_global_cells(
+            &mut node,
+            "teamSeeds",
+            row(401),
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(team1.0)),
+                ("kind".to_owned(), Value::String("sync".to_owned())),
+            ]),
+            14,
+            5,
+        );
+        commit_global_cells(
+            &mut node,
+            "teamSeeds",
+            row(402),
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(team4.0)),
+                ("kind".to_owned(), Value::String("other".to_owned())),
+            ]),
+            15,
+            6,
+        );
+        for (idx, member, parent, seq) in [(301, team1, team2, 7), (302, team2, team3, 8)] {
+            commit_global_cells(
+                &mut node,
+                "teamTeamMemberships",
+                row(idx),
+                BTreeMap::from([
+                    ("member".to_owned(), Value::Uuid(member.0)),
+                    ("parent".to_owned(), Value::Uuid(parent.0)),
+                    ("onlyAdmins".to_owned(), Value::Bool(false)),
+                ]),
+                10 + seq,
+                seq,
+            );
+        }
+
+        let mut query = Query::from("resources").reachable_via(
+            "resourceAccess",
+            "resource",
+            "team",
+            lit("ignored-by-relation-seed"),
+            "teamTeamMemberships",
+            "member",
+            "parent",
+            [eq(col("onlyAdmins"), lit(false))],
+        );
+        query.reachable[0].seed = Some(crate::query::ReachableSeed {
+            table: "teamSeeds".to_owned(),
+            team_column: "team".to_owned(),
+            filters: vec![eq(col("kind"), lit("sync"))],
+        });
+        let shape = query.validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+
+        let rows = node
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(rows, BTreeSet::from([resource1]));
     }
 
     #[test]
