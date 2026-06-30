@@ -111,9 +111,9 @@ pub enum SyncMessage {
         result_member_adds: Vec<ResultMemberEntry>,
         /// Typed result membership removals for the subscription.
         result_member_removes: Vec<ResultMemberEntry>,
-        /// Non-row program fact additions, such as relation/path edges.
+        /// Non-row program fact additions, such as relation edges.
         program_fact_adds: Vec<ProgramFactEntry>,
-        /// Non-row program fact removals, such as relation/path edges.
+        /// Non-row program fact removals, such as relation edges.
         program_fact_removes: Vec<ProgramFactEntry>,
     },
     /// Bulk-lane request for bytes backing one content extent.
@@ -1178,8 +1178,8 @@ impl PartialEq<ResultMemberEntry> for ResultRowEntry {
 pub enum ProgramFactEntry {
     /// Payload bytes for a non-versioned result member, such as aggregate/window output.
     ResultPayload(ResultMemberPayloadEntry),
-    /// A relation/path edge between two materialized rows.
-    PathEdge(PathEdgeEntry),
+    /// A relation edge between two materialized rows.
+    RelationEdge(RelationEdgeEntry),
     /// Coverage for one correlated path expansion.
     PathCorrelationCoverage(PathCorrelationCoverageEntry),
     /// Source/table coverage fact.
@@ -1226,9 +1226,9 @@ pub struct ResultMemberPayloadEntry {
     pub record: Vec<u8>,
 }
 
-/// Relation/path edge fact emitted by query payloads.
+/// Relation edge fact emitted by query payloads.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct PathEdgeEntry {
+pub struct RelationEdgeEntry {
     /// Logical path or relation name.
     pub path: String,
     /// Source row table.
@@ -1241,7 +1241,7 @@ pub struct PathEdgeEntry {
     pub target_row: RowUuid,
     /// Edge kind, when this is more specific than a plain include/join edge.
     #[serde(default)]
-    pub kind: Option<PathEdgeKind>,
+    pub kind: Option<RelationEdgeKind>,
     /// Source version identity, when edge membership depends on a concrete version.
     #[serde(default)]
     pub source_version: Option<RowVersionRefEntry>,
@@ -1259,7 +1259,7 @@ pub struct PathEdgeEntry {
     pub branch: Option<Vec<u8>>,
     /// Terminal role for intermediate/frontier/output relation rows.
     #[serde(default)]
-    pub role: Option<PathEdgeRole>,
+    pub role: Option<RelationEdgeRole>,
     /// Stable edge order when order affects the maintained output.
     #[serde(default)]
     pub order: Option<Vec<u8>>,
@@ -1311,7 +1311,7 @@ pub struct PolicyWitnessEntry {
     /// Witness version proving or revoking visibility.
     pub witness: RowVersionRefEntry,
     /// Dependency edge kind.
-    pub edge_kind: Option<PathEdgeKind>,
+    pub edge_kind: Option<RelationEdgeKind>,
 }
 
 /// Derived-output provenance fact.
@@ -1359,11 +1359,11 @@ pub struct PointReadEntry {
     pub binding_id: BindingId,
 }
 
-/// Relation/path edge kind.
+/// Relation edge kind.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
-pub enum PathEdgeKind {
+pub enum RelationEdgeKind {
     /// Include edge.
     Include,
     /// Join edge.
@@ -1376,11 +1376,11 @@ pub enum PathEdgeKind {
     Policy,
 }
 
-/// Role of a path edge in the maintained program.
+/// Role of a relation edge in the maintained program.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
-pub enum PathEdgeRole {
+pub enum RelationEdgeRole {
     /// Internal edge only.
     Intermediate,
     /// Frontier/worklist edge.

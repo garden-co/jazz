@@ -772,7 +772,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
 }
 
 #[test]
-fn correlated_path_projection_lowers_with_path_fact_schemas() {
+fn correlated_path_projection_lowers_with_relation_fact_schemas() {
     let parent_node = RowSetNodeId("parent".to_owned());
     let child_node = RowSetNodeId("child".to_owned());
     let path_node = RowSetNodeId("path".to_owned());
@@ -840,7 +840,7 @@ fn correlated_path_projection_lowers_with_path_fact_schemas() {
         output: RowSetOutputRequest {
             app_rows: None,
             facts: BTreeSet::from([
-                ProgramFactKey::PathEdges,
+                ProgramFactKey::RelationEdges,
                 ProgramFactKey::PathCorrelationCoverage,
             ]),
         },
@@ -872,8 +872,8 @@ fn correlated_path_projection_lowers_with_path_fact_schemas() {
         matches!(
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
-                key: ProgramFactKey::PathEdges,
-                schema: ProgramFactSchema::PathEdges(PathEdgeSchema {
+                key: ProgramFactKey::RelationEdges,
+                schema: ProgramFactSchema::RelationEdges(RelationEdgeSchema {
                     role_field: Some(_),
                     depth_field: None,
                     ..
@@ -1066,14 +1066,14 @@ fn correlated_path_cardinality_app_rows_report_operator_gap() {
 }
 
 #[test]
-fn correlated_path_app_rows_reject_path_fact_terminals() {
+fn correlated_path_app_rows_reject_relation_fact_terminals() {
     // Internal lowering test: app-row correlated paths currently produce parent
     // rows, so advertising path-fact schemas from the same graph would be a
     // dishonest output contract.
     let request = correlated_path_request(
         CorrelationRequirement::Optional,
         row_set_output(BTreeSet::from([
-            ProgramFactKey::PathEdges,
+            ProgramFactKey::RelationEdges,
             ProgramFactKey::PathCorrelationCoverage,
         ])),
     );
@@ -1084,7 +1084,7 @@ fn correlated_path_app_rows_reject_path_fact_terminals() {
 
     assert!(resolver.requests.is_empty());
     assert!(report.gaps.contains(&UnsupportedReason::Output(Box::new(
-        ProgramFactKey::PathEdges
+        ProgramFactKey::RelationEdges
     ))));
     assert!(report.explain.capabilities.iter().any(|capability| {
         capability.contains("correlated path app rows lower to parent rows")
@@ -1092,7 +1092,7 @@ fn correlated_path_app_rows_reject_path_fact_terminals() {
 }
 
 #[test]
-fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
+fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     let seed_node = RowSetNodeId("seed".to_owned());
     let frontier_node = RowSetNodeId("frontier".to_owned());
     let step_node = RowSetNodeId("step".to_owned());
@@ -1251,7 +1251,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
         output: RowSetOutputRequest {
             app_rows: None,
             facts: BTreeSet::from([
-                ProgramFactKey::PathEdges,
+                ProgramFactKey::RelationEdges,
                 ProgramFactKey::PathCorrelationCoverage,
             ]),
         },
@@ -1322,8 +1322,8 @@ fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
         matches!(
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
-                key: ProgramFactKey::PathEdges,
-                schema: ProgramFactSchema::PathEdges(PathEdgeSchema {
+                key: ProgramFactKey::RelationEdges,
+                schema: ProgramFactSchema::RelationEdges(RelationEdgeSchema {
                     depth_field: Some(_),
                     ..
                 }),
@@ -1489,7 +1489,7 @@ fn read_frontier_facts_are_outputs_not_delivery_profiles() {
 fn app_rows_are_separate_from_hidden_terminal_facts() {
     let request = row_set_output(BTreeSet::from([
         ProgramFactKey::ResultMembership,
-        ProgramFactKey::PathEdges,
+        ProgramFactKey::RelationEdges,
         ProgramFactKey::SourceCoverage(program_scope()),
     ]));
 
@@ -1498,7 +1498,7 @@ fn app_rows_are_separate_from_hidden_terminal_facts() {
         app_rows.projection,
         PayloadProjection::ShapeDefault
     ));
-    assert!(request.facts.contains(&ProgramFactKey::PathEdges));
+    assert!(request.facts.contains(&ProgramFactKey::RelationEdges));
 }
 
 #[test]
