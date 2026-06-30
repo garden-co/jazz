@@ -48,6 +48,7 @@ mod ingest;
 pub(crate) mod maintained_subscription_view;
 mod open_tx;
 mod policy;
+mod query_engine;
 mod query_eval;
 mod recovery;
 pub mod text_oplog;
