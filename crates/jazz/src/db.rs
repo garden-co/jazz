@@ -3949,7 +3949,7 @@ fn query_for_array_subquery_coverage(subquery: &ArraySubquery) -> Query {
 
 fn collect_relation_table_scans(expr: &RelationExpr, tables: &mut BTreeSet<String>) {
     match expr {
-        RelationExpr::TableScan { table } => {
+        RelationExpr::TableScan { table, .. } => {
             tables.insert(table.clone());
         }
         RelationExpr::Filter { input, .. }

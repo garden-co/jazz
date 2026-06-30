@@ -72,6 +72,8 @@ pub struct RelationQuery {
 pub enum RelationExpr {
     TableScan {
         table: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
     },
     Filter {
         input: Box<RelationExpr>,

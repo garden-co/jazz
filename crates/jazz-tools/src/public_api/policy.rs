@@ -585,6 +585,7 @@ mod tests {
             rel: RelExpr::Filter {
                 input: Box::new(RelExpr::TableScan {
                     table: "todo_shares".into(),
+                    alias: None,
                 }),
                 predicate: PredicateExpr::Cmp {
                     left: ColumnRef::unscoped("todo_id"),

@@ -688,7 +688,7 @@ pub mod policy_expr {
 
         fn into_table_where(self, table: TableName) -> Self::Output {
             Relation::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan { table }),
+                input: Box::new(RelExpr::TableScan { table, alias: None }),
                 predicate: self,
             })
         }
