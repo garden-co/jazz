@@ -3536,6 +3536,9 @@ pub enum Error {
     /// Error returned by query validation or binding.
     #[error(transparent)]
     Query(#[from] QueryError),
+    /// Query could not be represented by the unified query engine.
+    #[error("query lowering failed: {0}")]
+    QueryLowering(String),
     /// Table was not found in the schema.
     #[error("table not found: {0}")]
     TableNotFound(String),
