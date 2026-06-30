@@ -83,7 +83,6 @@ fn next_groove_runtime_token() -> u64 {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct MaintainedViewAddBundleStats {
     pub(super) stream_b_bundles: usize,
-    pub(super) fallback_bundles: usize,
 }
 
 #[cfg(test)]
@@ -97,7 +96,6 @@ pub(super) struct MaintainedViewReplacementForRemove {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct MaintainedViewRemovalBundleStats {
     pub(super) stream_bundles: usize,
-    pub(super) fallback_bundles: usize,
 }
 
 #[cfg(test)]
@@ -105,9 +103,7 @@ std::thread_local! {
     static QUERY_VERSIONS_FOR_TX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MAINTAINED_VIEW_MATERIALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static MAINTAINED_VIEW_ADD_BUNDLE_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static MAINTAINED_VIEW_REMOVAL_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -143,14 +139,12 @@ fn record_maintained_view_materialize_call() {
 #[cfg(test)]
 pub(super) fn reset_maintained_view_add_bundle_stats() {
     MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES.with(|bundles| bundles.set(0));
-    MAINTAINED_VIEW_ADD_BUNDLE_FALLBACKS.with(|fallbacks| fallbacks.set(0));
 }
 
 #[cfg(test)]
 pub(super) fn maintained_view_add_bundle_stats() -> MaintainedViewAddBundleStats {
     MaintainedViewAddBundleStats {
         stream_b_bundles: MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES.with(std::cell::Cell::get),
-        fallback_bundles: MAINTAINED_VIEW_ADD_BUNDLE_FALLBACKS.with(std::cell::Cell::get),
     }
 }
 
@@ -163,24 +157,14 @@ fn record_maintained_view_stream_b_add_bundle() {
 fn record_maintained_view_stream_b_add_bundle() {}
 
 #[cfg(test)]
-fn record_maintained_view_add_bundle_fallback() {
-    MAINTAINED_VIEW_ADD_BUNDLE_FALLBACKS.with(|fallbacks| fallbacks.set(fallbacks.get() + 1));
-}
-
-#[cfg(not(test))]
-fn record_maintained_view_add_bundle_fallback() {}
-
-#[cfg(test)]
 pub(super) fn reset_maintained_view_removal_bundle_stats() {
     MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES.with(|bundles| bundles.set(0));
-    MAINTAINED_VIEW_REMOVAL_FALLBACKS.with(|fallbacks| fallbacks.set(0));
 }
 
 #[cfg(test)]
 pub(super) fn maintained_view_removal_bundle_stats() -> MaintainedViewRemovalBundleStats {
     MaintainedViewRemovalBundleStats {
         stream_bundles: MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES.with(std::cell::Cell::get),
-        fallback_bundles: MAINTAINED_VIEW_REMOVAL_FALLBACKS.with(std::cell::Cell::get),
     }
 }
 
@@ -191,14 +175,6 @@ fn record_maintained_view_removal_stream_bundle() {
 
 #[cfg(not(test))]
 fn record_maintained_view_removal_stream_bundle() {}
-
-#[cfg(test)]
-fn record_maintained_view_removal_bundle_fallback() {
-    MAINTAINED_VIEW_REMOVAL_FALLBACKS.with(|fallbacks| fallbacks.set(fallbacks.get() + 1));
-}
-
-#[cfg(not(test))]
-fn record_maintained_view_removal_bundle_fallback() {}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum LensPathDirection {
@@ -3556,6 +3532,10 @@ pub enum Error {
     /// View update payload was internally inconsistent.
     #[error("malformed view update: {0}")]
     MalformedViewUpdate(&'static str),
+    /// Maintained subscription view lacked the version witness needed to emit
+    /// a self-contained incremental bundle.
+    #[error("maintained subscription view missing bundle witness: {0}")]
+    MaintainedViewMissingBundleWitness(&'static str),
     /// Open transaction handle was not known.
     #[error("missing open transaction: {0:?}")]
     MissingOpenTx(OpenTxId),

@@ -872,42 +872,9 @@ where
                 continue;
             }
 
-            record_maintained_view_add_bundle_fallback();
-            let tx_versions = self.query_versions_for_tx_memo_cloned(*tx_id, &mut context)?;
-            let version = tx_versions
-                .iter()
-                .find(|version| {
-                    version.deletion().is_none()
-                        && wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-                })
-                .ok_or(Error::MissingTransaction(*tx_id))?;
-            let table_schema = self.table(version.table())?.clone();
-            if self.read_policy_allows_version_memo(
-                &table_schema,
-                version,
-                identity,
-                &mut context,
-            )? {
-                let bundle_versions = if complete_exclusive_payloads {
-                    tx_versions.clone()
-                } else {
-                    tx_versions
-                        .iter()
-                        .filter(|version| {
-                            wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                };
-                version_bundles.push(self.version_bundle_for_view_memo_with_versions(
-                    &table_schema,
-                    version,
-                    *tx_id,
-                    &bundle_versions,
-                    identity,
-                    &mut context,
-                )?);
-            }
+            return Err(Error::MaintainedViewMissingBundleWitness(
+                "add result row missing Stream B content witness",
+            ));
         }
         for (entry_table, row_uuid, content_tx_id) in &result_row_adds {
             let (_, deletion_winner) = replacement_for(entry_table.to_string(), *row_uuid);
@@ -939,191 +906,56 @@ where
                     );
                     record_maintained_view_removal_stream_bundle();
                 } else {
-                    record_maintained_view_removal_bundle_fallback();
-                    let Some(version) = self.query_global_layer_winner(
-                        entry_table,
-                        *row_uuid,
-                        VersionLayer::Deletion,
-                    )?
-                    else {
-                        continue;
-                    };
-                    let table_schema = self.table(entry_table)?.clone();
-                    if self.read_policy_allows_deletion_version_memo(
-                        &table_schema,
-                        &version,
-                        identity,
-                        &mut context,
-                    )? {
-                        version_bundles.push(self.version_bundle_for_view_memo(
-                            &table_schema,
-                            &version,
-                            identity,
-                            &mut context,
-                        )?);
-                    }
+                    return Err(Error::MaintainedViewMissingBundleWitness(
+                        "add result row missing deletion replacement witness",
+                    ));
                 }
             }
         }
         for (entry_table, row_uuid, old_tx_id) in &result_row_removes {
             let (content_winner, deletion_winner) =
                 replacement_for(entry_table.to_string(), *row_uuid);
-            if let Some(version) = content_winner.as_ref() {
+            for (version, missing_witness) in [
+                (
+                    content_winner.as_ref(),
+                    "removed result row missing content replacement witness",
+                ),
+                (
+                    deletion_winner.as_ref(),
+                    "removed result row missing deletion replacement witness",
+                ),
+            ] {
+                let Some(version) = version else {
+                    continue;
+                };
                 let tx_id = self.version_tx_id(version)?;
-                if tx_id != *old_tx_id && !emitted_versions.contains(&tx_id) {
-                    if peer_complete_tx_payloads.contains(&tx_id) {
-                        peer_payload_inventory_refs.push(tx_id);
-                        record_maintained_view_removal_stream_bundle();
-                    } else {
-                        let tx_versions = tx_versions_cache
-                            .entry(tx_id)
-                            .or_insert_with(|| versions_by_tx(tx_id));
-                        if maintained_view_tx_versions_contain_winner(tx_versions, version) {
-                            emitted_versions.insert(tx_id);
-                            let stored_tx = self
-                                .query_transaction_memo(tx_id, &mut context)?
-                                .ok_or(Error::MissingTransaction(tx_id))?;
-                            version_bundles.push(
-                                self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
-                                    &stored_tx,
-                                    tx_versions,
-                                    identity,
-                                    &mut context,
-                                )?,
-                            );
-                            record_maintained_view_removal_stream_bundle();
-                        } else {
-                            record_maintained_view_removal_bundle_fallback();
-                            if let Some(version) =
-                                self.visible_global_content_version_now(entry_table, *row_uuid)
-                            {
-                                let fallback_tx_id = self.version_tx_id(&version)?;
-                                let table_schema = self.table(entry_table)?.clone();
-                                if self.read_policy_allows_version_memo(
-                                    &table_schema,
-                                    &version,
-                                    identity,
-                                    &mut context,
-                                )? {
-                                    emitted_versions.insert(fallback_tx_id);
-                                    version_bundles.push(self.version_bundle_for_view_memo(
-                                        &table_schema,
-                                        &version,
-                                        identity,
-                                        &mut context,
-                                    )?);
-                                }
-                            }
-                        }
-                    }
+                if tx_id == *old_tx_id || emitted_versions.contains(&tx_id) {
+                    continue;
                 }
-            } else if let Some(version) = deletion_winner.as_ref() {
-                let tx_id = self.version_tx_id(version)?;
-                if tx_id != *old_tx_id && !emitted_versions.contains(&tx_id) {
-                    if peer_complete_tx_payloads.contains(&tx_id) {
-                        peer_payload_inventory_refs.push(tx_id);
-                        record_maintained_view_removal_stream_bundle();
-                    } else {
-                        let tx_versions = tx_versions_cache
-                            .entry(tx_id)
-                            .or_insert_with(|| versions_by_tx(tx_id));
-                        if maintained_view_tx_versions_contain_winner(tx_versions, version) {
-                            emitted_versions.insert(tx_id);
-                            let stored_tx = self
-                                .query_transaction_memo(tx_id, &mut context)?
-                                .ok_or(Error::MissingTransaction(tx_id))?;
-                            version_bundles.push(
-                                self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
-                                    &stored_tx,
-                                    tx_versions,
-                                    identity,
-                                    &mut context,
-                                )?,
-                            );
-                            record_maintained_view_removal_stream_bundle();
-                        } else {
-                            record_maintained_view_removal_bundle_fallback();
-                            let Some(version) = self.query_global_layer_winner(
-                                entry_table,
-                                *row_uuid,
-                                VersionLayer::Deletion,
-                            )?
-                            else {
-                                continue;
-                            };
-                            let fallback_tx_id = self.version_tx_id(&version)?;
-                            let table_schema = self.table(entry_table)?.clone();
-                            if self.read_policy_allows_deletion_version_memo(
-                                &table_schema,
-                                &version,
-                                identity,
-                                &mut context,
-                            )? {
-                                emitted_versions.insert(fallback_tx_id);
-                                version_bundles.push(self.version_bundle_for_view_memo(
-                                    &table_schema,
-                                    &version,
-                                    identity,
-                                    &mut context,
-                                )?);
-                            }
-                        }
-                    }
+                if peer_complete_tx_payloads.contains(&tx_id) {
+                    peer_payload_inventory_refs.push(tx_id);
+                    record_maintained_view_removal_stream_bundle();
+                    continue;
                 }
-            } else if let Some(version) =
-                self.visible_global_content_version_now(entry_table, *row_uuid)
-            {
-                let tx_id = self.version_tx_id(&version)?;
-                if tx_id != *old_tx_id && !emitted_versions.contains(&tx_id) {
-                    if peer_complete_tx_payloads.contains(&tx_id) {
-                        peer_payload_inventory_refs.push(tx_id);
-                        record_maintained_view_removal_stream_bundle();
-                    } else {
-                        let table_schema = self.table(entry_table)?.clone();
-                        if self.read_policy_allows_version_memo(
-                            &table_schema,
-                            &version,
-                            identity,
-                            &mut context,
-                        )? {
-                            emitted_versions.insert(tx_id);
-                            version_bundles.push(self.version_bundle_for_view_memo(
-                                &table_schema,
-                                &version,
-                                identity,
-                                &mut context,
-                            )?);
-                            record_maintained_view_removal_bundle_fallback();
-                        }
-                    }
+                let tx_versions = tx_versions_cache
+                    .entry(tx_id)
+                    .or_insert_with(|| versions_by_tx(tx_id));
+                if !maintained_view_tx_versions_contain_winner(tx_versions, version) {
+                    return Err(Error::MaintainedViewMissingBundleWitness(missing_witness));
                 }
-            } else if let Some(version) =
-                self.query_global_layer_winner(entry_table, *row_uuid, VersionLayer::Deletion)?
-            {
-                let tx_id = self.version_tx_id(&version)?;
-                if tx_id != *old_tx_id && !emitted_versions.contains(&tx_id) {
-                    if peer_complete_tx_payloads.contains(&tx_id) {
-                        peer_payload_inventory_refs.push(tx_id);
-                        record_maintained_view_removal_stream_bundle();
-                    } else {
-                        let table_schema = self.table(entry_table)?.clone();
-                        if self.read_policy_allows_deletion_version_memo(
-                            &table_schema,
-                            &version,
-                            identity,
-                            &mut context,
-                        )? {
-                            emitted_versions.insert(tx_id);
-                            version_bundles.push(self.version_bundle_for_view_memo(
-                                &table_schema,
-                                &version,
-                                identity,
-                                &mut context,
-                            )?);
-                            record_maintained_view_removal_bundle_fallback();
-                        }
-                    }
-                }
+                emitted_versions.insert(tx_id);
+                let stored_tx = self
+                    .query_transaction_memo(tx_id, &mut context)?
+                    .ok_or(Error::MissingTransaction(tx_id))?;
+                version_bundles.push(
+                    self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
+                        &stored_tx,
+                        tx_versions,
+                        identity,
+                        &mut context,
+                    )?,
+                );
+                record_maintained_view_removal_stream_bundle();
             }
         }
         for bundle in &mut version_bundles {
