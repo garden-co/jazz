@@ -154,13 +154,22 @@ only after that state has been observed locally through synchronization (§13.5)
 until then, the local view may be empty. Reads do not perform an implicit network
 wait.
 
-`Db::subscribe(query, opts)` opens a live subscription only for the global
-maintained-view tier. The facade does not maintain local-tier live views by
-rerunning `query_rows` and diffing full results; `Local` effective-tier
-subscriptions return an explicit unsupported error instead. A successful
-subscription is backed by the maintained subscription view path from ch. 16 and
-emits opened/reset/delta events from maintained terminal rows (`INV-API-6`).
-Binding ABIs must keep this as a thin event bridge over the maintained view
+`Db::subscribe(query, opts)` opens a live subscription at the requested effective
+tier. `Local` subscriptions are first-class application-facing subscriptions:
+they include the node's own pending committed writes and must be able to drive
+synchronous local UI state after a local write. `Edge` and `Global`
+subscriptions use the same query semantics, but their source/frontier and first
+settlement/completeness rules are constrained to edge- or global-accepted data.
+
+The design target is that **all** live subscriptions are backed by the unified
+maintained subscription machinery from ch. 16, differing only in read frontier,
+source resolution, and settlement semantics. The facade must not grow a second
+query engine by rerunning `query_rows` and diffing full results as the normal
+live-subscription mechanism. Until local maintained-view subscriptions are fully
+unified with the edge/global path, implementations may keep an explicitly named
+local materialized-row bridge for alpha-compatible local live reads, but that is
+staging debt rather than a semantic exception (`INV-API-6`). Binding ABIs must
+keep subscription delivery as a thin event bridge over the core subscription
 surface (§13.7), not a second facade-side diff engine.
 
 ## 13.4 Writes

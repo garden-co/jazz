@@ -33,10 +33,16 @@ are coverage facts for the maintained subscription view only; they do not become
 complete transaction payload refs. The peer state machine MUST NOT answer a live
 subscription by running an independent semantic scan.
 
-The high-level `Db` facade follows the same boundary: live subscriptions are
-global maintained views. A local-tier request is unsupported and should fail
-explicitly rather than maintain a facade-local full `query_rows` refresh/diff
-loop.
+The high-level `Db` facade follows the same boundary for every live
+subscription tier. Local subscriptions are desired and first-class: they are the
+application/UI-facing maintained view over the local read frontier, including the
+node's own pending committed writes. Edge and global subscriptions are maintained
+views over their corresponding accepted-state frontiers, with additional
+settlement/completeness requirements. Tiers select the source/frontier and
+delivery contract; they must not select a different query engine. A facade-local
+full `query_rows` refresh/diff loop is permitted only as explicitly named
+migration scaffolding for alpha-compatible local live reads, not as the target
+semantics.
 
 ## 16.2 Policy composition
 
@@ -93,13 +99,16 @@ subscription with different semantics.
 
 ## 16.5 Current known gaps
 
-The current maintained-subscription surface supports ordinary global-tier live
-query subscriptions whose lowered policy-composed shape can be maintained by
-groove, including unordered `limit(1)` with offset `0` lowered through
-`ArgMinBy` over `row_uuid`, and ordered finite windows lowered through groove
-`TopBy`. Ordered windows preserve the user `order_by` terms, append `row_uuid`
-as the stable tie field, and retain the requested `offset + limit` window
-incrementally.
+The current maintained-subscription surface supports ordinary live query
+subscriptions whose lowered policy-composed shape can be maintained by groove,
+with the strongest production coverage on the global frontier. The target
+surface is tier-agnostic: local, edge, and global subscriptions use the same
+lowering and maintained terminal contracts, differing only in source/frontier
+selection and settlement/completeness rules. Supported maintained shapes include
+unordered `limit(1)` with offset `0` lowered through `ArgMinBy` over `row_uuid`,
+and ordered finite windows lowered through groove `TopBy`. Ordered windows
+preserve the user `order_by` terms, append `row_uuid` as the stable tie field,
+and retain the requested `offset + limit` window incrementally.
 
 Known gaps fall into distinct buckets:
 
@@ -124,9 +133,11 @@ Maintained-lowering gaps:
 - aggregate lowering is not yet represented as a groove-maintained graph
   fragment for subscription deltas;
 - `array_subqueries` have one-shot and local-tier relation snapshot
-  materialization, but global-tier maintained subscriptions do not yet emit
-  relation-edge terminal deltas. They must be rejected at subscription open
-  until maintained relation edges are represented in groove;
+  materialization, but maintained subscriptions do not yet emit relation-edge
+  terminal deltas across all tiers. A subscription shape that requires
+  maintained relation-edge deltas must be rejected at subscription open until
+  those edges are represented in groove; local snapshot materialization is
+  staging debt, not a separate relation subscription engine;
 - application-column projection is a materialization concern layered over the
   maintained membership/version stream; projected subscription payloads must not
   become a second diff engine;
