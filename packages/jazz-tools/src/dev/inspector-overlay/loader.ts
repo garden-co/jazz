@@ -1,5 +1,5 @@
-import { createRelay } from "./relay.js";
-import { attachDevTools } from "../../dev-tools/dev-tools.js";
+import { installInspectorHost } from "./host-bridge.js";
+import type { Db } from "../../runtime/db.js";
 
 const ELEMENT_NAME = "jazz-inspector-overlay";
 
@@ -223,6 +223,10 @@ function overlayStyleSheet(): CSSStyleSheet {
   return sheet;
 }
 
+// The host app's Db, set by startInspectorOverlay() before the element mounts,
+// so connectedCallback can publish the host handle for the iframe.
+let hostDb: Db | undefined;
+
 // The overlay chrome: a floating toggle + a bottom dock hosting the inspector
 // iframe, isolated from the host page by its shadow root. All listeners are
 // registered against #ac.signal so disconnectedCallback() removes them at once.
@@ -386,25 +390,28 @@ class JazzInspectorOverlay extends HTMLElement {
 
     apply();
 
-    // Relay wired regardless of dock visibility: the iframe announces/subscribes on load.
-    const relay = createRelay({
-      topWindow: window,
-      iframeWindow: iframe.contentWindow!,
-      origin: window.location.origin,
-    });
+    // Publish the host handle + push the active-subscription list to the iframe.
+    // The overlay reads the config off window.__jazzInspectorHost and opens its
+    // own worker connection; we only push the stack-less subscription list.
+    if (hostDb) {
+      const disposeHost = installInspectorHost(
+        hostDb,
+        iframe.contentWindow!,
+        window.location.origin,
+      );
+      signal.addEventListener("abort", () => disposeHost(), { once: true });
+    }
+
+    // The in-iframe Close button posts up here (same-origin).
     window.addEventListener(
       "message",
       (event) => {
-        // The in-iframe Close button posts up here (same-origin). Handle that
-        // before the relay, which only cares about devtools-bridge messages.
         if (
           event.origin === window.location.origin &&
           (event.data as { type?: unknown } | null)?.type === CLOSE_MESSAGE_TYPE
         ) {
           setOpen(false);
-          return;
         }
-        relay.handle(event);
       },
       { signal },
     );
@@ -425,14 +432,14 @@ function mount(): void {
 }
 
 /**
- * Start the inspector for an app db: mount the overlay UI (floating toggle +
- * bottom dock + bridge relay) and attach the devtools bridge. Idempotent. No-op
- * at module load — the framework providers call this from a dev-only dynamic
- * import, so nothing runs unless explicitly started and the whole module is
- * absent from prod builds. The schema is resolved from the live runtime at
- * announce time, so none is passed here.
+ * Start the inspector for an app db: record the db and mount the overlay UI
+ * (floating toggle + bottom dock + iframe). The element's connectedCallback then
+ * publishes the host handle (window.__jazzInspectorHost) and pushes the active
+ * subscription list to the iframe; the overlay opens its own worker connection
+ * from the published config. Idempotent. No-op at module load — providers call
+ * this from a dev-only dynamic import, so it's absent from prod builds.
  */
 export function startInspectorOverlay(db: object): void {
+  hostDb = db as Db;
   mount();
-  void attachDevTools({ db } as Parameters<typeof attachDevTools>[0]);
 }
