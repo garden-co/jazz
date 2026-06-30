@@ -2808,6 +2808,8 @@ pub struct RelationEdge {
 /// One-shot relation read payload: row material plus array-subquery edges.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RelationSnapshot {
+    /// Number of leading `rows` entries that are query roots.
+    pub root_count: usize,
     /// Root and related rows referenced by `edges`.
     pub rows: Vec<CurrentRow>,
     /// Relation edges between rows.

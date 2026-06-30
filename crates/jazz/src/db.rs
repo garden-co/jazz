@@ -4597,6 +4597,7 @@ fn subscription_snapshot_for_rows(
         "maintained relation subscriptions must produce relation edges"
     );
     RelationSnapshot {
+        root_count: rows.len(),
         rows,
         edges: Vec::new(),
     }

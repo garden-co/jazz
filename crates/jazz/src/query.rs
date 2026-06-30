@@ -1629,7 +1629,8 @@ fn validate_aggregate_order_by(
 
 fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), QueryError> {
     match column {
-        "id" | "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => Ok(()),
+        "id" | "$canRead" | "$canEdit" | "$canDelete" | "$createdAt" | "$createdBy"
+        | "$updatedAt" | "$updatedBy" => Ok(()),
         name if name.starts_with('$') => Err(QueryError::UnknownColumn {
             table: table.name.clone(),
             column: name.to_owned(),
@@ -2780,7 +2781,14 @@ mod tests {
                 is_null(col("snoozed_until")),
             ]))
             .include_with(Include::new("project.org").join_mode(JoinMode::Holes))
-            .select(["title", "state", "$createdAt"])
+            .select([
+                "title",
+                "state",
+                "$canRead",
+                "$canEdit",
+                "$canDelete",
+                "$createdAt",
+            ])
             .offset(5)
             .limit(10);
 
@@ -2792,6 +2800,9 @@ mod tests {
             validated.query().select.as_deref(),
             Some(
                 [
+                    "$canDelete".to_owned(),
+                    "$canEdit".to_owned(),
+                    "$canRead".to_owned(),
                     "$createdAt".to_owned(),
                     "state".to_owned(),
                     "title".to_owned()

@@ -22,6 +22,7 @@ export type NativeRelationSubscriptionEdge = {
 };
 export type NativeRelationSubscriptionSnapshot = {
   cursor: number;
+  rootCount: number;
   rows: NativeRowBatch[];
   edges: NativeRelationSubscriptionEdge[];
 };
@@ -79,6 +80,7 @@ export function readNativeRelationSubscriptionSnapshot(
 ): NativeRelationSubscriptionSnapshot {
   return {
     cursor: reader.u64(),
+    rootCount: reader.u64(),
     rows: reader.readVec(readNativeRowBatch),
     edges: reader.readVec(readNativeRelationSubscriptionEdge),
   };

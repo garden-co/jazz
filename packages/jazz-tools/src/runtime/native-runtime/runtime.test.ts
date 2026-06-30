@@ -1363,6 +1363,7 @@ describe("NativeRuntimeAdapter server transport", () => {
             targetRowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
           },
         ],
+        1,
       ),
     });
     await Promise.resolve();
@@ -1439,6 +1440,7 @@ describe("NativeRuntimeAdapter server transport", () => {
                     targetRowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
                   },
                 ],
+                1,
               );
             },
             all: () => {
@@ -2133,6 +2135,187 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("preserves relation IR in literals for numeric and timestamp columns", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      {
+        metrics: {
+          columns: [
+            { name: "count", column_type: { type: "Integer" }, nullable: false },
+            { name: "ratio", column_type: { type: "Double" }, nullable: false },
+            { name: "createdAt", column_type: { type: "Timestamp" }, nullable: false },
+          ],
+        },
+      } satisfies WasmSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await runtime.query(
+      JSON.stringify({
+        table: "metrics",
+        relation_ir: {
+          Filter: {
+            input: { TableScan: { table: "metrics" } },
+            predicate: {
+              And: [
+                {
+                  In: {
+                    left: { column: "count" },
+                    values: [
+                      { Literal: { type: "Integer", value: 5 } },
+                      { Literal: { type: "Integer", value: 10 } },
+                    ],
+                  },
+                },
+                {
+                  In: {
+                    left: { column: "ratio" },
+                    values: [
+                      { Literal: { type: "Double", value: 1.5 } },
+                      { Literal: { type: "Double", value: 2.5 } },
+                    ],
+                  },
+                },
+                {
+                  In: {
+                    left: { column: "createdAt" },
+                    values: [
+                      { Literal: { type: "Timestamp", value: 1767225600000 } },
+                      { Literal: { type: "Timestamp", value: 1767312000000 } },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(readPreparedInLiterals(preparedBytes!)).toEqual([
+      {
+        column: "count",
+        literals: [
+          { tag: 2, value: encodeSignedI32ForTest(5) },
+          { tag: 2, value: encodeSignedI32ForTest(10) },
+        ],
+      },
+      {
+        column: "ratio",
+        literals: [
+          { tag: 4, value: 1.5 },
+          { tag: 4, value: 2.5 },
+        ],
+      },
+      {
+        column: "createdAt",
+        literals: [
+          { tag: 3, value: 1767225600000 },
+          { tag: 3, value: 1767312000000 },
+        ],
+      },
+    ]);
+  });
+
+  it("preserves relation IR range literal types for double and timestamp columns", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      {
+        metrics: {
+          columns: [
+            { name: "ratio", column_type: { type: "Double" }, nullable: false },
+            { name: "createdAt", column_type: { type: "Timestamp" }, nullable: false },
+          ],
+        },
+      } satisfies WasmSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await runtime.query(
+      JSON.stringify({
+        table: "metrics",
+        relation_ir: {
+          Filter: {
+            input: { TableScan: { table: "metrics" } },
+            predicate: {
+              And: [
+                {
+                  Cmp: {
+                    left: { column: "ratio" },
+                    op: "Gt",
+                    right: { Literal: { type: "Double", value: 1.5 } },
+                  },
+                },
+                {
+                  Cmp: {
+                    left: { column: "ratio" },
+                    op: "Lt",
+                    right: { Literal: { type: "Double", value: 4.5 } },
+                  },
+                },
+                {
+                  Cmp: {
+                    left: { column: "createdAt" },
+                    op: "Gt",
+                    right: { Literal: { type: "Timestamp", value: 1770076800000 } },
+                  },
+                },
+                {
+                  Cmp: {
+                    left: { column: "createdAt" },
+                    op: "Lt",
+                    right: { Literal: { type: "Timestamp", value: 1770336000000 } },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(readPreparedComparisonLiterals(preparedBytes!)).toEqual([
+      { predicateTag: 6, column: "ratio", literal: { tag: 4, value: 1.5 } },
+      { predicateTag: 8, column: "ratio", literal: { tag: 4, value: 4.5 } },
+      { predicateTag: 6, column: "createdAt", literal: { tag: 3, value: 1770076800000 } },
+      { predicateTag: 8, column: "createdAt", literal: { tag: 3, value: 1770336000000 } },
+    ]);
+  });
+
   it("does not filter native subscription snapshots by public id in JS", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
     let preparedBytes: Uint8Array | undefined;
@@ -2775,6 +2958,54 @@ function readPreparedUuidIn(query: Uint8Array): {
   return { table, column, values };
 }
 
+function readPreparedInLiterals(
+  query: Uint8Array,
+): Array<{ column: string; literals: Array<{ tag: number; value: number }> }> {
+  const reader = new PostcardReader(query);
+  reader.string();
+  return reader.readVec((predicateReader) => {
+    expect(predicateReader.u64()).toBe(5);
+    expect(predicateReader.u64()).toBe(0);
+    const column = predicateReader.string();
+    const literals = predicateReader.readVec((valueReader) => {
+      expect(valueReader.u64()).toBe(3);
+      return readPreparedNumericLiteral(valueReader);
+    });
+    return { column, literals };
+  });
+}
+
+function readPreparedComparisonLiterals(
+  query: Uint8Array,
+): Array<{ predicateTag: number; column: string; literal: { tag: number; value: number } }> {
+  const reader = new PostcardReader(query);
+  reader.string();
+  return reader.readVec((predicateReader) => {
+    const predicateTag = predicateReader.u64();
+    expect(predicateReader.u64()).toBe(0);
+    const column = predicateReader.string();
+    expect(predicateReader.u64()).toBe(3);
+    return { predicateTag, column, literal: readPreparedNumericLiteral(predicateReader) };
+  });
+}
+
+function readPreparedNumericLiteral(reader: PostcardReader): { tag: number; value: number } {
+  const tag = reader.u64();
+  switch (tag) {
+    case 2:
+    case 3:
+      return { tag, value: reader.u64() };
+    case 4:
+      return { tag, value: reader.f64Le() };
+    default:
+      throw new Error(`expected numeric prepared literal tag, got ${tag}`);
+  }
+}
+
+function encodeSignedI32ForTest(value: number): number {
+  return (value ^ 0x80000000) >>> 0;
+}
+
 function readPreparedLimit(query: Uint8Array): number | undefined {
   const reader = new PostcardReader(query);
   reader.string();
@@ -2811,7 +3042,11 @@ function skipPreparedLiteral(reader: PostcardReader): void {
   const literalTag = reader.u64();
   switch (literalTag) {
     case 2:
+    case 3:
       reader.u64();
+      return;
+    case 4:
+      reader.f64Le();
       return;
     case 5:
       reader.bool();
@@ -3314,9 +3549,11 @@ function encodeRelationSnapshot(
     targetTable: string;
     targetRowId: Uint8Array;
   }>,
+  rootCount = rows.length,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0);
+  writer.u64(rootCount);
   writeRowBatches(writer, rows);
   writer.vec((edge, index) => {
     const source = edges[index]!;

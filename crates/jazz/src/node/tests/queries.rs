@@ -470,6 +470,320 @@ fn relation_snapshot_policy_schema() -> JazzSchema {
     ])
 }
 
+fn forward_include_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new(
+            "profiles",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("best_friend", ColumnType::Uuid.nullable()),
+            ],
+        )
+        .with_reference("best_friend", "profiles"),
+        TableSchema::new(
+            "groups",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("profile", ColumnType::Uuid.nullable()),
+                ColumnSchema::new("members", ColumnType::Uuid.array_of()),
+            ],
+        )
+        .with_reference("profile", "profiles")
+        .with_reference("members", "profiles"),
+    ])
+}
+
+#[test]
+fn required_forward_include_allows_null_scalar_but_requires_every_array_member() {
+    let schema = forward_include_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x80), schema.clone());
+    let profile_a = row(0xa1);
+    let profile_b = row(0xb1);
+    let complete = row(0xc1);
+    let partial = row(0xc2);
+    let null_scalar = row(0xc3);
+
+    node.commit_mergeable(
+        MergeableCommit::new("profiles", profile_a, 10).cells(BTreeMap::from([(
+            "name".to_owned(),
+            v("a"),
+        )])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("profiles", profile_b, 11).cells(BTreeMap::from([(
+            "name".to_owned(),
+            v("b"),
+        ), (
+            "best_friend".to_owned(),
+            Value::Nullable(None),
+        )])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("groups", complete, 12).cells(BTreeMap::from([
+            ("name".to_owned(), v("complete")),
+            ("profile".to_owned(), Value::Nullable(None)),
+            (
+                "members".to_owned(),
+                Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(profile_b.0)]),
+            ),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("groups", partial, 13).cells(BTreeMap::from([
+            ("name".to_owned(), v("partial")),
+            ("profile".to_owned(), Value::Nullable(None)),
+            (
+                "members".to_owned(),
+                Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(row(0xff).0)]),
+            ),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("groups", null_scalar, 14).cells(BTreeMap::from([
+            ("name".to_owned(), v("null-scalar")),
+            ("profile".to_owned(), Value::Nullable(None)),
+            ("members".to_owned(), Value::Array(Vec::new())),
+        ])),
+    )
+    .unwrap();
+
+    let shape = Query::from("groups")
+        .include_with(crate::query::Include::new("profile").require_includes())
+        .include_with(crate::query::Include::new("members").require_includes())
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = node
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .unwrap();
+
+    assert_eq!(
+        rows.iter().map(CurrentRow::row_uuid).collect::<BTreeSet<_>>(),
+        BTreeSet::from([complete, null_scalar])
+    );
+}
+
+#[test]
+fn nested_required_include_checks_every_array_member_recursively() {
+    let schema = forward_include_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x81), schema.clone());
+    let profile_a = row(0xa1);
+    let profile_b = row(0xb1);
+    let complete = row(0xc1);
+    let nested_partial = row(0xc2);
+
+    node.commit_mergeable(
+        MergeableCommit::new("profiles", profile_a, 10).cells(BTreeMap::from([
+            ("name".to_owned(), v("a")),
+            ("best_friend".to_owned(), Value::Nullable(None)),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("profiles", profile_b, 11).cells(BTreeMap::from([
+            ("name".to_owned(), v("b")),
+            (
+                "best_friend".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0xee).0)))),
+            ),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("groups", complete, 12).cells(BTreeMap::from([
+            ("name".to_owned(), v("complete")),
+            ("profile".to_owned(), Value::Nullable(None)),
+            ("members".to_owned(), Value::Array(vec![Value::Uuid(profile_a.0)])),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("groups", nested_partial, 13).cells(BTreeMap::from([
+            ("name".to_owned(), v("nested-partial")),
+            ("profile".to_owned(), Value::Nullable(None)),
+            (
+                "members".to_owned(),
+                Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(profile_b.0)]),
+            ),
+        ])),
+    )
+    .unwrap();
+
+    let shape = Query::from("groups")
+        .include_with(crate::query::Include::new("members.best_friend").require_includes())
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = node
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .unwrap();
+
+    assert_eq!(
+        rows.iter().map(CurrentRow::row_uuid).collect::<BTreeSet<_>>(),
+        BTreeSet::from([complete])
+    );
+}
+
+#[test]
+fn array_subquery_match_correlation_cardinality_requires_every_referenced_member() {
+    let schema = forward_include_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x82), schema.clone());
+    let profile_a = row(0xa1);
+    let profile_b = row(0xb1);
+    let complete = row(0xc1);
+    let partial = row(0xc2);
+    let empty = row(0xc3);
+
+    for (idx, profile) in [profile_a, profile_b].into_iter().enumerate() {
+        node.commit_mergeable(
+            MergeableCommit::new("profiles", profile, 10 + idx as u64).cells(BTreeMap::from([
+                ("name".to_owned(), v("profile")),
+                ("best_friend".to_owned(), Value::Nullable(None)),
+            ])),
+        )
+        .unwrap();
+    }
+    node.commit_mergeable(
+        MergeableCommit::new("groups", complete, 12).cells(BTreeMap::from([
+            ("name".to_owned(), v("complete")),
+            ("profile".to_owned(), Value::Nullable(None)),
+            (
+                "members".to_owned(),
+                Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(profile_b.0)]),
+            ),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("groups", partial, 13).cells(BTreeMap::from([
+            ("name".to_owned(), v("partial")),
+            ("profile".to_owned(), Value::Nullable(None)),
+            (
+                "members".to_owned(),
+                Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(row(0xee).0)]),
+            ),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("groups", empty, 14).cells(BTreeMap::from([
+            ("name".to_owned(), v("empty")),
+            ("profile".to_owned(), Value::Nullable(None)),
+            ("members".to_owned(), Value::Array(Vec::new())),
+        ])),
+    )
+    .unwrap();
+
+    let shape = Query::from("groups")
+        .array_subquery(
+            ArraySubquery::new("memberRows", "profiles", "id", "members")
+                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality),
+        )
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let snapshot = node
+        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .filter(|row| row.table() == "groups")
+            .map(CurrentRow::row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([complete, empty])
+    );
+    assert_eq!(
+        snapshot
+            .edges
+            .iter()
+            .filter(|edge| edge.source_row == complete)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
+    let schema = forward_include_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x83), schema.clone());
+    let profile_a = row(0xa1);
+    let profile_b = row(0xb1);
+    let partial_first = row(0xc1);
+    let complete_first = row(0xc2);
+    let partial_second = row(0xc3);
+    let complete_second = row(0xc4);
+    let complete_third = row(0xc5);
+
+    for (idx, profile) in [profile_a, profile_b].into_iter().enumerate() {
+        node.commit_mergeable(
+            MergeableCommit::new("profiles", profile, 10 + idx as u64).cells(BTreeMap::from([
+                ("name".to_owned(), v("profile")),
+                ("best_friend".to_owned(), Value::Nullable(None)),
+            ])),
+        )
+        .unwrap();
+    }
+    for (idx, (group, name, members)) in [
+        (
+            partial_first,
+            "a-partial",
+            vec![Value::Uuid(profile_a.0), Value::Uuid(row(0xea).0)],
+        ),
+        (complete_first, "b-complete", vec![Value::Uuid(profile_a.0)]),
+        (
+            partial_second,
+            "c-partial",
+            vec![Value::Uuid(profile_b.0), Value::Uuid(row(0xeb).0)],
+        ),
+        (complete_second, "d-complete", vec![Value::Uuid(profile_b.0)]),
+        (complete_third, "e-complete", vec![Value::Uuid(profile_a.0)]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        node.commit_mergeable(
+            MergeableCommit::new("groups", group, 20 + idx as u64).cells(BTreeMap::from([
+                ("name".to_owned(), v(name)),
+                ("profile".to_owned(), Value::Nullable(None)),
+                ("members".to_owned(), Value::Array(members)),
+            ])),
+        )
+        .unwrap();
+    }
+
+    let shape = Query::from("groups")
+        .array_subquery(
+            ArraySubquery::new("memberRows", "profiles", "id", "members")
+                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality),
+        )
+        .order_by("name", crate::query::OrderDirection::Asc)
+        .offset(1)
+        .limit(2)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let snapshot = node
+        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .filter(|row| row.table() == "groups")
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![complete_second, complete_third]
+    );
+}
+
 #[test]
 fn relation_snapshot_materializes_reverse_array_edges() {
     let schema = relation_snapshot_schema();

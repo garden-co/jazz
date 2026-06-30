@@ -279,6 +279,30 @@ impl Backend {
         }
     }
 
+    fn can_read(&self, table: &str, row: CoreRowUuid) -> std::result::Result<bool, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.can_read(table, row),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.can_read(table, row),
+        }
+    }
+
+    fn can_update(&self, table: &str, row: CoreRowUuid) -> std::result::Result<bool, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.can_update(table, row),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.can_update(table, row),
+        }
+    }
+
+    fn can_delete(&self, table: &str, row: CoreRowUuid) -> std::result::Result<bool, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.can_delete(table, row),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.can_delete(table, row),
+        }
+    }
+
     async fn all(
         &self,
         prepared: &jazz::db::PreparedQuery,
@@ -1058,6 +1082,22 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
     }
 }
 
+fn current_row_tx_time(row: &jazz::node::CurrentRow) -> Option<u64> {
+    let (descriptor, raw) = row.encoded_record();
+    let tx_time_idx = descriptor
+        .fields()
+        .iter()
+        .position(|field| field.name.as_deref() == Some("tx_time"))?;
+    let tx_node_idx = tx_time_idx + 1;
+    if descriptor.fields().get(tx_node_idx)?.name.as_deref() != Some("tx_node_id") {
+        return None;
+    }
+    let record = jazz::groove::records::BorrowedRecord::new(raw, descriptor);
+    let time = record.get_u64(tx_time_idx).ok()?;
+    let node = record.get_u64(tx_node_idx).ok()?;
+    (time != 0 || node != 0).then_some(jazz::time::TxTime(time).physical_ms())
+}
+
 fn core_batch_id(tx_id: CoreTxId) -> BatchId {
     let mut bytes = *tx_id.node.0.as_bytes();
     bytes[..8].copy_from_slice(&tx_id.time.0.to_be_bytes());
@@ -1134,10 +1174,16 @@ impl JazzClient {
         let rows = rows
             .into_iter()
             .map(|row| {
-                let row_id = ObjectId::from_uuid(row.row_uuid().0);
+                let core_row_id = row.row_uuid();
+                let row_id = ObjectId::from_uuid(core_row_id.0);
                 let values = columns
                     .iter()
                     .map(|column| {
+                        if let Some(value) =
+                            self.core_magic_value(table, core_row_id, &row, column)?
+                        {
+                            return Ok(value);
+                        }
                         let position =
                             table_schema.columns.column_index(column).ok_or_else(|| {
                                 JazzError::Query(format!(
@@ -1153,6 +1199,56 @@ impl JazzClient {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    fn core_magic_value(
+        &self,
+        table: &str,
+        row_id: CoreRowUuid,
+        row: &jazz::node::CurrentRow,
+        column: &str,
+    ) -> Result<Option<Value>> {
+        let value = match column {
+            "$canRead" => Value::Boolean(
+                self.db
+                    .inner
+                    .borrow()
+                    .db
+                    .can_read(table, row_id)
+                    .map_err(|error| JazzError::Query(error.to_string()))?,
+            ),
+            "$canEdit" => Value::Boolean(
+                self.db
+                    .inner
+                    .borrow()
+                    .db
+                    .can_update(table, row_id)
+                    .map_err(|error| JazzError::Query(error.to_string()))?,
+            ),
+            "$canDelete" => Value::Boolean(
+                self.db
+                    .inner
+                    .borrow()
+                    .db
+                    .can_delete(table, row_id)
+                    .map_err(|error| JazzError::Query(error.to_string()))?,
+            ),
+            "$createdAt" | "$updatedAt" => {
+                let Some(time) = current_row_tx_time(row) else {
+                    return Err(JazzError::Query(format!(
+                        "row missing provenance for magic column {column} on table {table}"
+                    )));
+                };
+                Value::Timestamp(time)
+            }
+            "$createdBy" | "$updatedBy" => {
+                return Err(JazzError::Query(format!(
+                    "magic column {column} is not available through the Rust public client yet"
+                )));
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(value))
     }
     fn core_cells(values: HashMap<String, Value>) -> Result<jazz::db::RowCells> {
         values
