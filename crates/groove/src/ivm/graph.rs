@@ -463,9 +463,18 @@ impl ProjectField {
         }
     }
 
+    pub fn nullable_flat(source_name: impl Into<String>, output_name: impl Into<String>) -> Self {
+        Self {
+            expression: ProjectExpr::NullableFlat(FieldRef::name(source_name)),
+            output_name: output_name.into(),
+        }
+    }
+
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
-            ProjectExpr::Field(source) | ProjectExpr::Nullable(source) => Some(source),
+            ProjectExpr::Field(source)
+            | ProjectExpr::Nullable(source)
+            | ProjectExpr::NullableFlat(source) => Some(source),
             ProjectExpr::Literal(_) | ProjectExpr::Null(_) => None,
         }
     }
@@ -477,6 +486,7 @@ pub enum ProjectExpr {
     Literal(LiteralValue),
     Null(ValueType),
     Nullable(FieldRef),
+    NullableFlat(FieldRef),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -32,6 +32,7 @@ pub(crate) struct ReachableGraphs {
     pub(crate) edge_current: GraphBuilder,
     pub(crate) access_current: GraphBuilder,
     pub(crate) seed_param: String,
+    pub(crate) seed_param_available: bool,
 }
 
 pub(crate) struct LocalMaintainedViewSubscription {
@@ -3073,6 +3074,8 @@ where
             let access_table = self.lowered_related_table(&reachable.access_table, &options)?;
             let edge_table = self.lowered_related_table(&reachable.edge_table, &options)?;
             let reachable_seed_param = reachable_seed_param(reachable)?;
+            let reachable_seed_param_available =
+                reachable_seed_param_available(reachable, &reachable_seed_param);
             let reachable_graph = self.lower_reachable_graph(
                 shape,
                 param_types,
@@ -3084,7 +3087,6 @@ where
                 &options.binding_source_shape,
             )?;
             let params = options.keep_binding_params_in_output.then(|| {
-                let reachable_param_idx = options.output_fields.len() + carried_params.len() + 1;
                 param_types
                     .keys()
                     .filter_map(|param| {
@@ -3093,9 +3095,9 @@ where
                                 format!("left.{param}"),
                                 param.clone(),
                             ))
-                        } else if *param == reachable_seed_param {
-                            Some(ProjectField::renamed_resolved(
-                                reachable_param_idx,
+                        } else if *param == reachable_seed_param && reachable_seed_param_available {
+                            Some(ProjectField::renamed(
+                                format!("right.{param}"),
                                 param.clone(),
                             ))
                         } else {
@@ -3117,7 +3119,7 @@ where
                     .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone()))
                     .chain(params.into_iter().flatten()),
             );
-            if options.keep_binding_params_in_output {
+            if options.keep_binding_params_in_output && reachable_seed_param_available {
                 carried_params.insert(reachable_seed_param);
             }
         }
@@ -3532,14 +3534,11 @@ where
         let policy_shape = self.maintained_view_table_policy_shape(&table, identity)?;
 
         let mut replacements = BTreeMap::<RowUuid, MaintainedViewReplacementForRemove>::new();
-        let visible_content_keys = visible_current_graph(&table, DurabilityTier::Global).project([
-            "row_uuid",
-            "tx_time",
-            "tx_node_id",
-        ]);
+        let content_current_keys = GraphBuilder::table(global_current_table_name(&table.name))
+            .project(["row_uuid", "tx_time", "tx_node_id"]);
         let content = GraphBuilder::join(
             GraphBuilder::table(history_table_name(&table.name)),
-            visible_content_keys,
+            content_current_keys,
             ["row_uuid", "tx_time", "tx_node_id"],
             ["row_uuid", "tx_time", "tx_node_id"],
         )
@@ -4168,20 +4167,30 @@ where
             param_binding_mode,
             true,
         )?);
-        let mut graphs =
-            vec![
-                result_current
-                    .clone()
-                    .project_fields(maintained_view_tagged_content_fields(
-                        &root_table,
-                        "result_current",
-                        "",
-                        terminal_tables.values(),
-                        output_hidden_param_types,
-                        &result_current_param_types,
-                        "",
-                    )),
-            ];
+        let mut graphs = vec![
+            result_current
+                .clone()
+                .project_fields(maintained_view_tagged_content_fields(
+                    &root_table,
+                    "result_current",
+                    "",
+                    terminal_tables.values(),
+                    output_hidden_param_types,
+                    &result_current_param_types,
+                    "",
+                )),
+            result_current
+                .clone()
+                .project_fields(maintained_view_tagged_content_fields(
+                    &root_table,
+                    "version_content",
+                    "",
+                    terminal_tables.values(),
+                    output_hidden_param_types,
+                    &result_current_param_types,
+                    "",
+                )),
+        ];
 
         for (column, target_table_name) in &root_table.references {
             let target_table = self.table(target_table_name)?.clone();
@@ -4779,14 +4788,11 @@ where
         let filter_param_types = graph_param_types(policy_shape, &self.catalogue.schema)?;
         let available_hidden_param_types =
             hidden_maintained_view_param_types(&filter_param_types, param_binding_mode);
-        let visible_content_keys = visible_current_graph(table, DurabilityTier::Global).project([
-            "row_uuid",
-            "tx_time",
-            "tx_node_id",
-        ]);
+        let content_current_keys = GraphBuilder::table(global_current_table_name(&table.name))
+            .project(["row_uuid", "tx_time", "tx_node_id"]);
         let content = GraphBuilder::join(
             GraphBuilder::table(history_table_name(&table.name)),
-            visible_content_keys,
+            content_current_keys,
             ["row_uuid", "tx_time", "tx_node_id"],
             ["row_uuid", "tx_time", "tx_node_id"],
         )
@@ -4898,8 +4904,10 @@ where
                 reachable_graphs.seed_param.clone(),
             ),
         ]);
+        let edge_current_for_version =
+            edge_current.project(maintained_view_version_fields(edge_table));
         Ok(GraphBuilder::join(
-            edge_current,
+            edge_current_for_version,
             reachable_edge_keys,
             ["row_uuid"],
             ["row_uuid"],
@@ -4974,8 +4982,10 @@ where
                 reachable_graphs.seed_param.clone(),
             ),
         ]);
+        let access_current_for_version =
+            access_current.project(maintained_view_version_fields(access_table));
         Ok(GraphBuilder::join(
-            access_current,
+            access_current_for_version,
             reachable_access_keys,
             ["row_uuid"],
             ["row_uuid"],
@@ -5223,6 +5233,10 @@ where
                 .into_iter()
                 .map(|field| ProjectField::renamed(format!("left.{field}"), field))
                 .chain([
+                    ProjectField::renamed("left.$createdBy", "created_by"),
+                    ProjectField::renamed("left.$createdAt", "created_at"),
+                    ProjectField::renamed("left.$updatedBy", "updated_by"),
+                    ProjectField::renamed("left.$updatedAt", "updated_at"),
                     ProjectField::renamed("right.schema_version", "schema_version"),
                     ProjectField::renamed("right.parents", "parents"),
                 ]),
@@ -5302,23 +5316,29 @@ where
             binding_source_shape,
         )?;
         let seed_param = reachable_graphs.seed_param.clone();
-        let seed_field_idx = current_row_fields(access_table).len();
         let graph = GraphBuilder::join(
             reachable_graphs.access_current,
             reachable_graphs.closure,
             [query_field(&reachable.access_team_column)],
             ["reachable_team".to_owned()],
         )
-        .project_fields([
-            ProjectField::renamed(
+        .project_fields({
+            let mut fields = vec![ProjectField::renamed(
                 format!("left.{}", query_field(&reachable.access_row_column)),
                 "access_row_uuid",
-            ),
-            ProjectField::renamed_resolved(seed_field_idx, seed_param.clone()),
-        ]);
+            )];
+            if reachable_graphs.seed_param_available {
+                fields.push(ProjectField::renamed(
+                    format!("right.{seed_param}"),
+                    seed_param.clone(),
+                ));
+            }
+            fields
+        });
         if param_types
             .get(&seed_param)
             .is_some_and(|column_type| matches!(column_type.value_type(), ValueType::Nullable(_)))
+            && reachable_graphs.seed_param_available
         {
             Ok(graph.project_fields([
                 ProjectField::named("access_row_uuid"),
@@ -5362,18 +5382,20 @@ where
         source_overrides: &BTreeMap<String, GraphBuilder>,
         binding_source_shape: &str,
     ) -> Result<ReachableGraphs, Error> {
-        let team_desc = RecordDescriptor::new([
-            ("team".to_owned(), groove::records::ValueType::Uuid),
-            (
-                "reachable_team".to_owned(),
-                groove::records::ValueType::Uuid,
-            ),
-        ]);
         let seed_param = reachable_seed_param(reachable)?;
+        let mut seed_params = BTreeSet::new();
+        let mut seed_param_value_types = BTreeMap::new();
         let seed = if let Some(seed) = &reachable.seed {
             let seed_table = self.table(&seed.table)?;
             let mut seed_graph = current_source_graph(&seed_table, tier, source_overrides)
                 .unwrap_nullable(query_field(&seed.team_column));
+            seed_params = predicate_params(&seed.filters);
+            for param in &seed_params {
+                let column_type = param_types.get(param).ok_or(Error::InvalidStoredValue(
+                    "reachable seed param missing from graph param types",
+                ))?;
+                seed_param_value_types.insert(param.clone(), column_type.value_type());
+            }
             seed_graph = apply_filters_with_predicate_params(
                 seed_graph,
                 &seed_table,
@@ -5383,13 +5405,18 @@ where
                 true,
                 binding_source_shape,
             )?;
-            seed_graph.project_fields([
-                ProjectField::renamed(query_field(&seed.team_column), "team"),
-                ProjectField::renamed(query_field(&seed.team_column), "reachable_team"),
-            ])
+            seed_graph.project_fields(
+                [
+                    ProjectField::renamed(query_field(&seed.team_column), "team"),
+                    ProjectField::renamed(query_field(&seed.team_column), "reachable_team"),
+                ]
+                .into_iter()
+                .chain(seed_params.iter().cloned().map(ProjectField::named)),
+            )
         } else {
             match &reachable.from {
                 Operand::Param(param) => {
+                    seed_params.insert(param.clone());
                     let mut seed =
                         GraphBuilder::binding_source(
                             binding_source_shape.to_owned(),
@@ -5402,13 +5429,22 @@ where
                     }) {
                         seed = seed.unwrap_nullable(param.clone());
                     }
+                    let column_type = param_types.get(param).ok_or(Error::InvalidStoredValue(
+                        "reachable seed param missing from graph param types",
+                    ))?;
+                    let value_type = match column_type.value_type() {
+                        ValueType::Nullable(inner) => (*inner).clone(),
+                        value_type => value_type,
+                    };
+                    seed_param_value_types.insert(param.clone(), value_type);
                     seed.project_fields([
                         ProjectField::renamed(param.clone(), "team"),
                         ProjectField::renamed(param.clone(), "reachable_team"),
+                        ProjectField::named(param.clone()),
                     ])
                 }
                 Operand::Literal(Value::Uuid(seed)) => GraphBuilder::values(
-                    team_desc.clone(),
+                    reachable_frontier_descriptor(&seed_param_value_types),
                     [[Value::Uuid(*seed), Value::Uuid(*seed)]],
                 )?,
                 Operand::Claim(_) => {
@@ -5423,7 +5459,11 @@ where
                 }
             }
         };
-        let frontier = GraphBuilder::frontier_source("reachable_frontier", team_desc);
+        let seed_param_available = seed_params.contains(&seed_param);
+        let frontier = GraphBuilder::frontier_source(
+            "reachable_frontier",
+            reachable_frontier_descriptor(&seed_param_value_types),
+        );
         let mut edge_graph = current_source_graph(edge_table, tier, source_overrides)
             .unwrap_nullable(query_field(&reachable.edge_member_column))
             .unwrap_nullable(query_field(&reachable.edge_parent_column));
@@ -5442,13 +5482,22 @@ where
             ["reachable_team".to_owned()],
             [query_field(&reachable.edge_member_column)],
         )
-        .project_fields([
-            ProjectField::renamed("left.team", "team"),
-            ProjectField::renamed(
-                format!("right.{}", query_field(&reachable.edge_parent_column)),
-                "reachable_team",
+        .project_fields(
+            [
+                ProjectField::renamed("left.team", "team"),
+                ProjectField::renamed(
+                    format!("right.{}", query_field(&reachable.edge_parent_column)),
+                    "reachable_team",
+                ),
+            ]
+            .into_iter()
+            .chain(
+                seed_params
+                    .iter()
+                    .cloned()
+                    .map(|param| ProjectField::renamed(format!("left.{param}"), param)),
             ),
-        ]);
+        );
         let closure =
             GraphBuilder::recursive(seed, step, "reachable_frontier", reachable.max_depth.max(1));
         let mut access_graph = current_source_graph(access_table, tier, source_overrides)
@@ -5468,6 +5517,7 @@ where
             edge_current: edge_graph,
             access_current: access_graph,
             seed_param,
+            seed_param_available,
         })
     }
 
@@ -6476,6 +6526,32 @@ fn reachable_seed_param(reachable: &crate::query::ReachableVia) -> Result<String
             "reachable_via currently supports uuid parameter/claim/literal seeds only",
         )),
     }
+}
+
+fn reachable_seed_param_available(
+    reachable: &crate::query::ReachableVia,
+    seed_param: &str,
+) -> bool {
+    if let Some(seed) = &reachable.seed {
+        return predicate_params(&seed.filters).contains(seed_param);
+    }
+    matches!(&reachable.from, Operand::Param(param) if param == seed_param)
+}
+
+fn reachable_frontier_descriptor(
+    seed_param_value_types: &BTreeMap<String, groove::records::ValueType>,
+) -> RecordDescriptor {
+    let mut fields = vec![
+        ("team".to_owned(), groove::records::ValueType::Uuid),
+        (
+            "reachable_team".to_owned(),
+            groove::records::ValueType::Uuid,
+        ),
+    ];
+    for (param, value_type) in seed_param_value_types {
+        fields.push((param.clone(), value_type.clone()));
+    }
+    RecordDescriptor::new(fields)
 }
 
 #[cfg(test)]
@@ -7889,6 +7965,10 @@ fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<Strin
         "tx_node_id".to_owned(),
         "schema_version".to_owned(),
         "parents".to_owned(),
+        "created_by".to_owned(),
+        "created_at".to_owned(),
+        "updated_by".to_owned(),
+        "updated_at".to_owned(),
     ];
     fields.extend(
         table
@@ -7913,6 +7993,10 @@ fn maintained_view_register_storage_fields(prefix: &str) -> Vec<ProjectField> {
         "tx_node_id",
         "schema_version",
         "parents",
+        "created_by",
+        "created_at",
+        "updated_by",
+        "updated_at",
         "_deletion",
     ]
     .into_iter()
@@ -7921,7 +8005,7 @@ fn maintained_view_register_storage_fields(prefix: &str) -> Vec<ProjectField> {
 }
 
 fn maintained_view_version_fields(table: &TableSchema) -> Vec<String> {
-    let mut fields = current_row_fields(table);
+    let mut fields = global_current_storage_fields(table);
     fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
     fields
 }
@@ -7941,6 +8025,10 @@ fn maintained_view_result_current_fields(table: &TableSchema) -> Vec<ProjectFiel
         ProjectField::renamed("tx_node_id", "version_tx_node_id"),
         ProjectField::named("schema_version"),
         ProjectField::named("parents"),
+        ProjectField::literal("created_by", Value::Uuid(AuthorId::SYSTEM.0)),
+        ProjectField::literal("created_at", Value::U64(0)),
+        ProjectField::literal("updated_by", Value::Uuid(AuthorId::SYSTEM.0)),
+        ProjectField::literal("updated_at", Value::U64(0)),
         ProjectField::null_typed("_deletion", maintained_view_nullable_deletion_type()),
     ];
     fields.extend(
@@ -7961,6 +8049,10 @@ fn maintained_view_policy_content_fields(table: &TableSchema) -> Vec<ProjectFiel
         ProjectField::renamed("tx_node_id", "version_tx_node_id"),
         ProjectField::named("schema_version"),
         ProjectField::named("parents"),
+        ProjectField::literal("created_by", Value::Uuid(AuthorId::SYSTEM.0)),
+        ProjectField::literal("created_at", Value::U64(0)),
+        ProjectField::literal("updated_by", Value::Uuid(AuthorId::SYSTEM.0)),
+        ProjectField::literal("updated_at", Value::U64(0)),
         ProjectField::null_typed("_deletion", maintained_view_nullable_deletion_type()),
     ];
     fields.extend(
@@ -7981,6 +8073,10 @@ fn maintained_view_policy_deletion_fields(table: &TableSchema) -> Vec<ProjectFie
         ProjectField::renamed("left.tx_node_id", "version_tx_node_id"),
         ProjectField::renamed("left.schema_version", "schema_version"),
         ProjectField::renamed("left.parents", "parents"),
+        ProjectField::renamed("left.created_by", "created_by"),
+        ProjectField::renamed("left.created_at", "created_at"),
+        ProjectField::renamed("left.updated_by", "updated_by"),
+        ProjectField::renamed("left.updated_at", "updated_at"),
         ProjectField::literal("_deletion", Value::Nullable(Some(Box::new(Value::U8(0))))),
     ];
     fields.extend(table.columns.iter().map(|column| {
@@ -8012,21 +8108,20 @@ fn maintained_view_tagged_content_fields<'a>(
         ProjectField::renamed(source("tx_node_id"), "tx_node_id"),
         ProjectField::renamed(source("schema_version"), "schema_version"),
         ProjectField::renamed(source("parents"), "parents"),
+        ProjectField::renamed(source("created_by"), "created_by"),
+        ProjectField::renamed(source("created_at"), "created_at"),
+        ProjectField::renamed(source("updated_by"), "updated_by"),
+        ProjectField::renamed(source("updated_at"), "updated_at"),
         ProjectField::null_typed("_deletion", maintained_view_nullable_deletion_type()),
     ];
-    let table_columns = table
-        .columns
-        .iter()
-        .map(|column| (column.name.as_str(), &column.column_type))
-        .collect::<BTreeMap<_, _>>();
     fields.extend(
         maintained_view_terminal_user_columns(terminal_tables)
             .into_iter()
             .map(|((table_name, column_name), column_type)| {
                 let user_field = format!("user_{column_name}");
                 let tagged_field = maintained_view_tagged_user_field(&table_name, &column_name);
-                if table_name == table.name && table_columns.contains_key(column_name.as_str()) {
-                    ProjectField::renamed(source(&user_field), tagged_field)
+                if table_name == table.name {
+                    ProjectField::nullable_flat(source(&user_field), tagged_field)
                 } else {
                     ProjectField::null_typed(
                         tagged_field,
@@ -8057,6 +8152,10 @@ fn maintained_view_tagged_field_names<'a>(
         "tx_node_id",
         "schema_version",
         "parents",
+        "created_by",
+        "created_at",
+        "updated_by",
+        "updated_at",
         "_deletion",
     ]
     .into_iter()
@@ -8090,6 +8189,10 @@ fn maintained_view_tagged_deletion_fields<'a>(
         ProjectField::renamed(source("tx_node_id"), "tx_node_id"),
         ProjectField::renamed(source("schema_version"), "schema_version"),
         ProjectField::renamed(source("parents"), "parents"),
+        ProjectField::renamed(source("created_by"), "created_by"),
+        ProjectField::renamed(source("created_at"), "created_at"),
+        ProjectField::renamed(source("updated_by"), "updated_by"),
+        ProjectField::renamed(source("updated_at"), "updated_at"),
         ProjectField::literal("_deletion", Value::Nullable(Some(Box::new(Value::U8(0))))),
     ];
     fields.extend(
