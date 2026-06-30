@@ -48,13 +48,15 @@ export function InspectorApp() {
     setConnectError(null);
     // Pass exactly one credential — secret/jwtToken/cookieSession are mutually
     // exclusive, and a local-first host carries both a secret and a derived
-    // jwtToken. Prefer admin (see-everything) → the live session token → seed.
-    const credential = config.adminSecret
-      ? { adminSecret: config.adminSecret }
-      : config.jwtToken
-        ? { jwtToken: config.jwtToken }
-        : config.secret
-          ? { secret: config.secret }
+    // jwtToken. Use the host's *identity* (live session → seed) so the overlay
+    // is the same user as the host and reads its local store; admin is only a
+    // last-resort fallback (it's a server-side, online-only "see everything").
+    const credential = config.jwtToken
+      ? { jwtToken: config.jwtToken }
+      : config.secret
+        ? { secret: config.secret }
+        : config.adminSecret
+          ? { adminSecret: config.adminSecret }
           : {};
     createJazzClient({
       appId: config.appId,
@@ -62,7 +64,13 @@ export function InspectorApp() {
       env: config.env,
       userBranch: config.userBranch,
       ...credential,
-      driver: { type: "memory" },
+      // Join the host's persistent store: same OPFS namespace (dbName) and the
+      // host's exact broker SharedWorker URL, so the overlay sees the host's
+      // local data — including unsynced local-only rows — and works offline.
+      driver: { type: "persistent", dbName: config.dbName ?? config.appId },
+      runtimeSources: config.brokerWorkerUrl
+        ? { brokerWorkerUrl: config.brokerWorkerUrl }
+        : undefined,
     })
       .then((c) => {
         if (cancelled) {
