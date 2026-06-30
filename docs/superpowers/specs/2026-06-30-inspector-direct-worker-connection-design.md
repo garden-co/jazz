@@ -1,225 +1,211 @@
-# Inspector: reuse the host Db (drop the devtools protocol)
+# Inspector: own worker connection + minimal live-query link (drop the devtools protocol)
 
 - **Date:** 2026-06-30
 - **Status:** Approved design — ready for implementation plan
-- **Scope:** `packages/inspector`, `packages/jazz-tools` (dev-tools + overlay loader)
+- **Scope:** `packages/inspector`, `packages/jazz-tools` (dev-tools + overlay loader, framework bindings)
 
 ## Goal
 
-Make the embedded inspector overlay use the host app's **live, already
-worker-connected `Db` directly** instead of proxying every call over the devtools
-bridge. Delete the bridge protocol. Kill the browser-extension / devtools build.
-Keep only two builds: `web` (standalone) and `embedded` (overlay).
+Make the embedded inspector overlay connect to the data layer as its **own
+normal Jazz worker client** (the standalone path), and replace the heavy postMessage
+"devtools protocol" bridge with a **minimal one-way parent link** that carries
+only the host app's active subscription list (no call-site stacks). Kill the
+browser-extension / devtools build. Keep two builds: `web` (standalone) +
+`embedded` (overlay).
 
-Because the overlay iframe is **same-origin** with the host page, it can read the
-host `Db` straight off `window.parent` — no message protocol, no proxy `Db`, no
-second connection. "Use the normal worker connection for the data layer" is
-satisfied by reusing the host `Db`, which _is_ the normal worker connection.
+## Why this shape (and why NOT host-`Db` reuse)
 
-This is an experiment; the bar is "works end-to-end for the overlay against a
-real backend," not feature-parity with every bridge edge case.
+An earlier iteration proposed the overlay reusing the host page's live `Db`
+directly across the same-origin iframe boundary. Two independent reviews
+(Opus + GLM) showed that's riskier than it looks:
+
+- **Cross-realm `instanceof` breaks on values, not just the query.** Host-realm
+  `Uint8Array`/`Date` fail the inspector's own-realm checks → bytea/timestamp
+  columns misrender on read and **throw on write** (`query-adapter.ts:120-137`);
+  `instanceof Error` loses mutation-rejection reasons (`TableDataGrid.tsx:916`).
+- **A dead iframe listener can break the host app** — the inspector's
+  subscription callback runs synchronously inside the host's own `subscribeAll`
+  (`db.ts:1536-1571`).
+
+The overlay's **own** worker client keeps every `Db` value/error in the iframe
+realm, so all of that evaporates. We accept the inherent trade-off (a separate
+client sees **server-synced state**, not the host's local-only rows) — and we
+keep the live-query feature by linking just the subscription _list_ from the host.
 
 ## Decisions (locked)
 
-1. **Data layer (default): reuse the host `Db` directly.** The host publishes its
-   live `db` on `window.__jazzInspectorHost`; the overlay reads
-   `window.parent.__jazzInspectorHost.db` and wraps it in its own
-   `SubscriptionsOrchestrator` (iframe-local query cache). The inspector sees the
-   host's exact state — **including local-only / unsynced rows** — and inherits
-   the host app's identity. Its own queries are tagged
-   `visibility: "hidden_from_live_query_list"` (already done in
-   `TableDataGrid.tsx:718`) so they don't pollute the host's Live Query.
-2. **Admin override (optional).** A toggle opens a **separate**
-   `createJazzClient(adminConfig)` connection using the host's adminSecret to
-   bypass row-level policies and "see everything." Default off. Toggling swaps the
-   active _data_ client (host-Db ⇄ admin connection) and tears the other down.
-3. **Subscriptions: always from the host `Db`.** Live Query reads
-   `host.db.getActiveQuerySubscriptions()` / `onActiveQuerySubscriptionsChange()`
-   (traces _with JS call-site stacks_), **independent of the data mode** — even in
-   admin mode the subscription feed stays the host's. No protocol.
-4. **Handoff (same-origin handle).** The loader publishes a read-only
-   `window.__jazzInspectorHost = { db, getConnectionConfig(), wasmSchema,
-session }`. The overlay reads it via `window.parent`. No postMessage.
-
-### Central risk — validate first
-
-**Cross-realm `Db` use.** The overlay is a separate iframe realm with its own
-jazz-tools bundle; it would drive the host-realm `Db` instance. The boundary is
-plain data + callbacks (query JSON in, rows out, subscription callbacks), and the
-WASM runtime + broker worker stay in the host realm — so it _should_ work, and in
-dev the host and the `embedded` build share the same jazz-tools version. But this
-is the load-bearing assumption. **Plan step 1 is a spike** proving `useAll`,
-mutations, and the subscription feed work against
-`window.parent.__jazzInspectorHost.db`.
-
-- **Fallback if a method misbehaves across realms:** wrap only the offending `Db`
-  methods in a thin same-origin in-realm shim (still no request/response
-  protocol), or — worst case — make the separate-connection model the default and
-  keep host-Db reuse for the subscription feed only.
+1. **Data: own worker connection.** The overlay calls `createJazzClient(config)`
+   (the standalone path) → real `Db` → `DirectConnectionManager.connectTransport`.
+   The loader injects the host's connection config (incl. `schemaHash`) into the
+   same-origin iframe; the overlay resolves schema from the server like standalone.
+2. **Live queries: a minimal one-way parent link.** The loader (host realm) owns
+   the `db.onActiveQuerySubscriptionsChange` listener, serializes the active
+   subscription list **without stacks**, and posts it to the iframe. The overlay's
+   Live Query shows the host app's active subscriptions. **Stacks are dropped
+   (accepted).**
+3. **Identity: admin by default, switchable to app-user JWT.** Both credentials
+   are injected; a Settings toggle switches and reconnects. (Carried from the
+   earlier decision; valid for the own-connection model.)
+4. **Handoff:** connection config via a read-once same-origin handle
+   (`window.parent.__jazzInspectorHost`); subscriptions via a one-way postMessage
+   pushed on change. No request/response protocol, no proxy `Db`.
 
 ### Accepted trade-offs
 
-- **Default mode** depends on cross-realm `Db` access (the risk above) and edits
-  go through the host's identity/session.
-- **Admin mode** uses a separate synced client: loses local-only visibility, gains
-  see-everything; mutations are admin-attributed.
+- Server-synced view, not the host's local `Db` (local-only/unsynced rows don't
+  appear). Inherent to a normal worker connection.
+- Live Query loses the JS call-site stacks; it shows the subscription metadata
+  (table, query, tier, propagation, branches, createdAt).
+- Mutation durability `"edge"`, permissions panel available (== standalone).
 
 ## Current architecture (for reference)
 
 - **Builds** (`packages/inspector/vite.config.ts`): `web`→`dist` (standalone,
   `App.tsx`, `createJazzClient`); `extension`→`dist-extension` (Chrome devtools
-  panel, chrome-port bridge); `embedded`→`dist-embedded` (overlay iframe,
-  postMessage bridge).
-- **Bridge** (`packages/jazz-tools/src/dev-tools/`): `protocol.ts`, `dev-tools.ts`
-  (`attachDevTools`, `setDevMode(true)`), `extension-panel.ts`
-  (`DevToolsDb`/`DevToolsJazzClient` proxy — the inspector's data layer today,
-  every call a round-trip), `parent-window-port.ts`. Overlay relay:
-  `dev/inspector-overlay/relay.ts`, wired in `loader.ts`.
-- **Embedded client:** `createEmbeddedJazzClient()` =
-  `createExtensionJazzClient()` + parent-window transport — a remote proxy.
-- **`JazzClient` shape** (`react/create-jazz-client.ts`): `{ db, session,
-manager: SubscriptionsOrchestrator, shutdown }`. `createJazzClient(config)`
-  builds one with a fresh `createDb(config)` + a `SubscriptionsOrchestrator`.
+  panel); `embedded`→`dist-embedded` (overlay iframe, postMessage bridge).
+- **Bridge** (`packages/jazz-tools/src/dev-tools/`): `protocol.ts` (~9 commands),
+  `dev-tools.ts` (`attachDevTools`, `setDevMode(true)`), `extension-panel.ts`
+  (`DevToolsDb`/`DevToolsJazzClient` proxy — the inspector's data layer today),
+  `parent-window-port.ts`. Overlay relay: `dev/inspector-overlay/relay.ts`.
+- **Standalone client (the reuse target):** `createJazzClient(config)`
+  (`react/create-jazz-client.ts:41`) → `createDb` →
+  `DirectConnectionManager.onClientCreated` →
+  `client.connectTransport(serverUrl, { jwt_token, admin_secret })`. Config:
+  `{ appId, serverUrl, env, userBranch, adminSecret, jwtToken?, driver }`. Schema
+  resolved via `fetchStoredWasmSchema(appId, adminSecret, schemaHash)`.
 - **Subscription traces** (`runtime/db.ts`): `subscribeAll` registers an
   `ActiveQuerySubscriptionTrace` (`{ id, query, table, branches[], tier,
-propagation, createdAt, stack? }`), gated on `config.devMode`;
-  `getActiveQuerySubscriptions()` returns only `visibility === "public"` traces;
-  `onActiveQuerySubscriptionsChange()` / `setDevMode()` round it out.
+propagation, createdAt, stack? }`) when `config.devMode`;
+  `getActiveQuerySubscriptions()` (public traces only) /
+  `onActiveQuerySubscriptionsChange()` / `setDevMode()`.
 
 ## Target architecture
 
-### The host handle
+### Host side (overlay loader)
 
-The loader runs in the host window and gets `db` via `startInspectorOverlay(db)`.
-Instead of `attachDevTools(db)` + relay it:
+`startInspectorOverlay(db)` (host window) replaces `attachDevTools(db)` + relay with:
 
-1. Calls `db.setDevMode(true)`.
-2. Publishes:
+1. `db.setDevMode(true)` (so traces are captured) — **as early as possible**
+   (see devMode caveat below).
+2. Publish a read-once config handle:
+   ```ts
+   window.__jazzInspectorHost = {
+     getConnectionConfig(): {
+       appId; serverUrl; env; userBranch?; adminSecret?; jwtToken?; schemaHash;
+     };
+   };
+   ```
+3. Own the subscription listener **in the host realm** and push serialized
+   snapshots (no stacks) to the iframe, one-way:
+   ```ts
+   const push = () =>
+     iframe.contentWindow?.postMessage(
+       {
+         type: "jazz-inspector:subscriptions",
+         list: serializeNoStacks(db.getActiveQuerySubscriptions()),
+       },
+       origin,
+     );
+   const stop = db.onActiveQuerySubscriptionsChange(push);
+   push(); // initial
+   ```
+   Because the host realm owns the listener and only plain JSON crosses, there's
+   no dead-iframe-listener hazard and no cross-realm value issue.
 
-```ts
-// set by the loader (host window); read by the overlay via window.parent
-interface JazzInspectorHost {
-  db: Db; // the host's live, worker-connected Db (default data source + sub feed)
-  /** For the admin-override connection only. */
-  getConnectionConfig(): {
-    appId: string;
-    serverUrl: string;
-    env: string;
-    userBranch?: string;
-    adminSecret?: string;
-  };
-  wasmSchema: WasmSchema; // host's resolved runtime schema
-  session: Session | null; // host identity, for the wrapping client
-}
-window.__jazzInspectorHost = host; // dev-only; `__` signals internal
-```
+### Overlay (iframe)
 
-### Default data client (host-Db reuse)
+`embedded.tsx`:
 
-The overlay reads `window.parent.__jazzInspectorHost` and builds a thin
-`JazzClient` around the host `db` — no new connection:
+1. Read `window.parent.__jazzInspectorHost.getConnectionConfig()`. Absent →
+   "inspector not attached" state.
+2. `createJazzClient({ ...config, credential-by-mode, driver: { type: "memory" } })`
+   → own worker connection. Resolve schema from the server via `schemaHash`
+   (standalone path) — no host-schema injection, no cross-realm schema.
+3. Live Query subscribes to the `window` `message` listener for
+   `jazz-inspector:subscriptions` and renders the pushed list.
 
-```ts
-const host = window.parent.__jazzInspectorHost;
-const client: JazzClient = {
-  db: host.db,
-  session: host.session,
-  manager: new SubscriptionsOrchestrator({ appId }, host.db, host.session),
-  async shutdown() {
-    await this.manager.shutdown();
-  }, // do NOT shut down the host db
-};
-```
+### Connection identity toggle
 
-`JazzClientProvider client={client}` then drives the existing `useAll`/`useDb`
-hooks against the host `db`. The orchestrator (cache) is iframe-local; only `Db`
-calls cross the realm boundary.
+Settings tab: **Admin ⇄ App-user (JWT)**, default Admin, persisted in
+localStorage. Switching `shutdown()`s the current client and re-creates it with
+the other credential. Hidden per missing credential.
 
-### Admin override
+### Live-query link details
 
-A toggle in the **Settings** tab (default off, persisted in localStorage). When
-on, build a **separate** `createJazzClient({ ...getConnectionConfig(),
-adminSecret, driver: { type: "memory" } })` and provide _that_ client instead;
-on toggle-off, `shutdown()` it and fall back to the host-Db client. Hidden if no
-`adminSecret` in the handle.
-
-### Subscription tracking
-
-Live Query always reads `host.db.getActiveQuerySubscriptions()` +
-`onActiveQuerySubscriptionsChange()` (with stacks) — regardless of data mode.
-Same `ActiveQuerySubscriptionTrace[]` shape as today, so the table UI is
-unchanged. Unsubscribe on iframe unload. Standalone keeps `fetchServerSubscriptions`.
-
-### "Add APIs on the Db" (per the brainstorm)
-
-Anything the inspector currently gets from the bridge but isn't a plain `Db`
-method should become one (e.g., listing tables from schema, permissions, schema
-hashes), rather than a bridge command. Audit during implementation; in admin mode
-the server-fetch paths (permissions, schema hashes) remain available.
+- One-way, host→iframe, plain JSON, **no `stack` field**.
+- The serialized shape is `ActiveQuerySubscriptionTrace` minus `stack` — the Live
+  Query table already renders these columns; the stack column is removed.
+- **devMode caveat:** traces are registered only for subscriptions opened _after_
+  `setDevMode(true)` (`db.ts:1552`). Subscriptions the host app opened before the
+  inspector attached won't appear. Mitigate by calling `setDevMode(true)` as early
+  as the dev plugin can, and document the limitation.
 
 ### Runtime-model refactor
 
 `InspectorRuntime = "standalone" | "extension"` → `"standalone" | "overlay"`.
-Re-audit each branch:
+Overlay behaves like standalone for data (own client: `"edge"` durability,
+permissions panel shown, propagation `"full"`); its Live Query source is the
+parent-link message instead of the server-introspection poll. `isOverlay` stays
+orthogonal (Close button, launcher-hide setting), still passed by `embedded.tsx`.
 
-| Site                                    | Today (`extension`) | New (`overlay`)                               |
-| --------------------------------------- | ------------------- | --------------------------------------------- |
-| `live-query/index.tsx`                  | bridge cache        | host `db` feed (keeps stacks)                 |
-| `TableDataGrid.tsx` durability          | `"local"`           | default: host `db` semantics; admin: `"edge"` |
-| `TableSchemaDefinition.tsx` permissions | hidden              | shown (host `db` / admin fetch)               |
-| `data-explorer/index.tsx` propagation   | shown               | re-evaluate under host `db`                   |
+### Build & code removal (bigger than it looks — review H1)
 
-`isOverlay` stays orthogonal (Close button, launcher-hide setting); still passed
-by `embedded.tsx`.
+Deleting the bridge is a **cross-package, public-API-affecting refactor**, not a
+localized delete:
 
-### Build & code removal
+- `jazz-tools/src/index.ts:230` re-exports `dev-tools/*` (public); `attachDevTools`
+  is re-exported from `react/`, `vue/`, `svelte/`, `solid/` barrels — decide
+  explicitly: breaking removal vs deprecated shim.
+- `createDbFromInspectedPage` is imported by `react/`, `web/`, `vue/`, `svelte/`
+  `create-jazz-client.ts`; `startInspectorOnce` by the react/vue/solid providers
+  (`auto-attach.ts:32`). Rewrite `startInspectorOnce` to publish the handle + own
+  the subscription push instead of `attachDevTools` + relay.
 
-**Remove:** `build:extension` + its entry in `build`; the `isExtensionBuild`
-vite branch; `devtools-tab.html`, `devtools.html`, `src/devtools-main.tsx`,
-`src/devtools/main.js`, `chrome-extension/`; the bridge
-(`packages/jazz-tools/src/dev-tools/` protocol/attachDevTools/extension-panel/
-parent-window-port/index + tests, the bridge parts of `auto-attach.ts`),
-`dev/inspector-overlay/relay.ts` + its `loader.ts` wiring;
-`react/create-embedded-jazz-client.ts`, `createExtensionJazzClient`, their exports.
+**Remove:** `build:extension` + the `isExtensionBuild` vite branch;
+`devtools-tab.html`, `devtools.html`, `src/devtools-main.tsx`, `src/devtools/main.js`,
+`chrome-extension/`; the `dev-tools/` bridge (protocol, `attachDevTools`,
+`extension-panel` proxy, `parent-window-port`) + the overlay `relay.ts` and its
+`loader.ts` wiring; `create-embedded-jazz-client.ts`, `createExtensionJazzClient`,
+their exports.
 
 **Keep:** on `Db` — `setDevMode`, `getActiveQuerySubscriptions`,
-`onActiveQuerySubscriptionsChange`, `ActiveQuerySubscriptionTrace`; the overlay
-serving + chrome (`dev/inspector-overlay/serve.ts`, `loader.ts` minus relay,
-resize/close/launcher); `createJazzClient` (for the admin override) + the
-standalone build.
+`onActiveQuerySubscriptionsChange`, `ActiveQuerySubscriptionTrace`;
+`createJazzClient` + `fetchStoredWasmSchema`; the standalone build; the overlay
+serving + chrome (`serve.ts`, `loader.ts` minus relay; resize/close/launcher).
 
 **Builds left:** `web` + `embedded`.
 
 ## Error handling / edge cases
 
-- **Handle missing** → "inspector not attached" state, no crash.
-- **Cross-realm method failure** → in-realm shim for that method (see fallback).
-- **Admin toggle** → clean `shutdown()` of the outgoing client before swapping;
-  guard overlapping switches; hide toggle if no `adminSecret`.
-- **`devMode` off** → empty Live Query with a hint.
-- **iframe reload** → re-reads the host global; rebuilds its wrapping client +
-  subscription listener.
-- **Listener leak** → unsubscribe `onChange` on unload; never `shutdown()` the
-  host `db` (only the inspector's own orchestrator / admin client).
+- **Handle missing** → "inspector not attached" state.
+- **Connection failure / expired JWT** → error + retry; offer switch to Admin.
+- **Identity switch** → `shutdown()` before reconnect; guard overlapping switches;
+  hide a mode when its credential is absent; the admin/memory driver needs
+  `serverUrl` (`db.ts:1820`) — guard if absent.
+- **devMode off / pre-existing subs** → Live Query may be empty or partial; hint.
+- **iframe reload** → re-reads config handle, reconnects, re-listens for pushes.
 
 ## Testing
 
-- **Step 0 — cross-realm spike** (gating): prove `useAll` + a mutation + the
-  subscription feed work against `window.parent.__jazzInspectorHost.db` in a real
-  two-realm setup. Decide host-Db-direct vs fallback before building further.
+No cross-realm spike needed (the overlay uses a normal own-realm client). Focus:
+
 - **Standalone:** unchanged; existing inspector unit tests stay green.
-- **Overlay default path:** rewrite `tests/browser/overlay.spec.ts` — host
-  publishes handle → overlay wraps host `db` → Data Explorer shows rows (incl. a
-  local-only row) → Live Query shows a host subscription with a stack.
-- **Admin override:** toggling opens/closes the separate connection and re-resolves
-  data; hidden when no adminSecret.
+- **Overlay own connection:** rewrite `tests/browser/overlay.spec.ts` — loader
+  injects config → overlay opens its own client → Data Explorer shows rows →
+  Live Query shows a host subscription (no stack column).
+- **Identity toggle:** switching reconnects/re-resolves; hidden when credential
+  absent.
+- **Parent link:** opening a `subscribeAll` in the host app pushes an updated list
+  to the overlay; closing it removes it.
 
 ## Out of scope / risks
 
-- **Out of scope:** reviving the Chrome extension; multi-Db host pages (assume one
-  host `db`).
-- **Risk — cross-realm (load-bearing):** see "Central risk"; spike first.
-- **Risk — credential exposure:** adminSecret reachable via the host handle
+- **Out of scope:** reviving the Chrome extension; local-only data visibility;
+  call-site stacks in Live Query.
+- **Risk — deletion blast radius (review H1):** the bridge is woven through all
+  framework bindings + a public export; the refactor + the public-API decision is
+  the largest implementation risk. Sequence it carefully.
+- **Risk — devMode trace timing:** pre-attach subscriptions are untraced; set
+  devMode early, document the limit.
+- **Risk — credential exposure:** adminSecret/JWT reachable via the host handle
   (dev-only, `__`-prefixed); call out in code.
-- **Risk — runtime branch audit:** `"extension"` → `"overlay"` touches several
-  components; verify against a real backend, not just typecheck.
