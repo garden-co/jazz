@@ -102,7 +102,6 @@ describe("SubscriptionManager", () => {
     const manager = new SubscriptionManager<TestItem>();
     const id = "00000000-0000-4000-8000-000000000001";
     const delta: NativeRowDelta = {
-      __jazzNativeRowDelta: true,
       added: nativeAddedRecord(id, 0, "native", 42),
       removed: new Uint8Array(),
       updated: new Uint8Array(),
@@ -128,7 +127,6 @@ describe("SubscriptionManager", () => {
     const manager = new SubscriptionManager<TestItem>();
     const id = "00000000-0000-4000-8000-000000000002";
     const delta: NativeRowDelta = {
-      __jazzNativeRowDelta: true,
       added: nativeAddedRecord(id, 0, "direct", 7),
       removed: new Uint8Array(),
       updated: new Uint8Array(),

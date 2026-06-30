@@ -6,6 +6,10 @@
       "outputs": ["dist/**", "pkg/**"],
       "env": ["JAZZ_NAPI_RELEASE"]
     },
+    "inspector#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "dist-embedded/**", "dist-extension/**"]
+    },
     "docs#build": {
       "dependsOn": [
         "todo-client-localfirst-react#build",

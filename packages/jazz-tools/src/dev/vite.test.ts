@@ -152,19 +152,56 @@ describe("jazzPlugin", () => {
     expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
     expect(process.env.VITE_JAZZ_APP_ID).toBe(fakeViteServer.config.env.VITE_JAZZ_APP_ID);
     expect(process.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        `Open the inspector: https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
-          `http://127.0.0.1:${port}`,
-        )}&appId=${encodeURIComponent(fakeViteServer.config.env.VITE_JAZZ_APP_ID!)}&adminSecret=vite-test-admin`,
-      ),
-    );
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Inspector overlay enabled"));
+    // The plugin signals the client (mount the toggle) by exposing this flag.
+    expect(fakeViteServer.config.env.VITE_JAZZ_INSPECTOR).toBe("1");
 
     for (const handler of closeHandlers) {
       await handler();
     }
 
     await expect(fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok)).rejects.toThrow();
+  }, 30_000);
+
+  it("does not wire the inspector overlay when inspector: false", async () => {
+    const port = await getAvailablePort();
+    const schemaDir = await tempRoots.create("jazz-vite-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const plugin = jazzPlugin({
+      server: { port, adminSecret: "vite-test-admin" },
+      schemaDir,
+      inspector: false,
+    });
+
+    const closeHandlers: (() => Promise<void> | void)[] = [];
+    const fakeViteServer = {
+      config: {
+        root: schemaDir,
+        command: "serve" as const,
+        env: {} as Record<string, string>,
+      },
+      httpServer: {
+        once(_event: string, cb: () => void) {
+          closeHandlers.push(cb);
+        },
+      },
+      ws: { send() {} },
+    };
+
+    const configureServer = plugin.configureServer as (
+      server: typeof fakeViteServer,
+    ) => Promise<void>;
+    await configureServer(fakeViteServer);
+
+    // Disabled: no client flag injected and no announcement.
+    expect(fakeViteServer.config.env.VITE_JAZZ_INSPECTOR).toBeUndefined();
+    expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining("Inspector overlay enabled"));
+
+    for (const handler of closeHandlers) {
+      await handler();
+    }
   }, 30_000);
 
   it("does not inject a dev server url during build", async () => {

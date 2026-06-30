@@ -13,7 +13,12 @@ import {
   Value,
   WasmSchema,
 } from "../index.js";
-import { DirectInsertResult, DirectMutationResult } from "../runtime/client.js";
+import {
+  DirectInsertResult,
+  DirectMutationResult,
+  WriteHandle,
+  WriteResult,
+} from "../runtime/client.js";
 import { Db, DbConfig } from "../runtime/db.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
@@ -51,14 +56,40 @@ const devtoolsPortDisconnectListeners = new Set<DevToolsPortListener>();
 const devtoolsPortConnectListeners = new Set<DevToolsPortListener>();
 const activeQuerySubscriptionsListeners = new Set<ActiveQuerySubscriptionsListener>();
 
-let devtoolsPort: any | null = null;
+let devtoolsPort: DevtoolsBridgePort | null = null;
 let announcedBootstrap: DevToolsBootstrap | null = null;
 let announcePromise: Promise<DevToolsBootstrap> | null = null;
 const pendingRequests = new Map<string, PendingRequest>();
+// Durable writes issued via db.insert/update/delete().wait() in devtools mode.
+// db applies the column transform then calls client.insert/update/delete, which
+// stash the bridge call here keyed by batchId; WriteHandle.wait() runs it via
+// waitForBatch (the runtime executes the actual durable mutation).
+const pendingDurableWrites = new Map<string, (tier: DurabilityTier) => Promise<unknown>>();
 const pendingSubscriptionCallbacks = new Map<string, SubscriptionCallback>();
 const pendingSubscriptionBridgeIds = new Map<number, string>();
 let nextSubscriptionHandle = 1;
 let activeQuerySubscriptions: ActiveQuerySubscriptionTrace[] = [];
+
+export interface DevtoolsBridgePort {
+  postMessage(message: unknown): void;
+  onMessage: {
+    addListener(cb: (message: unknown) => void): void;
+    removeListener(cb: (message: unknown) => void): void;
+  };
+  onDisconnect: {
+    addListener(cb: () => void): void;
+    removeListener(cb: () => void): void;
+  };
+}
+export type DevtoolsBridgeConnector = () => Promise<DevtoolsBridgePort>;
+
+let bridgeConnector: DevtoolsBridgeConnector = connectChromeDevtoolsPort;
+export function setDevtoolsBridgeConnector(connector: DevtoolsBridgeConnector): void {
+  bridgeConnector = connector;
+}
+export function resetDevtoolsBridgeConnector(): void {
+  bridgeConnector = connectChromeDevtoolsPort;
+}
 
 function cloneActiveQuerySubscriptions(
   subscriptions: readonly ActiveQuerySubscriptionTrace[],
@@ -214,11 +245,7 @@ async function connectValidatedPort(chromeApi: any, tabId: number): Promise<any>
   return port;
 }
 
-async function ensureDevtoolsPort(): Promise<any> {
-  if (devtoolsPort) {
-    return devtoolsPort;
-  }
-
+async function connectChromeDevtoolsPort(): Promise<DevtoolsBridgePort> {
   const global = globalThis as any;
   const chromeApi = global?.chrome;
 
@@ -234,14 +261,22 @@ async function ensureDevtoolsPort(): Promise<any> {
 
   const tabId = chromeApi.devtools.inspectedWindow.tabId;
   try {
-    devtoolsPort = await connectValidatedPort(chromeApi, tabId);
+    return await connectValidatedPort(chromeApi, tabId);
   } catch (error) {
     if (!isMissingReceivingEndError(error)) {
       throw error;
     }
     await installBridgeInInspectedTab(chromeApi, tabId);
-    devtoolsPort = await connectValidatedPort(chromeApi, tabId);
+    return await connectValidatedPort(chromeApi, tabId);
   }
+}
+
+async function ensureDevtoolsPort(): Promise<DevtoolsBridgePort> {
+  if (devtoolsPort) {
+    return devtoolsPort;
+  }
+
+  devtoolsPort = await bridgeConnector();
 
   const onMessage = (message: unknown) => {
     if (!message || typeof message !== "object") return;
@@ -267,7 +302,9 @@ async function ensureDevtoolsPort(): Promise<any> {
         return;
       }
       const delta = payload.delta;
-      if (!Array.isArray(delta)) {
+      // Forward wire deltas (arrays) and native row deltas (objects); arrays are
+      // objects too, so this one check drops only primitives and null.
+      if (delta === null || typeof delta !== "object") {
         return;
       }
       callback(delta as Parameters<SubscriptionCallback>[0]);
@@ -465,7 +502,7 @@ export function onActiveQuerySubscriptionsChange(
   };
 }
 
-class DevToolsDb extends Db {
+export class DevToolsDb extends Db {
   constructor(config: DbConfig) {
     super(config, null);
   }
@@ -494,8 +531,19 @@ class DevToolsJazzClient {
     this.fallbackSchema = schema;
   }
 
-  create(table: string, values: InsertValues): DirectInsertResult {
-    throw new Error("DevTools client does not support non-durable create().");
+  insert(table: string, values: InsertValues): DirectInsertResult {
+    // db.insert maps the returned row through transformRow, which expects a
+    // WasmRow ({ id, values: WasmValue[] }) — not the raw insert input. The grid
+    // awaits .wait() but ignores the mapped row, so a minimal valid WasmRow (no
+    // column values) is enough to satisfy the transform without throwing.
+    const id = (values as Record<string, unknown>).id;
+    const standIn = { id: typeof id === "string" ? id : "", values: [] } as unknown as Row;
+    const batchId = this.registerDurable((tier) => this.createDurable(table, values, { tier }));
+    return new WriteResult(
+      standIn,
+      batchId,
+      this as unknown as JazzClient,
+    ) as unknown as DirectInsertResult;
   }
   async createDurable(
     table: string,
@@ -526,7 +574,11 @@ class DevToolsJazzClient {
     updates: Record<string, Value>,
     options?: { tier?: DurabilityTier },
   ): DirectMutationResult {
-    throw new Error("DevTools client does not support non-durable update().");
+    const batchId = this.registerDurable((tier) => this.updateDurable(objectId, updates, { tier }));
+    return new WriteHandle(
+      batchId,
+      this as unknown as JazzClient,
+    ) as unknown as DirectMutationResult;
   }
   async updateDurable(
     objectId: string,
@@ -541,7 +593,25 @@ class DevToolsJazzClient {
     });
   }
   delete(objectId: string, options?: { tier?: DurabilityTier }): DirectMutationResult {
-    throw new Error("DevTools client does not support non-durable delete().");
+    const batchId = this.registerDurable((tier) => this.deleteDurable(objectId, { tier }));
+    return new WriteHandle(
+      batchId,
+      this as unknown as JazzClient,
+    ) as unknown as DirectMutationResult;
+  }
+  // Allocate a batch id and stash the durable bridge call for it. db applies its
+  // column transform, then calls client.insert/update/delete, which defer the
+  // actual bridge call here keyed by batchId; WriteHandle.wait()/WriteResult.wait()
+  // runs it via waitForBatch (the runtime executes the durable mutation).
+  private registerDurable(run: (tier: DurabilityTier) => Promise<unknown>): string {
+    const batchId = randomId();
+    pendingDurableWrites.set(batchId, run);
+    return batchId;
+  }
+  async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+    const run = pendingDurableWrites.get(batchId);
+    pendingDurableWrites.delete(batchId);
+    if (run) await run(tier);
   }
   async deleteDurable(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
     await ensureDevtoolsAnnounced();

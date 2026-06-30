@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
-import { buildInspectorLink } from "./inspector-link.js";
+import { wireInspectorOverlay, type OverlayDevServer } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
@@ -20,6 +20,31 @@ export function resolveJazzWasmEntry(): string | null {
   }
 }
 
+export interface JazzViteUserConfig {
+  ssr?: { external?: true | string[] };
+  optimizeDeps?: { exclude?: string[] };
+}
+
+// Shared Vite config merge used by both the Vite and SvelteKit plugins so the
+// wasm/ssr/optimizeDeps shape is maintained in one place.
+export function buildJazzViteConfig(config: JazzViteUserConfig) {
+  const existingSsr = config.ssr?.external;
+  const existingExclude = config.optimizeDeps?.exclude ?? [];
+  const jazzWasmEntry = resolveJazzWasmEntry();
+  // `ssr.external: true` means "externalize everything", so jazz-napi is
+  // already covered — preserve the bool rather than coercing to an array.
+  const ssrExternal: true | string[] =
+    existingSsr === true ? true : Array.from(new Set([...(existingSsr ?? []), "jazz-napi"]));
+  return {
+    worker: { format: "es" as const },
+    optimizeDeps: { exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])) },
+    ssr: { external: ssrExternal },
+    ...(jazzWasmEntry
+      ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
+      : {}),
+  };
+}
+
 export interface JazzServerOptions {
   port?: number;
   adminSecret?: string;
@@ -36,14 +61,19 @@ export interface JazzPluginOptions {
   schemaDir?: string;
   appId?: string;
   telemetry?: TelemetryOptions;
+  /**
+   * The in-app inspector overlay (a floating toggle that opens the embedded
+   * inspector) is served during dev by default. Set to `false` to disable it.
+   */
+  inspector?: boolean;
 }
 
 const LOG_PREFIX = "[jazz]";
 
 // Minimal subset of Vite's ViteDevServer — redeclared here to keep this
-// module zero-dep on Vite's public types. Exported for sibling plugins
-// (./sveltekit.ts) to share, so the shape is maintained in one place.
-export interface ViteDevServer {
+// module zero-dep on Vite's public types. Extends OverlayDevServer so the
+// middleware shape is shared with ./sveltekit.ts in one place.
+export interface ViteDevServer extends OverlayDevServer {
   config: {
     root: string;
     command: string;
@@ -74,25 +104,8 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   return {
     name: "jazz",
 
-    config(config: {
-      ssr?: { external?: true | string[] };
-      optimizeDeps?: { exclude?: string[] };
-    }) {
-      const existingSsr = config.ssr?.external;
-      const existingExclude = config.optimizeDeps?.exclude ?? [];
-      const jazzWasmEntry = resolveJazzWasmEntry();
-      // `ssr.external: true` means "externalize everything", so jazz-napi is
-      // already covered — preserve the bool rather than coercing to an array.
-      const ssrExternal: true | string[] =
-        existingSsr === true ? true : Array.from(new Set([...(existingSsr ?? []), "jazz-napi"]));
-      return {
-        worker: { format: "es" as const },
-        optimizeDeps: { exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])) },
-        ssr: { external: ssrExternal },
-        ...(jazzWasmEntry
-          ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
-          : {}),
-      };
+    config(config: JazzViteUserConfig) {
+      return buildJazzViteConfig(config);
     },
 
     async configureServer(viteServer: ViteDevServer) {
@@ -139,13 +152,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       if (managed.telemetryCollectorUrl) {
         viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
       }
-      console.log(
-        `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(
-          managed.serverUrl,
-          managed.appId,
-          managed.adminSecret,
-        )}`,
-      );
+      if (options.inspector !== false) wireInspectorOverlay(viteServer);
 
       viteServer.httpServer?.once("close", async () => {
         await runtime.dispose();

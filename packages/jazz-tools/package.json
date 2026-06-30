@@ -130,6 +130,7 @@
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
     "stage:local": "node scripts/stage-local-binary.mjs",
+    "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {

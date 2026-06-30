@@ -3,6 +3,7 @@ export {
   createExtensionJazzClient,
   type JazzClient,
 } from "./create-jazz-client.js";
+export { createEmbeddedJazzClient } from "./create-embedded-jazz-client.js";
 export { attachDevTools, type DevToolsAttachment } from "../dev-tools/dev-tools.js";
 export {
   JazzProvider,

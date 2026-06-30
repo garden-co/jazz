@@ -269,7 +269,6 @@ fn native_subscription_delta_to_js(delta: &SubscriptionDelta) -> JsValue {
     }
 
     let object = Object::new();
-    set_property(&object, "__jazzNativeRowDelta", &JsValue::from_bool(true));
     set_property(&object, "added", &Uint8Array::from(added.as_slice()).into());
     set_property(
         &object,
