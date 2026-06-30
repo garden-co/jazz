@@ -6,7 +6,9 @@ Jazz's file-storage convention diverges from the historical alpha `files` +
 `file_parts` model. Files are ordinary application rows whose payload lives in
 a binary large-value column; `mime_type` and `data` are only naming
 conventions. Permissions therefore follow normal row/column policy for that
-row, rather than a special chunk/table permission model.
+row, rather than a special chunk/table permission model. This is an intentional
+alpha-target divergence, not a compatibility gap to close by reviving
+`file_parts`.
 
 Depends on the future row-level cascade semantics work. Can be deferred to `c_later/` if cascade isn't ready at launch.
 

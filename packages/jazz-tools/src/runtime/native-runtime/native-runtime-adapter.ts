@@ -34,6 +34,11 @@ import { columnTypeToValueType, columnValueType, encodeSchema } from "./schema-c
 import { WebSocketCarrier, wireAuthFailureReason } from "./websocket.js";
 import { createRecord, decodeRecordValue } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
+import {
+  isPermissionIntrospectionColumn,
+  isProvenanceMagicTimestampColumn,
+  magicColumnType,
+} from "../../magic-columns.js";
 
 export { encodeSchema } from "./schema-codec.js";
 
@@ -107,6 +112,13 @@ type NativeDb = {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
+  canUpdateEncodedForIdentity?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    author: Uint8Array,
+  ): boolean;
+  canDeleteForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
@@ -223,6 +235,9 @@ type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
   rootTable: string | null;
+  requestedMagicColumns: Map<string, Set<string>>;
+  session: RuntimeSession | null;
+  opts: unknown;
   opened: boolean;
   callback?: Function;
   cancelled: boolean;
@@ -267,6 +282,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly writes = new Map<string, Write>();
   private readonly serverPumpObservedWrites = new WeakSet<Write>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
+  private readonly provenanceFallbackTimes = new Map<string, number>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private serverTransport: Transport | null = null;
   private serverCarrier: WebSocketCarrier | null = null;
@@ -370,7 +386,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
-    const updatedAtMs = updatedAtMsFromWriteContext(_writeContext) ?? null;
+    const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells, updatedAtMs);
@@ -396,7 +412,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
-    const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
+    const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
       this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells, updatedAtMs);
@@ -422,7 +438,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
-    const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
+    const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
       this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch, updatedAtMs);
@@ -448,7 +464,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
-    const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
+    const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Upsert");
     const existing = this.readRow(table, rowId, writeIdentity);
     let cells: Uint8Array;
@@ -478,7 +494,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = writeSession?.identity;
-    const updatedAtMs = updatedAtMsFromWriteContext(writeContext) ?? null;
+    const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
       this.txForWrite(tx, writeIdentity).delete(table, rowId, updatedAtMs);
@@ -567,51 +583,91 @@ export class NativeRuntimeAdapter implements Runtime {
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
     this.applySessionClaims(session);
-    const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
-    if (queryUsesNativeRelationApi(queryJson)) {
+    const postFilters = rootMagicPostFilters(queryJson);
+    const withoutMagicFilters =
+      postFilters.length > 0 ? stripRootMagicPostFilters(queryJson) : queryJson;
+    const coreQueryJson = addNestedOuterColumns(stripMagicSelectColumns(withoutMagicFilters));
+    const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    const requestedMagicColumns = requestedMagicColumnsByTable(queryJson);
+    if (queryUsesNativeRelationApi(coreQueryJson)) {
       if (session) {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support session-scoped relation queries");
         }
-        const payload = this.db.allRelationQueryForIdentity(queryJson, session.identity, opts);
-        return rowsFromBatches(readRowBatches(payload), this.schema);
+        const payload = this.db.allRelationQueryForIdentity(coreQueryJson, session.identity, opts);
+        return applyMagicPostFilters(
+          this.materializeMagicColumns(
+            rowsFromBatches(readRowBatches(payload), this.schema),
+            requestedMagicColumns,
+            session,
+          ),
+          postFilters,
+        );
       }
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
-      const payload = this.db.allRelationQuery(queryJson, opts);
-      return rowsFromBatches(readRowBatches(payload), this.schema);
+      const payload = this.db.allRelationQuery(coreQueryJson, opts);
+      return applyMagicPostFilters(
+        this.materializeMagicColumns(
+          rowsFromBatches(readRowBatches(payload), this.schema),
+          requestedMagicColumns,
+          session,
+        ),
+        postFilters,
+      );
     }
-    const query = this.prepareQuery(queryJson);
+    const query = this.prepareQuery(coreQueryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
-      if (queryHasArraySubqueries(queryJson)) {
+      if (queryHasArraySubqueries(coreQueryJson)) {
         if (session) {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support session-scoped relation snapshots");
           }
           const payload = this.db.allRelationSnapshotForIdentity(query, session.identity, opts);
-          return rowsFromRelationSnapshot(
-            readRelationSnapshot(payload),
-            this.schema,
-            queryTable(queryJson),
+          return applyMagicPostFilters(
+            this.materializeMagicColumns(
+              rowsFromRelationSnapshot(
+                readRelationSnapshot(payload),
+                this.schema,
+                queryTable(coreQueryJson),
+              ),
+              requestedMagicColumns,
+              session,
+            ),
+            postFilters,
           );
         }
         if (!this.db.allRelationSnapshot) {
           throw new Error("Native runtime does not support relation snapshots");
         }
         const payload = this.db.allRelationSnapshot(query, opts);
-        return rowsFromRelationSnapshot(
-          readRelationSnapshot(payload),
-          this.schema,
-          queryTable(queryJson),
+        return applyMagicPostFilters(
+          this.materializeMagicColumns(
+            rowsFromRelationSnapshot(
+              readRelationSnapshot(payload),
+              this.schema,
+              queryTable(coreQueryJson),
+            ),
+            requestedMagicColumns,
+            session,
+          ),
+          postFilters,
         );
       }
       const rows = session
         ? this.db.allForIdentity(query, session.identity, opts)
         : this.db.all(query, opts);
-      return rowsFromBatches(readRowBatches(rows), this.schema);
+      return applyMagicPostFilters(
+        this.materializeMagicColumns(
+          rowsFromBatches(readRowBatches(rows), this.schema),
+          requestedMagicColumns,
+          session,
+        ),
+        postFilters,
+      );
     } finally {
       if (attachment !== undefined) this.db.detachQuery?.(attachment);
     }
@@ -626,7 +682,8 @@ export class NativeRuntimeAdapter implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     const session = readSession(sessionJson);
     this.applySessionClaims(session);
-    const usesNativeRelationApi = queryUsesNativeRelationApi(queryJson);
+    const usesNativeRelationApi =
+      queryUsesNativeRelationApi(queryJson) || queryContainsPermissionPredicate(queryJson);
     if (usesNativeRelationApi) {
       if (!this.db.subscribeRelationQuery) {
         throw new Error("Native runtime does not support relation query subscriptions");
@@ -664,6 +721,9 @@ export class NativeRuntimeAdapter implements Runtime {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       rows: [],
       rootTable: usesNativeRelationApi ? null : queryTable(queryJson),
+      requestedMagicColumns: requestedMagicColumnsByTable(queryJson),
+      session,
+      opts,
       opened: false,
       cancelled: false,
     });
@@ -1094,16 +1154,131 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const previousRows = subscription.rows;
     if (chunk.type === "snapshot") {
-      subscription.rows = rowsFromRelationSnapshot(
-        chunk.snapshot,
-        this.schema,
-        subscription.rootTable,
+      subscription.rows = this.materializeMagicColumns(
+        rowsFromRelationSnapshot(chunk.snapshot, this.schema, subscription.rootTable),
+        subscription.requestedMagicColumns,
+        subscription.session,
       );
       subscription.opened = true;
     } else {
-      subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
+      subscription.rows = this.materializeMagicColumns(
+        applySubscriptionDelta(subscription.rows, chunk.delta, this.schema),
+        subscription.requestedMagicColumns,
+        subscription.session,
+      );
     }
     subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
+  }
+
+  private materializeMagicColumns(
+    rows: RowState[],
+    requestedByTable: Map<string, Set<string>>,
+    session: RuntimeSession | null,
+  ): RowState[] {
+    if (requestedByTable.size === 0) return rows;
+    for (const row of rows) {
+      this.materializeRowMagicColumns(row, requestedByTable, session);
+    }
+    return rows;
+  }
+
+  private materializeRowMagicColumns(
+    row: RowState,
+    requestedByTable: Map<string, Set<string>>,
+    session: RuntimeSession | null,
+  ): void {
+    const valuesByColumn = new Map(row.valuesByColumn ?? []);
+    const requested = requestedByTable.get(row.table);
+    let changed = false;
+    if (requested) {
+      for (const column of requested) {
+        if (isProvenanceMagicTimestampColumn(column)) {
+          const updatedAt = this.materializeProvenanceTimestamp(
+            row,
+            valuesByColumn.get("$updatedAt"),
+          );
+          if (updatedAt) {
+            valuesByColumn.set(column, updatedAt);
+            changed = true;
+          }
+          continue;
+        }
+        if (valuesByColumn.has(column)) continue;
+        if (isPermissionIntrospectionColumn(column)) {
+          valuesByColumn.set(column, {
+            type: "Boolean",
+            value: this.materializePermissionMagic(row.table, row.id, column, session),
+          });
+          changed = true;
+        }
+      }
+    }
+
+    for (const value of valuesByColumn.values()) {
+      this.materializeNestedMagicColumns(value, requestedByTable, session);
+    }
+
+    if (changed) {
+      withValuesByColumn(row, valuesByColumn);
+    }
+  }
+
+  private materializeNestedMagicColumns(
+    value: Value,
+    requestedByTable: Map<string, Set<string>>,
+    session: RuntimeSession | null,
+  ): void {
+    if (value.type !== "Array") return;
+    for (const entry of value.value) {
+      if (entry.type !== "Row") continue;
+      const rowValue = entry.value as {
+        id?: string;
+        values: Value[];
+        valuesByColumn?: Map<string, Value>;
+        table?: string;
+      };
+      if (!rowValue.id || !rowValue.table) continue;
+      this.materializeRowMagicColumns(rowValue as RowState, requestedByTable, session);
+    }
+  }
+
+  private materializePermissionMagic(
+    table: string,
+    id: string,
+    column: string,
+    session: RuntimeSession | null,
+  ): boolean {
+    if (column === "$canRead") return true;
+    const identity = session?.identity ?? this.peerIdentity;
+    if (column === "$canEdit") {
+      if (!this.db.canUpdateEncodedForIdentity) return false;
+      return this.db.canUpdateEncodedForIdentity(
+        table,
+        parseUuid(id),
+        encodeCellsForPatch(this.table(table), {}),
+        identity,
+      );
+    }
+    if (column === "$canDelete") {
+      if (!this.db.canDeleteForIdentity) return false;
+      return this.db.canDeleteForIdentity(table, parseUuid(id), identity);
+    }
+    return false;
+  }
+
+  private materializeProvenanceTimestamp(
+    row: RowState,
+    value: Value | undefined,
+  ): Value | undefined {
+    if (!value || value.type !== "Timestamp") return value;
+    if (value.value > 1_000_000_000_000) return value;
+    const key = `${row.table}\0${row.id}`;
+    let fallback = this.provenanceFallbackTimes.get(key);
+    if (fallback === undefined) {
+      fallback = Date.now() * 1_000;
+      this.provenanceFallbackTimes.set(key, fallback);
+    }
+    return { type: "Timestamp", value: fallback };
   }
 
   private scheduleServerPump(): void {
@@ -1239,6 +1414,10 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   } catch {
     return undefined;
   }
+}
+
+function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
+  return updatedAtMsFromWriteContext(writeContext) ?? null;
 }
 
 function txStateMessage(transactionId: string, completedTxs: Map<string, CompletedTx>): string {
@@ -1394,6 +1573,35 @@ function queryUsesNativeRelationApi(queryJson: string): boolean {
   }
 }
 
+function queryContainsPermissionPredicate(queryJson: string): boolean {
+  try {
+    const relationIr = (JSON.parse(queryJson) as { relation_ir?: unknown }).relation_ir;
+    return relationIrContainsPermissionPredicate(relationIr);
+  } catch {
+    return false;
+  }
+}
+
+function relationIrContainsPermissionPredicate(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(relationIrContainsPermissionPredicate);
+  const record = value as Record<string, unknown>;
+  const column =
+    readMagicPredicateColumn(record.Cmp) ??
+    readMagicPredicateColumn(record.In) ??
+    readMagicPredicateColumn(record.IsNull) ??
+    readMagicPredicateColumn(record.IsNotNull) ??
+    readMagicPredicateColumn(record.Contains);
+  if (column && isPermissionIntrospectionColumn(column)) return true;
+  return Object.values(record).some(relationIrContainsPermissionPredicate);
+}
+
+function readMagicPredicateColumn(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as { left?: unknown; column?: unknown };
+  return readColumnRef(record.left ?? record.column);
+}
+
 function relationIrContainsNativeOperator(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   if (Array.isArray(value)) return value.some(relationIrContainsNativeOperator);
@@ -1408,6 +1616,207 @@ function queryTable(queryJson: string): string {
     throw new Error("Native runtime only supports table queries in this slice");
   }
   return table;
+}
+
+function requestedMagicColumnsByTable(queryJson: string): Map<string, Set<string>> {
+  const parsed = JSON.parse(queryJson) as {
+    table?: unknown;
+    select_columns?: unknown;
+    select?: unknown;
+    array_subqueries?: unknown;
+  };
+  const requested = new Map<string, Set<string>>();
+  if (typeof parsed.table === "string") {
+    addRequestedMagicColumns(requested, parsed.table, parsed.select_columns ?? parsed.select);
+  }
+  collectSubqueryMagicColumns(requested, parsed.array_subqueries);
+  return requested;
+}
+
+type MagicPostFilter = { column: string; op: string; value: Value };
+
+function rootMagicPostFilters(queryJson: string): MagicPostFilter[] {
+  const parsed = JSON.parse(queryJson) as { relation_ir?: unknown };
+  const filters: MagicPostFilter[] = [];
+  collectMagicPostFilters(parsed.relation_ir, filters);
+  return filters;
+}
+
+function collectMagicPostFilters(value: unknown, filters: MagicPostFilter[]): void {
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  const cmp = record.Cmp;
+  if (cmp && typeof cmp === "object") {
+    const cmpRecord = cmp as { left?: unknown; op?: unknown; right?: unknown };
+    const column = readColumnRef(cmpRecord.left);
+    const literal = readLiteral(cmpRecord.right);
+    if (
+      column &&
+      literal &&
+      (isPermissionIntrospectionColumn(column) || isProvenanceMagicTimestampColumn(column))
+    ) {
+      filters.push({ column, op: String(cmpRecord.op), value: literal as Value });
+      return;
+    }
+  }
+  for (const child of Object.values(record)) {
+    collectMagicPostFilters(child, filters);
+  }
+}
+
+function stripRootMagicPostFilters(queryJson: string): string {
+  const parsed = JSON.parse(queryJson) as { relation_ir?: unknown };
+  parsed.relation_ir = stripMagicPredicates(parsed.relation_ir);
+  return JSON.stringify(parsed);
+}
+
+function stripMagicSelectColumns(queryJson: string): string {
+  const parsed = JSON.parse(queryJson) as {
+    select_columns?: unknown;
+    select?: unknown;
+    array_subqueries?: unknown;
+  };
+  parsed.select_columns = withoutMagicSelectColumns(parsed.select_columns);
+  parsed.select = withoutMagicSelectColumns(parsed.select);
+  stripSubqueryMagicSelectColumns(parsed.array_subqueries);
+  return JSON.stringify(parsed);
+}
+
+function addNestedOuterColumns(queryJson: string): string {
+  const parsed = JSON.parse(queryJson) as { array_subqueries?: unknown };
+  addNestedOuterColumnsToSubqueries(parsed.array_subqueries);
+  return JSON.stringify(parsed);
+}
+
+function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
+  if (!Array.isArray(subqueries)) return;
+  for (const entry of subqueries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as {
+      select_columns?: unknown;
+      nested_arrays?: unknown;
+    };
+    if (Array.isArray(record.select_columns) && Array.isArray(record.nested_arrays)) {
+      for (const nested of record.nested_arrays) {
+        if (!nested || typeof nested !== "object") continue;
+        const outerColumn = (nested as { outer_column?: unknown }).outer_column;
+        if (typeof outerColumn !== "string") continue;
+        const column = outerColumn.split(".").at(-1) ?? outerColumn;
+        if (!record.select_columns.includes(column)) {
+          record.select_columns.push(column);
+        }
+      }
+    }
+    addNestedOuterColumnsToSubqueries(record.nested_arrays);
+  }
+}
+
+function stripSubqueryMagicSelectColumns(subqueries: unknown): void {
+  if (!Array.isArray(subqueries)) return;
+  for (const entry of subqueries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as { select_columns?: unknown; nested_arrays?: unknown };
+    record.select_columns = withoutMagicSelectColumns(record.select_columns);
+    stripSubqueryMagicSelectColumns(record.nested_arrays);
+  }
+}
+
+function withoutMagicSelectColumns(select: unknown): unknown {
+  if (!Array.isArray(select)) return select;
+  return select.filter(
+    (column) =>
+      typeof column !== "string" ||
+      (!isPermissionIntrospectionColumn(column) && !isProvenanceMagicTimestampColumn(column)),
+  );
+}
+
+function stripMagicPredicates(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(stripMagicPredicates);
+  const record = value as Record<string, unknown>;
+  if (record.Cmp && typeof record.Cmp === "object") {
+    const column = readColumnRef((record.Cmp as { left?: unknown }).left);
+    if (
+      column &&
+      (isPermissionIntrospectionColumn(column) || isProvenanceMagicTimestampColumn(column))
+    ) {
+      return "True";
+    }
+  }
+  if (Array.isArray(record.And)) {
+    const children = record.And.map(stripMagicPredicates).filter((child) => child !== "True");
+    return children.length === 0 ? "True" : { And: children };
+  }
+  const next: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(record)) {
+    next[key] = stripMagicPredicates(child);
+  }
+  return next;
+}
+
+function applyMagicPostFilters(rows: RowState[], filters: MagicPostFilter[]): RowState[] {
+  if (filters.length === 0) return rows;
+  return rows.filter((row) =>
+    filters.every((filter) => magicPostFilterMatches(row.valuesByColumn, filter)),
+  );
+}
+
+function magicPostFilterMatches(
+  valuesByColumn: Map<string, Value> | undefined,
+  filter: MagicPostFilter,
+): boolean {
+  const value = valuesByColumn?.get(filter.column);
+  if (!value || !("value" in value)) return false;
+  const left = value.value instanceof Date ? value.value.getTime() : value.value;
+  const right = "value" in filter.value ? filter.value.value : null;
+  switch (filter.op) {
+    case "Eq":
+      return left === right;
+    case "Le":
+      return typeof left === "number" && typeof right === "number" && left <= right;
+    default:
+      return false;
+  }
+}
+
+function collectSubqueryMagicColumns(
+  requested: Map<string, Set<string>>,
+  subqueries: unknown,
+): void {
+  if (!Array.isArray(subqueries)) return;
+  for (const entry of subqueries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as {
+      table?: unknown;
+      select_columns?: unknown;
+      nested_arrays?: unknown;
+    };
+    if (typeof record.table === "string") {
+      addRequestedMagicColumns(requested, record.table, record.select_columns);
+    }
+    collectSubqueryMagicColumns(requested, record.nested_arrays);
+  }
+}
+
+function addRequestedMagicColumns(
+  requested: Map<string, Set<string>>,
+  table: string,
+  select: unknown,
+): void {
+  if (!Array.isArray(select)) return;
+  for (const column of select) {
+    if (
+      typeof column === "string" &&
+      (isPermissionIntrospectionColumn(column) || isProvenanceMagicTimestampColumn(column))
+    ) {
+      let columns = requested.get(table);
+      if (!columns) {
+        columns = new Set();
+        requested.set(table, columns);
+      }
+      columns.add(column);
+    }
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1904,6 +2313,15 @@ function coerceLiteralForColumnType(
   if (columnType?.type === "Uuid" && value.type === "Text" && isUuidString(value.value)) {
     return { type: "Uuid", value: value.value };
   }
+  if (columnType?.type === "Double" && value.type === "Integer") {
+    return { type: "Double", value: value.value };
+  }
+  if (columnType?.type === "BigInt" && value.type === "Integer") {
+    return { type: "BigInt", value: value.value };
+  }
+  if (columnType?.type === "Timestamp" && value.type === "Integer") {
+    return { type: "Timestamp", value: value.value };
+  }
   if (columnType?.type === "Bytea" && value.type === "Array") {
     return { type: "Bytea", value: Uint8Array.from(value.value.map(readByteLiteral)) };
   }
@@ -2040,6 +2458,7 @@ function valueToQueryLiteral(value: unknown): QueryLiteral {
   if (value === null || value === undefined) return { type: "Nullable", value: null };
   if (typeof value === "boolean") return { type: "Boolean", value };
   if (typeof value === "number" && Number.isSafeInteger(value)) return { type: "Integer", value };
+  if (typeof value === "number" && Number.isFinite(value)) return { type: "Double", value };
   if (typeof value === "string")
     return isUuidString(value) ? { type: "Uuid", value } : { type: "Text", value };
   if (value instanceof Uint8Array) return { type: "Bytea", value };
@@ -2081,11 +2500,32 @@ function readLiteral(value: unknown): QueryLiteral | null {
     return { type: "Boolean", value: record.value };
   }
   if (
-    (record.type === "Integer" || record.type === "BigInt" || record.type === "Timestamp") &&
+    record.type === "Integer" &&
     typeof record.value === "number" &&
     Number.isSafeInteger(record.value)
   ) {
     return { type: "Integer", value: record.value };
+  }
+  if (
+    record.type === "BigInt" &&
+    typeof record.value === "number" &&
+    Number.isSafeInteger(record.value)
+  ) {
+    return { type: "BigInt", value: record.value };
+  }
+  if (
+    record.type === "Timestamp" &&
+    typeof record.value === "number" &&
+    Number.isSafeInteger(record.value)
+  ) {
+    return { type: "Timestamp", value: record.value };
+  }
+  if (
+    record.type === "Double" &&
+    typeof record.value === "number" &&
+    Number.isFinite(record.value)
+  ) {
+    return { type: "Double", value: record.value };
   }
   if (record.type === "Bytea" && Array.isArray(record.value)) {
     return { type: "Bytea", value: Uint8Array.from(record.value.map(Number)) };
@@ -2372,8 +2812,7 @@ function decodeUpdatedAt(descriptor: DescriptorField[], raw: Uint8Array): Value 
   const bytes = decodeRecordValue(descriptor, raw, index);
   if (!bytes || bytes.length < 8) return undefined;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const physicalMs = Number(view.getBigUint64(0, true) >> 16n);
-  return { type: "Timestamp", value: physicalMs * 1_000 };
+  return { type: "Timestamp", value: Number(view.getBigUint64(0, true) >> 16n) * 1_000 };
 }
 
 function rowsFromRelationSnapshot(
@@ -2385,7 +2824,8 @@ function rowsFromRelationSnapshot(
   const rowsByKey = new Map(rows.map((row) => [rowKey(row.table, row.id), row]));
   const childRowsBySourceAndRelation = new Map<string, RowState[]>();
   for (const edge of snapshot.edges) {
-    const child = rowsByKey.get(rowKey(edge.targetTable, formatUuid(edge.targetRowId)));
+    const targetKey = rowKey(edge.targetTable, formatUuid(edge.targetRowId));
+    const child = rowsByKey.get(targetKey);
     if (!child) continue;
     const key = relationKey(edge.sourceTable, formatUuid(edge.sourceRowId), edge.relation);
     const children = childRowsBySourceAndRelation.get(key) ?? [];
@@ -2394,7 +2834,7 @@ function rowsFromRelationSnapshot(
   }
   const materialized = new Map<string, RowState>();
   return rows
-    .filter((row) => rootTable === null || row.table === rootTable)
+    .slice(0, rootTable === null ? rows.length : snapshot.rootCount)
     .map((row) => materializeRelationRow(row, childRowsBySourceAndRelation, materialized));
 }
 
@@ -2452,10 +2892,20 @@ function rowValueWithValuesByColumn(row: RowState): {
   values: Value[];
   valuesByColumn?: Map<string, Value>;
 } {
-  const value: { id: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
+  const value: {
+    id: string;
+    values: Value[];
+    valuesByColumn?: Map<string, Value>;
+    table?: string;
+  } = {
     id: row.id,
     values: row.values,
   };
+  Object.defineProperty(value, "table", {
+    value: row.table,
+    enumerable: false,
+    configurable: true,
+  });
   if (row.valuesByColumn) {
     Object.defineProperty(value, "valuesByColumn", {
       value: row.valuesByColumn,
@@ -2508,10 +2958,9 @@ function decodeField(
   index: number,
   schema: WasmSchema,
 ): Value {
-  const column = schema[table]?.columns.find(
-    (candidate) => candidate.name === publicFieldName(field.name ?? ""),
-  );
-  const type = column?.column_type;
+  const fieldName = publicFieldName(field.name ?? "");
+  const column = schema[table]?.columns.find((candidate) => candidate.name === fieldName);
+  const type = magicColumnType(fieldName) ?? column?.column_type;
   const bytes = decodeRecordValue(descriptor, raw, index);
   if (bytes == null) return { type: "Null" };
   if (!type) return { type: "Bytea", value: bytes };

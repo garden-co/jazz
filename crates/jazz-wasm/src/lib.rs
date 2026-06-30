@@ -147,6 +147,7 @@ struct WasmRow<'a> {
 #[derive(Clone, Debug, Serialize)]
 struct WasmRelationSnapshot<'a> {
     cursor: u64,
+    root_count: u64,
     rows: Vec<WasmRowBatch<'a>>,
     edges: Vec<WasmRelationEdge>,
 }
@@ -1362,6 +1363,27 @@ impl WasmDb {
         }
     }
 
+    #[wasm_bindgen(js_name = canDeleteForIdentity)]
+    pub fn can_delete_for_identity(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<bool, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let author = author_id_from_bytes(&author)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => db
+                .can_delete_for_identity(&table, row_id, author)
+                .map_err(to_js_error),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .can_delete_for_identity(&table, row_id, author)
+                .map_err(to_js_error),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
     #[wasm_bindgen(js_name = upsertEncoded)]
     pub fn upsert_encoded(
         &self,
@@ -2147,6 +2169,7 @@ fn encode_relation_snapshot(
 ) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&WasmRelationSnapshot {
         cursor: 0,
+        root_count: snapshot.root_count as u64,
         rows: row_batches(&snapshot.rows),
         edges: snapshot.edges.iter().map(wasm_relation_edge).collect(),
     })

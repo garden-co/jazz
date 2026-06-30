@@ -131,6 +131,12 @@ describe("files and blobs docs snippets", () => {
   });
 
   it("compiles the documented file permission chain", () => {
+    expect(Object.keys(app.wasmSchema)).not.toContain("file_parts");
+    expect(app.wasmSchema.files.columns).toEqual([
+      expect.objectContaining({ name: "name" }),
+      expect.objectContaining({ name: "mime_type" }),
+      expect.objectContaining({ name: "data", large_value: "Blob" }),
+    ]);
     expect(fileBlobPermissions.files.select?.using).toEqual({
       type: "InheritsReferencing",
       operation: "Select",
