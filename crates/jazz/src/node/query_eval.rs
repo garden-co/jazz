@@ -595,13 +595,6 @@ fn normalize_array_subquery(
     subquery: &ArraySubquery,
     index: usize,
 ) -> Result<RowSetNodeId, Error> {
-    if !subquery.nested_arrays.is_empty() {
-        return Err(normalization_gap(format!(
-            "nested array_subqueries are not represented in normalized row-set shapes yet: {}",
-            subquery.column_name
-        )));
-    }
-
     let child_source = correlated_child_source_id(subquery, index);
     let child_node = RowSetNodeId(format!("array_subquery:{index}:source"));
     nodes.insert(
@@ -1686,14 +1679,6 @@ where
         binding: &Binding,
         prepared_plan: Option<&PreparedQueryPlan>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if !shape.query().array_subqueries.is_empty() {
-            return self.query_rows_for_composed_array_snapshot_root(
-                shape,
-                binding,
-                DurabilityTier::Local,
-                AuthorId::SYSTEM,
-            );
-        }
         let _program = self.compile_current_query_program(
             shape,
             binding,
@@ -2249,10 +2234,6 @@ where
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
-        if !shape.query().array_subqueries.is_empty() {
-            return self
-                .query_rows_for_composed_array_snapshot_root(&shape, &binding, tier, identity);
-        }
         self.query_rows_with_prepared_plan_for_identity(
             &shape,
             &binding,
@@ -2260,49 +2241,6 @@ where
             None,
             AuthorId::SYSTEM,
         )
-    }
-
-    fn query_rows_for_composed_array_snapshot_root(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let mut source_query = shape.query().clone();
-        source_query.select = None;
-        source_query.limit = None;
-        source_query.offset = 0;
-        source_query.array_subqueries.clear();
-        let source_shape = source_query
-            .validate(&self.catalogue.schema)
-            .map_err(Error::Query)?;
-        let source_binding = source_shape
-            .bind(binding.values().clone())
-            .map_err(Error::Query)?;
-        let mut rows = self.query_rows_with_prepared_plan_for_identity(
-            &source_shape,
-            &source_binding,
-            tier,
-            None,
-            AuthorId::SYSTEM,
-        )?;
-        self.retain_rows_satisfying_array_subquery_requirements(
-            &mut rows,
-            binding,
-            &shape.query().array_subqueries,
-            shape.schema_version(),
-            tier,
-            identity,
-        )?;
-        let mut finish_query = shape.query().clone();
-        finish_query.select = None;
-        finish_query.array_subqueries.clear();
-        self.finish_query_rows(&finish_query, &mut rows)?;
-        if shape.query().select.is_some() {
-            self.apply_projection(shape.query(), &mut rows)?;
-        }
-        Ok(rows)
     }
 
     /// Evaluate a query plus its array-subquery relation payload against local
@@ -2373,9 +2311,7 @@ where
         let source_shape = query
             .validate(&self.catalogue.schema)
             .map_err(Error::Query)?;
-        let source_binding = source_shape
-            .bind(binding.values().clone())
-            .map_err(Error::Query)?;
+        let source_binding = binding_for_shape(&source_shape, binding)?;
         self.query_rows_for_link(&source_shape, &source_binding, tier, identity)
     }
 
