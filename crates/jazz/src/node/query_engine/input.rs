@@ -187,6 +187,22 @@ pub(crate) enum RowSetExpr {
         /// Query-visible deletion behavior for this source occurrence.
         visibility: RowVisibility,
     },
+    /// Non-table rows supplied by binding parameters or inline scalar values.
+    ValueSource {
+        /// Stable binding-source shape name used when `mode` is runtime-bound.
+        shape: String,
+        /// Output columns carried by the value rows.
+        columns: Vec<ValueSourceColumn>,
+        /// Value source mode.
+        mode: ValueSourceMode,
+    },
+    /// Recursive frontier rows bound inside a recursive step graph.
+    FrontierSource {
+        /// Frontier tuple identity.
+        frontier: FrontierId,
+        /// Output columns carried by the frontier.
+        columns: Vec<ValueSourceColumn>,
+    },
     /// Filter expression over row values, binding params, or trusted claims.
     Filter {
         /// Input node.
@@ -287,6 +303,27 @@ pub(crate) enum RowSetExpr {
         /// Aggregate output expressions.
         outputs: Vec<AggregateExpr>,
     },
+}
+
+/// One column emitted by a non-table value row source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ValueSourceColumn {
+    /// Output column name.
+    pub(crate) name: String,
+    /// Value expression for seed rows. Binding-source columns should use
+    /// `NormalizedValueRef::Param` and inline values should use literals.
+    pub(crate) value: NormalizedValueRef,
+    /// Groove column type.
+    pub(crate) ty: ColumnType,
+}
+
+/// Non-table value source mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ValueSourceMode {
+    /// Runtime binding source populated from query bindings.
+    Binding,
+    /// Inline single-row value source.
+    Inline,
 }
 
 /// One projected row value.

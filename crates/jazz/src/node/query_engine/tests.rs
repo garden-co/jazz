@@ -898,11 +898,30 @@ fn correlated_path_projection_lowers_with_path_fact_schemas() {
 #[test]
 fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
     let seed_node = RowSetNodeId("seed".to_owned());
+    let frontier_node = RowSetNodeId("frontier".to_owned());
     let step_node = RowSetNodeId("step".to_owned());
+    let step_join = RowSetNodeId("step-join".to_owned());
+    let step_project = RowSetNodeId("step-project".to_owned());
     let relation_node = RowSetNodeId("relation".to_owned());
     let frontier = FrontierId("reachable".to_owned());
-    let seed_source = source("todos", SourceRole::RecursiveSeed("seed".to_owned()));
     let step_source = source("todos", SourceRole::RecursiveStep("step".to_owned()));
+    let frontier_columns = vec![
+        ValueSourceColumn {
+            name: "team".to_owned(),
+            value: NormalizedValueRef::Param("team".to_owned()),
+            ty: ColumnType::Uuid,
+        },
+        ValueSourceColumn {
+            name: "reachable_team".to_owned(),
+            value: NormalizedValueRef::Param("team".to_owned()),
+            ty: ColumnType::Uuid,
+        },
+        ValueSourceColumn {
+            name: "route".to_owned(),
+            value: NormalizedValueRef::Param("route".to_owned()),
+            ty: ColumnType::String,
+        },
+    ];
     let request = QueryProgramRequest {
         reads: QueryReadSet::primary(recursive_current_read_view()),
         policy: system_policy_context(),
@@ -913,16 +932,30 @@ fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
                     canonical: vec![0x76],
                 },
                 root: relation_node.clone(),
-                result: ResultId::RealRow {
-                    table: "todos".to_owned(),
-                    row: ResultRowRef::Source(seed_source.clone()),
+                result: ResultId::PathTuple {
+                    path: ProgramPathId {
+                        owner: step_source.clone(),
+                        child: step_source.clone(),
+                    },
+                    revision: vec![NormalizedValueRef::FrontierColumn {
+                        frontier: frontier.clone(),
+                        field: "reachable_team".to_owned(),
+                    }],
                 },
                 nodes: BTreeMap::from([
                     (
                         seed_node.clone(),
-                        RowSetExpr::Source {
-                            source: seed_source.clone(),
-                            visibility: RowVisibility::Visible,
+                        RowSetExpr::ValueSource {
+                            shape: "reachable-binding".to_owned(),
+                            columns: frontier_columns.clone(),
+                            mode: ValueSourceMode::Binding,
+                        },
+                    ),
+                    (
+                        frontier_node.clone(),
+                        RowSetExpr::FrontierSource {
+                            frontier: frontier.clone(),
+                            columns: frontier_columns,
                         },
                     ),
                     (
@@ -933,17 +966,76 @@ fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
                         },
                     ),
                     (
+                        step_join.clone(),
+                        RowSetExpr::Join {
+                            left: frontier_node,
+                            right: step_node,
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::FrontierColumn {
+                                    frontier: frontier.clone(),
+                                    field: "reachable_team".to_owned(),
+                                },
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: step_source.clone(),
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                    (
+                        step_project.clone(),
+                        RowSetExpr::Project {
+                            input: step_join,
+                            columns: vec![
+                                RowProjection {
+                                    output: TypedOutputField {
+                                        name: "team".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::FrontierColumn {
+                                        frontier: frontier.clone(),
+                                        field: "team".to_owned(),
+                                    },
+                                },
+                                RowProjection {
+                                    output: TypedOutputField {
+                                        name: "reachable_team".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::SourceField {
+                                        source: step_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
+                                },
+                                RowProjection {
+                                    output: TypedOutputField {
+                                        name: "route".to_owned(),
+                                        ty: ColumnType::String,
+                                    },
+                                    value: NormalizedValueRef::FrontierColumn {
+                                        frontier: frontier.clone(),
+                                        field: "route".to_owned(),
+                                    },
+                                },
+                            ],
+                        },
+                    ),
+                    (
                         relation_node.clone(),
                         RowSetExpr::RecursiveRelation {
                             seed: seed_node,
-                            step: step_node,
+                            step: step_project,
                             frontier: frontier.clone(),
-                            frontier_key: NormalizedValueRef::RowId(RowIdRef::Source(
-                                seed_source.clone(),
-                            )),
-                            dedupe_keys: vec![NormalizedValueRef::RowId(RowIdRef::Source(
-                                step_source.clone(),
-                            ))],
+                            frontier_key: NormalizedValueRef::FrontierColumn {
+                                frontier: frontier.clone(),
+                                field: "reachable_team".to_owned(),
+                            },
+                            dedupe_keys: vec![NormalizedValueRef::FrontierColumn {
+                                frontier: frontier.clone(),
+                                field: "reachable_team".to_owned(),
+                            }],
                             bound: RecursionBound::MaxDepth(4),
                         },
                     ),
@@ -951,7 +1043,13 @@ fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x76; 16])),
-                values: BTreeMap::new(),
+                values: BTreeMap::from([
+                    (
+                        "team".to_owned(),
+                        Value::Uuid(uuid::Uuid::from_bytes([0x76; 16])),
+                    ),
+                    ("route".to_owned(), Value::String("sync".to_owned())),
+                ]),
             },
         },
         output: RowSetOutputRequest {
@@ -967,14 +1065,62 @@ fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
     let program =
         lower_query_program(request, &mut resolver).expect("recursive relation should lower");
 
+    fn step_input_reads_frontier(input: &GraphBuilder) -> bool {
+        match input {
+            GraphBuilder::Join { left, .. } => matches!(
+                left.as_ref(),
+                GraphBuilder::FrontierSource { binding, output }
+                    if binding.0 == "reachable"
+                        && output.field_index("team").is_some()
+                        && output.field_index("reachable_team").is_some()
+                        && output.field_index("route").is_some()
+            ),
+            GraphBuilder::UnwrapNullable { input, .. } => step_input_reads_frontier(input),
+            _ => false,
+        }
+    }
+
     assert!(matches!(
         program.lowered.graph,
         GraphBuilder::Recursive {
+            ref seed,
+            ref step,
             ref frontier,
             max_iters: 4,
             ..
         } if frontier.0 == "reachable"
+            && matches!(
+                seed.as_ref(),
+                GraphBuilder::Project { input, fields }
+                    if fields.iter().any(|field| field.output_name == "team")
+                        && fields.iter().any(|field| field.output_name == "reachable_team")
+                        && fields.iter().any(|field| field.output_name == "route")
+                        && matches!(
+                            input.as_ref(),
+                            GraphBuilder::BindingSource { shape, output }
+                                if shape == "reachable-binding"
+                                    && output.field_index("team").is_some()
+                                    && output.field_index("route").is_some()
+                                    && output.field_index("reachable_team").is_none()
+                        )
+            )
+            && matches!(
+                step.as_ref(),
+                GraphBuilder::Project { input, .. }
+                    if step_input_reads_frontier(input)
+            )
     ));
+    assert_eq!(
+        program.lowered.parameters.user_params,
+        BTreeMap::from([
+            ("route".to_owned(), ColumnType::String),
+            ("team".to_owned(), ColumnType::Uuid),
+        ])
+    );
+    assert_eq!(
+        program.lowered.parameters.routing_params,
+        BTreeSet::from(["route".to_owned(), "team".to_owned()])
+    );
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert!(terminals.iter().any(|terminal| {
         matches!(

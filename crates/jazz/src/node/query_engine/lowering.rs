@@ -97,7 +97,7 @@ pub(crate) fn lower_query_program(
     Ok(QueryProgram {
         lowered: LoweredGraph {
             graph,
-            parameters: ParameterDomain::default(),
+            parameters: parameter_domain(&request.input.shape),
             output: ProgramOutputSchemas::RowSet(output_terminals(
                 &request.output,
                 &plan,
@@ -110,10 +110,67 @@ pub(crate) fn lower_query_program(
     })
 }
 
+fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
+    let mut domain = ParameterDomain::default();
+    for node in shape.nodes.values() {
+        match node {
+            RowSetExpr::ValueSource {
+                columns,
+                mode: ValueSourceMode::Binding,
+                ..
+            } => {
+                for column in columns {
+                    if let NormalizedValueRef::Param(param) = &column.value {
+                        domain.user_params.insert(param.clone(), column.ty.clone());
+                        domain.routing_params.insert(param.clone());
+                    }
+                }
+            }
+            RowSetExpr::ValueSource { .. }
+            | RowSetExpr::FrontierSource { .. }
+            | RowSetExpr::Source { .. }
+            | RowSetExpr::Filter { .. }
+            | RowSetExpr::Join { .. }
+            | RowSetExpr::RecursiveRelation { .. }
+            | RowSetExpr::Union { .. }
+            | RowSetExpr::Distinct { .. }
+            | RowSetExpr::Project { .. }
+            | RowSetExpr::CorrelatedPathProjection { .. }
+            | RowSetExpr::OrderBy { .. }
+            | RowSetExpr::Slice { .. }
+            | RowSetExpr::Aggregate { .. } => {}
+        }
+    }
+    domain
+}
+
 #[derive(Clone, Debug)]
 struct LinearCurrentRoot {
-    root_source: SourceId,
+    root: LinearRoot,
     steps: Vec<LinearStep>,
+}
+
+#[derive(Clone, Debug)]
+enum LinearRoot {
+    Source(SourceId),
+    Value {
+        shape: String,
+        columns: Vec<ValueSourceColumn>,
+        mode: ValueSourceMode,
+    },
+    Frontier {
+        frontier: FrontierId,
+        columns: Vec<ValueSourceColumn>,
+    },
+}
+
+impl LinearRoot {
+    fn source(&self) -> Option<&SourceId> {
+        match self {
+            LinearRoot::Source(source) => Some(source),
+            LinearRoot::Value { .. } | LinearRoot::Frontier { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -126,9 +183,17 @@ enum AnalyzedQueryPlan {
 impl AnalyzedQueryPlan {
     fn root_source(&self) -> &SourceId {
         match self {
-            AnalyzedQueryPlan::Linear(plan) => &plan.root_source,
-            AnalyzedQueryPlan::CorrelatedPath(plan) => &plan.parent.root_source,
-            AnalyzedQueryPlan::RecursiveRelation(plan) => &plan.seed.root_source,
+            AnalyzedQueryPlan::Linear(plan) => plan.root.source().expect("linear root source"),
+            AnalyzedQueryPlan::CorrelatedPath(plan) => {
+                plan.parent.root.source().expect("path parent source")
+            }
+            AnalyzedQueryPlan::RecursiveRelation(plan) => plan
+                .seed
+                .root
+                .source()
+                .or_else(|| plan.step.root.source())
+                .or_else(|| first_step_source(&plan.step.steps))
+                .expect("recursive source"),
         }
     }
 
@@ -139,6 +204,16 @@ impl AnalyzedQueryPlan {
             AnalyzedQueryPlan::RecursiveRelation(_) => "recursive relation analysis",
         }
     }
+}
+
+fn first_step_source(steps: &[LinearStep]) -> Option<&SourceId> {
+    steps.iter().find_map(|step| match step {
+        LinearStep::Join { right, .. } => right.root_source(),
+        LinearStep::Filter(_)
+        | LinearStep::Project(_)
+        | LinearStep::OrderBy(_)
+        | LinearStep::Slice { .. } => None,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -160,15 +235,47 @@ struct RecursiveRelationPlan {
     bound: RecursionBound,
 }
 
+impl RecursiveRelationPlan {
+    fn root_source(&self) -> Option<&SourceId> {
+        self.seed
+            .root
+            .source()
+            .or_else(|| self.step.root.source())
+            .or_else(|| first_step_source(&self.step.steps))
+    }
+
+    fn step_source(&self) -> Option<&SourceId> {
+        self.step
+            .root
+            .source()
+            .or_else(|| first_step_source(&self.step.steps))
+    }
+}
+
+#[derive(Clone, Debug)]
+enum RelationInputPlan {
+    Linear(LinearCurrentRoot),
+    Recursive(RecursiveRelationPlan),
+}
+
+impl RelationInputPlan {
+    fn root_source(&self) -> Option<&SourceId> {
+        match self {
+            RelationInputPlan::Linear(linear) => linear.root.source(),
+            RelationInputPlan::Recursive(relation) => relation.root_source(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum LinearStep {
     Filter(PredicateExpr),
     Join {
-        right_source: SourceId,
-        right_steps: Vec<JoinRightStep>,
+        right: Box<RelationInputPlan>,
         mode: JoinMode,
         on: PredicateExpr,
     },
+    Project(Vec<RowProjection>),
     OrderBy(Vec<OrderKey>),
     Slice {
         partition_by: Vec<NormalizedValueRef>,
@@ -177,11 +284,6 @@ enum LinearStep {
         tie_breaker: Vec<NormalizedValueRef>,
         rank_output: Option<TypedOutputField>,
     },
-}
-
-#[derive(Clone, Debug)]
-enum JoinRightStep {
-    Filter(PredicateExpr),
 }
 
 fn analyze_query_plan(
@@ -254,7 +356,12 @@ fn analyze_root_node(
             let parent = analyze_linear_root(input, request, &mut visited)?;
             let child =
                 analyze_linear_subplan(child_input, &request.input.shape.nodes, &mut visited)?;
-            validate_result_source(request, &parent.root_source)?;
+            validate_result_source(
+                request,
+                parent.root.source().ok_or_else(|| {
+                    UnsupportedReason::Operator("path parent must be a source".to_owned())
+                })?,
+            )?;
             AnalyzedQueryPlan::CorrelatedPath(CorrelatedPathPlan {
                 parent,
                 child,
@@ -278,7 +385,8 @@ fn analyze_root_node(
                 ResultId::RealRow {
                     row: ResultRowRef::Source(result_source),
                     ..
-                } if result_source == &seed.root_source || result_source == &step.root_source => {}
+                } if seed.root.source() == Some(result_source)
+                    || step.root.source() == Some(result_source) => {}
                 ResultId::PathTuple { .. } => {}
                 _ => {
                     return Err(UnsupportedReason::Operator(
@@ -298,7 +406,12 @@ fn analyze_root_node(
         }
         _ => {
             let linear = analyze_linear_root(&request.input.shape.root, request, &mut visited)?;
-            validate_result_source(request, &linear.root_source)?;
+            validate_result_source(
+                request,
+                linear.root.source().ok_or_else(|| {
+                    UnsupportedReason::Operator("result must be the root source row".to_owned())
+                })?,
+            )?;
             AnalyzedQueryPlan::Linear(linear)
         }
     };
@@ -324,7 +437,7 @@ fn analyze_linear_root(
         return Err(gap);
     }
     Ok(LinearCurrentRoot {
-        root_source: source,
+        root: source,
         steps,
     })
 }
@@ -341,7 +454,7 @@ fn analyze_linear_subplan(
         return Err(gap);
     }
     Ok(LinearCurrentRoot {
-        root_source: source,
+        root: source,
         steps,
     })
 }
@@ -367,28 +480,47 @@ fn validate_result_source(
 
 fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
     match plan {
-        AnalyzedQueryPlan::Linear(linear) => plan_sources(&linear.root_source, &linear.steps),
+        AnalyzedQueryPlan::Linear(linear) => linear_plan_sources(linear),
         AnalyzedQueryPlan::CorrelatedPath(path) => {
-            let mut sources = plan_sources(&path.parent.root_source, &path.parent.steps);
-            sources.extend(plan_sources(&path.child.root_source, &path.child.steps));
+            let mut sources = linear_plan_sources(&path.parent);
+            sources.extend(linear_plan_sources(&path.child));
             sources
         }
         AnalyzedQueryPlan::RecursiveRelation(relation) => {
-            let mut sources = plan_sources(&relation.seed.root_source, &relation.seed.steps);
-            sources.extend(plan_sources(
-                &relation.step.root_source,
-                &relation.step.steps,
-            ));
+            let mut sources = linear_plan_sources(&relation.seed);
+            sources.extend(linear_plan_sources(&relation.step));
             sources
         }
     }
 }
 
-fn plan_sources(root: &SourceId, steps: &[LinearStep]) -> BTreeSet<SourceId> {
-    let mut sources = BTreeSet::from([root.clone()]);
+fn linear_plan_sources(plan: &LinearCurrentRoot) -> BTreeSet<SourceId> {
+    let mut sources = plan
+        .root
+        .source()
+        .cloned()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    sources.extend(step_sources(&plan.steps));
+    sources
+}
+
+fn relation_plan_sources(plan: &RelationInputPlan) -> BTreeSet<SourceId> {
+    match plan {
+        RelationInputPlan::Linear(linear) => linear_plan_sources(linear),
+        RelationInputPlan::Recursive(relation) => {
+            let mut sources = linear_plan_sources(&relation.seed);
+            sources.extend(linear_plan_sources(&relation.step));
+            sources
+        }
+    }
+}
+
+fn step_sources(steps: &[LinearStep]) -> BTreeSet<SourceId> {
+    let mut sources = BTreeSet::new();
     for step in steps {
-        if let LinearStep::Join { right_source, .. } = step {
-            sources.insert(right_source.clone());
+        if let LinearStep::Join { right, .. } = step {
+            sources.extend(relation_plan_sources(right));
         }
     }
     sources
@@ -409,7 +541,7 @@ fn analyze_current_node(
     node_id: &RowSetNodeId,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     visited: &mut BTreeSet<RowSetNodeId>,
-) -> Result<(SourceId, Vec<LinearStep>), UnsupportedReason> {
+) -> Result<(LinearRoot, Vec<LinearStep>), UnsupportedReason> {
     if !visited.insert(node_id.clone()) {
         return Err(UnsupportedReason::Operator(format!(
             "row-set node {:?} participates in a cycle",
@@ -430,8 +562,27 @@ fn analyze_current_node(
                     "include-deleted roots are not lowered yet".to_owned(),
                 ));
             }
-            Ok((source.clone(), Vec::new()))
+            Ok((LinearRoot::Source(source.clone()), Vec::new()))
         }
+        RowSetExpr::ValueSource {
+            shape,
+            columns,
+            mode,
+        } => Ok((
+            LinearRoot::Value {
+                shape: shape.clone(),
+                columns: columns.clone(),
+                mode: mode.clone(),
+            },
+            Vec::new(),
+        )),
+        RowSetExpr::FrontierSource { frontier, columns } => Ok((
+            LinearRoot::Frontier {
+                frontier: frontier.clone(),
+                columns: columns.clone(),
+            },
+            Vec::new(),
+        )),
         RowSetExpr::Filter { input, predicate } => {
             let (source, mut steps) = analyze_current_node(input, nodes, visited)?;
             steps.push(LinearStep::Filter(predicate.clone()));
@@ -467,13 +618,17 @@ fn analyze_current_node(
             on,
         } => {
             let (source, mut steps) = analyze_current_node(left, nodes, visited)?;
-            let (right_source, right_steps) = analyze_join_right_node(right, nodes, visited)?;
+            let right = analyze_relation_input_node(right, nodes, visited)?;
             steps.push(LinearStep::Join {
-                right_source,
-                right_steps,
+                right: Box::new(right),
                 mode: *mode,
                 on: on.clone(),
             });
+            Ok((source, steps))
+        }
+        RowSetExpr::Project { input, columns } => {
+            let (source, mut steps) = analyze_current_node(input, nodes, visited)?;
+            steps.push(LinearStep::Project(columns.clone()));
             Ok((source, steps))
         }
         RowSetExpr::RecursiveRelation { .. } => Err(UnsupportedReason::Operator(
@@ -486,9 +641,6 @@ fn analyze_current_node(
             unsupported_marker_message(keys)
                 .unwrap_or_else(|| "distinct row-set nodes are not lowered yet".to_owned()),
         )),
-        RowSetExpr::Project { .. } => Err(UnsupportedReason::Operator(
-            "project row-set nodes are not lowered yet".to_owned(),
-        )),
         RowSetExpr::CorrelatedPathProjection { .. } => Err(UnsupportedReason::Operator(
             "correlated path projection row-set nodes are not lowered yet".to_owned(),
         )),
@@ -498,17 +650,11 @@ fn analyze_current_node(
     }
 }
 
-fn analyze_join_right_node(
+fn analyze_relation_input_node(
     node_id: &RowSetNodeId,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     visited: &mut BTreeSet<RowSetNodeId>,
-) -> Result<(SourceId, Vec<JoinRightStep>), UnsupportedReason> {
-    if !visited.insert(node_id.clone()) {
-        return Err(UnsupportedReason::Operator(format!(
-            "row-set node {:?} participates in a cycle",
-            node_id
-        )));
-    }
+) -> Result<RelationInputPlan, UnsupportedReason> {
     let Some(node) = nodes.get(node_id) else {
         return Err(UnsupportedReason::Operator(format!(
             "row-set node {:?} is missing",
@@ -517,36 +663,51 @@ fn analyze_join_right_node(
     };
 
     match node {
-        RowSetExpr::Source { source, visibility } => {
-            if *visibility != RowVisibility::Visible {
-                return Err(UnsupportedReason::Operator(
-                    "include-deleted join sources are not lowered yet".to_owned(),
-                ));
+        RowSetExpr::RecursiveRelation {
+            seed,
+            step,
+            frontier,
+            frontier_key,
+            dedupe_keys,
+            bound,
+        } => {
+            if !visited.insert(node_id.clone()) {
+                return Err(UnsupportedReason::Operator(format!(
+                    "row-set node {:?} participates in a cycle",
+                    node_id
+                )));
             }
-            Ok((source.clone(), Vec::new()))
+            let seed = analyze_linear_subplan(seed, nodes, visited)?;
+            let step = analyze_linear_subplan(step, nodes, visited)?;
+            Ok(RelationInputPlan::Recursive(RecursiveRelationPlan {
+                seed,
+                step,
+                frontier: frontier.clone(),
+                frontier_key: frontier_key.clone(),
+                dedupe_keys: dedupe_keys.clone(),
+                bound: *bound,
+            }))
         }
-        RowSetExpr::Filter { input, predicate } => {
-            if predicate_contains_param(predicate) {
-                return Err(UnsupportedReason::Operator(
-                    "join_via filters with binding parameters are not lowered without binding-source parameter support".to_owned(),
-                ));
-            }
-            let (source, mut steps) = analyze_join_right_node(input, nodes, visited)?;
-            steps.push(JoinRightStep::Filter(predicate.clone()));
-            Ok((source, steps))
+        _ => {
+            let linear = analyze_linear_subplan(node_id, nodes, visited)?;
+            validate_join_relation(&linear)?;
+            Ok(RelationInputPlan::Linear(linear))
         }
-        RowSetExpr::OrderBy { .. }
-        | RowSetExpr::Slice { .. }
-        | RowSetExpr::Join { .. }
-        | RowSetExpr::RecursiveRelation { .. }
-        | RowSetExpr::Union { .. }
-        | RowSetExpr::Distinct { .. }
-        | RowSetExpr::Project { .. }
-        | RowSetExpr::CorrelatedPathProjection { .. }
-        | RowSetExpr::Aggregate { .. } => Err(UnsupportedReason::Operator(
-            "join_via right side only supports source plus filters".to_owned(),
-        )),
     }
+}
+
+fn validate_join_relation(plan: &LinearCurrentRoot) -> Result<(), UnsupportedReason> {
+    for step in &plan.steps {
+        match step {
+            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
+            LinearStep::OrderBy(_) | LinearStep::Slice { .. } => {
+                return Err(UnsupportedReason::Operator(
+                    "join inputs do not support order/slice operators yet".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn unsupported_marker_message(keys: &[NormalizedValueRef]) -> Option<String> {
@@ -588,12 +749,14 @@ fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) 
     let mut seen_slice = false;
     for step in steps {
         match step {
-            LinearStep::Filter(_) | LinearStep::Join { .. } if seen_order || seen_slice => {
+            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_)
+                if seen_order || seen_slice =>
+            {
                 gaps.push(UnsupportedReason::Operator(
-                    "filters/joins after order/slice are not lowered yet".to_owned(),
+                    "filters/joins/projects after order/slice are not lowered yet".to_owned(),
                 ));
             }
-            LinearStep::Filter(_) | LinearStep::Join { .. } => {}
+            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
             LinearStep::OrderBy(_) if seen_slice => {
                 gaps.push(UnsupportedReason::Operator(
                     "order-by after slice is not lowered yet".to_owned(),
@@ -714,9 +877,25 @@ fn collect_plan_requirements(
         AnalyzedQueryPlan::RecursiveRelation(relation) => {
             collect_linear_requirements(&relation.seed, requirements)?;
             collect_linear_requirements(&relation.step, requirements)?;
-            collect_value_requirements_for_all_sources(&relation.frontier_key, requirements)?;
+            if !matches!(
+                relation.frontier_key,
+                NormalizedValueRef::FrontierColumn { .. }
+                    | NormalizedValueRef::RowId(RowIdRef::Frontier(_))
+                    | NormalizedValueRef::Param(_)
+                    | NormalizedValueRef::Literal(_)
+            ) {
+                collect_value_requirements_for_all_sources(&relation.frontier_key, requirements)?;
+            }
             for key in &relation.dedupe_keys {
-                collect_value_requirements_for_all_sources(key, requirements)?;
+                if !matches!(
+                    key,
+                    NormalizedValueRef::FrontierColumn { .. }
+                        | NormalizedValueRef::RowId(RowIdRef::Frontier(_))
+                        | NormalizedValueRef::Param(_)
+                        | NormalizedValueRef::Literal(_)
+                ) {
+                    collect_value_requirements_for_all_sources(key, requirements)?;
+                }
             }
             Ok(())
         }
@@ -727,6 +906,11 @@ fn collect_linear_requirements(
     plan: &LinearCurrentRoot,
     requirements: &mut BTreeMap<SourceId, SourceRequirements>,
 ) -> CapabilityResult<()> {
+    for step in &plan.steps {
+        if let LinearStep::Join { right, .. } = step {
+            collect_relation_requirements(right, requirements)?;
+        }
+    }
     for step in &plan.steps {
         for (source, source_requirements) in requirements.iter_mut() {
             collect_step_requirements(step, source, source_requirements)?;
@@ -789,16 +973,13 @@ fn collect_step_requirements(
         LinearStep::Filter(predicate) => {
             collect_predicate_requirements(predicate, source, requirements)
         }
-        LinearStep::Join {
-            right_steps, on, ..
-        } => (|| {
+        LinearStep::Join { on, .. } => (|| {
             collect_predicate_requirements(on, source, requirements)?;
-            for right_step in right_steps {
-                match right_step {
-                    JoinRightStep::Filter(predicate) => {
-                        collect_predicate_requirements(predicate, source, requirements)?;
-                    }
-                }
+            Ok(())
+        })(),
+        LinearStep::Project(columns) => (|| {
+            for column in columns {
+                collect_value_requirements(&column.value, source, requirements)?;
             }
             Ok(())
         })(),
@@ -829,6 +1010,19 @@ fn collect_step_requirements(
             },
         })
     })
+}
+
+fn collect_relation_requirements(
+    plan: &RelationInputPlan,
+    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
+) -> CapabilityResult<()> {
+    match plan {
+        RelationInputPlan::Linear(linear) => collect_linear_requirements(linear, requirements),
+        RelationInputPlan::Recursive(relation) => {
+            collect_linear_requirements(&relation.seed, requirements)?;
+            collect_linear_requirements(&relation.step, requirements)
+        }
+    }
 }
 
 fn collect_predicate_requirements(
@@ -906,11 +1100,7 @@ fn collect_value_requirements(
             ));
         }
         NormalizedValueRef::FrontierColumn { .. }
-        | NormalizedValueRef::RowId(RowIdRef::Frontier(_)) => {
-            return Err(UnsupportedReason::Operator(
-                "frontier values are not valid in root source predicates".to_owned(),
-            ));
-        }
+        | NormalizedValueRef::RowId(RowIdRef::Frontier(_)) => {}
     }
     Ok(())
 }
@@ -948,14 +1138,15 @@ fn lower_plan_steps(
                 resolved_sources,
                 request,
             )?;
-            let child_source = resolved_sources
-                .get(&path.child.root_source)
-                .ok_or_else(|| {
-                    UnsupportedReason::Runtime(format!(
-                        "path child source {:?} was not resolved",
-                        path.child.root_source
-                    ))
-                })?;
+            let child_root = path.child.root.source().ok_or_else(|| {
+                UnsupportedReason::Operator("path child must be a source".to_owned())
+            })?;
+            let child_source = resolved_sources.get(child_root).ok_or_else(|| {
+                UnsupportedReason::Runtime(format!(
+                    "path child source {:?} was not resolved",
+                    child_root
+                ))
+            })?;
             let child = lower_linear_plan_steps(
                 child_source.graph.clone(),
                 &path.child,
@@ -965,112 +1156,345 @@ fn lower_plan_steps(
             )?;
             let (parent_key, child_key) = lower_path_key_pair(
                 &path.correlation,
-                &path.parent.root_source,
+                path.parent.root.source().ok_or_else(|| {
+                    UnsupportedReason::Operator("path parent must be a source".to_owned())
+                })?,
                 root_source,
-                &path.child.root_source,
+                child_root,
                 child_source,
                 request,
             )?;
             Ok(GraphBuilder::join(parent, child, [parent_key], [child_key]))
         }
-        AnalyzedQueryPlan::RecursiveRelation(relation) => {
-            let seed = lower_linear_plan_steps(
+        AnalyzedQueryPlan::RecursiveRelation(relation) => lower_recursive_relation(
+            Some(graph),
+            relation,
+            root_source,
+            resolved_sources,
+            request,
+        ),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LoweredRelationInput {
+    graph: GraphBuilder,
+    root_source: Option<ResolvedSource>,
+    fields: BTreeSet<String>,
+    nullable_fields: BTreeSet<String>,
+}
+
+fn lower_relation_input(
+    plan: &RelationInputPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    match plan {
+        RelationInputPlan::Linear(linear) => {
+            let source_id = linear.root.source().ok_or_else(|| {
+                UnsupportedReason::Operator("linear join input must have a source".to_owned())
+            })?;
+            let source = resolved_sources.get(source_id).cloned().ok_or_else(|| {
+                UnsupportedReason::Runtime(format!("join source {:?} was not resolved", source_id))
+            })?;
+            let graph = lower_linear_plan_steps(
+                source.graph.clone(),
+                linear,
+                &source,
+                resolved_sources,
+                request,
+            )?;
+            Ok(LoweredRelationInput {
                 graph,
-                &relation.seed,
-                root_source,
-                resolved_sources,
-                request,
-            )?;
-            let step_source = resolved_sources
-                .get(&relation.step.root_source)
-                .ok_or_else(|| {
-                    UnsupportedReason::Runtime(format!(
-                        "recursive step source {:?} was not resolved",
-                        relation.step.root_source
-                    ))
-                })?;
-            let step = lower_linear_plan_steps(
-                step_source.graph.clone(),
-                &relation.step,
-                step_source,
-                resolved_sources,
-                request,
-            )?;
-            let max_iters = match relation.bound {
-                RecursionBound::Fixpoint => 128,
-                RecursionBound::MaxDepth(max_depth) => max_depth.max(1),
-            };
-            Ok(GraphBuilder::recursive(
-                seed,
-                step,
-                relation.frontier.0.clone(),
-                max_iters,
-            ))
+                fields: linear_output_fields(linear, &source, request),
+                nullable_fields: linear_nullable_output_fields(linear, &source),
+                root_source: Some(source),
+            })
+        }
+        RelationInputPlan::Recursive(relation) => {
+            let source_id = relation.root_source().ok_or_else(|| {
+                UnsupportedReason::Operator(
+                    "recursive join input must include a table source".to_owned(),
+                )
+            })?;
+            let source = resolved_sources.get(source_id).cloned().ok_or_else(|| {
+                UnsupportedReason::Runtime(format!(
+                    "recursive join source {:?} was not resolved",
+                    source_id
+                ))
+            })?;
+            let graph =
+                lower_recursive_relation(None, relation, &source, resolved_sources, request)?;
+            Ok(LoweredRelationInput {
+                graph,
+                root_source: Some(source),
+                fields: recursive_output_fields(relation),
+                nullable_fields: BTreeSet::new(),
+            })
         }
     }
 }
 
+fn linear_output_fields(
+    plan: &LinearCurrentRoot,
+    root_source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> BTreeSet<String> {
+    if let Some(LinearStep::Project(columns)) = plan.steps.last() {
+        return columns
+            .iter()
+            .map(|column| column.output.name.clone())
+            .collect();
+    }
+    let mut fields: BTreeSet<String> = match &plan.root {
+        LinearRoot::Source(_) => source_fields(root_source).collect(),
+        LinearRoot::Value { columns, .. } | LinearRoot::Frontier { columns, .. } => {
+            columns.iter().map(|column| column.name.clone()).collect()
+        }
+    };
+    if matches!(plan.root, LinearRoot::Source(_)) {
+        let routing = parameter_domain(&request.input.shape).routing_params;
+        for step in &plan.steps {
+            if let LinearStep::Join { right, .. } = step {
+                let right_fields = relation_output_fields_for_routing(right, request);
+                fields.extend(
+                    routing
+                        .iter()
+                        .filter(|param| right_fields.contains(*param))
+                        .cloned(),
+                );
+            }
+        }
+    }
+    fields
+}
+
+fn linear_nullable_output_fields(
+    plan: &LinearCurrentRoot,
+    root_source: &ResolvedSource,
+) -> BTreeSet<String> {
+    if matches!(plan.steps.last(), Some(LinearStep::Project(_))) {
+        return BTreeSet::new();
+    }
+    if !matches!(plan.root, LinearRoot::Source(_)) {
+        return BTreeSet::new();
+    }
+    root_source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| {
+            let name = field.name.as_ref()?;
+            matches!(&field.value_type, ValueType::Nullable(_)).then(|| name.clone())
+        })
+        .collect()
+}
+
+fn recursive_output_fields(relation: &RecursiveRelationPlan) -> BTreeSet<String> {
+    if let Some(LinearStep::Project(columns)) = relation.step.steps.last() {
+        return columns
+            .iter()
+            .map(|column| column.output.name.clone())
+            .collect();
+    }
+    linear_root_fields(&relation.seed.root)
+}
+
+fn relation_output_fields_for_routing(
+    plan: &RelationInputPlan,
+    request: &QueryProgramRequest,
+) -> BTreeSet<String> {
+    match plan {
+        RelationInputPlan::Recursive(relation) => recursive_output_fields(relation),
+        RelationInputPlan::Linear(linear) => {
+            if let Some(LinearStep::Project(columns)) = linear.steps.last() {
+                return columns
+                    .iter()
+                    .map(|column| column.output.name.clone())
+                    .collect();
+            }
+            let mut fields = linear_root_fields(&linear.root);
+            if matches!(linear.root, LinearRoot::Source(_)) {
+                let routing = parameter_domain(&request.input.shape).routing_params;
+                for step in &linear.steps {
+                    if let LinearStep::Join { right, .. } = step {
+                        let right_fields = relation_output_fields_for_routing(right, request);
+                        fields.extend(
+                            routing
+                                .iter()
+                                .filter(|param| right_fields.contains(*param))
+                                .cloned(),
+                        );
+                    }
+                }
+            }
+            fields
+        }
+    }
+}
+
+fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
+    match root {
+        LinearRoot::Source(_) => BTreeSet::new(),
+        LinearRoot::Value { columns, .. } | LinearRoot::Frontier { columns, .. } => {
+            columns.iter().map(|column| column.name.clone()).collect()
+        }
+    }
+}
+
+fn source_fields(source: &ResolvedSource) -> impl Iterator<Item = String> + '_ {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| field.name.clone())
+}
+
+fn lower_recursive_relation(
+    root_graph: Option<GraphBuilder>,
+    relation: &RecursiveRelationPlan,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<GraphBuilder, UnsupportedReason> {
+    let seed_root = relation.seed.root.source().and_then(|source| {
+        resolved_sources
+            .get(source)
+            .map(|resolved| resolved.graph.clone())
+    });
+    let seed_graph = root_graph
+        .or(seed_root)
+        .unwrap_or_else(|| root_source.graph.clone());
+    let seed = lower_linear_plan_steps(
+        seed_graph,
+        &relation.seed,
+        root_source,
+        resolved_sources,
+        request,
+    )?;
+    let step_source_id = relation.step_source().ok_or_else(|| {
+        UnsupportedReason::Operator("recursive step must include a table source".to_owned())
+    })?;
+    let step_source = resolved_sources.get(step_source_id).ok_or_else(|| {
+        UnsupportedReason::Runtime(format!(
+            "recursive step source {:?} was not resolved",
+            step_source_id
+        ))
+    })?;
+    let step = lower_linear_plan_steps(
+        step_source.graph.clone(),
+        &relation.step,
+        step_source,
+        resolved_sources,
+        request,
+    )?;
+    let max_iters = match relation.bound {
+        RecursionBound::Fixpoint => 128,
+        RecursionBound::MaxDepth(max_depth) => max_depth.max(1),
+    };
+    Ok(GraphBuilder::recursive(
+        seed,
+        step,
+        relation.frontier.0.clone(),
+        max_iters,
+    ))
+}
+
 fn lower_linear_plan_steps(
-    mut graph: GraphBuilder,
+    graph: GraphBuilder,
     plan: &LinearCurrentRoot,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> Result<GraphBuilder, UnsupportedReason> {
+    let mut graph = match &plan.root {
+        LinearRoot::Source(_) => graph,
+        LinearRoot::Value {
+            shape,
+            columns,
+            mode,
+        } => lower_value_source(shape, columns, mode, request)?,
+        LinearRoot::Frontier { frontier, columns } => {
+            GraphBuilder::frontier_source(frontier.0.clone(), value_source_descriptor(columns))
+        }
+    };
     let mut pending_order: Option<Vec<OrderKey>> = None;
+    let mut last_join_right: Option<(RelationInputPlan, BTreeSet<String>)> = None;
 
     for step in &plan.steps {
         match step {
             LinearStep::Filter(predicate) => {
-                let predicate =
-                    lower_predicate(predicate, &plan.root_source, root_source, request)?;
+                last_join_right = None;
+                let source = plan.root.source().ok_or_else(|| {
+                    UnsupportedReason::Operator(
+                        "filters on value/frontier sources are not lowered yet".to_owned(),
+                    )
+                })?;
+                let predicate = lower_predicate(predicate, source, root_source, request)?;
                 graph = graph.filter(predicate);
             }
-            LinearStep::Join {
-                right_source,
-                right_steps,
-                mode,
-                on,
-            } => {
+            LinearStep::Join { right, mode, on } => {
                 if *mode != JoinMode::Inner {
                     return Err(UnsupportedReason::Operator(
                         "join_via only lowers inner/semi joins".to_owned(),
                     ));
                 }
-                let resolved_right = resolved_sources.get(right_source).ok_or_else(|| {
-                    UnsupportedReason::Runtime(format!(
-                        "join source {:?} was not resolved",
-                        right_source
-                    ))
-                })?;
-                let mut right_graph = resolved_right.graph.clone();
-                for right_step in right_steps {
-                    match right_step {
-                        JoinRightStep::Filter(predicate) => {
-                            let predicate =
-                                lower_predicate(predicate, right_source, resolved_right, request)?;
-                            right_graph = right_graph.filter(predicate);
-                        }
-                    }
-                }
-                let (left_key, right_key) = lower_join_key_pair(
+                let lowered_right = lower_relation_input(right, resolved_sources, request)?;
+                let (left_key, right_key) = lower_linear_join_key_pair(
                     on,
-                    &plan.root_source,
+                    &plan.root,
                     root_source,
-                    right_source,
-                    resolved_right,
+                    right,
+                    &lowered_right,
                     request,
                 )?;
-                if source_field_is_nullable(root_source, &left_key) {
+                if matches!(&plan.root, LinearRoot::Source(_))
+                    && source_field_is_nullable(root_source, &left_key)
+                {
                     graph = graph.unwrap_nullable(left_key.clone());
                 }
-                if source_field_is_nullable(resolved_right, &right_key) {
+                let right_nullable_fields = lowered_right.nullable_fields.clone();
+                let mut right_graph = lowered_right.graph;
+                if lowered_right.nullable_fields.contains(&right_key) {
                     right_graph = right_graph.unwrap_nullable(right_key.clone());
                 }
-                graph = GraphBuilder::join(graph, right_graph, [left_key], [right_key])
-                    .project_fields(project_left_source_fields(root_source));
+                graph = GraphBuilder::join(graph, right_graph, [left_key], [right_key]);
+                last_join_right = Some(((**right).clone(), right_nullable_fields));
+                if matches!(&plan.root, LinearRoot::Source(_)) {
+                    graph = graph.project_fields(project_left_source_fields_with_routing(
+                        root_source,
+                        &lowered_right.fields,
+                        request,
+                    ));
+                    last_join_right = None;
+                }
+            }
+            LinearStep::Project(columns) => {
+                let mut unwrap_fields = BTreeSet::new();
+                let fields = columns
+                    .iter()
+                    .map(|column| {
+                        let field = lower_projection_field(
+                            column,
+                            plan,
+                            root_source,
+                            last_join_right.as_ref(),
+                            request,
+                        )?;
+                        unwrap_fields.extend(field.unwrap_before_project.iter().cloned());
+                        Ok(field.project)
+                    })
+                    .collect::<Result<Vec<_>, UnsupportedReason>>()?;
+                for field in unwrap_fields {
+                    graph = graph.unwrap_nullable(field);
+                }
+                graph = graph.project_fields(fields);
+                last_join_right = None;
             }
             LinearStep::OrderBy(keys) => {
+                last_join_right = None;
                 pending_order = Some(keys.clone());
             }
             LinearStep::Slice {
@@ -1080,6 +1504,7 @@ fn lower_linear_plan_steps(
                 tie_breaker,
                 ..
             } => {
+                last_join_right = None;
                 let order = pending_order.take().unwrap_or_default();
                 graph = lower_window(
                     graph,
@@ -1104,7 +1529,12 @@ fn lower_linear_plan_steps(
             None,
             0,
             &[NormalizedValueRef::RowId(RowIdRef::Source(
-                plan.root_source.clone(),
+                plan.root
+                    .source()
+                    .ok_or_else(|| {
+                        UnsupportedReason::Operator("order fallback must be a source".to_owned())
+                    })?
+                    .clone(),
             ))],
             plan,
             root_source,
@@ -1113,6 +1543,89 @@ fn lower_linear_plan_steps(
     }
 
     Ok(graph)
+}
+
+fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
+    RecordDescriptor::new(
+        columns
+            .iter()
+            .map(|column| (column.name.clone(), column.ty.value_type())),
+    )
+}
+
+fn lower_value_source(
+    shape: &str,
+    columns: &[ValueSourceColumn],
+    mode: &ValueSourceMode,
+    request: &QueryProgramRequest,
+) -> Result<GraphBuilder, UnsupportedReason> {
+    let descriptor = value_source_descriptor(columns);
+    match mode {
+        ValueSourceMode::Binding => {
+            let mut params = BTreeMap::<String, ColumnType>::new();
+            for column in columns {
+                let NormalizedValueRef::Param(param) = &column.value else {
+                    return Err(UnsupportedReason::Operator(
+                        "binding value source columns must reference binding params".to_owned(),
+                    ));
+                };
+                if let Some(existing) = params.insert(param.clone(), column.ty.clone()) {
+                    if existing != column.ty {
+                        return Err(UnsupportedReason::Operator(format!(
+                            "binding parameter '{param}' has conflicting value-source types"
+                        )));
+                    }
+                }
+            }
+            let input_descriptor = RecordDescriptor::new(
+                params
+                    .iter()
+                    .map(|(name, column_type)| (name.clone(), column_type.value_type())),
+            );
+            Ok(
+                GraphBuilder::binding_source(shape.to_owned(), input_descriptor).project_fields(
+                    columns.iter().map(|column| {
+                        let NormalizedValueRef::Param(param) = &column.value else {
+                            unreachable!("checked above");
+                        };
+                        ProjectField::renamed(param.clone(), column.name.clone())
+                    }),
+                ),
+            )
+        }
+        ValueSourceMode::Inline => {
+            let row = columns
+                .iter()
+                .map(|column| lower_value_source_column(column, request))
+                .collect::<Result<Vec<_>, _>>()?;
+            GraphBuilder::values(descriptor, [row]).map_err(|err| {
+                UnsupportedReason::Operator(format!("inline value source could not encode: {err}"))
+            })
+        }
+    }
+}
+
+fn lower_value_source_column(
+    column: &ValueSourceColumn,
+    request: &QueryProgramRequest,
+) -> Result<Value, UnsupportedReason> {
+    match &column.value {
+        NormalizedValueRef::Param(name) => request
+            .input
+            .binding
+            .values
+            .get(name)
+            .cloned()
+            .ok_or_else(|| {
+                UnsupportedReason::Operator(format!("binding parameter '{name}' is not bound"))
+            }),
+        NormalizedValueRef::Literal(bytes) => postcard::from_bytes::<Value>(bytes).map_err(|err| {
+            UnsupportedReason::Operator(format!("literal value could not be decoded: {err}"))
+        }),
+        _ => Err(UnsupportedReason::Operator(
+            "value source columns must be binding params or literals".to_owned(),
+        )),
+    }
 }
 
 fn lower_path_key_pair(
@@ -1189,6 +1702,283 @@ fn lower_join_key_pair(
     }
 }
 
+fn lower_linear_join_key_pair(
+    predicate: &PredicateExpr,
+    left_root: &LinearRoot,
+    left_source: &ResolvedSource,
+    right_plan: &RelationInputPlan,
+    right_output: &LoweredRelationInput,
+    request: &QueryProgramRequest,
+) -> Result<(String, String), UnsupportedReason> {
+    let PredicateExpr::Compare {
+        left,
+        op: ComparisonOp::Eq,
+        right: right_value,
+    } = predicate
+    else {
+        return Err(UnsupportedReason::Operator(
+            "join_via only lowers equality join predicates".to_owned(),
+        ));
+    };
+
+    match (
+        lower_linear_root_key_ref(left, left_root, left_source, request),
+        lower_relation_key_ref(right_value, right_plan, right_output, request),
+    ) {
+        (Ok(left_key), Ok(right_key)) => Ok((left_key, right_key)),
+        _ => match (
+            lower_linear_root_key_ref(right_value, left_root, left_source, request),
+            lower_relation_key_ref(left, right_plan, right_output, request),
+        ) {
+            (Ok(left_key), Ok(right_key)) => Ok((left_key, right_key)),
+            _ => Err(UnsupportedReason::Operator(
+                "join_via join predicate must compare left root and right relation fields"
+                    .to_owned(),
+            )),
+        },
+    }
+}
+
+fn lower_relation_key_ref(
+    value: &NormalizedValueRef,
+    plan: &RelationInputPlan,
+    output: &LoweredRelationInput,
+    request: &QueryProgramRequest,
+) -> Result<String, UnsupportedReason> {
+    match plan {
+        RelationInputPlan::Linear(linear) => {
+            if let Some(source) = &output.root_source {
+                if let Some(source_id) = linear.root.source() {
+                    if let Ok(key) = lower_join_key_ref(value, source_id, source, request) {
+                        return Ok(key);
+                    }
+                }
+            }
+            lower_named_relation_field(value, &output.fields)
+        }
+        RelationInputPlan::Recursive(_) => lower_named_relation_field(value, &output.fields),
+    }
+}
+
+fn lower_named_relation_field(
+    value: &NormalizedValueRef,
+    fields: &BTreeSet<String>,
+) -> Result<String, UnsupportedReason> {
+    let field = match value {
+        NormalizedValueRef::FrontierColumn { field, .. } => field,
+        NormalizedValueRef::Param(param) => param,
+        NormalizedValueRef::SourceField { field, .. } => field,
+        NormalizedValueRef::RowId(RowIdRef::Frontier(_)) => "row_uuid",
+        NormalizedValueRef::RowId(RowIdRef::Source(_))
+        | NormalizedValueRef::Claim(_)
+        | NormalizedValueRef::Provenance { .. }
+        | NormalizedValueRef::Literal(_) => {
+            return Err(UnsupportedReason::Operator(
+                "join relation key must be an output field".to_owned(),
+            ));
+        }
+    };
+    if fields.contains(field) {
+        Ok(field.to_owned())
+    } else {
+        Err(UnsupportedReason::Operator(format!(
+            "join relation does not output field '{field}'"
+        )))
+    }
+}
+
+fn lower_linear_root_key_ref(
+    value: &NormalizedValueRef,
+    root: &LinearRoot,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<String, UnsupportedReason> {
+    match root {
+        LinearRoot::Source(source_id) => lower_join_key_ref(value, source_id, source, request),
+        LinearRoot::Frontier { frontier, columns } => match value {
+            NormalizedValueRef::FrontierColumn {
+                frontier: value_frontier,
+                field,
+            } if value_frontier == frontier
+                && columns.iter().any(|column| column.name == *field) =>
+            {
+                Ok(field.clone())
+            }
+            NormalizedValueRef::RowId(RowIdRef::Frontier(value_frontier))
+                if value_frontier == frontier
+                    && columns.iter().any(|column| column.name == "row_uuid") =>
+            {
+                Ok("row_uuid".to_owned())
+            }
+            _ => Err(UnsupportedReason::Operator(
+                "join left key must be a frontier column".to_owned(),
+            )),
+        },
+        LinearRoot::Value { columns, .. } => match value {
+            NormalizedValueRef::Param(name)
+            | NormalizedValueRef::FrontierColumn { field: name, .. }
+                if columns.iter().any(|column| column.name == *name) =>
+            {
+                Ok(name.clone())
+            }
+            _ => Err(UnsupportedReason::Operator(
+                "join left key must be a value-source column".to_owned(),
+            )),
+        },
+    }
+}
+
+fn lower_projection_field(
+    column: &RowProjection,
+    plan: &LinearCurrentRoot,
+    source: &ResolvedSource,
+    last_join_right: Option<&(RelationInputPlan, BTreeSet<String>)>,
+    request: &QueryProgramRequest,
+) -> Result<ProjectionFieldPlan, UnsupportedReason> {
+    let mut unwrap_before_project = BTreeSet::new();
+    let project =
+        match lower_projection_source(&column.value, plan, source, last_join_right, request)? {
+            ProjectionSource::Field { field, nullable } => {
+                if nullable && !matches!(column.output.ty.value_type(), ValueType::Nullable(_)) {
+                    unwrap_before_project.insert(field.clone());
+                }
+                ProjectField::renamed(field, column.output.name.clone())
+            }
+            ProjectionSource::Literal(value) => {
+                ProjectField::literal(column.output.name.clone(), value)
+            }
+        };
+    Ok(ProjectionFieldPlan {
+        project,
+        unwrap_before_project,
+    })
+}
+
+#[derive(Clone, Debug)]
+enum ProjectionSource {
+    Field { field: String, nullable: bool },
+    Literal(LiteralValue),
+}
+
+#[derive(Clone, Debug)]
+struct ProjectionFieldPlan {
+    project: ProjectField,
+    unwrap_before_project: BTreeSet<String>,
+}
+
+fn lower_projection_source(
+    value: &NormalizedValueRef,
+    plan: &LinearCurrentRoot,
+    source: &ResolvedSource,
+    last_join_right: Option<&(RelationInputPlan, BTreeSet<String>)>,
+    request: &QueryProgramRequest,
+) -> Result<ProjectionSource, UnsupportedReason> {
+    if let Ok(field) = lower_linear_root_key_ref(value, &plan.root, source, request) {
+        let nullable =
+            matches!(plan.root, LinearRoot::Source(_)) && source_field_is_nullable(source, &field);
+        return Ok(ProjectionSource::Field {
+            field: match last_join_right {
+                Some(_) => format!("left.{field}"),
+                None => field,
+            },
+            nullable,
+        });
+    }
+
+    if let Some((right, nullable_fields)) = last_join_right {
+        if let Some(field) = lower_relation_projection_ref(value, right, request)? {
+            let nullable = nullable_fields.contains(&field);
+            return Ok(ProjectionSource::Field {
+                field: format!("right.{field}"),
+                nullable,
+            });
+        }
+    }
+
+    match lower_literal_projection_value(value, request)? {
+        Some(value) => Ok(ProjectionSource::Literal(value)),
+        None => Err(UnsupportedReason::Operator(
+            "project value must reference the current root, last join input, or a literal"
+                .to_owned(),
+        )),
+    }
+}
+
+fn lower_relation_projection_ref(
+    value: &NormalizedValueRef,
+    plan: &RelationInputPlan,
+    _request: &QueryProgramRequest,
+) -> Result<Option<String>, UnsupportedReason> {
+    match plan {
+        RelationInputPlan::Linear(linear) => {
+            if matches!(linear.root, LinearRoot::Source(_)) {
+                if let Some(source_id) = linear.root.source() {
+                    match value {
+                        NormalizedValueRef::SourceField {
+                            source: value_source,
+                            field,
+                        } if value_source == source_id => {
+                            return Ok(Some(format!("user_{field}")));
+                        }
+                        NormalizedValueRef::RowId(RowIdRef::Source(value_source))
+                            if value_source == source_id =>
+                        {
+                            return Ok(Some("row_uuid".to_owned()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            match value {
+                NormalizedValueRef::Param(param)
+                | NormalizedValueRef::FrontierColumn { field: param, .. } => {
+                    Ok(Some(param.clone()))
+                }
+                NormalizedValueRef::Literal(_) => Ok(None),
+                NormalizedValueRef::Claim(_)
+                | NormalizedValueRef::SourceField { .. }
+                | NormalizedValueRef::RowId(_)
+                | NormalizedValueRef::Provenance { .. } => Ok(None),
+            }
+        }
+        RelationInputPlan::Recursive(relation) => match value {
+            NormalizedValueRef::FrontierColumn { frontier, field }
+                if frontier == &relation.frontier =>
+            {
+                Ok(Some(field.clone()))
+            }
+            NormalizedValueRef::Param(param) => Ok(Some(param.clone())),
+            NormalizedValueRef::Literal(_) => Ok(None),
+            NormalizedValueRef::Claim(_)
+            | NormalizedValueRef::SourceField { .. }
+            | NormalizedValueRef::RowId(_)
+            | NormalizedValueRef::Provenance { .. }
+            | NormalizedValueRef::FrontierColumn { .. } => Ok(None),
+        },
+    }
+}
+
+fn lower_literal_projection_value(
+    value: &NormalizedValueRef,
+    request: &QueryProgramRequest,
+) -> Result<Option<LiteralValue>, UnsupportedReason> {
+    match value {
+        NormalizedValueRef::Literal(bytes) => {
+            let value = postcard::from_bytes::<Value>(bytes).map_err(|err| {
+                UnsupportedReason::Operator(format!("literal value could not be decoded: {err}"))
+            })?;
+            Ok(Some(value.into()))
+        }
+        NormalizedValueRef::Param(name) => {
+            let value = request.input.binding.values.get(name).ok_or_else(|| {
+                UnsupportedReason::Operator(format!("binding parameter '{name}' is not bound"))
+            })?;
+            Ok(Some(value.clone().into()))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn lower_join_key_ref(
     value: &NormalizedValueRef,
     source_id: &SourceId,
@@ -1221,6 +2011,21 @@ fn project_left_source_fields(source: &ResolvedSource) -> Vec<ProjectField> {
         .filter_map(|field| field.name.as_ref())
         .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone()))
         .collect()
+}
+
+fn project_left_source_fields_with_routing(
+    source: &ResolvedSource,
+    right_fields: &BTreeSet<String>,
+    request: &QueryProgramRequest,
+) -> Vec<ProjectField> {
+    let mut fields = project_left_source_fields(source);
+    let routing = parameter_domain(&request.input.shape).routing_params;
+    fields.extend(routing.into_iter().filter_map(|param| {
+        right_fields
+            .contains(&param)
+            .then(|| ProjectField::renamed(format!("right.{param}"), param))
+    }));
+    fields
 }
 
 fn lower_window(
@@ -1525,7 +2330,10 @@ fn lower_field_ref(
     request: &QueryProgramRequest,
     context: &str,
 ) -> Result<String, UnsupportedReason> {
-    match lower_value_ref(value, &plan.root_source, source, request)? {
+    let source_id = plan.root.source().ok_or_else(|| {
+        UnsupportedReason::Operator(format!("{context} must be a root source field"))
+    })?;
+    match lower_value_ref(value, source_id, source, request)? {
         LoweredValueRef::Field(field) => Ok(field),
         LoweredValueRef::Literal(_) => Err(UnsupportedReason::Operator(format!(
             "{context} must be a root source field"
@@ -1722,17 +2530,29 @@ fn path_edge_schema(
             (root_source, child, None)
         }
         AnalyzedQueryPlan::RecursiveRelation(relation) => {
-            let step = resolved_sources
-                .get(&relation.step.root_source)
+            let step_source = relation
+                .step
+                .root
+                .source()
+                .cloned()
+                .or_else(|| first_step_source(&relation.step.steps).cloned())
                 .ok_or_else(|| {
                     Box::new(CapabilityReport {
-                        gaps: vec![UnsupportedReason::Runtime(format!(
-                            "recursive step source {:?} was not resolved",
-                            relation.step.root_source
-                        ))],
+                        gaps: vec![UnsupportedReason::Runtime(
+                            "recursive step source was not resolved".to_owned(),
+                        )],
                         explain: ExplainPlan::default(),
                     })
                 })?;
+            let step = resolved_sources.get(&step_source).ok_or_else(|| {
+                Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Runtime(format!(
+                        "recursive step source {:?} was not resolved",
+                        step_source
+                    ))],
+                    explain: ExplainPlan::default(),
+                })
+            })?;
             (root_source, step, Some("depth".to_owned()))
         }
         AnalyzedQueryPlan::Linear(_) => {

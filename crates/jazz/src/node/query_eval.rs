@@ -19,18 +19,18 @@ use super::maintained_subscription_view::MaintainedSubscriptionView;
 use super::policy::ViewEvaluationContext;
 use super::query_engine::{
     AppProjectionTree, AppRowOutputRequest, ClaimPath, ComparisonOp as NormalizedComparisonOp,
-    CorrelationRequirement, CoverageScope, DataSource, FieldProjection,
+    CorrelationRequirement, CoverageScope, DataSource, FieldProjection, FrontierId,
     JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
     NormalizedValueRef, OrderKey as NormalizedOrderKey, PayloadProjection, PolicyContext,
     PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
     ProgramFactKey, ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest,
     QueryReadSet, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
-    ResultRowRef, RowIdRef, RowSetExpr, RowSetNodeId, RowSetOutputRequest, RowSetProgramInput,
-    RowVisibility, SchemaFamilySelection, SchemaProjection,
+    ResultRowRef, RowIdRef, RowProjection, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
+    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
     SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
     SourceResolutionError, SourceResolver, SourceRole, SourceRowShape, StorageSchemaSelection,
-    lower_query_program,
+    TypedOutputField, ValueSourceColumn, ValueSourceMode, lower_query_program,
 };
 #[cfg(test)]
 use crate::protocol::ResultRowEntry;
@@ -700,11 +700,279 @@ fn normalize_reachable(
     root_source: &SourceId,
     reachable: &crate::query::ReachableVia,
     index: usize,
+    binding_source_shape: &str,
+    param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<RowSetNodeId, Error> {
-    let _ = (nodes, current, root_source, reachable, index);
-    Err(normalization_gap(
-        "reachable_via needs query-engine value-source/frontier lowering before public runtime use",
+    if reachable.seed.is_some() {
+        return Err(normalization_gap(
+            "reachable_via relation seeds are not represented in normalized row-set shapes yet",
+        ));
+    }
+
+    let frontier = FrontierId(format!("reachable:{index}:frontier"));
+    let columns = reachable_frontier_columns(&reachable.from, param_types)?;
+    let seed_node = RowSetNodeId(format!("reachable:{index}:seed"));
+    nodes.insert(
+        seed_node.clone(),
+        RowSetExpr::ValueSource {
+            shape: binding_source_shape.to_owned(),
+            columns: columns.clone(),
+            mode: reachable_seed_value_source_mode(&reachable.from)?,
+        },
+    );
+
+    let frontier_node = RowSetNodeId(format!("reachable:{index}:frontier"));
+    nodes.insert(
+        frontier_node.clone(),
+        RowSetExpr::FrontierSource {
+            frontier: frontier.clone(),
+            columns: columns.clone(),
+        },
+    );
+
+    let edge_source = reachable_edge_source_id(reachable, index);
+    let edge_source_node = RowSetNodeId(format!("reachable:{index}:edge_source"));
+    nodes.insert(
+        edge_source_node.clone(),
+        RowSetExpr::Source {
+            source: edge_source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    let mut edge_current = edge_source_node;
+    if !reachable.edge_filters.is_empty() {
+        let edge_filter_node = RowSetNodeId(format!("reachable:{index}:edge_filter"));
+        nodes.insert(
+            edge_filter_node.clone(),
+            RowSetExpr::Filter {
+                input: edge_current,
+                predicate: normalize_predicates(&edge_source, &reachable.edge_filters)?,
+            },
+        );
+        edge_current = edge_filter_node;
+    }
+
+    let step_join_node = RowSetNodeId(format!("reachable:{index}:step_join"));
+    nodes.insert(
+        step_join_node.clone(),
+        RowSetExpr::Join {
+            left: frontier_node,
+            right: edge_current,
+            mode: NormalizedJoinMode::Inner,
+            on: NormalizedPredicateExpr::Compare {
+                left: NormalizedValueRef::FrontierColumn {
+                    frontier: frontier.clone(),
+                    field: "reachable_team".to_owned(),
+                },
+                op: NormalizedComparisonOp::Eq,
+                right: NormalizedValueRef::SourceField {
+                    source: edge_source.clone(),
+                    field: reachable.edge_member_column.clone(),
+                },
+            },
+        },
+    );
+    let step_project_node = RowSetNodeId(format!("reachable:{index}:step_project"));
+    nodes.insert(
+        step_project_node.clone(),
+        RowSetExpr::Project {
+            input: step_join_node,
+            columns: vec![
+                RowProjection {
+                    output: typed_output_field("team", ColumnType::Uuid),
+                    value: NormalizedValueRef::FrontierColumn {
+                        frontier: frontier.clone(),
+                        field: "team".to_owned(),
+                    },
+                },
+                RowProjection {
+                    output: typed_output_field("reachable_team", ColumnType::Uuid),
+                    value: NormalizedValueRef::SourceField {
+                        source: edge_source.clone(),
+                        field: reachable.edge_parent_column.clone(),
+                    },
+                },
+            ],
+        },
+    );
+
+    let closure_node = RowSetNodeId(format!("reachable:{index}:closure"));
+    nodes.insert(
+        closure_node.clone(),
+        RowSetExpr::RecursiveRelation {
+            seed: seed_node,
+            step: step_project_node,
+            frontier: frontier.clone(),
+            frontier_key: NormalizedValueRef::FrontierColumn {
+                frontier: frontier.clone(),
+                field: "reachable_team".to_owned(),
+            },
+            dedupe_keys: vec![NormalizedValueRef::FrontierColumn {
+                frontier: frontier.clone(),
+                field: "reachable_team".to_owned(),
+            }],
+            bound: reachable.bound,
+        },
+    );
+
+    let access_source = reachable_access_source_id(reachable, index);
+    let access_source_node = RowSetNodeId(format!("reachable:{index}:access_source"));
+    nodes.insert(
+        access_source_node.clone(),
+        RowSetExpr::Source {
+            source: access_source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    let mut access_current = access_source_node;
+    if !reachable.access_filters.is_empty() {
+        let access_filter_node = RowSetNodeId(format!("reachable:{index}:access_filter"));
+        nodes.insert(
+            access_filter_node.clone(),
+            RowSetExpr::Filter {
+                input: access_current,
+                predicate: normalize_predicates(&access_source, &reachable.access_filters)?,
+            },
+        );
+        access_current = access_filter_node;
+    }
+
+    let access_join_node = RowSetNodeId(format!("reachable:{index}:access_join"));
+    nodes.insert(
+        access_join_node.clone(),
+        RowSetExpr::Join {
+            left: access_current,
+            right: closure_node,
+            mode: NormalizedJoinMode::Inner,
+            on: NormalizedPredicateExpr::Compare {
+                left: NormalizedValueRef::SourceField {
+                    source: access_source.clone(),
+                    field: reachable.access_team_column.clone(),
+                },
+                op: NormalizedComparisonOp::Eq,
+                right: NormalizedValueRef::FrontierColumn {
+                    frontier: frontier.clone(),
+                    field: "reachable_team".to_owned(),
+                },
+            },
+        },
+    );
+
+    let root_join_node = RowSetNodeId(format!("reachable:{index}:root_join"));
+    nodes.insert(
+        root_join_node.clone(),
+        RowSetExpr::Join {
+            left: current,
+            right: access_join_node,
+            mode: NormalizedJoinMode::Inner,
+            on: NormalizedPredicateExpr::Compare {
+                left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                op: NormalizedComparisonOp::Eq,
+                right: NormalizedValueRef::SourceField {
+                    source: access_source,
+                    field: reachable.access_row_column.clone(),
+                },
+            },
+        },
+    );
+    Ok(root_join_node)
+}
+
+fn reachable_frontier_columns(
+    seed: &Operand,
+    param_types: &BTreeMap<String, ColumnType>,
+) -> Result<Vec<ValueSourceColumn>, Error> {
+    let value = reachable_seed_value_ref(seed)?;
+    let ty = match seed {
+        Operand::Param(param) => param_types.get(param).cloned().unwrap_or(ColumnType::Uuid),
+        Operand::Literal(Value::Uuid(_)) => ColumnType::Uuid,
+        Operand::Claim(_) => {
+            return Err(normalization_gap(
+                "query claims must be rewritten to params before lowering",
+            ));
+        }
+        Operand::Column(_) | Operand::Literal(_) => {
+            return Err(normalization_gap(
+                "reachable_via currently supports uuid parameter/claim/literal seeds only",
+            ));
+        }
+    };
+    Ok(vec![
+        ValueSourceColumn {
+            name: "team".to_owned(),
+            value: value.clone(),
+            ty: ty.clone(),
+        },
+        ValueSourceColumn {
+            name: "reachable_team".to_owned(),
+            value,
+            ty,
+        },
+    ])
+}
+
+fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error> {
+    match seed {
+        Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
+        Operand::Literal(Value::Uuid(uuid)) => literal_value_ref(&Value::Uuid(*uuid)),
+        Operand::Claim(_) => Err(normalization_gap(
+            "query claims must be rewritten to params before lowering",
+        )),
+        Operand::Column(_) | Operand::Literal(_) => Err(normalization_gap(
+            "reachable_via currently supports uuid parameter/claim/literal seeds only",
+        )),
+    }
+}
+
+fn reachable_seed_value_source_mode(seed: &Operand) -> Result<ValueSourceMode, Error> {
+    match seed {
+        Operand::Param(_) => Ok(ValueSourceMode::Binding),
+        Operand::Literal(Value::Uuid(_)) => Ok(ValueSourceMode::Inline),
+        Operand::Claim(_) => Err(normalization_gap(
+            "query claims must be rewritten to params before lowering",
+        )),
+        Operand::Column(_) | Operand::Literal(_) => Err(normalization_gap(
+            "reachable_via currently supports uuid parameter/claim/literal seeds only",
+        )),
+    }
+}
+
+fn literal_value_ref(value: &Value) -> Result<NormalizedValueRef, Error> {
+    Ok(NormalizedValueRef::Literal(
+        postcard::to_allocvec(value)
+            .map_err(|err| Error::QueryLowering(format!("literal encoding failed: {err}")))?,
     ))
+}
+
+fn typed_output_field(name: impl Into<String>, ty: ColumnType) -> TypedOutputField {
+    TypedOutputField {
+        name: name.into(),
+        ty,
+    }
+}
+
+fn reachable_edge_source_id(reachable: &crate::query::ReachableVia, index: usize) -> SourceId {
+    SourceId {
+        table: reachable.edge_table.clone(),
+        path: SourcePath {
+            components: vec![
+                SourceRole::Root,
+                SourceRole::RecursiveStep(format!("{index}:{}", reachable.edge_table)),
+            ],
+        },
+    }
+}
+
+fn reachable_access_source_id(reachable: &crate::query::ReachableVia, index: usize) -> SourceId {
+    SourceId {
+        table: reachable.access_table.clone(),
+        path: SourcePath {
+            components: vec![SourceRole::Alias(format!(
+                "reachable:{index}:{}",
+                reachable.access_table
+            ))],
+        },
+    }
 }
 
 fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
@@ -1156,8 +1424,17 @@ where
             current = join_node;
         }
 
+        let binding_source_shape = query_binding_source_shape(shape);
         for (index, reachable) in query.reachable.iter().enumerate() {
-            current = normalize_reachable(&mut nodes, current, &root_source, reachable, index)?;
+            current = normalize_reachable(
+                &mut nodes,
+                current,
+                &root_source,
+                reachable,
+                index,
+                &binding_source_shape,
+                shape.params(),
+            )?;
         }
 
         for (index, subquery) in query.array_subqueries.iter().enumerate() {
@@ -1387,14 +1664,30 @@ where
             self.finish_query_rows(query, &mut rows)?;
             return Ok(rows);
         }
-        let program = self.compile_current_query_program(
-            shape,
-            binding,
-            tier,
-            identity,
-            CurrentQueryProgramOutput::AppRows,
-        )?;
-        if matches!(tier, DurabilityTier::Edge | DurabilityTier::Global)
+        let inlined_shape;
+        let shape = if prepared_plan.is_none()
+            && matches!(tier, DurabilityTier::Local)
+            && !shape.query().reachable.is_empty()
+        {
+            inlined_shape =
+                inline_snapshot_bind_filter_literals(shape, binding, &self.catalogue.schema)?;
+            &inlined_shape
+        } else {
+            shape
+        };
+        let program = if prepared_plan.is_some() {
+            None
+        } else {
+            Some(self.compile_current_query_program(
+                shape,
+                binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+            )?)
+        };
+        if prepared_plan.is_none()
+            && matches!(tier, DurabilityTier::Edge | DurabilityTier::Global)
             && shape.query().reachable.is_empty()
             && !self.uses_partitioned_or_schema_projected_read(shape)
         {
@@ -1415,12 +1708,31 @@ where
                 return self.query_rows_from_result_set(shape, binding_view_key);
             }
         }
-        let plan = prepared_plan.cloned();
+        let plan = match prepared_plan {
+            Some(plan) => Some(plan.clone()),
+            None if matches!(tier, DurabilityTier::Edge | DurabilityTier::Global)
+                && !program
+                    .as_ref()
+                    .expect("program is compiled when no prepared plan is supplied")
+                    .lowered
+                    .parameters
+                    .user_params
+                    .is_empty() =>
+            {
+                Some(self.prepared_query_plan(shape, binding, tier, identity)?)
+            }
+            None => None,
+        };
         let table_schema = self.table(&shape.query().table)?.clone();
         let deltas_result = match plan {
             None => self
                 .database
-                .query_graph(program.lowered.graph)
+                .query_graph(
+                    program
+                        .expect("program is compiled when no prepared plan is supplied")
+                        .lowered
+                        .graph,
+                )
                 .map_err(Error::Groove),
             Some(PreparedQueryPlan::Prepared {
                 shape,
