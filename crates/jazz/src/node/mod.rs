@@ -857,15 +857,27 @@ where
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let layer = VersionLayer::for_commit(&commit);
             let previous_current =
-                self.query_local_layer_winner(&table_schema.name, commit.row_uuid, layer)?;
+                match self.query_local_layer_winner(&table_schema.name, commit.row_uuid, layer)? {
+                    Some(previous) => Some(previous),
+                    None => {
+                        self.query_global_layer_winner(&table_schema.name, commit.row_uuid, layer)?
+                    }
+                };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())
             } else if layer == VersionLayer::Deletion {
-                self.query_local_layer_winner(
+                match self.query_local_layer_winner(
                     &table_schema.name,
                     commit.row_uuid,
                     VersionLayer::Content,
-                )?
+                )? {
+                    Some(previous) => Some(previous),
+                    None => self.query_global_layer_winner(
+                        &table_schema.name,
+                        commit.row_uuid,
+                        VersionLayer::Content,
+                    )?,
+                }
             } else {
                 None
             };
@@ -998,11 +1010,18 @@ where
             source_branch: None,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
-        let previous_current = self.query_local_layer_winner(
+        let previous_current = match self.query_local_layer_winner(
             &table_schema.name,
             edit.row_uuid,
             VersionLayer::Content,
-        )?;
+        )? {
+            Some(previous) => Some(previous),
+            None => self.query_global_layer_winner(
+                &table_schema.name,
+                edit.row_uuid,
+                VersionLayer::Content,
+            )?,
+        };
         let (created_by, created_at) = previous_current
             .as_ref()
             .map(|version| (version.created_by(), version.created_at()))

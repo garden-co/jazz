@@ -1,11 +1,7 @@
 use std::future::Future;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jazz_tools::AppId;
-use jazz_tools::public_schema::SchemaHash;
-use jazz_tools::schema_lens::Lens;
-use jazz_tools::server::{JazzServer, ServerState};
+use jazz_tools::server::JazzServer;
 use jazz_tools::sync::ClientId;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
@@ -25,7 +21,8 @@ const DEFAULT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const TEST_JWT_KID: &str = "test-jwks-kid";
 
-pub use jazz_tools::test_support::{QueryRows, wait_for_query};
+#[allow(unused_imports)]
+pub use jazz_tools::test_support::{QueryRows, push_catalogue_in_memory, wait_for_query};
 
 #[allow(unused_imports)]
 pub use permissions::{
@@ -201,6 +198,7 @@ impl<'a> TestingClient<'a> {
                     .expect("TestingClient requires `with_schema(...)` before building"),
                 user_id,
             );
+        context.client_id = ClientId::parse(user_id);
 
         match &self.auth {
             TestingClientAuth::Admin => {
@@ -305,46 +303,6 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
         &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
     )
     .expect("encode jwt")
-}
-
-pub async fn push_catalogue_in_memory(
-    state: Arc<ServerState>,
-    app_id: AppId,
-    env: &str,
-    user_branch: &str,
-    schemas: &[Schema],
-    lenses: &[Lens],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut schema_by_hash: std::collections::HashMap<SchemaHash, &Schema> =
-        std::collections::HashMap::with_capacity(schemas.len());
-    for schema in schemas {
-        schema_by_hash.insert(SchemaHash::compute(schema), schema);
-        state
-            .catalogue
-            .publish_schema(&state.catalogue_store, schema.clone())
-            .map_err(|error| format!("publish schema to server catalogue: {error}"))?;
-    }
-
-    for lens in lenses {
-        let source_schema = schema_by_hash.get(&lens.source_hash).ok_or_else(|| {
-            format!(
-                "No schema provided for lens source hash {}",
-                lens.source_hash
-            )
-        })?;
-        let _ = (source_schema, app_id, env, user_branch);
-        state
-            .catalogue
-            .publish_lens(&state.catalogue_store, lens)
-            .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
-    }
-
-    state
-        .catalogue
-        .flush(&state.catalogue_store)
-        .map_err(|error| format!("flush server catalogue: {error}"))?;
-
-    Ok(())
 }
 
 #[allow(dead_code)]
