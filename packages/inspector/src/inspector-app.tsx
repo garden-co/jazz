@@ -40,7 +40,11 @@ export function InspectorApp() {
       serverUrl: config.serverUrl,
       env: config.env,
       userBranch: config.userBranch,
+      // Inherit the host's credential (local-first seed, admin, or JWT) so the
+      // overlay connects as the same identity the app uses.
+      secret: config.secret,
       adminSecret: config.adminSecret,
+      jwtToken: config.jwtToken,
       driver: { type: "memory" },
     });
   }, [config]);
