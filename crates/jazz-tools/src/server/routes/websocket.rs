@@ -333,6 +333,17 @@ async fn close_ws_for_shutdown(socket: &mut WebSocket) {
         .await;
 }
 
+/// Decide the edge-fallback redirect target for a freshly-accepted connection:
+/// `Some(url)` when the connection was forwarded here (the landing gateway set
+/// `x-jazz-forwarded`) **and** a public URL is configured to advertise; `None`
+/// otherwise (serve normally). Pure so the gating is unit-testable.
+fn forwarded_redirect_target(public_url: Option<&str>, headers: &HeaderMap) -> Option<String> {
+    let public_url = public_url?;
+    headers
+        .contains_key("x-jazz-forwarded")
+        .then(|| public_url.to_string())
+}
+
 async fn handle_ws_connection(
     mut socket: WebSocket,
     state: Arc<ServerState>,
@@ -525,6 +536,25 @@ async fn handle_ws_connection(
     }
     tracing::info!(connection_id, %client_id, role, "ws client connected");
 
+    // 6b. Edge-fallback redirect. If this connection was proxied here from a
+    //     region where the tenant isn't present — the landing gateway stamps
+    //     `x-jazz-forwarded` — and we have a public URL to advertise, offer the
+    //     client a direct reconnect URL in-band and keep serving. The client
+    //     migrates at its own pace and closes its own old socket; older clients
+    //     that don't recognize the frame ignore it and stay on the proxy. The
+    //     URL is pure deployment config (JAZZ_PUBLIC_URL) — no topology here.
+    if let Some(url) = forwarded_redirect_target(state.public_url.as_deref(), &request_headers) {
+        let event = crate::jazz_transport::ServerEvent::Redirect { url: url.clone() };
+        if let Ok(bytes) = event.encode_payload() {
+            let frame = crate::transport_manager::frame_encode(&bytes);
+            if socket.send(Message::Binary(frame)).await.is_err() {
+                ws_cleanup(&state, connection_id, client_id).await;
+                return;
+            }
+            tracing::info!(connection_id, %client_id, public_url = %url, "offered edge-fallback redirect");
+        }
+    }
+
     // 7. Bidirectional loop: inbound frames from client + outbound updates from hub.
     //    Also fires a periodic heartbeat so idle connections don't look half-open.
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -630,4 +660,40 @@ async fn ws_cleanup(state: &Arc<ServerState>, connection_id: u64, client_id: Cli
         .connection_event_hub
         .unregister_connection(connection_id);
     state.on_connection_closed(client_id).await;
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::forwarded_redirect_target;
+    use axum::http::HeaderMap;
+
+    fn headers_with(forwarded: bool) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if forwarded {
+            h.insert("x-jazz-forwarded", "1".parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn redirects_when_forwarded_and_public_url_set() {
+        assert_eq!(
+            forwarded_redirect_target(Some("https://us-east-2.example"), &headers_with(true))
+                .as_deref(),
+            Some("https://us-east-2.example"),
+        );
+    }
+
+    #[test]
+    fn no_redirect_without_forwarded_marker() {
+        assert!(
+            forwarded_redirect_target(Some("https://us-east-2.example"), &headers_with(false))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn no_redirect_without_public_url() {
+        assert!(forwarded_redirect_target(None, &headers_with(true)).is_none());
+    }
 }

@@ -18,6 +18,7 @@ pub async fn run(
     in_memory: bool,
     auth_config: AuthConfig,
     upstream_url: Option<String>,
+    public_url: Option<String>,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -37,6 +38,10 @@ pub async fn run(
         .with_shutdown_timeout(shutdown_timeout);
     let builder = match upstream_url {
         Some(upstream_url) => builder.with_upstream_url(upstream_url),
+        None => builder,
+    };
+    let builder = match public_url {
+        Some(public_url) => builder.with_public_url(public_url),
         None => builder,
     };
     let built = if in_memory {
