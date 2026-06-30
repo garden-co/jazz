@@ -109,6 +109,7 @@ struct CoreRow<'a> {
 #[derive(Clone, Debug, serde::Serialize)]
 struct CoreRelationSnapshot<'a> {
     cursor: u64,
+    root_count: u64,
     rows: Vec<CoreRowBatch<'a>>,
     edges: Vec<CoreRelationEdge>,
 }
@@ -1715,6 +1716,7 @@ fn encode_core_relation_snapshot(
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&CoreRelationSnapshot {
         cursor: 0,
+        root_count: snapshot.root_count as u64,
         rows: core_row_batches(&snapshot.rows),
         edges: snapshot.edges.iter().map(core_relation_edge).collect(),
     })

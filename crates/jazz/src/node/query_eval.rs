@@ -21,7 +21,7 @@ use crate::query::{
     Include, JoinTarget, JoinVia, Operand, OrderDirection, PolicyBranch, Predicate,
     QUERY_NAMESPACE, Query as JazzQuery, RelationCmpOp, RelationColumnRef, RelationExpr,
     RelationJoinCondition, RelationJoinKind, RelationPredicate, RelationProjectExpr, RelationQuery,
-    RelationRowIdRef, RelationValueRef, ShapeId, ValidatedQuery, col, eq, lit,
+    RelationRowIdRef, RelationValueRef, ShapeId, ValidatedQuery, col, eq, in_list, lit,
 };
 
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
@@ -957,29 +957,30 @@ where
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
         let mut snapshot = RelationSnapshot::default();
-        let root_rows = self.query_rows_for_link(shape, binding, tier, identity)?;
-        let relation_source_rows = if shape.query().select.is_some() {
-            let mut relation_source_query = shape.query().clone();
-            relation_source_query.select = None;
-            let relation_source_shape = relation_source_query
-                .validate(&self.catalogue.schema)
-                .map_err(Error::Query)?;
-            let relation_source_binding = relation_source_shape
-                .bind(binding.values().clone())
-                .map_err(Error::Query)?;
-            self.query_rows_for_link(
-                &relation_source_shape,
-                &relation_source_binding,
-                tier,
-                identity,
-            )?
+        let mut relation_source_rows =
+            self.query_relation_source_rows_before_pagination(shape, binding, tier, identity)?;
+        self.retain_rows_satisfying_array_subquery_requirements(
+            &mut relation_source_rows,
+            &shape.query().array_subqueries,
+            shape.schema_version(),
+            tier,
+            identity,
+        )?;
+        let mut relation_source_query = shape.query().clone();
+        relation_source_query.select = None;
+        self.finish_query_rows(&relation_source_query, &mut relation_source_rows)?;
+        let root_rows = if shape.query().select.is_some() {
+            let mut rows = relation_source_rows.clone();
+            self.apply_projection(shape.query(), &mut rows)?;
+            rows
         } else {
-            root_rows.clone()
+            relation_source_rows.clone()
         };
         let mut row_keys = BTreeSet::new();
         for row in &root_rows {
             row_keys.insert((row.table().to_owned(), row.row_uuid()));
         }
+        snapshot.root_count = root_rows.len();
         snapshot.rows.extend(root_rows.iter().cloned());
         let root_table = self
             .table_in_schema(&shape.query().table, shape.schema_version())?
@@ -997,6 +998,26 @@ where
         Ok(snapshot)
     }
 
+    fn query_relation_source_rows_before_pagination(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut query = shape.query().clone();
+        query.select = None;
+        query.limit = None;
+        query.offset = 0;
+        let source_shape = query
+            .validate(&self.catalogue.schema)
+            .map_err(Error::Query)?;
+        let source_binding = source_shape
+            .bind(binding.values().clone())
+            .map_err(Error::Query)?;
+        self.query_rows_for_link(&source_shape, &source_binding, tier, identity)
+    }
+
     pub(crate) fn query_relation_query_snapshot_for_link(
         &mut self,
         query: &RelationQuery,
@@ -1011,8 +1032,10 @@ where
         rows.dedup_by(|left, right| {
             subscription_row_key_for_eval(left) == subscription_row_key_for_eval(right)
         });
+        let rows = rows.into_iter().map(|row| row.current).collect::<Vec<_>>();
         Ok(RelationSnapshot {
-            rows: rows.into_iter().map(|row| row.current).collect(),
+            root_count: rows.len(),
+            rows,
             edges: Vec::new(),
         })
     }
@@ -1340,8 +1363,10 @@ where
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
         if shape.query().array_subqueries.is_empty() {
+            let rows = self.query_rows_for_link(shape, binding, tier, identity)?;
             return Ok(RelationSnapshot {
-                rows: self.query_rows_for_link(shape, binding, tier, identity)?,
+                root_count: rows.len(),
+                rows,
                 edges: Vec::new(),
             });
         }
@@ -1436,19 +1461,34 @@ where
                 let child_rows = if relation_correlation_value_is_null(&value) {
                     Vec::new()
                 } else {
-                    self.query_array_subquery_rows(subquery, schema_version, tier, identity, value)?
+                    self.query_array_subquery_rows(
+                        subquery,
+                        schema_version,
+                        tier,
+                        identity,
+                        value.clone(),
+                    )?
                 };
-                if matches!(
-                    subquery.requirement,
-                    ArraySubqueryRequirement::AtLeastOne
-                        | ArraySubqueryRequirement::MatchCorrelationCardinality
-                ) && child_rows.is_empty()
+                if matches!(subquery.requirement, ArraySubqueryRequirement::AtLeastOne)
+                    && child_rows.is_empty()
+                    || matches!(
+                        subquery.requirement,
+                        ArraySubqueryRequirement::MatchCorrelationCardinality
+                    ) && !Self::array_subquery_matches_correlation_cardinality(
+                        &value,
+                        &child_table,
+                        &child_rows,
+                        &subquery.inner_column,
+                    )?
                 {
                     snapshot.rows.retain(|row| {
                         row.table() != parent.table() || row.row_uuid() != parent.row_uuid()
                     });
                     snapshot.edges.retain(|edge| {
-                        edge.source_table != parent.table() || edge.source_row != parent.row_uuid()
+                        (edge.source_table != parent.table()
+                            || edge.source_row != parent.row_uuid())
+                            && (edge.target_table != parent.table()
+                                || edge.target_row != parent.row_uuid())
                     });
                     row_keys.remove(&(parent.table().to_owned(), parent.row_uuid()));
                     continue;
@@ -1480,6 +1520,82 @@ where
         Ok(())
     }
 
+    fn retain_rows_satisfying_array_subquery_requirements(
+        &mut self,
+        rows: &mut Vec<CurrentRow>,
+        subqueries: &[ArraySubquery],
+        schema_version: SchemaVersionId,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<(), Error> {
+        if subqueries.is_empty() || rows.is_empty() {
+            return Ok(());
+        }
+        let mut retained = Vec::with_capacity(rows.len());
+        for row in std::mem::take(rows) {
+            let parent_table = self.table_in_schema(row.table(), schema_version)?.clone();
+            if self.row_satisfies_array_subquery_requirements(
+                &parent_table,
+                &row,
+                subqueries,
+                schema_version,
+                tier,
+                identity,
+            )? {
+                retained.push(row);
+            }
+        }
+        *rows = retained;
+        Ok(())
+    }
+
+    fn row_satisfies_array_subquery_requirements(
+        &mut self,
+        parent_table: &TableSchema,
+        parent: &CurrentRow,
+        subqueries: &[ArraySubquery],
+        schema_version: SchemaVersionId,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        for subquery in subqueries {
+            let Some(value) = relation_outer_value(parent_table, parent, &subquery.outer_column)
+            else {
+                continue;
+            };
+            let child_table = self
+                .table_in_schema(&subquery.table, schema_version)?
+                .clone();
+            let child_rows = if relation_correlation_value_is_null(&value) {
+                Vec::new()
+            } else {
+                self.query_array_subquery_rows(
+                    subquery,
+                    schema_version,
+                    tier,
+                    identity,
+                    value.clone(),
+                )?
+            };
+            let satisfies_requirement = match subquery.requirement {
+                ArraySubqueryRequirement::Optional => true,
+                ArraySubqueryRequirement::AtLeastOne => !child_rows.is_empty(),
+                ArraySubqueryRequirement::MatchCorrelationCardinality => {
+                    Self::array_subquery_matches_correlation_cardinality(
+                        &value,
+                        &child_table,
+                        &child_rows,
+                        &subquery.inner_column,
+                    )?
+                }
+            };
+            if !satisfies_requirement {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn query_array_subquery_rows(
         &mut self,
         subquery: &ArraySubquery,
@@ -1489,9 +1605,10 @@ where
         value: Value,
     ) -> Result<Vec<CurrentRow>, Error> {
         let correlation = match value {
-            Value::Array(_) => {
-                crate::query::contains(lit(value), col(subquery.inner_column.clone()))
-            }
+            Value::Array(values) => in_list(
+                col(subquery.inner_column.clone()),
+                values.into_iter().map(lit).collect::<Vec<_>>(),
+            ),
             _ => eq(col(subquery.inner_column.clone()), lit(value)),
         };
         let mut query = JazzQuery::from(subquery.table.clone()).filter(correlation);
@@ -1515,6 +1632,42 @@ where
         let shape = query.validate(&schema.schema).map_err(Error::Query)?;
         let binding = shape.bind(BTreeMap::new()).map_err(Error::Query)?;
         self.query_rows_for_link(&shape, &binding, tier, identity)
+    }
+
+    fn array_subquery_matches_correlation_cardinality(
+        correlation_value: &Value,
+        child_table: &TableSchema,
+        child_rows: &[CurrentRow],
+        inner_column: &str,
+    ) -> Result<bool, Error> {
+        let Value::Array(correlation_values) = correlation_value else {
+            return Ok(!child_rows.is_empty());
+        };
+        let required = correlation_values
+            .iter()
+            .filter_map(|value| match value {
+                Value::Uuid(uuid) => Some(RowUuid(*uuid)),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if required.len() != correlation_values.len() {
+            return Ok(false);
+        }
+        if required.is_empty() {
+            return Ok(true);
+        }
+        let mut covered = BTreeSet::new();
+        for child in child_rows {
+            let value = if inner_column == "id" {
+                Some(Value::Uuid(child.row_uuid().0))
+            } else {
+                child.cell(child_table, inner_column)
+            };
+            if let Some(Value::Uuid(uuid)) = value {
+                covered.insert(RowUuid(uuid));
+            }
+        }
+        Ok(required.is_subset(&covered))
     }
 
     fn query_rows_from_projected_current_source(
@@ -1662,10 +1815,11 @@ where
         query: &crate::query::Query,
         rows: &mut [CurrentRow],
     ) -> Result<(), Error> {
-        sort_current_rows(rows);
         if query.order_by.is_empty() {
+            sort_query_default_rows(rows);
             return Ok(());
         }
+        sort_current_rows(rows);
         if query.aggregate.is_some() {
             rows.sort_by(|left, right| {
                 for order in &query.order_by {
@@ -5862,16 +6016,50 @@ struct PreparedIncludePath {
 
 impl PreparedIncludePath {
     fn resolves(&self, row: &CurrentRow, modes: &PreparedIncludeModes) -> bool {
-        let mut current_row = row;
+        let mut current_rows = vec![row];
         for segment in &self.segments {
-            let Some(Value::Uuid(target_uuid)) = current_row.cell_at(segment.column_position)
-            else {
-                return false;
-            };
-            let Some(next_row) = modes.row(&segment.target_table, RowUuid(target_uuid)) else {
-                return false;
-            };
-            current_row = next_row;
+            let mut next_rows = Vec::new();
+            for current_row in current_rows {
+                match current_row.cell_at(segment.column_position) {
+                    Some(Value::Uuid(target_uuid)) => {
+                        let Some(next_row) = modes.row(&segment.target_table, RowUuid(target_uuid))
+                        else {
+                            return false;
+                        };
+                        next_rows.push(next_row);
+                    }
+                    Some(Value::Array(targets)) => {
+                        for target in targets {
+                            let Value::Uuid(target_uuid) = target else {
+                                return false;
+                            };
+                            let Some(next_row) =
+                                modes.row(&segment.target_table, RowUuid(target_uuid))
+                            else {
+                                return false;
+                            };
+                            next_rows.push(next_row);
+                        }
+                    }
+                    Some(Value::Nullable(None)) | None => {}
+                    Some(Value::Nullable(Some(target))) => {
+                        let Value::Uuid(target_uuid) = target.as_ref() else {
+                            return false;
+                        };
+                        let Some(next_row) =
+                            modes.row(&segment.target_table, RowUuid(*target_uuid))
+                        else {
+                            return false;
+                        };
+                        next_rows.push(next_row);
+                    }
+                    Some(_) => return false,
+                }
+            }
+            current_rows = next_rows;
+            if current_rows.is_empty() {
+                return true;
+            }
         }
         true
     }
@@ -7070,6 +7258,15 @@ fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Orderin
         (Some(_), None) => Ordering::Greater,
         (None, None) => Ordering::Equal,
     }
+}
+
+fn sort_query_default_rows(rows: &mut [CurrentRow]) {
+    rows.sort_by(|left, right| {
+        left.projected_tx_alias()
+            .cmp(&right.projected_tx_alias())
+            .then_with(|| left.row_uuid().to_bytes().cmp(&right.row_uuid().to_bytes()))
+            .then_with(|| left.record.raw().cmp(right.record.raw()))
+    });
 }
 
 fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Option<Value> {

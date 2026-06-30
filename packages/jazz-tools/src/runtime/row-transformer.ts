@@ -171,7 +171,9 @@ function transformRowValues(
     if (!col) continue;
     const value = hasNamedValue(valuesByColumn, col.name)
       ? getNamedValue(valuesByColumn, col.name)
-      : values[i];
+      : valuesByColumn
+        ? undefined
+        : values[i];
     if (value !== undefined) {
       obj[col.name] = unwrapValue(value, col.columnType, col.name);
     }

@@ -143,6 +143,9 @@ export function queryWhereStringContains(
 export type QueryLiteral =
   | { type: "Boolean"; value: boolean }
   | { type: "Integer"; value: number }
+  | { type: "BigInt"; value: number }
+  | { type: "Double"; value: number }
+  | { type: "Timestamp"; value: number }
   | { type: "Text"; value: string }
   | { type: "Uuid"; value: string }
   | { type: "Bytea"; value: Uint8Array }
@@ -410,6 +413,22 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     writer.u64((value.value ^ 0x80000000) >>> 0);
     return;
   }
+  if (value.type === "BigInt" || value.type === "Timestamp") {
+    if (!Number.isSafeInteger(value.value) || value.value < 0) {
+      throw new Error(`${value.type} value must be a non-negative safe integer`);
+    }
+    writer.u64(3); // groove::records::Value::U64
+    writer.u64(value.value);
+    return;
+  }
+  if (value.type === "Double") {
+    if (!Number.isFinite(value.value)) {
+      throw new Error("Double value must be finite");
+    }
+    writer.u64(4); // groove::records::Value::F64
+    writer.f64Le(value.value);
+    return;
+  }
   if (value.type === "Uuid") {
     writer.u64(8); // groove::records::Value::Uuid
     writer.bytes(parseUuidBytes(value.value));
@@ -474,6 +493,12 @@ export class PostcardWriter {
       (value >>> 16) & 0xff,
       (value >>> 24) & 0xff,
     );
+  }
+
+  f64Le(value: number): void {
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setFloat64(0, value, true);
+    this.bytes(bytes, false);
   }
 
   bool(value: boolean): void {
@@ -547,8 +572,17 @@ export class PostcardReader {
     throw new Error(`invalid bool tag ${tag}`);
   }
 
+  f64Le(): number {
+    const bytes = this.bytesOfLength(8);
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat64(0, true);
+  }
+
   bytes(withLength = true): Uint8Array {
     const length = withLength ? this.u64() : 16;
+    return this.bytesOfLength(length);
+  }
+
+  private bytesOfLength(length: number): Uint8Array {
     const end = this.offset + length;
     if (end > this.bytesValue.length) throw new Error("postcard bytes overflow");
     const value = this.bytesValue.subarray(this.offset, end);
