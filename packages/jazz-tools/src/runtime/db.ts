@@ -1026,6 +1026,23 @@ export class Db {
     return structuredClone(this.config);
   }
 
+  /**
+   * The runtime schema of this Db's live client, normalized. Used by the
+   * inspector overlay (a same-origin iframe) to render columns and build queries
+   * against this connection without bridging or private-field access. Throws if
+   * no client exists yet — run a query/subscription (or wait for connection)
+   * first.
+   */
+  getRuntimeSchema(): WasmSchema {
+    const schema = this.connection.getRuntimeSchema();
+    if (!schema) {
+      throw new Error(
+        "Db.getRuntimeSchema(): no runtime client yet — run a query or wait for the connection.",
+      );
+    }
+    return normalizeRuntimeSchema(schema);
+  }
+
   setDevMode(enabled: boolean): void {
     this.config.devMode = enabled;
   }
