@@ -1334,7 +1334,7 @@ where
                 .frontier
                 .as_ref()
                 .map(|row| Value::Uuid(row.row_uuid().0))),
-            RelationValueRef::SessionRef(_) => Ok(None),
+            RelationValueRef::Param(_) | RelationValueRef::SessionRef(_) => Ok(None),
         }
     }
 

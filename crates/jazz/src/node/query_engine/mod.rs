@@ -26,7 +26,7 @@ use groove::schema::ColumnType;
 use super::OpenTxId;
 use crate::ids::{AuthorId, BranchId, RowUuid, SchemaVersionId};
 use crate::protocol::SubscriptionKey;
-use crate::query::{Binding, BindingId, RelationQuery, ShapeId, ValidatedQuery};
+use crate::query::{Binding, BindingId, ShapeId, ValidatedQuery, ValidatedRelationQuery};
 use crate::schema::TableSchema;
 use crate::time::GlobalSeq;
 use crate::tx::{DurabilityTier, Snapshot, TxId};
@@ -72,26 +72,6 @@ pub(crate) enum QuerySurface {
         /// Binding values for this use of the shape.
         binding: Binding,
     },
-}
-
-/// Validated relation query shape.
-///
-/// This is the destination shape for moving relation validation into
-/// `crate::query`: relation queries must be as addressable and cacheable as
-/// ordinary query shapes, otherwise relation live queries grow a parallel
-/// identity model.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ValidatedRelationQuery {
-    /// Canonical relation query.
-    pub(crate) query: RelationQuery,
-    /// Schema version this relation query was authored and validated against.
-    pub(crate) schema_version: SchemaVersionId,
-    /// Inferred parameter types by name.
-    pub(crate) params: BTreeMap<String, ColumnType>,
-    /// Canonical bytes used for shape identity.
-    pub(crate) canonical: Vec<u8>,
-    /// Content-addressed shape id, in a relation-discriminated namespace.
-    pub(crate) shape_id: ShapeId,
 }
 
 /// Stable identity of a query surface plus binding.
@@ -401,10 +381,9 @@ pub(crate) enum PredicateReadMode {
     /// Do not emit predicate reads.
     #[default]
     None,
-    /// Emit predicate reads for the caller to record.
-    ReturnToCaller,
-    /// Record predicate reads against the open transaction named by `ReadSource`.
-    RecordForTransaction,
+    /// Emit predicate-read facts. The caller owns whether those facts are
+    /// recorded, returned, or both.
+    Emit,
 }
 
 /// Stable key for safe sharing of compiled maintained work.
@@ -516,7 +495,7 @@ pub(crate) struct PolicyProbeKey {
     /// Row identity semantics for the probe.
     pub(crate) row: PolicyProbeRowKey,
     /// Canonical fingerprint of proposed values, when present.
-    pub(crate) proposed_values_fingerprint: Option<Vec<u8>>,
+    pub(crate) proposal: PolicyProbeProposalKey,
 }
 
 /// Stable row identity component for policy-probe keys.
@@ -524,12 +503,25 @@ pub(crate) struct PolicyProbeKey {
 pub(crate) enum PolicyProbeRowKey {
     /// Probe targets this concrete row.
     Row(RowUuid),
-    /// Engine generated or must generate a row id before policy evaluation.
-    Generated,
+    /// Engine generated this concrete row id before policy evaluation.
+    Generated(RowUuid),
     /// Probe is only valid for id-independent policy.
     IdIndependent,
     /// Probe has no row identity component.
     None,
+}
+
+/// Stable proposal component for policy-probe keys.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PolicyProbeProposalKey {
+    /// Probe has no proposed cell/state change.
+    None,
+    /// Patch semantics: omitted fields keep their current value.
+    Patch(Vec<u8>),
+    /// After-image semantics: supplied values are the complete proposed row.
+    AfterImage(Vec<u8>),
+    /// Deletion/restoration intent with no cell patch.
+    StateChange(WriteStateChange),
 }
 
 /// Policy-probe category.
@@ -572,10 +564,8 @@ pub(crate) enum TerminalProgramKind {
 pub(crate) enum ProgramEffectsKey {
     /// No side effects.
     None,
-    /// Predicate reads are returned to the caller.
-    PredicateReadsReturned,
-    /// Predicate reads are recorded against the transaction read source.
-    PredicateReadsRecorded,
+    /// Predicate-read facts are emitted.
+    PredicateReads,
 }
 
 /// Typed terminal payload schemas emitted by maintained graphs.
@@ -732,10 +722,25 @@ pub(crate) struct PolicyWitnessSchema {
 /// Aggregate group terminal row schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AggregateResultSchema {
+    /// Synthetic result membership for this aggregate group.
+    pub(crate) synthetic: SyntheticResultMembershipSchema,
     /// Stable group-key fields.
     pub(crate) group_key_fields: BTreeSet<String>,
     /// Aggregate value fields.
     pub(crate) value_fields: BTreeSet<String>,
+    /// Retained binding/routing parameter fields.
+    pub(crate) routing_param_fields: BTreeSet<String>,
+}
+
+/// Synthetic result identity for aggregate/window-like rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SyntheticResultMembershipSchema {
+    /// Logical synthetic table/relation field.
+    pub(crate) table_field: String,
+    /// Stable synthetic row id field.
+    pub(crate) row_field: String,
+    /// Synthetic revision/version field used for replacement deltas.
+    pub(crate) revision_field: String,
     /// Retained binding/routing parameter fields.
     pub(crate) routing_param_fields: BTreeSet<String>,
 }
@@ -806,8 +811,9 @@ pub(crate) enum DeletionScope {
     VisibleOnly,
     /// Include deletion markers at the root result source.
     IncludeDeletedRoot,
-    /// Include deletion markers for witness/replacement source work.
-    IncludeDeletedWitness,
+    /// Read version witnesses, including deletion-register state, for payload
+    /// shipping or replacement facts. This is not query-visible widening.
+    VersionWitnesses,
 }
 
 /// Resolver that turns logical Jazz source requests into concrete groove inputs.
@@ -923,12 +929,36 @@ pub(crate) struct ProgramEffectSchemas {
 /// Predicate-read side-effect schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PredicateReadEffectSchema {
-    /// Shape id recorded for the predicate read.
-    pub(crate) shape_id: ShapeId,
+    /// Surface whose predicate read is being tracked.
+    pub(crate) surface: PredicateReadSurfaceSchema,
     /// Binding id recorded for the predicate read.
     pub(crate) binding_id: BindingId,
     /// Binding value fields retained for validation without prior registration.
     pub(crate) binding_value_fields: BTreeSet<String>,
+}
+
+/// Surface identity emitted by predicate-read effects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PredicateReadSurfaceSchema {
+    /// Ordinary query predicate read.
+    Query {
+        /// Shape id recorded for the predicate read.
+        shape_id: ShapeId,
+        /// Field carrying canonical query bytes for validation without prior registration.
+        canonical_shape_field: String,
+    },
+    /// Relation query predicate read.
+    Relation {
+        /// Shape id recorded for the predicate read.
+        shape_id: ShapeId,
+        /// Field carrying canonical relation bytes for validation without prior registration.
+        canonical_shape_field: String,
+    },
+    /// Policy probe predicate read.
+    PolicyProbe {
+        /// Stable probe key emitted with the effect.
+        probe: PolicyProbeKey,
+    },
 }
 
 /// Capability status for an unsupported requested program.

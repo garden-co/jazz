@@ -67,6 +67,24 @@ pub struct RelationQuery {
     pub rel: RelationExpr,
 }
 
+/// Validated relation query shape with inferred parameter types.
+///
+/// Relation queries share the same shape/binding identity machinery as ordinary
+/// queries so relation subscriptions do not grow a parallel cache model.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ValidatedRelationQuery {
+    /// Canonical relation query.
+    pub query: RelationQuery,
+    /// Schema version this relation query was authored and validated against.
+    pub schema_version: SchemaVersionId,
+    /// Inferred parameter types by name.
+    pub params: BTreeMap<String, ColumnType>,
+    /// Canonical bytes used for shape identity.
+    pub canonical: Vec<u8>,
+    /// Content-addressed shape id, in a relation-discriminated namespace.
+    pub shape_id: ShapeId,
+}
+
 #[allow(missing_docs)]
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum RelationExpr {
@@ -170,6 +188,7 @@ pub struct RelationColumnRef {
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum RelationValueRef {
     Literal(serde_json::Value),
+    Param(String),
     SessionRef(Vec<String>),
     OuterColumn(RelationColumnRef),
     FrontierColumn(RelationColumnRef),
@@ -1050,9 +1069,12 @@ pub struct ReachableSeed {
 /// Recursion semantics for reachability and relation gather.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum RecursionBound {
-    /// Continue until the recursive frontier reaches a fixpoint.
+    /// Continue until the recursive frontier reaches a fixpoint. Unified
+    /// lowering may still apply an independent safety cap that errors if hit.
     Fixpoint,
-    /// Stop after at most this many recursive steps.
+    /// Stop after at most this many recursive steps. Unified lowering must carry
+    /// depth through the recursive relation and filter by it; this is not the
+    /// same as groove's internal safety cap.
     MaxDepth(usize),
 }
 
