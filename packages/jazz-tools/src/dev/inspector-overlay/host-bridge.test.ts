@@ -62,6 +62,8 @@ describe("installInspectorHost", () => {
       adminSecret: "sek",
     });
     expect(handle.getWasmSchema()).toEqual({ todos: { columns: [] } });
+    expect(handle.getActiveSubscriptions()[0].id).toBe("s1");
+    expect("stack" in handle.getActiveSubscriptions()[0]).toBe(false);
     expect(posts).toHaveLength(1);
     expect(posts[0]).toMatchObject({ type: "jazz-inspector:subscriptions" });
     expect(posts[0].list[0].id).toBe("s1");

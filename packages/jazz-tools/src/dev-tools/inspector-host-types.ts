@@ -23,6 +23,13 @@ export interface JazzInspectorHost {
   getConnectionConfig(): InspectorConnectionConfig;
   /** The host's runtime schema (plain serializable data — safe across realms). */
   getWasmSchema(): WasmSchema;
+  /**
+   * Current active subscriptions (stack-less) — read once on overlay mount so
+   * the initial state isn't lost to the push race (the iframe's message
+   * listener may not be ready when the first push fires). Live updates still
+   * arrive via the `INSPECTOR_SUBSCRIPTIONS_MESSAGE` push.
+   */
+  getActiveSubscriptions(): InspectorSubscription[];
 }
 
 export const INSPECTOR_HOST_GLOBAL = "__jazzInspectorHost" as const;

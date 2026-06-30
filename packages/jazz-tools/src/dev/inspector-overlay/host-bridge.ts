@@ -37,6 +37,9 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
     getWasmSchema() {
       return db.getRuntimeSchema();
     },
+    getActiveSubscriptions() {
+      return serializeActiveSubscriptions(db.getActiveQuerySubscriptions());
+    },
   };
   (window as unknown as Record<string, unknown>)[INSPECTOR_HOST_GLOBAL] = handle;
 
