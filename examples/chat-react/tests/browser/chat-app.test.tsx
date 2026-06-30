@@ -136,6 +136,7 @@ describe("Chat App E2E", () => {
       dbName?: string;
       serverUrl?: string;
       secret?: string;
+      authSecretStorageKey?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -452,11 +453,14 @@ describe("Chat App E2E", () => {
     bobContainer: HTMLDivElement;
   }> {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const aliceAuthKey = uniqueDbName("access-a-auth");
+    const bobAuthKey = uniqueDbName("access-b-auth");
 
     // --- User A: create a private chat with a secret message ----------------
     const aliceContainer = await mountApp({
       appId: APP_ID,
       dbName: uniqueDbName("access-a"),
+      authSecretStorageKey: aliceAuthKey,
       serverUrl,
     });
 
@@ -542,6 +546,7 @@ describe("Chat App E2E", () => {
     const bobContainer = await mountApp({
       appId: APP_ID,
       dbName: uniqueDbName("access-b"),
+      authSecretStorageKey: bobAuthKey,
       serverUrl,
     });
 
