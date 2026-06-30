@@ -9,7 +9,7 @@ use super::codec::{
 };
 use super::query_eval::maintained_view_tagged_user_field;
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
-use crate::protocol::ResultRowEntry;
+use crate::protocol::ResultMemberEntry;
 use crate::schema::TableSchema;
 use crate::time::TxTime;
 use crate::tx::TxId;
@@ -18,7 +18,7 @@ type TableSchemas = BTreeMap<String, TableSchema>;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MaintainedSubscriptionView {
-    result_weights: BTreeMap<ResultRowEntry, i64>,
+    result_weights: BTreeMap<ResultMemberEntry, i64>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -75,13 +75,13 @@ struct ReplacementKey {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResultTransitions {
-    pub(crate) adds: Vec<ResultRowEntry>,
-    pub(crate) removes: Vec<ResultRowEntry>,
+    pub(crate) adds: Vec<ResultMemberEntry>,
+    pub(crate) removes: Vec<ResultMemberEntry>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum DecodedMaintainedEvent {
-    ResultCurrent(ResultRowEntry),
+    ResultCurrent(ResultMemberEntry),
     VersionContent(VersionRow),
     VersionDeletion(VersionRow),
     ReplacementContent(VersionRow),
@@ -90,14 +90,14 @@ pub(crate) enum DecodedMaintainedEvent {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum EventIdentity {
-    Result(ResultRowEntry),
+    Result(ResultMemberEntry),
     Version(VersionIdentity),
     Replacement(ReplacementKey, VersionIdentity),
 }
 
 #[derive(Clone, Debug)]
 enum NetEvent {
-    Result(ResultRowEntry),
+    Result(ResultMemberEntry),
     Version(VersionIdentity, VersionRow),
     Replacement(ReplacementKey, VersionIdentity, VersionRow),
 }
@@ -205,17 +205,17 @@ impl MaintainedSubscriptionView {
 
     fn apply_result_delta(
         &mut self,
-        entry: ResultRowEntry,
+        entry: ResultMemberEntry,
         weight: i64,
         transitions: &mut ResultTransitions,
     ) {
         let old = self.result_weights.get(&entry).copied().unwrap_or(0);
         let new = old + weight;
         if old <= 0 && new > 0 {
-            transitions.adds.push(entry);
+            transitions.adds.push(entry.clone());
         }
         if old > 0 && new <= 0 {
-            transitions.removes.push(entry);
+            transitions.removes.push(entry.clone());
         }
         if new == 0 {
             self.result_weights.remove(&entry);
@@ -262,11 +262,14 @@ fn decode_tagged_terminal_record(
             .ok_or(super::Error::InvalidStoredValue(
                 "result tx node alias must exist",
             ))?;
-        return Ok(DecodedMaintainedEvent::ResultCurrent((
-            table.name.clone().into(),
-            row_uuid,
-            TxId::new(tx_time, tx_node),
-        )));
+        return Ok(DecodedMaintainedEvent::ResultCurrent(
+            (
+                table.name.clone().into(),
+                row_uuid,
+                TxId::new(tx_time, tx_node),
+            )
+                .into(),
+        ));
     }
 
     let version = decode_tagged_terminal_version(record, table)?;
@@ -525,7 +528,7 @@ impl ReplacementKey {
 impl NetEvent {
     fn identity(&self) -> EventIdentity {
         match self {
-            Self::Result(entry) => EventIdentity::Result(*entry),
+            Self::Result(entry) => EventIdentity::Result(entry.clone()),
             Self::Version(identity, _) => EventIdentity::Version(identity.clone()),
             Self::Replacement(key, identity, _) => {
                 EventIdentity::Replacement(key.clone(), identity.clone())
@@ -576,6 +579,7 @@ mod tests {
     use super::*;
     use crate::ids::{NodeUuid, SchemaVersionAlias};
     use crate::node::codec::{VersionRow, VersionRowParts};
+    use crate::protocol::ResultRowEntry;
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::TxTime;
     use crate::tx::DeletionEvent;
@@ -698,6 +702,10 @@ mod tests {
                 Value::U64(10),
                 Value::U64(0),
                 Value::Array(Vec::new()),
+                Value::Uuid(AuthorId::SYSTEM.0),
+                Value::U64(10),
+                Value::Uuid(AuthorId::SYSTEM.0),
+                Value::U64(10),
                 Value::Nullable(None),
                 Value::Nullable(Some(Box::new(Value::String("decoded".to_owned())))),
             ])
@@ -726,25 +734,26 @@ mod tests {
     fn result_single_enter_then_leave_emits_add_then_remove() {
         let aliases = aliases();
         let entry = result(row(1), 10);
+        let member = ResultMemberEntry::from(entry);
         let mut maintained = MaintainedSubscriptionView::default();
 
         let first = maintained
             .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ResultCurrent(entry), 1)],
+                [(DecodedMaintainedEvent::ResultCurrent(member.clone()), 1)],
                 &aliases,
             )
             .unwrap();
-        assert_eq!(first.adds, vec![entry]);
+        assert_eq!(first.adds, vec![member.clone()]);
         assert!(first.removes.is_empty());
 
         let second = maintained
             .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ResultCurrent(entry), -1)],
+                [(DecodedMaintainedEvent::ResultCurrent(member.clone()), -1)],
                 &aliases,
             )
             .unwrap();
         assert!(second.adds.is_empty());
-        assert_eq!(second.removes, vec![entry]);
+        assert_eq!(second.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
     }
 
@@ -752,47 +761,49 @@ mod tests {
     fn result_non_consolidated_drain_nets_to_one_add() {
         let aliases = aliases();
         let entry = result(row(1), 10);
+        let member = ResultMemberEntry::from(entry);
         let mut maintained = MaintainedSubscriptionView::default();
 
         let transitions = maintained
             .apply_decoded_deltas(
                 [
-                    (DecodedMaintainedEvent::ResultCurrent(entry), 1),
-                    (DecodedMaintainedEvent::ResultCurrent(entry), 1),
-                    (DecodedMaintainedEvent::ResultCurrent(entry), -1),
+                    (DecodedMaintainedEvent::ResultCurrent(member.clone()), 1),
+                    (DecodedMaintainedEvent::ResultCurrent(member.clone()), 1),
+                    (DecodedMaintainedEvent::ResultCurrent(member.clone()), -1),
                 ],
                 &aliases,
             )
             .unwrap();
 
-        assert_eq!(transitions.adds, vec![entry]);
+        assert_eq!(transitions.adds, vec![member.clone()]);
         assert!(transitions.removes.is_empty());
-        assert_eq!(maintained.result_weights.get(&entry), Some(&1));
+        assert_eq!(maintained.result_weights.get(&member), Some(&1));
     }
 
     #[test]
     fn result_weight_magnitude_greater_than_one_tracks_active_membership() {
         let aliases = aliases();
         let entry = result(row(1), 10);
+        let member = ResultMemberEntry::from(entry);
         let mut maintained = MaintainedSubscriptionView::default();
 
         let active = maintained
             .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ResultCurrent(entry), 2)],
+                [(DecodedMaintainedEvent::ResultCurrent(member.clone()), 2)],
                 &aliases,
             )
             .unwrap();
-        assert_eq!(active.adds, vec![entry]);
+        assert_eq!(active.adds, vec![member.clone()]);
         assert!(active.removes.is_empty());
 
         let inactive = maintained
             .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ResultCurrent(entry), -2)],
+                [(DecodedMaintainedEvent::ResultCurrent(member.clone()), -2)],
                 &aliases,
             )
             .unwrap();
         assert!(inactive.adds.is_empty());
-        assert_eq!(inactive.removes, vec![entry]);
+        assert_eq!(inactive.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
     }
 

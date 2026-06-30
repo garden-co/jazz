@@ -798,9 +798,21 @@ function lowerGatherRel(gather: RelExprObject): LoweredRelExpr {
       edgeMemberColumn: step.edgeMemberColumn,
       edgeParentColumn: step.edgeParentColumn,
       edgeFilters: step.edgeFilters,
-      maxDepth: typeof gather.max_depth === "number" ? gather.max_depth : 1,
+      maxDepth: gatherMaxDepth(gather),
     },
   };
+}
+
+function gatherMaxDepth(gather: RelExprObject): number {
+  if (
+    isRecord(gather.bound) &&
+    typeof gather.bound.MaxDepth === "number" &&
+    Number.isInteger(gather.bound.MaxDepth) &&
+    gather.bound.MaxDepth > 0
+  ) {
+    return gather.bound.MaxDepth;
+  }
+  throw new Error("Gather relation policies require bound: { MaxDepth: positive integer }.");
 }
 
 function lowerGatherSeed(seed: unknown): {

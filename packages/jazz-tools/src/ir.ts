@@ -7,6 +7,7 @@ export type RelRowIdRef = "Current" | "Outer" | "Frontier";
 
 export type RelValueRef =
   | { Literal: unknown }
+  | { Param: string }
   | { SessionRef: string[] }
   | { OuterColumn: RelColumnRef }
   | { FrontierColumn: RelColumnRef }
@@ -55,8 +56,10 @@ export type RelOrderByExpr = {
   direction: RelOrderDirection;
 };
 
+export type RelRecursionBound = "Fixpoint" | { MaxDepth: number };
+
 export type RelExpr =
-  | { TableScan: { table: string } }
+  | { TableScan: { table: string; alias?: string } }
   | { Filter: { input: RelExpr; predicate: RelPredicateExpr } }
   | { Union: { inputs: RelExpr[] } }
   | { Join: { left: RelExpr; right: RelExpr; on: RelJoinCondition[]; join_kind: RelJoinKind } }
@@ -66,7 +69,7 @@ export type RelExpr =
         seed: RelExpr;
         step: RelExpr;
         frontier_key: RelKeyRef;
-        max_depth: number;
+        bound: RelRecursionBound;
         dedupe_key: RelKeyRef[];
       };
     }

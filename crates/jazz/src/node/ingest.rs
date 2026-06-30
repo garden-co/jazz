@@ -111,16 +111,20 @@ where
                 reset_result_set,
                 version_bundles,
                 peer_payload_inventory,
-                result_row_adds,
-                result_row_removes,
+                result_member_adds,
+                result_member_removes,
+                program_fact_adds,
+                program_fact_removes,
             } => {
                 self.apply_view_update(ViewUpdateParts {
                     subscription,
                     reset_result_set,
                     version_bundles,
                     peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-                    result_row_adds,
-                    result_row_removes,
+                    result_member_adds,
+                    result_member_removes,
+                    program_fact_adds,
+                    program_fact_removes,
                 })?;
                 Ok(Vec::new())
             }

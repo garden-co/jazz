@@ -10,9 +10,7 @@ import type {
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
 import {
-  PERMISSION_INTROSPECTION_COLUMNS,
   PROVENANCE_MAGIC_COLUMNS,
-  type PermissionIntrospectionColumn,
   type ProvenanceMagicColumn,
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
@@ -297,8 +295,6 @@ export type TableWhereInput<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {
-    [TColumn in PermissionIntrospectionColumn]?: boolean;
-  } & {
     [TColumn in ProvenanceMagicColumn]?:
       | string
       | Date
@@ -448,12 +444,6 @@ type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> &
   _serializeRelation(): unknown;
 };
 
-type PermissionIntrospectionColumns = {
-  $canRead: boolean | null;
-  $canEdit: boolean | null;
-  $canDelete: boolean | null;
-};
-
 type ProvenanceMagicColumns = {
   $createdBy: string;
   $createdAt: Date;
@@ -463,13 +453,11 @@ type ProvenanceMagicColumns = {
 
 export type TableSelectableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
   | BaseColumnName<TSchema, TTable>
-  | PermissionIntrospectionColumn
   | ProvenanceMagicColumn
   | "*";
 
 export type TableOrderableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
   | BaseColumnName<TSchema, TTable>
-  | PermissionIntrospectionColumn
   | ProvenanceMagicColumn;
 
 export type TableSelected<
@@ -483,7 +471,6 @@ export type TableSelected<
         TableRow<TSchema, TTable>,
         Extract<TSelection | "id", keyof TableRow<TSchema, TTable>>
       >) &
-    Pick<PermissionIntrospectionColumns, Extract<TSelection, PermissionIntrospectionColumn>> &
     Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
 >;
 
@@ -642,12 +629,10 @@ type BaseColumnNameFromMeta<TMeta extends AnyTableMeta> = Extract<
 >;
 type TableSelectableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
-  | PermissionIntrospectionColumn
   | ProvenanceMagicColumn
   | "*";
 type TableOrderableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
-  | PermissionIntrospectionColumn
   | ProvenanceMagicColumn;
 type DefaultTableSelection<TMeta extends AnyTableMeta> = BaseColumnNameFromMeta<TMeta>;
 
@@ -694,7 +679,6 @@ type SelectedFromMeta<
   ("*" extends TSelection
     ? TableRowFromMeta<TMeta>
     : Pick<TableRowFromMeta<TMeta>, Extract<TSelection | "id", keyof TableRowFromMeta<TMeta>>>) &
-    Pick<PermissionIntrospectionColumns, Extract<TSelection, PermissionIntrospectionColumn>> &
     Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
 >;
 
@@ -1392,5 +1376,4 @@ function createAppForTables(
   } as App<Schema<SchemaDefinition>>;
 }
 
-export const permissionIntrospectionColumns = [...PERMISSION_INTROSPECTION_COLUMNS];
 export const provenanceMagicColumns = [...PROVENANCE_MAGIC_COLUMNS];

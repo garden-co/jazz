@@ -1420,10 +1420,11 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
         )]))
         .unwrap();
     core.query.settled_result_sets.insert(
-        crate::protocol::SubscriptionKey {
+        crate::protocol::BindingViewKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
-        },
+        read_view: Default::default(),
+},
         BTreeSet::new(),
     );
 

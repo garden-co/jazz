@@ -12,11 +12,11 @@ use groove::records::{OwnedRecord, Value};
 
 use crate::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::content_store::Extent;
-use crate::query::{BindingId, Query, ShapeId};
+use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::time::TxTime;
-use crate::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId};
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
 
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -107,15 +107,19 @@ pub enum SyncMessage {
         /// scoped payloads remain explicit bundles until the protocol grows
         /// finer coverage refs.
         peer_payload_inventory: PeerPayloadInventory,
-        /// Row-specific result_set additions for the subscription.
-        result_row_adds: Vec<ResultRowEntry>,
-        /// Row-specific result_set removals for the subscription.
-        result_row_removes: Vec<ResultRowEntry>,
+        /// Typed result membership additions for the subscription.
+        result_member_adds: Vec<ResultMemberEntry>,
+        /// Typed result membership removals for the subscription.
+        result_member_removes: Vec<ResultMemberEntry>,
+        /// Non-row program fact additions, such as relation/path edges.
+        program_fact_adds: Vec<ProgramFactEntry>,
+        /// Non-row program fact removals, such as relation/path edges.
+        program_fact_removes: Vec<ProgramFactEntry>,
     },
     /// Bulk-lane request for bytes backing one content extent.
     FetchContentExtent {
-        /// Row context used for authorization and membership checks.
-        row: RowUuid,
+        /// Owner/version/read-view context used for authorization and membership checks.
+        owner: LargeValueOwnerRef,
         /// Requested content extent.
         extent: Extent,
     },
@@ -486,22 +490,117 @@ pub struct VersionBundle {
 /// Bytes for one immutable content extent.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ContentExtent {
+    /// Owner/version/read-view context for this immutable extent.
+    pub owner: LargeValueOwnerRef,
     /// Extent name.
     pub extent: Extent,
     /// Immutable bytes stored at the extent.
     pub bytes: Vec<u8>,
 }
 
-/// Address of one usage-site subscription result set.
+/// Authorized owner context for a binary large value extent.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct LargeValueOwnerRef {
+    /// Optional table qualifier when the request is tied to a materialized row shape.
+    pub table: Option<groove::Intern<String>>,
+    /// Row that owns the large value column.
+    pub row: RowUuid,
+    /// Row-version state the value was observed through.
+    pub version: LargeValueVersionRef,
+    /// Serving-options identity that authorized observing this value.
+    pub read_view: ReadViewKey,
+}
+
+impl LargeValueOwnerRef {
+    /// Current/default read-view owner used by existing row-only fetch paths.
+    pub fn current_row(row: RowUuid) -> Self {
+        Self {
+            table: None,
+            row,
+            version: LargeValueVersionRef::CurrentVisible,
+            read_view: ReadViewKey::default(),
+        }
+    }
+}
+
+/// Version witness used to authorize a large value fetch.
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+pub enum LargeValueVersionRef {
+    /// Resolve against the row version visible in the associated read view.
+    #[default]
+    CurrentVisible,
+    /// Resolve against a concrete content-version transaction.
+    Content {
+        /// Transaction that wrote the visible content value.
+        tx: TxId,
+    },
+    /// Resolve against a concrete deletion-register transaction.
+    Deletion {
+        /// Transaction that wrote the visible deletion register.
+        tx: TxId,
+    },
+}
+
+/// Wire handle for one usage-site subscription.
+///
+/// This key addresses `Subscribe`, `ViewUpdate`, and `Unsubscribe` messages on
+/// one link. Its `binding_id` is the subscriber-chosen usage-site handle, not
+/// necessarily the canonical binding id derived from the query's bound values.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
 pub struct SubscriptionKey {
     /// Registered query shape.
     pub shape_id: ShapeId,
-    /// Usage-site subscription id. Historically this was the deterministic
-    /// binding id; coverage grouping now uses [`CoverageKey`] instead.
+    /// Usage-site subscription id. Historically this was often the
+    /// deterministic binding id; settled state must use [`BindingViewKey`]
+    /// instead.
     pub binding_id: BindingId,
+    /// Serving-options identity for this usage site.
+    pub read_view: ReadViewKey,
+}
+
+/// Canonical settled-state key for one query binding in one read view.
+///
+/// Unlike [`SubscriptionKey`], this is not a wire subscription handle. It is
+/// keyed by the actual canonical binding values and serving-options identity, so
+/// multiple usage-site subscriptions for the same binding share one settled
+/// result/fact state.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct BindingViewKey {
+    /// Registered query shape.
+    pub shape_id: ShapeId,
+    /// Deterministic binding id derived from canonical binding values.
+    pub binding_id: BindingId,
+    /// Serving-options identity.
+    pub read_view: ReadViewKey,
+}
+
+impl BindingViewKey {
+    /// Create a canonical binding-view key.
+    pub fn new(shape_id: ShapeId, binding_id: BindingId, read_view: ReadViewKey) -> Self {
+        Self {
+            shape_id,
+            binding_id,
+            read_view,
+        }
+    }
+
+    /// Treat a wire subscription key as already canonical.
+    ///
+    /// Use this only for internal whole-table/coverage paths whose subscription
+    /// key was intentionally constructed from canonical binding values.
+    pub fn from_canonical_subscription_key(subscription: SubscriptionKey) -> Self {
+        Self::new(
+            subscription.shape_id,
+            subscription.binding_id,
+            subscription.read_view,
+        )
+    }
 }
 
 /// Shared coverage group for equivalent query bindings.
@@ -524,8 +623,17 @@ pub struct ShapeAst {
     pub version: u32,
     /// Schema version this shape was authored against.
     pub schema_version: SchemaVersionId,
-    /// Query AST.
-    pub query: Query,
+    /// Registered shape body.
+    pub body: ShapeBody,
+}
+
+/// Facade syntax accepted by shape registration.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum ShapeBody {
+    /// Ordinary root-table query.
+    Query(Query),
+    /// Output-changing relation query, normalized by the query compiler.
+    Relation(RelationQuery),
 }
 
 impl ShapeAst {
@@ -537,7 +645,24 @@ impl ShapeAst {
         Self {
             version: Self::VERSION,
             schema_version,
-            query,
+            body: ShapeBody::Query(query),
+        }
+    }
+
+    /// Wrap a relation query AST in the current protocol version.
+    pub fn new_relation(query: RelationQuery, schema_version: SchemaVersionId) -> Self {
+        Self {
+            version: Self::VERSION,
+            schema_version,
+            body: ShapeBody::Relation(query),
+        }
+    }
+
+    /// Borrow the ordinary query body, if this shape uses that facade syntax.
+    pub fn query(&self) -> Option<&Query> {
+        match &self.body {
+            ShapeBody::Query(query) => Some(query),
+            ShapeBody::Relation(_) => None,
         }
     }
 
@@ -555,18 +680,232 @@ pub struct RegisterShapeOptions {
     /// Durability tier the subscriber wants this shape served at.
     #[serde(default = "default_register_shape_tier")]
     pub tier: DurabilityTier,
+    /// Semantic read-view request for this shape registration.
+    #[serde(default)]
+    pub read_view: ReadViewSpec,
 }
 
 impl Default for RegisterShapeOptions {
     fn default() -> Self {
         Self {
             tier: default_register_shape_tier(),
+            read_view: ReadViewSpec::default(),
         }
+    }
+}
+
+impl RegisterShapeOptions {
+    /// Whether this request uses the only read view currently executable.
+    pub fn has_default_read_view(&self) -> bool {
+        self.read_view.is_default()
+    }
+
+    /// Derive the authoritative read-view key from the full semantic options.
+    pub fn read_view_key(&self) -> ReadViewKey {
+        ReadViewKey::from_register_shape_options(self)
     }
 }
 
 fn default_register_shape_tier() -> DurabilityTier {
     DurabilityTier::Global
+}
+
+/// Semantic read-view request carried over the wire before local resolution.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct ReadViewSpec {
+    /// Which branch/snapshot family this read observes.
+    pub source: ReadViewSourceSpec,
+    /// Optional schema lens for the application-facing row shape.
+    pub schema: ReadViewSchemaSpec,
+    /// Local overlays made visible in front of the persisted source.
+    #[serde(default)]
+    pub overlays: Vec<ReadOverlaySpec>,
+}
+
+impl ReadViewSpec {
+    /// Whether this is the current/default read view implemented by execution.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// Stable identity for read/serving options used by subscription coverage grouping.
+///
+/// Despite the historical name, this key is derived from the full
+/// [`RegisterShapeOptions`], including durability tier and semantic read view.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct ReadViewKey {
+    /// Canonical id of the resolved read view. Nil means the legacy
+    /// current/global default.
+    pub id: uuid::Uuid,
+}
+
+impl ReadViewKey {
+    /// Derive a stable key for one semantic read-view request.
+    pub fn from_register_shape_options(opts: &RegisterShapeOptions) -> Self {
+        let canonical = opts.canonical();
+        if canonical == RegisterShapeOptions::default() {
+            return Self::default();
+        }
+        let bytes = postcard::to_allocvec(&canonical)
+            .expect("register shape options are postcard encodable");
+        Self {
+            id: uuid::Uuid::new_v5(&READ_VIEW_NAMESPACE, &bytes),
+        }
+    }
+}
+
+impl RegisterShapeOptions {
+    fn canonical(&self) -> Self {
+        let mut canonical = self.clone();
+        canonical.read_view.canonicalize();
+        canonical
+    }
+}
+
+impl ReadViewSpec {
+    fn canonicalize(&mut self) {
+        self.source.canonicalize();
+    }
+}
+
+impl ReadViewSourceSpec {
+    fn canonicalize(&mut self) {
+        if let Self::MergedBranches { branches } = self {
+            branches.sort();
+            branches.dedup();
+        }
+    }
+}
+
+/// Wire source selected by a read view.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum ReadViewSourceSpec {
+    /// Current default branch/source.
+    #[default]
+    Current,
+    /// Current state of one named branch.
+    Branch {
+        /// Branch identifier to read from.
+        branch: uuid::Uuid,
+    },
+    /// Merge view of several named branches.
+    MergedBranches {
+        /// Branch identifiers participating in the merged read.
+        branches: Vec<uuid::Uuid>,
+    },
+    /// Snapshot ref resolved by the receiving node.
+    Snapshot {
+        /// Historic frontier to read.
+        snapshot: SnapshotRef,
+    },
+}
+
+/// Wire schema/lens selected by a read view.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum ReadViewSchemaSpec {
+    /// Use the receiver's current read schema.
+    #[default]
+    Current,
+    /// Read rows through a concrete schema-version lens.
+    SchemaVersion {
+        /// Application schema version to project rows through.
+        schema_version: SchemaVersionId,
+    },
+}
+
+/// Local overlay selected by a read view.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum ReadOverlaySpec {
+    /// Direct, non-durable batch overlay.
+    DirectBatch {
+        /// Non-durable batch transaction.
+        batch: TxId,
+    },
+    /// Accepted transaction overlay.
+    AcceptedTransaction {
+        /// Accepted transaction.
+        tx: TxId,
+    },
+    /// Open exclusive transaction overlay.
+    OpenTransaction {
+        /// Open transaction.
+        tx: TxId,
+    },
+}
+
+/// Dotted snapshot ref used by historic read views.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct SnapshotRef {
+    /// Node that owns the local snapshot prefix.
+    pub owner: NodeUuid,
+    /// Contiguous global base visible at snapshot time.
+    pub global_base: GlobalSeq,
+    /// Owner-local HLC prefix visible at snapshot time.
+    pub local_base: TxTime,
+    /// Individual transaction dots above the frontier.
+    #[serde(default)]
+    pub dots: Vec<TxId>,
+}
+
+impl From<Snapshot> for SnapshotRef {
+    fn from(snapshot: Snapshot) -> Self {
+        Self {
+            owner: snapshot.owner,
+            global_base: snapshot.global_base,
+            local_base: snapshot.local_base,
+            dots: snapshot.dots,
+        }
+    }
 }
 
 /// Usage-site subscription attach for one registered shape.
@@ -580,12 +919,633 @@ pub struct Subscribe {
     pub values: Vec<Value>,
 }
 
-/// Table-qualified row result set entry: `(table, row_uuid, content_tx_id)`.
+/// Legacy-compatible table-qualified current content row entry:
+/// `(table, row_uuid, content_tx_id)`.
 pub type ResultRowEntry = (groove::Intern<String>, RowUuid, TxId);
+
+/// Protocol-visible result member.
+///
+/// A member identifies one terminal output of a lowered query program. Ordinary
+/// current-row views use [`ResultMemberEntry::Row`] with a compatibility
+/// [`ResultRowEntry`] projection, but the member also carries enough optional
+/// identity to represent deleted-row, historical, branch, and schema-projected
+/// rows without creating a second result-set protocol.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum ResultMemberEntry {
+    /// Real table row membership.
+    Row(RealRowMemberEntry),
+    /// Synthetic result row, such as aggregate output.
+    Synthetic {
+        /// Logical synthetic table/relation.
+        table: String,
+        /// Stable synthetic row id.
+        row: Vec<u8>,
+        /// Synthetic revision/version id.
+        revision: Vec<u8>,
+    },
+    /// Relation/path tuple membership.
+    PathTuple {
+        /// Path identity.
+        path: String,
+        /// Source row table.
+        source_table: groove::Intern<String>,
+        /// Source row.
+        source_row: RowUuid,
+        /// Target table.
+        target_table: groove::Intern<String>,
+        /// Target row.
+        target_row: RowUuid,
+        /// Optional edge/correlation identity for multipath relations.
+        edge_id: Option<Vec<u8>>,
+        /// Stable tuple revision.
+        revision: Vec<u8>,
+    },
+}
+
+/// Real table row membership, including both the ordinary current-content
+/// compatibility identity and the extra dimensions needed by historic,
+/// branch/prefix, include-deleted, and schema-projected reads.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct RealRowMemberEntry {
+    /// Logical table.
+    pub table: groove::Intern<String>,
+    /// Row identity.
+    pub row_uuid: RowUuid,
+    /// Visible content transaction, when this member has a content row.
+    #[serde(default)]
+    pub content_tx: Option<TxId>,
+    /// Which register/layer this member represents.
+    #[serde(default)]
+    pub layer: ResultRowLayer,
+    /// Deletion-register transaction when membership is tombstone-aware.
+    #[serde(default)]
+    pub deletion_tx: Option<TxId>,
+    /// Source/read frontier this member was produced from.
+    #[serde(default)]
+    pub source: ResultRowSource,
+    /// Resolved read-view key for this member.
+    #[serde(default)]
+    pub read_view: ReadViewKey,
+    /// Schema version after lens/projection, when known on the result member.
+    #[serde(default)]
+    pub schema_version: Option<SchemaVersionId>,
+    /// Branch/prefix discriminator when it participates in member identity.
+    #[serde(default)]
+    pub branch_or_prefix: Option<Vec<u8>>,
+    /// Optional stable digest of the visible member row.
+    #[serde(default)]
+    pub row_digest: Option<Vec<u8>>,
+    /// Batch/transaction grouping identity for batch-centric visibility.
+    #[serde(default)]
+    pub batch: Option<TxId>,
+}
+
+impl RealRowMemberEntry {
+    /// Build the ordinary current-content row member used by current row views.
+    pub fn current_content(row: ResultRowEntry) -> Self {
+        let (table, row_uuid, content_tx) = row;
+        Self {
+            table,
+            row_uuid,
+            content_tx: Some(content_tx),
+            layer: ResultRowLayer::Content,
+            deletion_tx: None,
+            source: ResultRowSource::Current,
+            read_view: ReadViewKey::default(),
+            schema_version: None,
+            branch_or_prefix: None,
+            row_digest: None,
+            batch: None,
+        }
+    }
+
+    /// Return the ordinary current-content projection when available.
+    pub fn row_projection(&self) -> Option<ResultRowEntry> {
+        self.content_tx
+            .map(|tx| (self.table.clone(), self.row_uuid, tx))
+    }
+}
+
+/// Version/register layer represented by a real-row result member.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum ResultRowLayer {
+    /// Visible content register.
+    #[default]
+    Content,
+    /// Deletion register/tombstone.
+    Deletion,
+    /// Membership is determined by content-or-deletion identity.
+    ContentOrDeletion,
+}
+
+/// Source/read frontier that produced a real-row result member.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum ResultRowSource {
+    /// Current default source.
+    #[default]
+    Current,
+    /// Current state of a named branch.
+    Branch {
+        /// Branch identifier.
+        branch: uuid::Uuid,
+    },
+    /// Merge view of several named branches.
+    MergedBranches {
+        /// Branch identifiers participating in the merged source.
+        branches: Vec<uuid::Uuid>,
+    },
+    /// Historic snapshot ref.
+    Snapshot {
+        /// Snapshot frontier.
+        snapshot: SnapshotRef,
+    },
+    /// Historic cut by global sequence.
+    HistoryCut {
+        /// Global sequence frontier.
+        global_seq: GlobalSeq,
+    },
+    /// Merge/composition of several source alternatives.
+    Merge {
+        /// Source alternatives.
+        inputs: Vec<ResultRowSource>,
+    },
+    /// Schema/lens projection over a base source.
+    LensProjection {
+        /// Projected schema version.
+        schema_version: SchemaVersionId,
+        /// Base source before projection.
+        base: Box<ResultRowSource>,
+    },
+    /// Local/open overlay over another source.
+    Overlay {
+        /// Overlay transaction.
+        tx: TxId,
+        /// Base source under the overlay.
+        base: Box<ResultRowSource>,
+    },
+}
+
+impl ResultMemberEntry {
+    /// Construct an ordinary row membership entry.
+    pub fn row(entry: ResultRowEntry) -> Self {
+        Self::Row(RealRowMemberEntry::current_content(entry))
+    }
+
+    /// Return the logical table name when this member belongs to a table-like
+    /// output. Synthetic rows use their synthetic table/relation name.
+    pub fn table_name(&self) -> Option<&str> {
+        match self {
+            Self::Row(entry) => Some(entry.table.as_str()),
+            Self::Synthetic { table, .. } => Some(table.as_str()),
+            Self::PathTuple { target_table, .. } => Some(target_table.as_str()),
+        }
+    }
+
+    /// Return the real-row member payload, when this member is a real row.
+    pub fn as_real_row(&self) -> Option<&RealRowMemberEntry> {
+        match self {
+            Self::Row(entry) => Some(entry),
+            Self::Synthetic { .. } | Self::PathTuple { .. } => None,
+        }
+    }
+
+    /// Return the ordinary current-content projection when this member has one.
+    pub fn as_row(&self) -> Option<ResultRowEntry> {
+        match self {
+            Self::Row(entry) => entry.row_projection(),
+            Self::Synthetic { .. } | Self::PathTuple { .. } => None,
+        }
+    }
+
+    /// Consume the ordinary row entry when this member is row-shaped.
+    pub fn into_row(self) -> Option<ResultRowEntry> {
+        match self {
+            Self::Row(entry) => entry.row_projection(),
+            Self::Synthetic { .. } | Self::PathTuple { .. } => None,
+        }
+    }
+}
+
+impl From<ResultRowEntry> for ResultMemberEntry {
+    fn from(entry: ResultRowEntry) -> Self {
+        Self::row(entry)
+    }
+}
+
+impl From<RealRowMemberEntry> for ResultMemberEntry {
+    fn from(entry: RealRowMemberEntry) -> Self {
+        Self::Row(entry)
+    }
+}
+
+impl PartialEq<ResultRowEntry> for ResultMemberEntry {
+    fn eq(&self, other: &ResultRowEntry) -> bool {
+        self.as_row() == Some(*other)
+    }
+}
+
+impl PartialEq<ResultMemberEntry> for ResultRowEntry {
+    fn eq(&self, other: &ResultMemberEntry) -> bool {
+        other == self
+    }
+}
+
+/// One typed non-row fact emitted by a maintained view.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum ProgramFactEntry {
+    /// Payload bytes for a non-versioned result member, such as aggregate/window output.
+    ResultPayload(ResultMemberPayloadEntry),
+    /// A relation/path edge between two materialized rows.
+    PathEdge(PathEdgeEntry),
+    /// Coverage for one correlated path expansion.
+    PathCorrelationCoverage(PathCorrelationCoverageEntry),
+    /// Source/table coverage fact.
+    SourceCoverage(SourceCoverageEntry),
+    /// Settled read-frontier fact.
+    ReadFrontierSettled(ReadFrontierSettledEntry),
+    /// Complete transaction payload coverage fact.
+    CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry),
+    /// View-complete exclusive transaction coverage fact.
+    ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageEntry),
+    /// Policy decision fact.
+    PolicyDecision(PolicyDecisionEntry),
+    /// Content/deletion/replacement version witness.
+    VersionWitness(VersionWitnessEntry),
+    /// Policy dependency witness.
+    PolicyWitness(PolicyWitnessEntry),
+    /// Contributing member/batch provenance.
+    ContributingMembers(ContributingMembersEntry),
+    /// Predicate-read validation fact.
+    PredicateRead(PredicateReadEntry),
+    /// Predicate output-set fact.
+    PredicateOutputSet(PredicateOutputSetEntry),
+    /// Point row-read validation fact.
+    PointRead(PointReadEntry),
+    /// Large-value extent authorization/materialization fact.
+    LargeValueExtent(LargeValueExtentEntry),
+}
+
+/// Compatibility alias while current code still imports the previous name.
+pub type ViewFactEntry = ProgramFactEntry;
+
+/// Non-versioned result payload keyed by a typed result member.
+///
+/// Ordinary real rows travel via `VersionBundle`; synthetic/aggregate/window
+/// outputs use this fact to keep member identity and row bytes in the same
+/// typed program-output stream.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ResultMemberPayloadEntry {
+    /// Member whose payload is encoded here.
+    pub member: ResultMemberEntry,
+    /// Descriptor or schema identity for decoding `record`.
+    pub descriptor: Vec<u8>,
+    /// Custom row-record encoded payload bytes.
+    pub record: Vec<u8>,
+}
+
+/// Relation/path edge fact emitted by query payloads.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PathEdgeEntry {
+    /// Logical path or relation name.
+    pub path: String,
+    /// Source row table.
+    pub source_table: groove::Intern<String>,
+    /// Source row id.
+    pub source_row: RowUuid,
+    /// Target row table.
+    pub target_table: groove::Intern<String>,
+    /// Target row id.
+    pub target_row: RowUuid,
+    /// Edge kind, when this is more specific than a plain include/join edge.
+    #[serde(default)]
+    pub kind: Option<PathEdgeKind>,
+    /// Source version identity, when edge membership depends on a concrete version.
+    #[serde(default)]
+    pub source_version: Option<RowVersionRefEntry>,
+    /// Target version identity, when edge membership depends on a concrete version.
+    #[serde(default)]
+    pub target_version: Option<RowVersionRefEntry>,
+    /// Recursive depth for reachability/gather paths.
+    #[serde(default)]
+    pub depth: Option<u32>,
+    /// Multipath/edge id when several edges connect the same source/target.
+    #[serde(default)]
+    pub edge_id: Option<Vec<u8>>,
+    /// Union/policy branch alternative.
+    #[serde(default)]
+    pub branch: Option<Vec<u8>>,
+    /// Terminal role for intermediate/frontier/output relation rows.
+    #[serde(default)]
+    pub role: Option<PathEdgeRole>,
+    /// Stable edge order when order affects the maintained output.
+    #[serde(default)]
+    pub order: Option<Vec<u8>>,
+    /// Whether this edge is a materialized match or a hole/null placeholder.
+    #[serde(default)]
+    pub hole_state: Option<PathHoleState>,
+}
+
+/// Concrete row-version reference used by facts.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct RowVersionRefEntry {
+    /// Transaction containing the version.
+    pub tx: TxId,
+    /// Schema version carried by the version row, when available.
+    #[serde(default)]
+    pub schema_version: Option<SchemaVersionId>,
+    /// Version/register layer.
+    #[serde(default)]
+    pub layer: ResultRowLayer,
+    /// Batch/transaction grouping identity.
+    #[serde(default)]
+    pub batch: Option<TxId>,
+    /// Branch/prefix discriminator.
+    #[serde(default)]
+    pub branch_or_prefix: Option<Vec<u8>>,
+    /// Optional visible row digest.
+    #[serde(default)]
+    pub row_digest: Option<Vec<u8>>,
+}
+
+/// Version/replacement witness for payload and removal materialization.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct VersionWitnessEntry {
+    /// Witness role, such as payload, replacement, or deletion.
+    pub role: String,
+    /// Witnessed version.
+    pub version: RowVersionRefEntry,
+    /// Result member this witness serves, when scoped to one member.
+    pub member: Option<ResultMemberEntry>,
+}
+
+/// Policy dependency witness fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PolicyWitnessEntry {
+    /// Protected result member or row.
+    pub protected: ResultMemberEntry,
+    /// Policy path/branch identity.
+    pub policy_path: String,
+    /// Witness version proving or revoking visibility.
+    pub witness: RowVersionRefEntry,
+    /// Dependency edge kind.
+    pub edge_kind: Option<PathEdgeKind>,
+}
+
+/// Derived-output provenance fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ContributingMembersEntry {
+    /// Derived result member.
+    pub result: ResultMemberEntry,
+    /// Contributing member.
+    pub contributor: ResultMemberEntry,
+    /// Optional contributing transaction/batch.
+    pub batch: Option<TxId>,
+    /// Optional contribution role.
+    pub role: Option<String>,
+}
+
+/// Predicate-read validation fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PredicateReadEntry {
+    /// Validation side: base or now.
+    pub role: PredicateOutputSetRoleEntry,
+    /// Shape id.
+    pub shape_id: ShapeId,
+    /// Binding id.
+    pub binding_id: BindingId,
+    /// Encoded predicate/range identity.
+    pub predicate: Vec<u8>,
+    /// Encoded read frontier or snapshot point.
+    pub frontier: Vec<u8>,
+}
+
+/// Point row-read validation fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PointReadEntry {
+    /// Whether the row was present in this read.
+    pub present: bool,
+    /// Logical table.
+    pub table: groove::Intern<String>,
+    /// Row identity.
+    pub row: RowUuid,
+    /// Concrete version read, when present.
+    pub version: Option<RowVersionRefEntry>,
+    /// Shape id.
+    pub shape_id: ShapeId,
+    /// Binding id.
+    pub binding_id: BindingId,
+}
+
+/// Relation/path edge kind.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum PathEdgeKind {
+    /// Include edge.
+    Include,
+    /// Join edge.
+    Join,
+    /// Relation traversal edge.
+    Relation,
+    /// Recursive frontier/reachability edge.
+    Recursive,
+    /// Policy dependency edge.
+    Policy,
+}
+
+/// Role of a path edge in the maintained program.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum PathEdgeRole {
+    /// Internal edge only.
+    Intermediate,
+    /// Frontier/worklist edge.
+    Frontier,
+    /// Edge contributes directly to output membership.
+    Terminal,
+}
+
+/// Placeholder state for optional relation/include paths.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum PathHoleState {
+    /// Concrete matched edge.
+    Matched,
+    /// Placeholder for an absent optional target.
+    Hole,
+}
+
+/// Correlation coverage fact for relation/path materialization.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PathCorrelationCoverageEntry {
+    /// Logical path or relation name.
+    pub path: String,
+    /// Source row table.
+    pub source_table: groove::Intern<String>,
+    /// Source row id.
+    pub source_row: RowUuid,
+    /// Canonical encoded correlation key for the path expansion.
+    pub correlation_key: Vec<u8>,
+    /// Whether this correlation is complete for the subscription read view.
+    pub complete: bool,
+}
+
+/// Source/table coverage fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct SourceCoverageEntry {
+    /// Logical source id/path encoded for the wire.
+    pub source: String,
+    /// Logical table.
+    pub table: groove::Intern<String>,
+    /// Optional covered row.
+    pub row: Option<RowUuid>,
+    /// Canonical encoded coverage/range key.
+    pub coverage: Vec<u8>,
+}
+
+/// Settled read-frontier fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ReadFrontierSettledEntry {
+    /// Scope this frontier settles.
+    pub scope: String,
+    /// Durability tier that settled.
+    pub tier: DurabilityTier,
+    /// Optional ordered stream identity.
+    pub stream: Option<String>,
+    /// Canonical encoded frontier position.
+    pub frontier: Vec<u8>,
+}
+
+/// Complete transaction payload coverage fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct CompleteTxPayloadCoverageEntry {
+    /// Covered transaction/batch.
+    pub tx: TxId,
+    /// Durability tier at which the payload is complete.
+    pub tier: DurabilityTier,
+    /// Canonical payload digest.
+    pub payload_digest: Vec<u8>,
+}
+
+/// View-complete exclusive transaction coverage fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ViewCompleteExclusiveCoverageEntry {
+    /// Covered transaction/batch.
+    pub tx: TxId,
+    /// View/source scope.
+    pub scope: String,
+    /// Optional result member this coverage is complete for.
+    pub result: Option<ResultMemberEntry>,
+    /// Durability tier at which this view coverage is complete.
+    pub tier: DurabilityTier,
+    /// Digest of members covered by this view/result.
+    pub covered_members_digest: Vec<u8>,
+}
+
+/// Tri-state policy decision fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PolicyDecisionEntry {
+    /// Decision identity inside the program.
+    pub decision: Vec<u8>,
+    /// Decision outcome.
+    pub outcome: PolicyDecisionOutcomeEntry,
+    /// Optional machine-readable reason.
+    pub reason: Option<String>,
+}
+
+/// Wire policy decision outcome.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum PolicyDecisionOutcomeEntry {
+    /// Policy grants the operation.
+    Allowed,
+    /// Policy denies the operation.
+    Denied,
+    /// Caller did not provide input required by the policy.
+    IndeterminateRequiresInput {
+        /// Missing input name/category.
+        input: String,
+    },
+    /// The local node has not observed enough source/frontier coverage.
+    RequiresCoverage {
+        /// Coverage scope required before the decision can be known.
+        scope: String,
+        /// Canonical encoded frontier requirement.
+        frontier: Vec<u8>,
+    },
+}
+
+/// Predicate output-set fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PredicateOutputSetEntry {
+    /// Validation side: base or now.
+    pub role: PredicateOutputSetRoleEntry,
+    /// Logical table.
+    pub table: groove::Intern<String>,
+    /// Row identity.
+    pub row: RowUuid,
+    /// Version identity compared by validation.
+    pub version: RowVersionRefEntry,
+    /// Shape id.
+    pub shape_id: ShapeId,
+    /// Binding id.
+    pub binding_id: BindingId,
+}
+
+/// Predicate output-set comparison side.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+pub enum PredicateOutputSetRoleEntry {
+    /// Base snapshot side.
+    Base,
+    /// Validation/current side.
+    Now,
+}
+
+/// Large-value extent authorization/materialization fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct LargeValueExtentEntry {
+    /// Owner/version/read-view context.
+    pub owner: LargeValueOwnerRef,
+    /// Column name.
+    pub column: String,
+    /// Authorized extent.
+    pub extent: Extent,
+    /// Content digest.
+    pub digest: Vec<u8>,
+}
 
 /// Namespace used for migration-lens UUIDv5 ids.
 pub const MIGRATION_LENS_NAMESPACE: uuid::Uuid =
     uuid::uuid!("5d13f9cb-8a10-5e0f-9a58-e56630a1dc22");
+
+/// Namespace used for semantic read-view UUIDv5 ids.
+pub const READ_VIEW_NAMESPACE: uuid::Uuid = uuid::uuid!("1a87cf70-f8f0-5ae7-a574-1f9b5e4517f1");
 
 /// Published immutable schema-version payload.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -1002,5 +1962,31 @@ mod tests {
         };
 
         assert_ne!(lens.content_id(), changed.content_id());
+    }
+
+    #[test]
+    fn read_view_key_canonicalizes_merged_branch_order() {
+        let a = uuid::uuid!("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa");
+        let b = uuid::uuid!("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
+        let forward = RegisterShapeOptions {
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::MergedBranches {
+                    branches: vec![a, b],
+                },
+                ..ReadViewSpec::default()
+            },
+            ..RegisterShapeOptions::default()
+        };
+        let reversed = RegisterShapeOptions {
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::MergedBranches {
+                    branches: vec![b, a, a],
+                },
+                ..ReadViewSpec::default()
+            },
+            ..RegisterShapeOptions::default()
+        };
+
+        assert_eq!(forward.read_view_key(), reversed.read_view_key());
     }
 }

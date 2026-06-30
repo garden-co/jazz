@@ -324,7 +324,7 @@ impl Backend {
         &self,
         prepared: &jazz::db::PreparedQuery,
         opts: CoreReadOpts,
-    ) -> jazz::db::QueryAttachment {
+    ) -> std::result::Result<jazz::db::QueryAttachment, CoreDbError> {
         match self {
             Self::Memory(db) => db.attach_query_with_opts(prepared, opts),
             #[cfg(feature = "rocksdb")]
@@ -345,30 +345,6 @@ impl Backend {
             Self::Memory(db) => db.detach_query(attachment),
             #[cfg(feature = "rocksdb")]
             Self::RocksDb(db) => db.detach_query(attachment),
-        }
-    }
-
-    fn can_read(&self, table: &str, row: CoreRowUuid) -> std::result::Result<bool, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.can_read(table, row),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.can_read(table, row),
-        }
-    }
-
-    fn can_update(&self, table: &str, row: CoreRowUuid) -> std::result::Result<bool, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.can_update(table, row),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.can_update(table, row),
-        }
-    }
-
-    fn can_delete(&self, table: &str, row: CoreRowUuid) -> std::result::Result<bool, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.can_delete(table, row),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.can_delete(table, row),
         }
     }
 
@@ -999,7 +975,11 @@ impl ClientDbInner {
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
         let attachment = if wait_for_coverage {
-            let attachment = inner.borrow().db.attach_query(&prepared, opts);
+            let attachment = inner
+                .borrow()
+                .db
+                .attach_query(&prepared, opts.clone())
+                .map_err(|error| JazzError::Query(error.to_string()))?;
             Self::wait_for_query_coverage(inner, &attachment).await?;
             Some(attachment)
         } else {
@@ -1380,6 +1360,7 @@ impl JazzClient {
             local_updates: CoreLocalUpdates::Immediate,
             propagation: CorePropagation::Full,
             include_deleted: false,
+            ..CoreReadOpts::default()
         }
     }
     fn core_query(&self, query: &Query) -> Result<jazz::query::Query> {
@@ -1455,35 +1436,16 @@ impl JazzClient {
     fn core_magic_value(
         &self,
         table: &str,
-        row_id: CoreRowUuid,
+        _row_id: CoreRowUuid,
         row: &jazz::node::CurrentRow,
         column: &str,
     ) -> Result<Option<Value>> {
         let value = match column {
-            "$canRead" => Value::Boolean(
-                self.db
-                    .inner
-                    .borrow()
-                    .db
-                    .can_read(table, row_id)
-                    .map_err(|error| JazzError::Query(error.to_string()))?,
-            ),
-            "$canEdit" => Value::Boolean(
-                self.db
-                    .inner
-                    .borrow()
-                    .db
-                    .can_update(table, row_id)
-                    .map_err(|error| JazzError::Query(error.to_string()))?,
-            ),
-            "$canDelete" => Value::Boolean(
-                self.db
-                    .inner
-                    .borrow()
-                    .db
-                    .can_delete(table, row_id)
-                    .map_err(|error| JazzError::Query(error.to_string()))?,
-            ),
+            "$canRead" | "$canEdit" | "$canDelete" => {
+                return Err(JazzError::Query(format!(
+                    "permission introspection column {column} requires unified policy lowering"
+                )));
+            }
             "$createdAt" | "$updatedAt" | "$createdBy" | "$updatedBy" => {
                 let provenance = self
                     .db

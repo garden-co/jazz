@@ -7,7 +7,10 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 
 use super::*;
 use crate::ids::{AuthorId, NodeUuid};
-use crate::protocol::{CatalogueAck, LensOp, TableLens};
+use crate::protocol::{
+    CatalogueAck, LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ShapeAst,
+    Subscribe, TableLens,
+};
 use crate::query::{
     ArraySubquery, Include, JoinMode, all_of, any_of, claim, col, contains, eq, gt, in_list,
     is_null, lit, lte, ne, not,
@@ -62,6 +65,7 @@ fn global_subscribe_opts() -> ReadOpts {
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
         include_deleted: false,
+        ..ReadOpts::default()
     }
 }
 
@@ -71,6 +75,75 @@ fn edge_subscribe_opts() -> ReadOpts {
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
         include_deleted: false,
+        ..ReadOpts::default()
+    }
+}
+
+fn branch_read_opts() -> ReadOpts {
+    ReadOpts {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: uuid::Uuid::from_bytes([0x42; 16]),
+            },
+            ..ReadViewSpec::default()
+        },
+        ..ReadOpts::default()
+    }
+}
+
+fn assert_unsupported_read_view(error: Error) {
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("non-default read_view"),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+fn assert_unsupported_subscription_include_deleted(error: Error) {
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("include_deleted"),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+fn assert_unsupported_subscription_array_subquery(error: Error) {
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("array subqueries")
+            && (error.message.contains("unified relation/path lowering")
+                || error.message.contains("relation-edge terminal deltas")),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+fn assert_unsupported_propagated_subscription_tier(error: Error) {
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("global-tier remote coverage"),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+fn assert_unsupported_sync_register_tier(error: Error) {
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error
+            .message
+            .contains("sync subscription serving requires global tier"),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+fn expect_error<T>(result: Result<T, Error>) -> Error {
+    match result {
+        Ok(_) => panic!("expected operation to fail"),
+        Err(error) => error,
     }
 }
 
@@ -269,6 +342,46 @@ fn evolved_owner_write_schema() -> JazzSchema {
 
 fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
+}
+
+#[test]
+fn view_update_is_not_empty_when_it_only_carries_program_facts() {
+    let subscription = crate::protocol::SubscriptionKey {
+        shape_id: crate::query::ShapeId(uuid::Uuid::from_bytes([0x11; 16])),
+        binding_id: crate::query::BindingId(uuid::Uuid::from_bytes([0x22; 16])),
+        read_view: Default::default(),
+    };
+    let empty = SyncMessage::ViewUpdate {
+        subscription,
+        reset_result_set: false,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    assert!(view_update_is_empty(&empty));
+
+    let fact_only = SyncMessage::ViewUpdate {
+        subscription,
+        reset_result_set: false,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: vec![crate::protocol::ViewFactEntry::PathCorrelationCoverage(
+            crate::protocol::PathCorrelationCoverageEntry {
+                path: "owner".to_owned(),
+                source_table: "todos".to_owned().into(),
+                source_row: row(1),
+                correlation_key: vec![1],
+                complete: true,
+            },
+        )],
+        program_fact_removes: Vec::new(),
+    };
+    assert!(!view_update_is_empty(&fact_only));
 }
 
 fn cells(title: &str, done: bool, owner: AuthorId) -> RowCells {
@@ -539,6 +652,36 @@ fn db_facade_opens_writes_and_reads_todos_end_to_end() {
 }
 
 #[test]
+fn permission_introspection_magic_columns_fail_closed_on_prepare_query() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+
+    for (column, query) in [
+        ("$canRead", db.table("todos").select(["$canRead"])),
+        (
+            "$canEdit",
+            db.table("todos").filter(eq(col("$canEdit"), lit(true))),
+        ),
+        (
+            "$canDelete",
+            db.table("todos").filter(ne(col("$canDelete"), lit(false))),
+        ),
+    ] {
+        let error = expect_error(db.prepare_query(&query));
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(
+            error.message.contains("unsupported")
+                && error.message.contains("permission introspection")
+                && error.message.contains(column),
+            "unexpected error message: {}",
+            error.message
+        );
+    }
+
+    let provenance_query = db.table("todos").select(["$createdAt", "$createdBy"]);
+    db.prepare_query(&provenance_query).unwrap();
+}
+
+#[test]
 fn read_opts_default_and_effective_tier_preserve_local_update_contract() {
     let opts = ReadOpts::default();
     assert_eq!(opts.tier, DurabilityTier::Local);
@@ -546,31 +689,101 @@ fn read_opts_default_and_effective_tier_preserve_local_update_contract() {
     assert_eq!(opts.propagation, Propagation::Full);
 
     assert_eq!(
-        effective_read_tier(ReadOpts {
+        effective_read_tier(&ReadOpts {
             tier: DurabilityTier::None,
             local_updates: LocalUpdates::Immediate,
             propagation: Propagation::LocalOnly,
             include_deleted: false,
+            ..ReadOpts::default()
         }),
         DurabilityTier::Local
     );
     assert_eq!(
-        effective_read_tier(ReadOpts {
+        effective_read_tier(&ReadOpts {
             tier: DurabilityTier::Global,
             local_updates: LocalUpdates::Immediate,
             propagation: Propagation::LocalOnly,
             include_deleted: false,
+            ..ReadOpts::default()
         }),
         DurabilityTier::Global
     );
     assert_eq!(
-        effective_read_tier(ReadOpts {
+        effective_read_tier(&ReadOpts {
             tier: DurabilityTier::None,
             local_updates: LocalUpdates::Deferred,
             propagation: Propagation::Full,
             include_deleted: false,
+            ..ReadOpts::default()
         }),
         DurabilityTier::None
+    );
+}
+
+#[test]
+fn non_default_read_view_fails_closed_on_read_subscription_and_attach_apis() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+    let opts = branch_read_opts();
+
+    assert_unsupported_read_view(expect_error(doctest_support::block_on(
+        db.all(&prepared_query, opts.clone()),
+    )));
+    assert_unsupported_read_view(expect_error(doctest_support::block_on(
+        db.all_relation_snapshot(&prepared_query, opts.clone()),
+    )));
+    assert_unsupported_read_view(expect_error(doctest_support::block_on(
+        db.subscribe(&prepared_query, opts.clone()),
+    )));
+    assert_unsupported_read_view(expect_error(
+        db.attach_query_with_opts(&prepared_query, opts.clone()),
+    ));
+    assert_unsupported_read_view(expect_error(db.attach_query_with_opts_for_identity(
+        &prepared_query,
+        opts,
+        db.identity.author,
+    )));
+}
+
+#[test]
+fn include_deleted_fails_closed_on_live_subscription_apis() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+    let opts = ReadOpts {
+        include_deleted: true,
+        ..ReadOpts::default()
+    };
+
+    assert_unsupported_subscription_include_deleted(expect_error(doctest_support::block_on(
+        db.subscribe(&prepared_query, opts.clone()),
+    )));
+    assert_unsupported_subscription_include_deleted(expect_error(doctest_support::block_on(
+        db.subscribe_for_identity(&prepared_query, opts.clone(), db.identity.author),
+    )));
+
+    let rows = doctest_support::block_on(db.all(&prepared_query, opts)).unwrap();
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn array_subquery_fails_closed_on_live_subscription_api() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("todos", "todos", "owner_id", "id")
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+    );
+    let prepared_query = prepared(&db, &query);
+
+    assert_unsupported_subscription_array_subquery(expect_error(block_on(
+        db.subscribe(&prepared_query, global_subscribe_opts()),
+    )));
+    assert_eq!(
+        prepared_read(&db, &query).len(),
+        0,
+        "one-shot reads remain available for already-supported array subquery snapshots"
     );
 }
 
@@ -584,11 +797,12 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
     let prepared_query = prepared(&db, &query);
 
     assert_eq!(
-        effective_read_tier(ReadOpts {
+        effective_read_tier(&ReadOpts {
             tier: DurabilityTier::Edge,
             local_updates: LocalUpdates::Immediate,
             propagation: Propagation::LocalOnly,
             include_deleted: false,
+            ..ReadOpts::default()
         }),
         DurabilityTier::Edge
     );
@@ -600,6 +814,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
                 local_updates: LocalUpdates::Immediate,
                 propagation: Propagation::LocalOnly,
                 include_deleted: false,
+                ..ReadOpts::default()
             },
         ))
         .unwrap()
@@ -633,6 +848,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
                     local_updates: LocalUpdates::Immediate,
                     propagation: Propagation::LocalOnly,
                     include_deleted: false,
+                    ..ReadOpts::default()
                 },
             ))
             .unwrap()
@@ -1039,6 +1255,7 @@ fn db_facade_subscription_reports_initial_and_changed_results() {
             local_updates: LocalUpdates::Deferred,
             propagation: Propagation::Full,
             include_deleted: false,
+            ..ReadOpts::default()
         },
     ))
     .unwrap();
@@ -1078,6 +1295,7 @@ fn db_facade_subscription_refresh_preserves_read_tier() {
             local_updates: LocalUpdates::Deferred,
             propagation: Propagation::Full,
             include_deleted: false,
+            ..ReadOpts::default()
         },
     ))
     .unwrap();
@@ -1181,8 +1399,10 @@ fn db_facade_schedules_immediate_tick_for_attached_query_coverage() {
             local_updates: LocalUpdates::Deferred,
             propagation: Propagation::Full,
             include_deleted: false,
+            ..ReadOpts::default()
         },
-    );
+    )
+    .unwrap();
 
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
 }
@@ -1202,6 +1422,7 @@ fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
             local_updates: LocalUpdates::Deferred,
             propagation: Propagation::LocalOnly,
             include_deleted: false,
+            ..ReadOpts::default()
         },
     ))
     .unwrap();
@@ -1761,6 +1982,7 @@ fn subscribe_uses_prepared_non_simple_plan() {
             local_updates: LocalUpdates::Deferred,
             propagation: Propagation::Full,
             include_deleted: false,
+            ..ReadOpts::default()
         },
     ))
     .unwrap();
@@ -2307,6 +2529,241 @@ fn db_sync_surface_round_trips_subscription_to_client() {
 }
 
 #[test]
+fn subscriber_connection_rejects_non_default_read_view_before_serving_subscription() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+
+    // Internal sync-loop coverage: the public Db subscription API rejects this
+    // read view before it can produce wire messages, so this test sends protocol
+    // messages directly to exercise the lower serving path.
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let read_opts = branch_read_opts();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        read_view: read_opts.read_view,
+    };
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: opts.clone(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+        }))
+        .unwrap();
+
+    assert_unsupported_read_view(subscriber.borrow_mut().tick().unwrap_err());
+}
+
+#[test]
+fn subscriber_connection_rejects_local_tier_register_shape() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+
+    // Internal sync-loop coverage: public propagated subscriptions normalize
+    // local reads before sending RegisterShape, so this sends protocol messages
+    // directly to exercise the lower serving fence.
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Local,
+        read_view: ReadViewSpec::default(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts,
+        })
+        .unwrap();
+
+    assert_unsupported_sync_register_tier(subscriber.borrow_mut().tick().unwrap_err());
+}
+
+#[test]
+fn subscriber_connection_rejects_subscribe_without_link_shape_options() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+
+    // Internal sync-loop coverage: pre-register the shape in the served node but
+    // not on this link. The subscriber must still RegisterShape on its own
+    // connection so serving options cannot leak across links.
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    server
+        .node()
+        .borrow_mut()
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions::default().read_view_key(),
+            },
+            values: Vec::new(),
+        }))
+        .unwrap();
+
+    let error = subscriber.borrow_mut().tick().unwrap_err();
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(
+        error.message.contains("unregistered shape/read view"),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+#[test]
+fn local_live_subscription_requests_global_upstream_coverage() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    seed(&server, "todos", cells("first", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    client.tick().unwrap();
+    server.tick().unwrap();
+
+    // Internal sync-loop coverage: the public subscription is local-tier, but
+    // the remote coverage request must be settled-only because local state is
+    // link-local to the subscribing client.
+    let subscriber_ref = subscriber.borrow();
+    let ConnectionLink::Subscriber {
+        coverage_groups, ..
+    } = &subscriber_ref.link
+    else {
+        panic!("expected subscriber connection");
+    };
+    assert_eq!(coverage_groups.len(), 1);
+    let coverage = coverage_groups.keys().next().unwrap();
+    assert_eq!(coverage.opts.tier, DurabilityTier::Global);
+    assert!(coverage.opts.read_view.is_default());
+}
+
+#[test]
+fn edge_live_subscription_with_full_propagation_rejects_before_upstream_coverage() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+
+    let query = Query::from("todos");
+    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
+        &client,
+        &query,
+        edge_subscribe_opts(),
+    )));
+
+    client.tick().unwrap();
+    assert!(
+        upstream_transport.try_recv().is_none(),
+        "unsupported edge-tier subscription must not register upstream coverage"
+    );
+}
+
+#[test]
+fn subscriber_connection_rejects_non_global_register_shape_options() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+
+    // Internal sync-loop coverage: public APIs normalize local subscriptions to
+    // global upstream coverage. Malformed/direct peers must not install an
+    // edge-tier subscription served by the old full-recompute path.
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let edge_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        read_view: ReadViewSpec::default(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: edge_opts,
+        })
+        .unwrap();
+
+    let error = subscriber.borrow_mut().tick().unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error
+            .message
+            .contains("sync subscription serving requires global tier"),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+#[test]
+fn subscriber_connection_rejects_array_subquery_register_shape_before_serving_subscription() {
+    let schema = relation_schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+
+    // Internal sync-loop coverage: public Db APIs reject array-subquery
+    // subscriptions/attachments before wire messages, so this sends protocol
+    // messages directly to exercise the serving fence.
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("users")
+        .array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id"))
+        .validate(&schema)
+        .unwrap();
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+
+    assert_unsupported_subscription_array_subquery(subscriber.borrow_mut().tick().unwrap_err());
+}
+
+#[test]
 fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
     let schema = schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
@@ -2351,7 +2808,9 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
 
-    let attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
     assert!(!client.query_attachment_is_covered(&attachment));
     client.tick().unwrap();
     server.tick().unwrap();
@@ -2379,7 +2838,9 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
-    let first_attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
+    let first_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
@@ -2387,7 +2848,9 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     assert_eq!(prepared_read(&client, &query).len(), 1);
 
     seed(&server, "todos", cells("second", false, owner));
-    let second_attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
+    let second_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert!(!client.query_attachment_is_covered(&second_attachment));
     client.tick().unwrap();
@@ -2417,18 +2880,23 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
-    let first_attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
+    let first_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let second_attachment = client.attach_query_with_opts(&prepared, global_subscribe_opts());
+    let second_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
     let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber {
+        peer,
         served,
         coverage_groups,
         ..
@@ -2443,6 +2911,10 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
         .next()
         .expect("duplicate usage subscriptions should share one coverage group");
     assert_eq!(group.subscribers.len(), 2);
+    let maintained_metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(maintained_metrics.hits_out, 2);
+    assert_eq!(maintained_metrics.full_recomputes_out, 0);
+    assert_eq!(maintained_metrics.footprint.result_rows, 1);
     assert_eq!(prepared_read(&client, &query).len(), 1);
     drop(subscriber_ref);
     client.detach_query(first_attachment);
@@ -2556,7 +3028,9 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
-    let first_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
+    let first_attachment = client
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
@@ -2564,7 +3038,9 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     assert_eq!(prepared_read(&client, &query).len(), 1);
 
     seed(&server, "todos", cells("second", false, owner));
-    let second_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
+    let second_attachment = client
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert!(!client.query_attachment_is_covered(&second_attachment));
     client.tick().unwrap();
@@ -2625,7 +3101,9 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
 
     let query = Query::from("chats");
     let prepared = prepared(&client, &query);
-    let first_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
+    let first_attachment = client
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
@@ -2646,7 +3124,9 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
             ),
         ]),
     );
-    let second_attachment = client.attach_query_with_opts(&prepared, edge_subscribe_opts());
+    let second_attachment = client
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert!(!client.query_attachment_is_covered(&second_attachment));
     client.tick().unwrap();
@@ -2686,7 +3166,7 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
     let claims = BTreeMap::from([("join_code".to_owned(), Value::String(join_code.to_owned()))]);
     client.set_identity_claims(reader, claims.clone());
 
-    let first = seed(
+    let _first = seed(
         &server,
         "chats",
         BTreeMap::from([
@@ -2703,38 +3183,11 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, claims);
 
     let query = Query::from("chats");
-    let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
-    client.tick().unwrap();
-    server.tick().unwrap();
-    client.tick().unwrap();
-    assert_eq!(
-        row_ids(&delta_rows(block_on(subscription.next_event()).unwrap()).0),
-        vec![first]
-    );
-
-    let second = seed(
-        &server,
-        "chats",
-        BTreeMap::from([
-            ("title".to_owned(), Value::String("second".to_owned())),
-            (
-                "joinCode".to_owned(),
-                Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
-            ),
-        ]),
-    );
-    server.tick().unwrap();
-    client.tick().unwrap();
-
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
-    assert_eq!(row_ids(&added), vec![second]);
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
-    assert_eq!(
-        row_ids(&prepared_all(&client, &query, edge_subscribe_opts())),
-        vec![first, second]
-    );
+    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
+        &client,
+        &query,
+        edge_subscribe_opts(),
+    )));
 }
 
 #[test]
@@ -2990,17 +3443,12 @@ fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
     let (bob_transport, server_bob_transport) = duplex();
     let _bob_upstream = bob_db.connect_upstream(bob_transport);
     let _bob_subscriber = server.accept_subscriber(server_bob_transport, bob);
-    let mut bob_subscription = prepared_subscribe(&bob_db, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(bob_subscription.next_event()).unwrap()).is_empty());
-    bob_db.tick().unwrap();
-    server.tick().unwrap();
-    bob_db.tick().unwrap();
-
+    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
+        &bob_db,
+        &query,
+        edge_subscribe_opts(),
+    )));
     assert!(prepared_all(&bob_db, &query, edge_subscribe_opts()).is_empty());
-    let (added, updated, removed) = delta_rows(block_on(bob_subscription.next_event()).unwrap());
-    assert!(added.is_empty());
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
 }
 
 #[test]
@@ -3039,17 +3487,12 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
         BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
     );
     let query = Query::from("messages");
-    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
-    reader.tick().unwrap();
-    server.tick().unwrap();
-    reader.tick().unwrap();
-
+    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
+        &reader,
+        &query,
+        edge_subscribe_opts(),
+    )));
     assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
-    assert!(added.is_empty());
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
 }
 
 #[test]
@@ -3121,17 +3564,13 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
     );
     let query = Query::from("messages");
-    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
-    reader.tick().unwrap();
-    server.tick().unwrap();
-    reader.tick().unwrap();
+    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
+        &reader,
+        &query,
+        edge_subscribe_opts(),
+    )));
 
     assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
-    assert!(added.is_empty());
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
 }
 
 #[test]
@@ -3378,46 +3817,59 @@ fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
 }
 
 #[test]
-fn global_subscription_announces_array_subquery_upstream_coverage_recursively() {
+fn global_subscription_rejects_array_subquery_before_upstream_coverage() {
     let schema = relation_schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
             .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
     );
-    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let _upstream = client.connect_upstream(client_transport);
+    assert_unsupported_subscription_array_subquery(expect_error(prepared_subscribe(
+        &client,
+        &query,
+        global_subscribe_opts(),
+    )));
 
     client.tick().unwrap();
-
-    let mut registered_tables = Vec::new();
-    let mut subscribe_count = 0;
-    while let Some(message) = upstream_transport.try_recv() {
-        match message {
-            SyncMessage::RegisterShape { ast, .. } => {
-                registered_tables.push((
-                    ast.query.table,
-                    ast.query.array_subqueries.len(),
-                    ast.query.limit,
-                ));
-            }
-            SyncMessage::Subscribe(_) => subscribe_count += 1,
-            other => panic!("unexpected upstream message: {other:?}"),
-        }
-    }
-
-    assert_eq!(
-        registered_tables,
-        vec![
-            ("users".to_owned(), 1, None),
-            ("todos".to_owned(), 1, None),
-            ("comments".to_owned(), 0, None),
-        ]
+    assert!(
+        upstream_transport.try_recv().is_none(),
+        "array-subquery subscription failure must not register root or child coverage upstream"
     );
-    assert_eq!(subscribe_count, registered_tables.len());
+}
+
+#[test]
+fn array_subquery_attachment_rejects_before_upstream_coverage() {
+    let schema = relation_schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("todos", "todos", "owner_id", "id")
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+    );
+    let prepared = prepared(&client, &query);
+    assert_unsupported_subscription_array_subquery(expect_error(
+        client.attach_query_with_opts(&prepared, global_subscribe_opts()),
+    ));
+    assert_unsupported_subscription_array_subquery(expect_error(
+        client.attach_query_with_opts_for_identity(
+            &prepared,
+            global_subscribe_opts(),
+            client.identity.author,
+        ),
+    ));
+
+    client.tick().unwrap();
+    assert!(
+        upstream_transport.try_recv().is_none(),
+        "array-subquery attachment failure must not register coverage upstream"
+    );
 }
 
 #[test]

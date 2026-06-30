@@ -1348,13 +1348,16 @@ mod tests {
                 .db
                 .prepare_query(&self.db.table("todos"))
                 .expect("prepare todos query");
-            let attachment = self.db.attach_query_with_opts(
-                &query,
-                ReadOpts {
-                    tier: DurabilityTier::Edge,
-                    ..Default::default()
-                },
-            );
+            let attachment = self
+                .db
+                .attach_query_with_opts(
+                    &query,
+                    ReadOpts {
+                        tier: DurabilityTier::Edge,
+                        ..Default::default()
+                    },
+                )
+                .expect("default read view edge attachment should be supported");
             (query, attachment)
         }
 
@@ -1363,13 +1366,16 @@ mod tests {
                 .db
                 .prepare_query(&self.db.table(table))
                 .expect("prepare table query");
-            let attachment = self.db.attach_query_with_opts(
-                &query,
-                ReadOpts {
-                    tier: DurabilityTier::Edge,
-                    ..Default::default()
-                },
-            );
+            let attachment = self
+                .db
+                .attach_query_with_opts(
+                    &query,
+                    ReadOpts {
+                        tier: DurabilityTier::Edge,
+                        ..Default::default()
+                    },
+                )
+                .expect("default read view edge attachment should be supported");
             (query, attachment)
         }
 

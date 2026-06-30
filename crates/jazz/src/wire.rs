@@ -349,6 +349,7 @@ mod tests {
         let subscription = SubscriptionKey {
             shape_id,
             binding_id,
+            read_view: Default::default(),
         };
         let messages = vec![
             SyncMessage::RegisterShape {
@@ -368,8 +369,10 @@ mod tests {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                 },
-                result_row_adds: Vec::new(),
-                result_row_removes: Vec::new(),
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
             },
             SyncMessage::CommitUnit {
                 tx: Transaction {
@@ -421,14 +424,17 @@ mod tests {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::from_bytes([0x44; 16])),
                 binding_id: BindingId(uuid::Uuid::from_bytes([0x55; 16])),
+                read_view: Default::default(),
             },
             reset_result_set: true,
             version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: vec![tx_id],
             },
-            result_row_adds: vec![entry],
-            result_row_removes: Vec::new(),
+            result_member_adds: vec![entry.into()],
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         };
 
         let encoded = encode_sync_message(&message).unwrap();

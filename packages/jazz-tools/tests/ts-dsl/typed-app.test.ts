@@ -165,6 +165,20 @@ describe("typed app prototype", () => {
     expectTypeOf(row.$updatedAt).toEqualTypeOf<Date>();
   });
 
+  it("does not expose permission introspection columns through typed queries", () => {
+    // @ts-expect-error Permission introspection columns are not selectable query columns.
+    app.todos.select("$canRead");
+    // @ts-expect-error Permission introspection columns are not filterable query columns.
+    app.todos.where({ $canEdit: true });
+    // @ts-expect-error Permission introspection columns are not orderable query columns.
+    app.todos.orderBy("$canDelete");
+
+    app.todos
+      .select("$createdAt")
+      .where({ $updatedAt: { lte: new Date() } })
+      .orderBy("$createdBy");
+  });
+
   it("emits indexOnly metadata into the runtime schema", () => {
     expect(app.wasmSchema.todos?.indexed_columns).toEqual(["done"]);
     expect(app.wasmSchema.users?.indexed_columns).toBeUndefined();

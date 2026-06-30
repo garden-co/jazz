@@ -1615,7 +1615,7 @@ describe("NativeRuntimeAdapter server transport", () => {
                   },
                 },
               },
-              max_depth: 3,
+              bound: { MaxDepth: 3 },
             },
           },
         }),
@@ -1688,6 +1688,22 @@ describe("NativeRuntimeAdapter server transport", () => {
         JSON.stringify({ propagation: "local" }),
       ),
     ).rejects.toThrow("does not support read propagation");
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "local",
+        JSON.stringify({ read_view: { source: "branch" } }),
+      ),
+    ).rejects.toThrow("read_view");
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "local",
+        JSON.stringify({ readView: { source: "branch" } }),
+      ),
+    ).rejects.toThrow("read_view");
   });
 
   it("passes include_deleted query intent through native read options", async () => {
@@ -1833,6 +1849,259 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).toThrow("unsupported read tier");
   });
 
+  it("rejects include_deleted subscription query intent", () => {
+    const runtime = emptyNativeRuntime();
+
+    expect(() =>
+      runtime.createSubscription(JSON.stringify({ table: "todos", include_deleted: true })),
+    ).toThrow("include_deleted subscriptions");
+  });
+
+  it("rejects permission introspection selected columns before preparing flat queries", async () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              calls.push("all");
+              return new Uint8Array([0]);
+            },
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos", select_columns: ["title", "$canEdit"] })),
+    ).rejects.toThrow("permission-introspection query");
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos", select_columns: ["title", "todos.$canEdit"] }),
+      ),
+    ).rejects.toThrow("permission-introspection query");
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects permission introspection predicates before preparing flat queries", async () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              calls.push("all");
+              return new Uint8Array([0]);
+            },
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          conditions: [{ column: "$canDelete", op: "eq", value: true }],
+        }),
+      ),
+    ).rejects.toThrow("permission-introspection query");
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects permission introspection in array subqueries before native snapshot prep", async () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationSnapshot: () => {
+              calls.push("allRelationSnapshot");
+              return new Uint8Array([0]);
+            },
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          array_subqueries: [
+            {
+              column_name: "children",
+              table: "todos",
+              inner_column: "id",
+              outer_column: "todos.id",
+              select_columns: ["title", "$canRead"],
+            },
+          ],
+        }),
+      ),
+    ).rejects.toThrow("permission-introspection query");
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects permission introspection before subscribing to flat queries", () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            subscribe: () => {
+              calls.push("subscribe");
+              return new ReadableStream();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({
+          table: "todos",
+          conditions: [{ column: "$canEdit", op: "eq", value: true }],
+          select_columns: ["title", "$canEdit"],
+        }),
+      ),
+    ).toThrow("permission-introspection query");
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects permission introspection relation projections before native relation APIs", async () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              calls.push("allRelationQuery");
+              return new Uint8Array([0]);
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          relation_ir: {
+            Project: {
+              input: { TableScan: { table: "todos" } },
+              columns: [
+                {
+                  alias: "$canRead",
+                  expr: { Column: { scope: "todos", column: "$canRead" } },
+                },
+              ],
+            },
+          },
+        }),
+      ),
+    ).rejects.toThrow("permission-introspection query");
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps provenance selected columns on the native flat query path", async () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              calls.push("all");
+              return encodeRows([
+                {
+                  table: "todos",
+                  rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                  title: "native provenance",
+                  createdAt: 42,
+                },
+              ]);
+            },
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos", select_columns: ["title", "$createdAt"] })),
+    ).resolves.toHaveLength(1);
+    expect(calls).toEqual(["prepareQuery", "all"]);
+  });
+
   it("passes local-only subscription propagation through native read options", () => {
     const readOptions: unknown[] = [];
     const runtime = new NativeRuntimeAdapter(
@@ -1867,6 +2136,27 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).not.toThrow();
 
     expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
+  });
+
+  it("rejects non-default read_view subscription options", () => {
+    const runtime = emptyNativeRuntime();
+
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "edge",
+        JSON.stringify({ read_view: { source: "branch" } }),
+      ),
+    ).toThrow("read_view");
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "edge",
+        JSON.stringify({ readView: { source: "branch" } }),
+      ),
+    ).toThrow("read_view");
   });
 
   it("accepts well-formed subscription sessions and rejects malformed sessions", () => {
@@ -2752,6 +3042,95 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       ],
     });
+  });
+
+  it("rejects ExistsRel Gather policies without a concrete MaxDepth bound", () => {
+    expect(() =>
+      encodeSchema({
+        teams: {
+          columns: [
+            {
+              name: "parent_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "teams",
+            },
+          ],
+          policies: {
+            select: {
+              using: {
+                type: "ExistsRel",
+                rel: {
+                  Gather: {
+                    seed: {
+                      Project: {
+                        input: {
+                          Filter: {
+                            input: {
+                              Join: {
+                                left: { TableScan: { table: "teams", alias: "edge" } },
+                                right: { TableScan: { table: "teams", alias: "seed" } },
+                                on: [
+                                  {
+                                    left: { scope: "edge", column: "parent_id" },
+                                    right: { scope: "seed", column: "id" },
+                                  },
+                                ],
+                                join_kind: "Inner",
+                              },
+                            },
+                            predicate: {
+                              Cmp: {
+                                left: { scope: "seed", column: "parent_id" },
+                                op: "Eq",
+                                right: { SessionRef: ["teamId"] },
+                              },
+                            },
+                          },
+                        },
+                        columns: [],
+                      },
+                    },
+                    step: {
+                      Project: {
+                        input: {
+                          Join: {
+                            left: {
+                              Filter: {
+                                input: { TableScan: { table: "teams", alias: "edge" } },
+                                predicate: {
+                                  Cmp: {
+                                    left: { scope: "edge", column: "id" },
+                                    op: "Eq",
+                                    right: { RowId: "Frontier" },
+                                  },
+                                },
+                              },
+                            },
+                            right: { TableScan: { table: "teams", alias: "next" } },
+                            on: [
+                              {
+                                left: { scope: "edge", column: "parent_id" },
+                                right: { scope: "next", column: "id" },
+                              },
+                            ],
+                            join_kind: "Inner",
+                          },
+                        },
+                        columns: [],
+                      },
+                    },
+                    frontier_key: { RowId: "Frontier" },
+                    bound: "Fixpoint",
+                    dedupe_key: [{ RowId: "Current" }],
+                  },
+                },
+              } as never,
+            },
+          },
+        },
+      }),
+    ).toThrow("MaxDepth");
   });
 
   it("serializes InheritsReferencing without a source operation policy as fail-closed", () => {

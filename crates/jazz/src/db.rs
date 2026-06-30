@@ -27,12 +27,11 @@ use crate::node::{
 };
 use crate::peer::PeerState;
 use crate::protocol::{
-    ContentExtent, CoverageKey, CurrentWriteSchema, MigrationLens, RegisterShapeOptions,
-    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
+    BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
+    MigrationLens, ReadViewKey, ReadViewSpec, RegisterShapeOptions, SchemaVersion, ShapeAst,
+    Subscribe, SubscriptionKey, SyncMessage,
 };
-use crate::query::{
-    ArraySubquery, Binding, Query, QueryError, RelationExpr, RelationQuery, ShapeId, ValidatedQuery,
-};
+use crate::query::{Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
@@ -98,6 +97,7 @@ type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
+type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
 struct WriteStateWaiter {
     id: u64,
@@ -484,6 +484,7 @@ where
     ///     local_updates: LocalUpdates::Immediate,
     ///     propagation: Propagation::LocalOnly,
     ///     include_deleted: false,
+    ///     ..ReadOpts::default()
     /// };
     /// let todos = db.prepare_query(&db.table("todos"))?;
     /// let rows = block_on(db.all(&todos, opts))?;
@@ -506,7 +507,8 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let tier = effective_read_tier(opts);
+        ensure_default_read_view(&opts)?;
+        let tier = effective_read_tier(&opts);
         let mut node = self.node.node.borrow_mut();
         if opts.include_deleted {
             node.query_rows_for_link_including_deleted(
@@ -538,13 +540,14 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
+        ensure_default_read_view(&opts)?;
         if opts.include_deleted {
             return Err(Error::new(
                 ErrorCode::Query,
                 "relation snapshots do not support include_deleted yet",
             ));
         }
-        let tier = effective_read_tier(opts);
+        let tier = effective_read_tier(&opts);
         self.node
             .node
             .borrow_mut()
@@ -565,22 +568,12 @@ where
     /// Tier-gated one-shot output-changing relation read evaluated as `author`.
     pub async fn all_relation_query_for_identity(
         &self,
-        query: &RelationQuery,
+        _query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        _author: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
-        if opts.include_deleted {
-            return Err(Error::new(
-                ErrorCode::Query,
-                "relation queries do not support include_deleted yet",
-            ));
-        }
-        let tier = effective_read_tier(opts);
-        self.node
-            .node
-            .borrow_mut()
-            .query_relation_query_snapshot_for_link(query, tier, author)
-            .map_err(Into::into)
+        ensure_default_read_view(&opts)?;
+        Err(relation_query_requires_unified_lowering())
     }
 
     /// Subscribe to a query and return a stream of materialized subscription events.
@@ -598,6 +591,7 @@ where
     ///         local_updates: LocalUpdates::Immediate,
     ///         propagation: Propagation::LocalOnly,
     ///         include_deleted: false,
+    ///         ..ReadOpts::default()
     ///     },
     /// ))?;
     /// let opened = block_on(subscription.next_event()).unwrap();
@@ -661,15 +655,18 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-    ) -> QueryAttachment {
-        let tier = effective_read_tier(opts);
-        QueryAttachment {
-            subscriptions: vec![self.attach_query_shape_binding(
+    ) -> Result<QueryAttachment, Error> {
+        ensure_default_read_view(&opts)?;
+        ensure_supported_subscription_shape(&prepared.shape)?;
+        let upstream_opts =
+            upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
+        Ok(QueryAttachment {
+            subscriptions: vec![self.attach_query_shape_binding_with_opts(
                 &prepared.shape,
                 &prepared.binding,
-                tier,
+                upstream_opts,
             )],
-        }
+        })
     }
 
     /// Attach a one-shot usage-site query coverage request evaluated as `author`.
@@ -679,25 +676,23 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<QueryAttachment, Error> {
-        let tier = effective_read_tier(opts);
+        ensure_default_read_view(&opts)?;
+        ensure_supported_subscription_shape(&prepared.shape)?;
+        let upstream_opts =
+            upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         let (shape, binding, _) = self.node.node.borrow_mut().prepare_query_binding_for_link(
             &prepared.shape,
             &prepared.binding,
-            tier,
+            upstream_opts.tier,
             author,
         )?;
         Ok(QueryAttachment {
-            subscriptions: vec![self.attach_query_shape_binding(&shape, &binding, tier)],
+            subscriptions: vec![self.attach_query_shape_binding_with_opts(
+                &shape,
+                &binding,
+                upstream_opts,
+            )],
         })
-    }
-
-    fn attach_query_shape_binding(
-        &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-    ) -> SubscriptionKey {
-        self.attach_query_shape_binding_with_opts(shape, binding, RegisterShapeOptions { tier })
     }
 
     fn attach_query_shape_binding_with_opts(
@@ -706,7 +701,7 @@ where
         binding: &Binding,
         opts: RegisterShapeOptions,
     ) -> SubscriptionKey {
-        let subscription = self.node.next_subscription_key(shape);
+        let subscription = self.node.next_subscription_key(shape, opts.read_view_key());
         self.node
             .upstream_subscriptions
             .borrow_mut()
@@ -727,17 +722,17 @@ where
     }
 
     /// Attach a one-shot usage-site query coverage request at the default tier.
-    pub fn attach_query(&self, prepared: &PreparedQuery) -> QueryAttachment {
+    pub fn attach_query(&self, prepared: &PreparedQuery) -> Result<QueryAttachment, Error> {
         self.attach_query_with_opts(prepared, ReadOpts::default())
     }
 
     /// Return whether a query attachment has received at least one upstream view update.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
         let node = self.node.node.borrow();
-        attachment
-            .subscriptions
-            .iter()
-            .all(|subscription| node.has_settled_result_set(*subscription))
+        attachment.subscriptions.iter().all(|subscription| {
+            node.binding_view_key_for_subscription(*subscription)
+                .is_ok_and(|binding_view_key| node.has_settled_result_set(binding_view_key))
+        })
     }
 
     /// Detach a one-shot query coverage request.
@@ -762,44 +757,32 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
-        let read_tier = effective_read_tier(opts);
-        let (maintained_subscription, snapshot) = if read_tier == DurabilityTier::Global {
-            let (subscription, rows) = self
-                .node
-                .node
-                .borrow_mut()
-                .open_local_maintained_view_subscription(
-                    &prepared.shape,
-                    &prepared.binding,
-                    author,
-                )?;
-            (
-                Some(subscription),
-                if prepared.shape.query().array_subqueries.is_empty() {
-                    subscription_snapshot_for_rows(&prepared.shape, rows)
-                } else {
-                    self.node.node.borrow_mut().subscription_snapshot_for_link(
-                        &prepared.shape,
-                        &prepared.binding,
-                        read_tier,
-                        author,
-                    )?
-                },
-            )
-        } else {
-            let snapshot = self.node.node.borrow_mut().subscription_snapshot_for_link(
+        ensure_supported_subscription_read_opts(&opts)?;
+        ensure_supported_subscription_shape(&prepared.shape)?;
+        let read_tier = effective_read_tier(&opts);
+        if opts.propagation == Propagation::Full {
+            ensure_supported_propagated_subscription_tier(read_tier)?;
+        }
+        let (subscription, rows) = self
+            .node
+            .node
+            .borrow_mut()
+            .open_local_maintained_view_subscription(
                 &prepared.shape,
                 &prepared.binding,
-                read_tier,
                 author,
+                read_tier,
             )?;
-            (None, snapshot)
-        };
+        let (maintained_subscription, snapshot) = (
+            Some(subscription),
+            subscription_snapshot_for_rows(&prepared.shape, rows),
+        );
         let settled = subscription_is_settled(
             &self.node.node.borrow(),
             &prepared.shape,
             &prepared.binding,
             read_tier,
+            opts.read_view.clone(),
         );
         let (sender, receiver) = unbounded();
         let state = Rc::new(RefCell::new(SubscriptionState {
@@ -810,6 +793,7 @@ where
             },
             author,
             read_tier,
+            read_view: opts.read_view.clone(),
             snapshot: snapshot.clone(),
             settled,
             sender,
@@ -832,7 +816,8 @@ where
             // If this Db is attached to upstreams, ask them to carry this shape so
             // the subscription fills from synced rows, not just local writes. The consumer
             // sees only the handle; the request flows out on the next `tick`.
-            let upstream_opts = RegisterShapeOptions { tier: read_tier };
+            let upstream_opts =
+                upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
             let upstream_subscriptions =
                 self.open_subscription_upstream_coverage(prepared, upstream_opts.clone())?;
             cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
@@ -846,59 +831,12 @@ where
 
     async fn open_relation_subscription(
         &self,
-        query: &RelationQuery,
+        _query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        _author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
-        if opts.include_deleted {
-            return Err(Error::new(
-                ErrorCode::Query,
-                "relation query subscriptions do not support include_deleted yet",
-            ));
-        }
-        let read_tier = effective_read_tier(opts);
-        let snapshot = self
-            .node
-            .node
-            .borrow_mut()
-            .query_relation_query_snapshot_for_link(query, read_tier, author)?;
-        let settled = true;
-        let (sender, receiver) = unbounded();
-        let state = Rc::new(RefCell::new(SubscriptionState {
-            kind: SubscriptionKind::RelationQuery {
-                query: query.clone(),
-            },
-            author,
-            read_tier,
-            snapshot: snapshot.clone(),
-            settled,
-            sender,
-        }));
-        state
-            .borrow()
-            .sender
-            .unbounded_send(SubscriptionEvent::Opened {
-                current: snapshot,
-                settled,
-                tier: read_tier,
-            })
-            .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
-        self.node
-            .subscriptions
-            .borrow_mut()
-            .push(Rc::downgrade(&state));
-        let mut cleanup = None;
-        if opts.propagation == Propagation::Full {
-            let upstream_opts = RegisterShapeOptions { tier: read_tier };
-            let upstream_subscriptions =
-                self.open_relation_subscription_upstream_coverage(query, upstream_opts.clone())?;
-            cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
-        }
-        Ok(SubscriptionStream {
-            receiver,
-            _state: state,
-            cleanup,
-        })
+        ensure_supported_subscription_read_opts(&opts)?;
+        Err(relation_query_requires_unified_lowering())
     }
 
     fn open_subscription_upstream_coverage(
@@ -906,18 +844,12 @@ where
         prepared: &PreparedQuery,
         opts: RegisterShapeOptions,
     ) -> Result<Vec<SubscriptionKey>, Error> {
-        let mut shapes = vec![(prepared.shape.clone(), prepared.binding.clone())];
-        self.collect_array_subquery_upstream_coverage(
-            prepared.shape.query().array_subqueries.as_slice(),
+        ensure_supported_subscription_shape(&prepared.shape)?;
+        Ok(vec![self.attach_query_shape_binding_with_opts(
+            &prepared.shape,
             &prepared.binding,
-            &mut shapes,
-        )?;
-        Ok(shapes
-            .into_iter()
-            .map(|(shape, binding)| {
-                self.attach_query_shape_binding_with_opts(&shape, &binding, opts.clone())
-            })
-            .collect())
+            opts,
+        )])
     }
 
     fn upstream_subscription_cleanup(
@@ -940,47 +872,6 @@ where
             }
             schedule_tick_in(&scheduler, TickUrgency::Immediate);
         })
-    }
-
-    fn collect_array_subquery_upstream_coverage(
-        &self,
-        subqueries: &[ArraySubquery],
-        parent_binding: &Binding,
-        shapes: &mut Vec<(ValidatedQuery, Binding)>,
-    ) -> Result<(), Error> {
-        let schema = self.current_write_schema_for_query()?;
-        for subquery in subqueries {
-            let query = query_for_array_subquery_coverage(subquery);
-            let shape = query.validate(&schema)?;
-            let binding = binding_for_coverage_shape(&shape, parent_binding)?;
-            shapes.push((shape, binding));
-            self.collect_array_subquery_upstream_coverage(
-                subquery.nested_arrays.as_slice(),
-                parent_binding,
-                shapes,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn open_relation_subscription_upstream_coverage(
-        &self,
-        query: &RelationQuery,
-        opts: RegisterShapeOptions,
-    ) -> Result<Vec<SubscriptionKey>, Error> {
-        let schema = self.current_write_schema_for_query()?;
-        let mut tables = BTreeSet::new();
-        collect_relation_table_scans(&query.rel, &mut tables);
-        tables
-            .into_iter()
-            .map(|table| Query::from(table).validate(&schema))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|shape| {
-                let binding = shape.bind(BTreeMap::new())?;
-                Ok(self.attach_query_shape_binding_with_opts(&shape, &binding, opts.clone()))
-            })
-            .collect::<Result<Vec<_>, Error>>()
     }
 
     /// Insert a row locally, generating a uuidv7-shaped row id.
@@ -2478,7 +2369,11 @@ where
         self.schedule_tick(TickUrgency::Deferred);
     }
 
-    fn next_subscription_key(&self, shape: &ValidatedQuery) -> SubscriptionKey {
+    fn next_subscription_key(
+        &self,
+        shape: &ValidatedQuery,
+        read_view: crate::protocol::ReadViewKey,
+    ) -> SubscriptionKey {
         let nonce = self.next_subscription_nonce.get();
         self.next_subscription_nonce.set(nonce.saturating_add(1));
         SubscriptionKey {
@@ -2487,6 +2382,7 @@ where
                 &crate::query::QUERY_NAMESPACE,
                 &nonce.to_be_bytes(),
             )),
+            read_view,
         }
     }
 
@@ -2564,17 +2460,14 @@ where
         for state in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
             {
                 let state = state.borrow();
-                let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind else {
-                    continue;
-                };
-                let opts = RegisterShapeOptions {
-                    tier: state.read_tier,
-                };
+                let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind;
+                let opts =
+                    upstream_register_shape_options(state.read_tier, state.read_view.clone());
                 let coverage = coverage_key(shape, binding, opts.clone());
                 if !pending_coverage.insert(coverage.clone()) {
                     continue;
                 }
-                let subscription = self.next_subscription_key(shape);
+                let subscription = self.next_subscription_key(shape, opts.read_view_key());
                 self.latest_coverage_subscriptions
                     .borrow_mut()
                     .insert(coverage, subscription);
@@ -2745,10 +2638,11 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (read_tier, previous, previous_settled, author) = {
+        let (read_tier, read_view, previous, previous_settled, author) = {
             let state = state.borrow();
             (
                 state.read_tier,
+                state.read_view.clone(),
                 state.snapshot.clone(),
                 state.settled,
                 state.author,
@@ -2768,32 +2662,29 @@ where
                                 .drain_local_maintained_view_subscription(maintained)?
                         };
                         if let Some(update) = update {
-                            if shape.query().array_subqueries.is_empty() {
-                                let mut rows_by_id = previous
-                                    .rows
-                                    .iter()
-                                    .cloned()
-                                    .map(|row| (subscription_row_key(&row), row))
-                                    .collect::<BTreeMap<_, _>>();
-                                for (_, row_uuid, _) in update.removes {
-                                    rows_by_id.retain(|(_, existing_row_uuid), _| {
-                                        *existing_row_uuid != row_uuid
-                                    });
-                                }
-                                for row in update.adds {
-                                    rows_by_id.insert(subscription_row_key(&row), row);
-                                }
-                                let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
-                                node.borrow().apply_query_order(shape.query(), &mut rows)?;
-                                subscription_snapshot_for_rows(shape, rows)
-                            } else {
-                                node.borrow_mut().subscription_snapshot_for_link(
-                                    shape, binding, read_tier, author,
-                                )?
+                            let mut rows_by_id = previous
+                                .rows
+                                .iter()
+                                .cloned()
+                                .map(|row| (subscription_row_key(&row), row))
+                                .collect::<BTreeMap<_, _>>();
+                            for member in update.removes {
+                                let Some((_, row_uuid, _)) = member.as_row() else {
+                                    return Err(crate::node::Error::InvalidStoredValue(
+                                        "local maintained subscription removal cannot materialize non-row result member",
+                                    )
+                                    .into());
+                                };
+                                rows_by_id.retain(|(_, existing_row_uuid), _| {
+                                    *existing_row_uuid != row_uuid
+                                });
                             }
-                        } else if !shape.query().array_subqueries.is_empty() {
-                            node.borrow_mut()
-                                .subscription_snapshot_for_link(shape, binding, read_tier, author)?
+                            for row in update.adds {
+                                rows_by_id.insert(subscription_row_key(&row), row);
+                            }
+                            let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
+                            node.borrow().apply_query_order(shape.query(), &mut rows)?;
+                            subscription_snapshot_for_rows(shape, rows)
                         } else {
                             previous.clone()
                         }
@@ -2801,15 +2692,14 @@ where
                         node.borrow_mut()
                             .subscription_snapshot_for_link(shape, binding, read_tier, author)?
                     };
-                    let settled =
-                        subscription_is_settled(&node.borrow(), shape, binding, read_tier);
+                    let settled = subscription_is_settled(
+                        &node.borrow(),
+                        shape,
+                        binding,
+                        read_tier,
+                        read_view,
+                    );
                     (snapshot, settled)
-                }
-                SubscriptionKind::RelationQuery { query } => {
-                    let snapshot = node
-                        .borrow_mut()
-                        .query_relation_query_snapshot_for_link(query, read_tier, author)?;
-                    (snapshot, true)
                 }
             }
         };
@@ -3058,7 +2948,7 @@ enum ConnectionLink {
         /// Shapes registered through downstream subscribers.
         upstream_subscriptions: PendingUpstreamCommands,
         /// Shapes already registered on this connection.
-        announced_shapes: BTreeSet<ShapeId>,
+        announced_shapes: BTreeSet<ShapeRegistrationKey>,
         /// Locally-authored transactions to upload (shared with the `Db`).
         outbox: Outbox,
         /// Transactions already shipped on this connection (dedup across ticks).
@@ -3077,8 +2967,8 @@ enum ConnectionLink {
         served: BTreeMap<SubscriptionKey, CoverageKey>,
         /// Shared maintained views keyed by query shape, binding, and options.
         coverage_groups: BTreeMap<CoverageKey, CoverageGroup>,
-        /// Options from each subscriber `RegisterShape`, applied to later bindings.
-        registered_shape_opts: BTreeMap<ShapeId, RegisterShapeOptions>,
+        /// Options from each subscriber `RegisterShape`, keyed by shape and derived read-view key.
+        registered_shape_opts: BTreeMap<ShapeRegistrationKey, RegisterShapeOptions>,
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
     },
@@ -3161,7 +3051,9 @@ where
                         PendingUpstreamCommand::Subscribe(pending_subscription) => {
                             let shape = &pending_subscription.shape;
                             let binding = &pending_subscription.binding;
-                            if announced_shapes.insert(shape.shape_id()) {
+                            let registration_key =
+                                (shape.shape_id(), pending_subscription.opts.read_view_key());
+                            if announced_shapes.insert(registration_key) {
                                 self.node.borrow_mut().apply_sync_message(
                                     SyncMessage::RegisterShape {
                                         shape_id: shape.shape_id(),
@@ -3176,7 +3068,7 @@ where
                                         opts: pending_subscription.opts.clone(),
                                     })
                                 {
-                                    announced_shapes.remove(&shape.shape_id());
+                                    announced_shapes.remove(&registration_key);
                                     return Err(transport_error(error));
                                 }
                             }
@@ -3267,7 +3159,20 @@ where
                             opts,
                             ast,
                         } => {
-                            registered_shape_opts.insert(shape_id, opts);
+                            ensure_supported_register_shape_options(&opts)?;
+                            if let Some(query) = ast.query() {
+                                ensure_supported_maintained_coverage_query_shape(query)?;
+                            }
+                            let registration_key = (shape_id, opts.read_view_key());
+                            if let Some(existing) = registered_shape_opts.get(&registration_key)
+                                && existing != &opts
+                            {
+                                return Err(Error::new(
+                                    ErrorCode::Protocol,
+                                    "conflicting RegisterShape options for shape/read-view key",
+                                ));
+                            }
+                            registered_shape_opts.insert(registration_key, opts);
                             self.node.borrow_mut().apply_sync_message(
                                 SyncMessage::RegisterShape {
                                     shape_id,
@@ -3286,6 +3191,7 @@ where
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 continue;
                             };
+                            ensure_supported_subscription_shape(&shape)?;
                             let value_map = shape
                                 .params()
                                 .keys()
@@ -3294,13 +3200,20 @@ where
                                 .collect::<BTreeMap<_, _>>();
                             let binding = shape.bind(value_map)?;
                             let opts = registered_shape_opts
-                                .get(&shape_id)
+                                .get(&(shape_id, subscription.read_view))
                                 .cloned()
-                                .unwrap_or_default();
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorCode::Protocol,
+                                        "subscription referenced unregistered shape/read view",
+                                    )
+                                })?;
+                            ensure_supported_register_shape_options(&opts)?;
                             let coverage = coverage_key(&shape, &binding, opts.clone());
                             let group_subscription = SubscriptionKey {
                                 shape_id: coverage.shape_id,
                                 binding_id: coverage.binding_id,
+                                read_view: coverage.opts.read_view_key(),
                             };
                             let group =
                                 coverage_groups.entry(coverage.clone()).or_insert_with(|| {
@@ -3322,18 +3235,13 @@ where
                                 )?;
                                 retarget_view_update(update, subscription)
                             } else {
-                                let update = self.node.borrow_mut().view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
-                                    &shape,
-                                    &binding,
+                                let mut node = self.node.borrow_mut();
+                                peer.rehydrate_query_for_subscription_from_maintained_subscription(
+                                    &mut node,
+                                    group_subscription,
                                     subscription,
-                                    BTreeSet::new(),
-                                    BTreeSet::new(),
-                                    BTreeSet::new(),
-                                    peer.identity(),
-                                    None,
-                                    opts.tier,
-                                )?;
-                                reset_view_update(update)
+                                    &shape,
+                                )?
                             };
                             self.last_resume_bytes = Some(serialized_sync_message_len(&update));
                             send_with_content_extents(
@@ -3361,20 +3269,21 @@ where
                         }
                         SyncMessage::Unsubscribe { subscription } => {
                             self.node.borrow_mut().apply_unsubscribe(subscription);
-                            if let Some(coverage) = served.remove(&subscription)
-                                && let Some(group) = coverage_groups.get_mut(&coverage)
-                            {
-                                group.subscribers.remove(&subscription);
-                                if group.subscribers.is_empty() {
-                                    let group_subscription = SubscriptionKey {
-                                        shape_id: coverage.shape_id,
-                                        binding_id: coverage.binding_id,
-                                    };
-                                    peer.forget_subscription(group_subscription);
-                                    coverage_groups.remove(&coverage);
-                                    upstream_subscriptions.borrow_mut().push(
-                                        PendingUpstreamCommand::Unsubscribe(group_subscription),
-                                    );
+                            if let Some(coverage) = served.remove(&subscription) {
+                                if let Some(group) = coverage_groups.get_mut(&coverage) {
+                                    group.subscribers.remove(&subscription);
+                                    if group.subscribers.is_empty() {
+                                        let group_subscription = SubscriptionKey {
+                                            shape_id: coverage.shape_id,
+                                            binding_id: coverage.binding_id,
+                                            read_view: coverage.opts.read_view_key(),
+                                        };
+                                        peer.forget_subscription(group_subscription);
+                                        coverage_groups.remove(&coverage);
+                                        upstream_subscriptions.borrow_mut().push(
+                                            PendingUpstreamCommand::Unsubscribe(group_subscription),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -3428,6 +3337,7 @@ where
                     let group_subscription = SubscriptionKey {
                         shape_id: coverage.shape_id,
                         binding_id: coverage.binding_id,
+                        read_view: coverage.opts.read_view_key(),
                     };
                     let update = {
                         let mut node = self.node.borrow_mut();
@@ -3549,6 +3459,7 @@ where
             let mut out = Vec::new();
             for extent in extents {
                 out.push(ContentExtent {
+                    owner: LargeValueOwnerRef::current_row(extent.row),
                     bytes: node.content_store().read(&extent)?,
                     extent,
                 });
@@ -3570,16 +3481,6 @@ fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
 fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {
     if let SyncMessage::ViewUpdate { subscription, .. } = &mut message {
         *subscription = target;
-    }
-    message
-}
-
-fn reset_view_update(mut message: SyncMessage) -> SyncMessage {
-    if let SyncMessage::ViewUpdate {
-        reset_result_set, ..
-    } = &mut message
-    {
-        *reset_result_set = true;
     }
     message
 }
@@ -3620,23 +3521,27 @@ fn binding_values_in_param_order(shape: &ValidatedQuery, binding: &Binding) -> V
         .collect()
 }
 
-/// A `ViewUpdate` that carries no version or result-set change — nothing to
-/// ship to the subscriber this tick.
+/// A `ViewUpdate` that carries no version, result-set, or program-fact change —
+/// nothing to ship to the subscriber this tick.
 fn view_update_is_empty(message: &SyncMessage) -> bool {
     match message {
         SyncMessage::ViewUpdate {
             reset_result_set,
             version_bundles,
             peer_payload_inventory,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
             ..
         } => {
             !reset_result_set
                 && version_bundles.is_empty()
                 && peer_payload_inventory.complete_tx_payloads.is_empty()
-                && result_row_adds.is_empty()
-                && result_row_removes.is_empty()
+                && result_member_adds.is_empty()
+                && result_member_removes.is_empty()
+                && program_fact_adds.is_empty()
+                && program_fact_removes.is_empty()
         }
         _ => false,
     }
@@ -3751,7 +3656,7 @@ fn splitmix64(state: &mut u64) -> u64 {
 }
 
 /// One-shot read options.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ReadOpts {
     /// Durability tier that gates the first result.
     pub tier: DurabilityTier,
@@ -3761,6 +3666,8 @@ pub struct ReadOpts {
     pub propagation: Propagation,
     /// Include current rows whose deletion winner is `Deleted`.
     pub include_deleted: bool,
+    /// Semantic read view to evaluate against.
+    pub read_view: ReadViewSpec,
 }
 
 impl Default for ReadOpts {
@@ -3770,6 +3677,7 @@ impl Default for ReadOpts {
             local_updates: LocalUpdates::Immediate,
             propagation: Propagation::Full,
             include_deleted: false,
+            read_view: ReadViewSpec::default(),
         }
     }
 }
@@ -3920,12 +3828,98 @@ pub mod doctest_support {
     }
 }
 
-fn effective_read_tier(opts: ReadOpts) -> DurabilityTier {
+fn effective_read_tier(opts: &ReadOpts) -> DurabilityTier {
     if opts.local_updates == LocalUpdates::Immediate {
         opts.tier.max(DurabilityTier::Local)
     } else {
         opts.tier
     }
+}
+
+fn upstream_register_shape_options(
+    tier: DurabilityTier,
+    read_view: ReadViewSpec,
+) -> RegisterShapeOptions {
+    RegisterShapeOptions {
+        tier: remote_subscription_tier(tier),
+        read_view,
+    }
+}
+
+fn remote_subscription_tier(_tier: DurabilityTier) -> DurabilityTier {
+    DurabilityTier::Global
+}
+
+fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
+    if opts.read_view.is_default() {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Query,
+        "non-default read_view is not supported yet; reads currently execute against the current/default view",
+    ))
+}
+
+fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
+    if opts.include_deleted {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "live subscriptions do not support include_deleted yet",
+        ));
+    }
+    ensure_default_read_view(opts)
+}
+
+fn ensure_supported_subscription_shape(shape: &ValidatedQuery) -> Result<(), Error> {
+    ensure_supported_maintained_coverage_query_shape(shape.query())
+}
+
+fn ensure_supported_maintained_coverage_query_shape(query: &Query) -> Result<(), Error> {
+    if query.array_subqueries.is_empty() {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Query,
+        "maintained query coverage with array subqueries requires unified relation/path lowering or relation-edge terminal deltas",
+    ))
+}
+
+fn ensure_supported_propagated_subscription_tier(tier: DurabilityTier) -> Result<(), Error> {
+    if tier <= DurabilityTier::Local || tier == DurabilityTier::Global {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Query,
+        "propagated live subscriptions require global-tier remote coverage until unified maintained lowering supports other tiers",
+    ))
+}
+
+fn ensure_default_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
+    if opts.has_default_read_view() {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Query,
+        "non-default read_view is not supported yet; sync subscription serving currently executes against the current/default view",
+    ))
+}
+
+fn ensure_supported_register_shape_options(opts: &RegisterShapeOptions) -> Result<(), Error> {
+    ensure_default_register_shape_read_view(opts)?;
+    if opts.tier != DurabilityTier::Global {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "sync subscription serving requires global tier until unified maintained lowering supports other tiers",
+        ));
+    }
+    Ok(())
+}
+
+fn relation_query_requires_unified_lowering() -> Error {
+    Error::new(
+        ErrorCode::Query,
+        "output-changing relation queries require unified query-engine lowering",
+    )
 }
 
 fn coverage_key(
@@ -3938,55 +3932,6 @@ fn coverage_key(
         binding_id: binding.binding_id(),
         opts,
     }
-}
-
-fn query_for_array_subquery_coverage(subquery: &ArraySubquery) -> Query {
-    let mut query = Query::from(subquery.table.clone());
-    query.filters = subquery.filters.clone();
-    query.array_subqueries = subquery.nested_arrays.clone();
-    query
-}
-
-fn collect_relation_table_scans(expr: &RelationExpr, tables: &mut BTreeSet<String>) {
-    match expr {
-        RelationExpr::TableScan { table, .. } => {
-            tables.insert(table.clone());
-        }
-        RelationExpr::Filter { input, .. }
-        | RelationExpr::Project { input, .. }
-        | RelationExpr::Distinct { input, .. }
-        | RelationExpr::OrderBy { input, .. }
-        | RelationExpr::Offset { input, .. }
-        | RelationExpr::Limit { input, .. } => collect_relation_table_scans(input, tables),
-        RelationExpr::Union { inputs } => {
-            for input in inputs {
-                collect_relation_table_scans(input, tables);
-            }
-        }
-        RelationExpr::Join { left, right, .. } => {
-            collect_relation_table_scans(left, tables);
-            collect_relation_table_scans(right, tables);
-        }
-        RelationExpr::Gather { seed, step, .. } => {
-            collect_relation_table_scans(seed, tables);
-            collect_relation_table_scans(step, tables);
-        }
-    }
-}
-
-fn binding_for_coverage_shape(
-    shape: &ValidatedQuery,
-    parent_binding: &Binding,
-) -> Result<Binding, Error> {
-    let mut values = BTreeMap::new();
-    for name in shape.params().keys() {
-        let value =
-            parent_binding.values().get(name).cloned().ok_or_else(|| {
-                Error::new(ErrorCode::Query, format!("missing query param {name}"))
-            })?;
-        values.insert(name.clone(), value);
-    }
-    Ok(shape.bind(values)?)
 }
 
 /// Row cells supplied to write methods.
@@ -4524,6 +4469,7 @@ struct SubscriptionState {
     kind: SubscriptionKind,
     author: AuthorId,
     read_tier: DurabilityTier,
+    read_view: ReadViewSpec,
     snapshot: RelationSnapshot,
     settled: bool,
     sender: UnboundedSender<SubscriptionEvent>,
@@ -4534,9 +4480,6 @@ enum SubscriptionKind {
         shape: ValidatedQuery,
         binding: Binding,
         maintained_subscription: Option<LocalMaintainedViewSubscription>,
-    },
-    RelationQuery {
-        query: RelationQuery,
     },
 }
 
@@ -4768,6 +4711,7 @@ fn subscription_is_settled<S>(
     shape: &ValidatedQuery,
     binding: &Binding,
     tier: DurabilityTier,
+    read_view: ReadViewSpec,
 ) -> bool
 where
     S: OrderedKvStorage,
@@ -4775,9 +4719,10 @@ where
     if tier <= DurabilityTier::Local {
         return true;
     }
-    node.has_settled_result_set(SubscriptionKey {
+    node.has_settled_result_set(BindingViewKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions { tier, read_view }.read_view_key(),
     })
 }
 

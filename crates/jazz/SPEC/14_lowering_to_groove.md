@@ -73,12 +73,33 @@ and execute via `Database::bind_shape` with parameter types taken from the shape
 (`INV-LOWER-10`, groove spec ch. 5).
 
 There is one intended lowered-query core. That core takes an explicit **base
-source** (for example visible current rows for a table/tier) and a query algebra
-fragment (filters, joins, reachability, ordering/window operators that are in the
-maintained surface). The base source is not hidden inside the algebra: current
-rows, historical rows, partition/schema-projected rows, and future branch/lens
-sources choose their source first, then reuse the same algebra lowering where
-their source can be represented in groove.
+source expression graph** (for example visible current rows for a table/tier,
+historic cuts, snapshot refs, explicit data branches/prefixes, overlays,
+schema/lens projections, or branch merges) and a query algebra fragment
+(filters, joins, reachability,
+ordering/window operators that are in the maintained surface). The base source
+is not hidden inside the algebra: current rows, historical rows,
+partition/schema-projected rows, branch reads, transaction overlays, and
+snapshot refs compose as source expressions, then reuse the same algebra
+lowering where their source can be represented in groove.
+
+The lowering request has three orthogonal parts:
+
+- the semantic row-set body, including candidate/proposed-row sources for
+  dry-run policy probes;
+- the read view and policy context used to resolve sources and authorization;
+- the requested app-row output profile plus internal fact outputs.
+
+Runtime lifecycle is outside that semantic request. A one-shot read,
+application live subscription, protocol sync view, or transaction-validation
+read may choose different callback, reset, retry, propagation, and waiting
+behavior, but the compiler-facing way to ask for evidence is only app rows plus
+named terminal facts such as result membership, path edges, read-frontier
+settlement, payload witnesses, policy decisions/witnesses, predicate output
+sets, and large-value extents.
+Those runtime choices MUST consume the same lowered program. They must not
+select a second evaluator or make coverage state part of the query shape
+identity (`INV-LOWER-21`).
 
 Read policy composes before lowering. For non-system peers, the shape lowered by
 the core is the user query intersected with the table read policy under the
@@ -125,14 +146,26 @@ parameter predicates until supported.
 ## 14.5 Sync views & exclusive validation → groove
 
 Sync view maintenance shares the same lowered query machinery as ordinary reads.
-Peer state may cache a groove `Subscription` and prepared plan, recomputing a
-view update from current query rows otherwise (`INV-LOWER-14`), and a whole-table
-current-row view update matches the node's lowered `current_rows` result
-(`INV-LOWER-15`). Result-set ids stay separate from version payloads via
-per-peer dedup (ch. 8). Exclusive predicate validation compares the shape's
-output `(RowUuid, TxId)` set at `base_snapshot.global_base` against now
-(degenerate whole-table predicates use the global-currency-changed probe)
-(`INV-LOWER-16`, ch. 3).
+The target peer-serving path consumes maintained terminal facts for result
+membership, path/correlation coverage, payload/replacement/version witnesses,
+policy witnesses, and read-frontier settlement, then materializes `ViewUpdate`s
+from those facts plus peer inventory/runtime acknowledgements. Recomputing a
+view update from current query rows is migration/oracle debt governed by ch. 16,
+not an alternate production engine (`INV-LOWER-14`). Whole-table current-row
+views are the normal table-rooted row-set shape, not a separate current-row
+serving engine (`INV-LOWER-15`). Result-set ids stay separate from version
+payloads via per-peer dedup (ch. 8). Exclusive predicate validation compares
+predicate-output-set terminal facts for the shape+binding at
+`base_snapshot.global_base` against now (degenerate whole-table predicates use
+the global-currency-changed probe) (`INV-LOWER-16`, ch. 3).
+
+Result membership facts are typed at the lowering boundary. Real-row membership
+must preserve enough identity to distinguish content, deletion, branch,
+historic/snapshot, schema-projected, and batch-scoped membership. Synthetic
+aggregate/window rows emit member identity plus a `ResultPayload` fact carrying
+the custom encoded record bytes. Relation/path lowering emits non-lossy path
+facts rather than hiding edge kind, versions, depth, branch alternative, order,
+role, or hole state in opaque revisions.
 
 ## Open questions
 

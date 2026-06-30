@@ -252,13 +252,13 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads,
             },
-        result_row_adds,
+        result_member_adds,
         ..
     } = &update
     else {
         panic!("expected view update");
     };
-    assert_eq!(result_row_adds, &vec![(
+    assert_eq!(result_member_adds, &vec![(
         groove::Intern::new("announcements".to_owned()),
         announcement_row,
         tx_id
@@ -322,8 +322,8 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
             },
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = &update
     else {
@@ -331,9 +331,9 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     };
     assert!(version_bundles.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(result_row_adds.is_empty());
+    assert!(result_member_adds.is_empty());
     assert_eq!(
-        result_row_removes,
+        result_member_removes,
         &vec![("todos".to_owned().into(), row_uuid, tx_a)]
     );
     reader_a.apply_sync_message(update).unwrap();
@@ -521,13 +521,13 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         .current_rows_update(&mut core, "canvases")
         .unwrap();
     let SyncMessage::ViewUpdate {
-        result_row_removes, ..
+        result_member_removes, ..
     } = &revoked_update
     else {
         panic!("expected view update");
     };
     assert_eq!(
-        result_row_removes,
+        result_member_removes,
         &vec![("canvases".to_owned().into(), canvas_row, accepted_id)]
     );
     invited_reader.apply_sync_message(revoked_update).unwrap();
@@ -1078,10 +1078,10 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
     assert!(matches!(
         update,
-        SyncMessage::ViewUpdate {
-            result_row_adds: ref adds,
-            ..
-        } if adds.contains(&("messages".to_owned().into(), bob_message, bob_message_tx))
+            SyncMessage::ViewUpdate {
+                result_member_adds: ref adds,
+                ..
+        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), bob_message, bob_message_tx))
     ));
     let _ = bob_membership_tx;
 }
@@ -1188,10 +1188,11 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     core.query.settled_result_sets.insert(
-        crate::protocol::SubscriptionKey {
+        crate::protocol::BindingViewKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
-        },
+        read_view: Default::default(),
+},
         BTreeSet::new(),
     );
     assert!(
@@ -1225,6 +1226,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
             &binding,
             RegisterShapeOptions {
                 tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
             },
         )
         .unwrap();
@@ -1239,6 +1241,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
             &binding,
             RegisterShapeOptions {
                 tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
             },
         )
         .unwrap();
@@ -1360,16 +1363,18 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     let binding = shape
         .bind(BTreeMap::from([("chatId".to_owned(), Value::Uuid(chat.0))]))
         .unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
     let mut bob_peer = PeerState::edge_client(bob);
     let initial = bob_peer
-        .rehydrate_query_with_opts(
-            &mut core,
-            &shape,
-            &binding,
-            RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
-            },
-        )
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
     assert_view_update_only_references_rows(&initial, BTreeSet::new());
 
@@ -1398,13 +1403,15 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         BTreeSet::from([seed_message])
     );
 
-    let update = bob_peer.query_update(&mut core, &shape, &binding).unwrap();
+    let update = bob_peer
+        .query_update_for_subscription(&mut core, subscription, &shape, &binding)
+        .unwrap();
     assert!(matches!(
         update,
-        SyncMessage::ViewUpdate {
-            result_row_adds: ref adds,
-            ..
-        } if adds.contains(&("messages".to_owned().into(), seed_message, seed_tx))
+            SyncMessage::ViewUpdate {
+                result_member_adds: ref adds,
+                ..
+        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 }
 
@@ -1507,6 +1514,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .unwrap();
     let opts = RegisterShapeOptions {
         tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
     };
     let mut alice_peer = PeerState::edge_client(alice);
     let initial = alice_peer
@@ -1514,11 +1522,11 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .unwrap();
     assert!(matches!(
         initial,
-        SyncMessage::ViewUpdate {
-            result_row_adds: ref adds,
-            reset_result_set: true,
-            ..
-        } if adds.contains(&("messages".to_owned().into(), seed_message, seed_tx))
+            SyncMessage::ViewUpdate {
+                result_member_adds: ref adds,
+                reset_result_set: true,
+                ..
+        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 
     let bob_membership_tx = core
@@ -1552,7 +1560,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
     let SyncMessage::ViewUpdate {
-        result_row_adds,
+        result_member_adds,
         reset_result_set,
         ..
     } = rehydrated
@@ -1561,8 +1569,9 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     };
     assert!(reset_result_set);
     assert_eq!(
-        result_row_adds
+        result_member_adds
             .into_iter()
+            .filter_map(crate::protocol::ResultMemberEntry::into_row)
             .filter(|(table, _, _)| table.as_str() == "messages")
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
@@ -1621,6 +1630,7 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
             &binding,
             RegisterShapeOptions {
                 tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
             },
         )
         .unwrap();
@@ -1669,7 +1679,8 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let subscription = crate::protocol::SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    };
+    read_view: Default::default(),
+};
 
     let canvas_tx =
         core.commit_mergeable(MergeableCommit::new("canvases", canvas_row, 10).cells(
@@ -1710,14 +1721,14 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     assert!(matches!(
         invited_initial,
         SyncMessage::ViewUpdate {
-            result_row_adds: ref adds,
+            result_member_adds: ref adds,
             ..
         } if adds.is_empty()
     ));
     assert!(matches!(
         spy_initial,
         SyncMessage::ViewUpdate {
-            result_row_adds: ref adds,
+            result_member_adds: ref adds,
             ..
         } if adds.is_empty()
     ));
@@ -1763,21 +1774,21 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         .query_update(&mut core, &shape, &binding)
         .unwrap();
     let SyncMessage::ViewUpdate {
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = grant_update
     else {
         panic!("expected grant update");
     };
     assert_eq!(
-        result_row_adds,
+        result_member_adds,
         vec![
             ("canvases".to_owned().into(), canvas_row, canvas_tx),
             ("shapes".to_owned().into(), shape_row, shape_tx),
         ]
     );
-    assert!(result_row_removes.is_empty());
+    assert!(result_member_removes.is_empty());
     assert_eq!(invited_link.metrics.view_updates_out, 2);
     assert_eq!(
         invited_link
@@ -1790,8 +1801,8 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     assert!(matches!(
         spy_update,
         SyncMessage::ViewUpdate {
-            result_row_adds: ref adds,
-            result_row_removes: ref removes,
+            result_member_adds: ref adds,
+            result_member_removes: ref removes,
             ..
         } if adds.is_empty() && removes.is_empty()
     ));
@@ -1820,16 +1831,16 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         .query_update(&mut core, &shape, &binding)
         .unwrap();
     let SyncMessage::ViewUpdate {
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = revoke_update
     else {
         panic!("expected revoke update");
     };
-    assert!(result_row_adds.is_empty());
+    assert!(result_member_adds.is_empty());
     assert_eq!(
-        result_row_removes,
+        result_member_removes,
         vec![
             ("canvases".to_owned().into(), canvas_row, canvas_tx),
             ("shapes".to_owned().into(), shape_row, shape_tx),
@@ -2028,6 +2039,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
             &chat_binding,
             RegisterShapeOptions {
                 tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
             },
         )
         .unwrap();
@@ -2041,6 +2053,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
             &message_binding,
             RegisterShapeOptions {
                 tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
             },
         )
         .unwrap();
@@ -2112,6 +2125,7 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
             &binding,
             RegisterShapeOptions {
                 tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
             },
         )
         .unwrap();
@@ -2184,6 +2198,7 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
             &binding,
             RegisterShapeOptions {
                 tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
             },
         )
         .unwrap();
@@ -2243,13 +2258,14 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
             &binding,
             RegisterShapeOptions {
                 tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
             },
         )
         .unwrap();
 
     let SyncMessage::ViewUpdate {
         reset_result_set,
-        result_row_adds,
+        result_member_adds,
         version_bundles,
         ..
     } = update
@@ -2257,7 +2273,7 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
         panic!("expected view update");
     };
     assert!(reset_result_set);
-    assert!(result_row_adds.is_empty());
+    assert!(result_member_adds.is_empty());
     assert!(version_bundles.is_empty());
 }
 
@@ -2539,15 +2555,21 @@ fn seed_multi_segment_include_fixture(
 
 fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
     let SyncMessage::ViewUpdate {
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = update
     else {
         panic!("expected view update");
     };
-    let mut adds = result_row_adds.clone();
-    let mut removes = result_row_removes.clone();
+    let mut adds = result_member_adds
+        .iter()
+        .filter_map(crate::protocol::ResultMemberEntry::as_row)
+        .collect::<Vec<_>>();
+    let mut removes = result_member_removes
+        .iter()
+        .filter_map(crate::protocol::ResultMemberEntry::as_row)
+        .collect::<Vec<_>>();
     adds.sort();
     removes.sort();
     (adds, removes)
@@ -2725,13 +2747,16 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate {
-        result_row_adds, ..
+        result_member_adds, ..
     } = update
     else {
         panic!("expected view update");
     };
     assert_eq!(
-        result_row_adds.into_iter().collect::<BTreeSet<_>>(),
+        result_member_adds
+            .into_iter()
+            .filter_map(crate::protocol::ResultMemberEntry::into_row)
+            .collect::<BTreeSet<_>>(),
         BTreeSet::from([("roots".to_owned().into(), row(0xd2), update_tx)])
     );
 }
@@ -2792,7 +2817,8 @@ fn holes_multi_segment_include_keeps_parent_and_withholds_unreadable_second_hop(
             SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
-            },
+            read_view: Default::default(),
+},
             [],
             [],
             [],
@@ -2962,7 +2988,8 @@ fn holes_include_unreadable_target_keeps_parent_and_withholds_target() {
             SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
-            },
+            read_view: Default::default(),
+},
             [],
             [],
             [],
@@ -3972,7 +3999,11 @@ fn reachable_edge_constituent_current_graph_yields_closure_edges_with_versions()
     let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
     let shape = recursive_reachable_shape(&core);
     let graph = core
-        .reachable_edge_constituent_current_graph(&shape, &shape.query().reachable[0])
+        .reachable_edge_constituent_current_graph(
+            &shape,
+            &shape.query().reachable[0],
+            DurabilityTier::Global,
+        )
         .unwrap();
     let graph = reachable_constituent_test_graph_with_team(
         &core,
@@ -3999,7 +4030,11 @@ fn reachable_access_constituent_current_graph_yields_closure_access_rows_with_ve
     let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
     let shape = recursive_reachable_shape(&core);
     let graph = core
-        .reachable_access_constituent_current_graph(&shape, &shape.query().reachable[0])
+        .reachable_access_constituent_current_graph(
+            &shape,
+            &shape.query().reachable[0],
+            DurabilityTier::Global,
+        )
         .unwrap();
     let graph = reachable_constituent_test_graph_with_team(
         &core,
@@ -4024,7 +4059,11 @@ fn reachable_constituents_retract_when_edge_removed_and_closure_shrinks() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
     let shape = recursive_reachable_shape(&core);
     let before_graph = core
-        .reachable_access_constituent_current_graph(&shape, &shape.query().reachable[0])
+        .reachable_access_constituent_current_graph(
+            &shape,
+            &shape.query().reachable[0],
+            DurabilityTier::Global,
+        )
         .unwrap();
     let before_graph = reachable_constituent_test_graph_with_team(
         &core,
@@ -4089,17 +4128,17 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     expected_removes: [(&str, RowUuid, TxId); R],
 ) {
     let SyncMessage::ViewUpdate {
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = update
     else {
         panic!("expected view update");
     };
-    let mut result_row_adds = result_row_adds;
-    let mut result_row_removes = result_row_removes;
-    result_row_adds.sort();
-    result_row_removes.sort();
+    let mut result_member_adds = result_member_adds;
+    let mut result_member_removes = result_member_removes;
+    result_member_adds.sort();
+    result_member_removes.sort();
     let mut expected_adds = expected_adds
         .into_iter()
         .map(|(table, row_uuid, tx_id)| (table.to_owned().into(), row_uuid, tx_id))
@@ -4110,8 +4149,8 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
         .collect::<Vec<_>>();
     expected_adds.sort();
     expected_removes.sort();
-    assert_eq!(result_row_adds, expected_adds);
-    assert_eq!(result_row_removes, expected_removes);
+    assert_eq!(result_member_adds, expected_adds);
+    assert_eq!(result_member_removes, expected_removes);
 }
 
 struct RecursiveReachableFixture {

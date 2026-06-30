@@ -13,12 +13,12 @@ describe("schema.ts TS DSL fixture", () => {
     });
   });
 
-  it("serializes magic select metadata on generated query builders", () => {
-    expect(JSON.parse(app.todos.select("title", "$canRead", "$canEdit")._build())).toEqual({
+  it("serializes provenance magic select metadata on generated query builders", () => {
+    expect(JSON.parse(app.todos.select("title", "$createdAt", "$updatedBy")._build())).toEqual({
       table: "todos",
       conditions: [],
       includes: {},
-      select: ["title", "$canRead", "$canEdit"],
+      select: ["title", "$createdAt", "$updatedBy"],
       orderBy: [],
       hops: [],
     });
@@ -35,12 +35,12 @@ describe("schema.ts TS DSL fixture", () => {
     });
   });
 
-  it('serializes mixed select("*", "$canDelete") metadata on generated query builders', () => {
-    expect(JSON.parse(app.todos.select("*", "$canDelete")._build())).toEqual({
+  it('serializes mixed select("*", "$updatedAt") metadata on generated query builders', () => {
+    expect(JSON.parse(app.todos.select("*", "$updatedAt")._build())).toEqual({
       table: "todos",
       conditions: [],
       includes: {},
-      select: ["*", "$canDelete"],
+      select: ["*", "$updatedAt"],
       orderBy: [],
       hops: [],
     });

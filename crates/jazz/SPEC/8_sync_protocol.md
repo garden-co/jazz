@@ -61,16 +61,16 @@ acceptance/rejection, auth expiry, and unsupported-feature diagnostics through
 
 The message variants and their payloads are:
 
-| message                                                                    | direction      | payload                                                                                                                                                                                      |
-| -------------------------------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CommitUnit`                                                               | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                                                                          |
-| `FateUpdate`                                                               | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                                                                         |
-| `RegisterShape`                                                            | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                                                                                    |
-| `Subscribe`                                                                | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                                                                            |
-| `Unsubscribe`                                                              | up             | `{ subscription: SubscriptionKey }`                                                                                                                                                          |
-| `ViewUpdate`                                                               | down           | `{ subscription: SubscriptionKey, reset_result_set: bool, version_bundles: Vec<VersionBundle>, peer_payload_inventory: PeerPayloadInventory, result_row_adds/removes: Vec<ResultRowEntry> }` |
-| `FetchContentExtent` / `ContentExtents`                                    | bulk lane      | `{ row, extent }` / `{ extents: Vec<ContentExtent> }`                                                                                                                                        |
-| `PublishSchema` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                                                                                       |
+| message                                                                    | direction      | payload                                                                                                                              |
+| -------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `CommitUnit`                                                               | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                  |
+| `FateUpdate`                                                               | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                 |
+| `RegisterShape`                                                            | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                            |
+| `Subscribe`                                                                | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                    |
+| `Unsubscribe`                                                              | up             | `{ subscription: SubscriptionKey }`                                                                                                  |
+| `ViewUpdate`                                                               | down           | `{ subscription, reset_result_set, version_bundles, peer_payload_inventory, result_member_adds/removes, program_fact_adds/removes }` |
+| `FetchContentExtent` / `ContentExtents`                                    | bulk lane      | `{ owner: LargeValueOwnerRef, extent }` / `{ extents: Vec<ContentExtent> }`                                                          |
+| `PublishSchema` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                               |
 
 A `VersionBundle`, carried in `ViewUpdate.version_bundles`, is `{ tx, versions,
 fate, global_seq, durability }`: a settled **view payload bundle** with the fate
@@ -111,16 +111,20 @@ monotone `GlobalSeq` that advances the allocator and watermark (ch. 3,
 
 Downstream sync is driven by subscriptions rather than by raw transaction
 broadcasts (ch. 6). Each view update applies to one
-`SubscriptionKey { shape_id, binding_id }`, so peers receive the settled rows and
-versions that are visible through that specific shape binding. Three protocol
-rules govern these updates:
+`SubscriptionKey { shape_id, binding_id, read_view }`, so peers receive the
+settled rows and versions that are visible through that specific usage-site
+shape binding and read-view identity. Three protocol rules govern these updates:
 
 - View updates carry **accepted/settled state only** — pending versions are
   visible only on the creating node and are never emitted to non-origin peers
   (`INV-SYNC-12`).
-- Result sets are **row-grained**: `result_row_adds`/`removes` entries are
-  `(table, row_uuid, content_tx_id)`, not transaction-grained membership
-  (`INV-SYNC-7`).
+- Result sets are **member-grained**: the ordinary current-row projection is
+  `(table, row_uuid, content_tx_id)`, but protocol-visible membership is typed
+  `ResultMemberEntry` data. Real-row members carry source/read-view,
+  content/deletion layer, optional deletion tx, schema, branch/prefix, batch,
+  and digest dimensions when those dimensions participate in identity.
+  Synthetic aggregate/window rows and path tuple rows use the same member set
+  rather than another result-set engine (`INV-SYNC-7`).
 - Payload dedup is **per peer identity** for complete transaction payloads: once
   a peer has received all versions for a transaction, later mentions ride in
   `peer_payload_inventory.complete_tx_payloads: Vec<TxId>`. Those tx ids are
@@ -133,24 +137,32 @@ rules govern these updates:
   subscription view
   (`INV-SYNC-8`, `INV-SYNC-9`).
 
-Protocol state deliberately keeps four facts separate: concrete row-version
-payloads received in bundles, transaction existence/metadata (`Transaction` by
-`TxId`), full transaction-payload coverage
-(`peer_payload_inventory.complete_tx_payloads`), and subscription-scoped
-exclusive completeness. The last one is a visibility rule for a particular view,
-not a reusable tx-level reference.
+Protocol state deliberately keeps facts separate: concrete row-version payloads
+received in bundles, transaction existence/metadata (`Transaction` by `TxId`),
+non-versioned synthetic result payloads (`ResultPayload` program facts keyed by
+typed result member), full transaction-payload coverage
+(`peer_payload_inventory.complete_tx_payloads` / `CompleteTxPayloadCoverage`),
+subscription-scoped exclusive completeness (`ViewCompleteExclusiveCoverage`),
+source/read-frontier coverage, policy decisions/witnesses, predicate output
+sets, and large-value extents. Subscription-scoped exclusive completeness is a
+visibility rule for a particular view, not a reusable tx-level reference.
 
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
 `INV-SYNC-20` — incremental view updates are observationally equivalent to a full
-reset `ViewUpdate` for the same coverage key (ch. 6).
+reset `ViewUpdate` for the same canonical program instance (ch. 6).
 
 ## 8.5 Subscription Attach, Reset, And Detach
 
 `Subscribe` attaches one usage-site subscription id to a registered shape and a
-binding value vector. The serving side groups subscriptions by coverage key
-`(shape_id, binding_id, opts)` and maintains one shared view for that key, then
-fans `ViewUpdate`s out to each usage-site `SubscriptionKey`. A new usage-site
+binding value vector. A peer may register the same `shape_id` under multiple
+serving option sets; the serving side selects the option set by
+`Subscribe.subscription.read_view`, the `ReadViewKey` derived from the resolved
+read identity. The serving side groups subscriptions by canonical program
+instance `(shape, resolved_read, policy, binding)` and maintains one shared view
+for that key, then fans `ViewUpdate`s out to each usage-site `SubscriptionKey`. Remote serving
+options are settled-only: `Local`/`None` are link-local facade tiers and must be
+normalized before propagation or rejected by a serving peer. A new usage-site
 subscription always receives a complete replacement response with
 `reset_result_set = true`; later updates may be incremental. Applying a reset
 response clears the receiver's settled subscription result set before applying
@@ -158,8 +170,8 @@ the replacement rows (`INV-SYNC-10`), because removals against a discarded
 server-side result set are no longer expressible.
 
 `Unsubscribe` detaches one usage-site subscription. When the last usage-site
-subscription for a coverage key detaches, the serving side may drop the shared
-maintained view and its runtime subscription state. Per-peer payload dedup
+subscription for a canonical program instance detaches, the serving side may drop
+the shared maintained view and its runtime subscription state. Per-peer payload dedup
 survives view reset and detach while peer state survives (`INV-SYNC-11`).
 
 ## 8.6 Policy narrowing in sync
@@ -176,7 +188,7 @@ Downstream delivery preserves view visibility, not transport completeness. A
 mergeable transaction may be delivered and applied **partially**: each visible
 mergeable version contributes independently (`INV-SYNC-16`). Exclusive payloads
 may also be partial at the transaction level and may be stored immediately, but
-each maintained subscription view exposes exclusive result rows only when the
+each maintained subscription view exposes exclusive result members only when the
 payload required by that view is complete. This is a **view-complete exclusive
 payload**, not necessarily a complete transaction payload. Otherwise the payload
 remains stored but invisible for that view (`INV-SYNC-15`, ch. 3, ch. 7).
@@ -259,12 +271,13 @@ node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
   client retry after restart; persisted parked units are not implemented. Decide
   whether ch. 8 states this as an implementation limitation or defers to
   durability/topology.
-- 🔶 **View options & payload-inventory resubscribe.** `RegisterShapeOptions` is
-  currently empty; `rows full` / `history shallow` view options, `history: full`,
-  and delta-resubscribe from a peer payload inventory are reserved vocabulary,
-  not an implemented wire contract. This should be specified independently from
-  snapshot refs, which are read frontiers rather than peer payload inventories.
-  Decide how much to pin now.
+- 🔶 **View options & payload-inventory resubscribe.** `RegisterShapeOptions`
+  currently carries serving tier plus semantic read-view request. Richer row and
+  history materialization options (`rows full`, `history shallow`,
+  `history full`) and delta-resubscribe from a peer payload inventory are
+  reserved vocabulary, not an implemented wire contract. This should be
+  specified independently from snapshot refs, which are read frontiers rather
+  than peer payload inventories. Decide how much to pin now.
 - 🔶 **Relay upstream aggregation** onto coarser covering shapes is the design;
   implementation does not make it a MUST yet (ch. 6, ch. 9).
 - 🔶 **Covering-scope subsumption** is the design for broader permission scopes
