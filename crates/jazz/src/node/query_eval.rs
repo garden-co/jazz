@@ -1116,10 +1116,7 @@ where
                 Ok(out)
             }
             RelationExpr::Gather {
-                seed,
-                step,
-                max_depth,
-                ..
+                seed, step, bound, ..
             } => {
                 let seed_rows = self.eval_relation_expr(seed, tier, identity, context)?;
                 let mut by_key = BTreeMap::new();
@@ -1127,7 +1124,7 @@ where
                 for row in seed_rows {
                     by_key.insert(subscription_row_key_for_eval(&row), row);
                 }
-                for _ in 0..*max_depth {
+                for _ in 0..bound.legacy_iteration_cap() {
                     if frontier.is_empty() {
                         break;
                     }
@@ -5498,8 +5495,12 @@ where
                     .map(|param| ProjectField::renamed(format!("left.{param}"), param)),
             ),
         );
-        let closure =
-            GraphBuilder::recursive(seed, step, "reachable_frontier", reachable.max_depth.max(1));
+        let closure = GraphBuilder::recursive(
+            seed,
+            step,
+            "reachable_frontier",
+            reachable.bound.legacy_iteration_cap(),
+        );
         let mut access_graph = current_source_graph(access_table, tier, source_overrides)
             .unwrap_nullable(query_field(&reachable.access_row_column))
             .unwrap_nullable(query_field(&reachable.access_team_column));
