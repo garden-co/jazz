@@ -45,6 +45,7 @@ pub struct IvmRuntime {
     table_descriptors: HashMap<String, RecordDescriptor>,
     graph: IvmGraph,
     subscriptions: HashMap<SubscriptionId, SubscriptionState>,
+    multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
     prepared_shapes: HashMap<PreparedShapeId, PreparedShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
     binding_sources: HashMap<String, BindingSourceState>,
@@ -83,6 +84,7 @@ impl IvmRuntime {
             table_descriptors,
             graph: IvmGraph::new(),
             subscriptions: HashMap::new(),
+            multisink_subscriptions: HashMap::new(),
             operator_states: HashMap::new(),
             arrangement_states: HashMap::new(),
             eval_memo: HashMap::new(),
@@ -253,6 +255,28 @@ impl IvmRuntime {
                 dropped_subscriptions.push(*subscription_id);
             }
         }
+        for (subscription_id, subscription) in &self.multisink_subscriptions {
+            let mut sinks = BTreeMap::new();
+            for (sink, output) in &subscription.outputs {
+                let records = evaluator.update_node(output.node)?;
+                if !records.deltas.is_empty() && records.descriptor != output.output {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                if !records.is_empty() {
+                    sinks.insert(sink.clone(), records);
+                }
+            }
+            let records = MultisinkDeltas { sinks };
+            if !records.is_empty() {
+                evaluator.metrics.notifications_sent += 1;
+                evaluator.metrics.notification_records += multisink_deltas_record_count(&records);
+                evaluator.metrics.notification_encoded_bytes +=
+                    multisink_deltas_encoded_bytes(&records);
+            }
+            if !records.is_empty() && subscription.sender.send(records).is_err() {
+                dropped_subscriptions.push(*subscription_id);
+            }
+        }
         let shape_ids = self.prepared_shapes.keys().copied().collect::<Vec<_>>();
         let mut shape_outputs = Vec::new();
         for shape_id in shape_ids {
@@ -327,6 +351,25 @@ impl IvmRuntime {
             metrics: &mut metrics,
         };
         evaluator.update_node(output_node)
+    }
+
+    fn hydration_snapshots<S>(
+        &mut self,
+        outputs: &BTreeMap<String, CompiledNode>,
+        storage: &S,
+    ) -> Result<MultisinkDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let mut sinks = BTreeMap::new();
+        for (sink, output) in outputs {
+            let records = self.hydration_snapshot(output.node, storage)?;
+            if records.descriptor != output.output {
+                return Err(IvmRuntimeError::GraphOutputMismatch);
+            }
+            sinks.insert(sink.clone(), records);
+        }
+        Ok(MultisinkDeltas { sinks })
     }
 
     fn hydrate_shape_graph<S>(
@@ -504,6 +547,76 @@ impl IvmRuntime {
             self.unsubscribe(subscription_id);
         }
         Ok(Subscription {
+            id: subscription_id,
+            receiver,
+        })
+    }
+
+    pub fn subscribe_multisink<I, K, S>(
+        &mut self,
+        sinks: I,
+        storage: &S,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+        S: OrderedKvStorage,
+    {
+        let sinks = sinks
+            .into_iter()
+            .map(|(sink, graph)| (sink.into(), graph))
+            .collect::<Vec<_>>();
+        if sinks.is_empty() {
+            return Err(IvmRuntimeError::EmptyMultisinkSubscription);
+        }
+        let mut sink_names = HashSet::new();
+        for (sink, _) in &sinks {
+            if !sink_names.insert(sink.clone()) {
+                return Err(IvmRuntimeError::DuplicateMultisinkSink(sink.clone()));
+            }
+        }
+        if let Some((sink, _)) = sinks
+            .iter()
+            .find(|(_, graph)| builder_contains_binding_source(graph))
+        {
+            return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
+        }
+        self.logical_nodes_requested += sinks
+            .iter()
+            .map(|(_, graph)| count_builder_nodes(graph))
+            .sum::<usize>() as u64;
+        let mut outputs = BTreeMap::new();
+        for (sink, graph) in sinks {
+            let compiled = self.add_dedup_graph(&graph)?;
+            outputs.insert(sink, compiled);
+        }
+        let subscription_id = self.next_subscription_id();
+        let (sender, receiver) = mpsc::channel();
+        for output in outputs.values() {
+            self.retain_as_subscription(subscription_id, output.node);
+        }
+        self.multisink_subscriptions.insert(
+            subscription_id,
+            MultisinkSubscriptionState {
+                sender,
+                outputs: outputs.clone(),
+            },
+        );
+        let initial = match self.hydration_snapshots(&outputs, storage) {
+            Ok(initial) => initial,
+            Err(error) => {
+                self.unsubscribe(subscription_id);
+                return Err(error);
+            }
+        };
+        let sent = self
+            .multisink_subscriptions
+            .get(&subscription_id)
+            .is_some_and(|subscription| subscription.sender.send(initial).is_ok());
+        if !sent {
+            self.unsubscribe(subscription_id);
+        }
+        Ok(MultisinkSubscription {
             id: subscription_id,
             receiver,
         })
@@ -737,6 +850,21 @@ impl IvmRuntime {
     }
 
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
+        if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
+            let mut removed = false;
+            for output in subscription.outputs.values() {
+                removed |= self.remove_retainer(
+                    output.node,
+                    &Retainer::Subscription(subscription_id.retainer_key()),
+                );
+            }
+            for node in self.gc_ephemeral_nodes(0) {
+                self.remove_node_runtime(node);
+            }
+            self.prune_unreferenced_arrangements();
+            return removed;
+        }
+
         let Some(subscription) = self.subscriptions.remove(&subscription_id) else {
             return false;
         };
@@ -772,6 +900,21 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
+            let mut removed = false;
+            for output in subscription.outputs.values() {
+                removed |= self.remove_retainer(
+                    output.node,
+                    &Retainer::Subscription(subscription_id.retainer_key()),
+                );
+            }
+            for node in self.gc_ephemeral_nodes(0) {
+                self.remove_node_runtime(node);
+            }
+            self.prune_unreferenced_arrangements();
+            return Ok(removed);
+        }
+
         let Some(subscription) = self.subscriptions.remove(&subscription_id) else {
             return Ok(false);
         };
@@ -810,6 +953,9 @@ impl IvmRuntime {
     }
 
     pub fn subscription_output_node(&self, subscription_id: SubscriptionId) -> Option<NodeId> {
+        if self.multisink_subscriptions.contains_key(&subscription_id) {
+            return None;
+        }
         match &self.subscriptions.get(&subscription_id)?.target {
             SubscriptionTarget::Direct { output } => Some(output.node),
             SubscriptionTarget::Shape { shape_id, .. } => self
@@ -823,6 +969,9 @@ impl IvmRuntime {
         &self,
         subscription_id: SubscriptionId,
     ) -> Option<&RecordDescriptor> {
+        if self.multisink_subscriptions.contains_key(&subscription_id) {
+            return None;
+        }
         match &self.subscriptions.get(&subscription_id)?.target {
             SubscriptionTarget::Direct { output } => Some(&output.output),
             SubscriptionTarget::Shape {
@@ -1210,7 +1359,7 @@ impl IvmRuntime {
     pub fn stats(&self) -> RuntimeStats {
         let mut stats = RuntimeStats {
             graph_nodes: self.graph.nodes().len(),
-            active_subscriptions: self.subscriptions.len(),
+            active_subscriptions: self.subscriptions.len() + self.multisink_subscriptions.len(),
             active_prepared_shapes: self.prepared_shapes.len(),
             active_shape_params: self
                 .binding_sources
@@ -2315,6 +2464,43 @@ impl Subscription {
     }
 }
 
+/// Deltas grouped by named output sink for one multisink graph subscription.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultisinkDeltas {
+    pub sinks: BTreeMap<String, RecordDeltas>,
+}
+
+impl MultisinkDeltas {
+    pub fn is_empty(&self) -> bool {
+        self.sinks.values().all(RecordDeltas::is_empty)
+    }
+
+    pub fn get(&self, sink: &str) -> Option<&RecordDeltas> {
+        self.sinks.get(sink)
+    }
+}
+
+/// Receiving end of a live multisink graph subscription.
+#[derive(Debug)]
+pub struct MultisinkSubscription {
+    id: SubscriptionId,
+    receiver: Receiver<MultisinkDeltas>,
+}
+
+impl MultisinkSubscription {
+    pub fn id(&self) -> SubscriptionId {
+        self.id
+    }
+
+    pub fn recv(&self) -> Result<MultisinkDeltas, RecvError> {
+        self.receiver.recv()
+    }
+
+    pub fn try_recv(&self) -> Result<MultisinkDeltas, TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
 impl PredicateExpr {
     fn matches(&self, record: BorrowedRecord<'_>) -> Result<bool, IvmRuntimeError> {
         match self {
@@ -2392,6 +2578,12 @@ struct SubscriptionState {
     /// Sending end for this subscription's notification stream.
     sender: Sender<RecordDeltas>,
     target: SubscriptionTarget,
+}
+
+#[derive(Clone, Debug)]
+struct MultisinkSubscriptionState {
+    sender: Sender<MultisinkDeltas>,
+    outputs: BTreeMap<String, CompiledNode>,
 }
 
 #[derive(Clone, Debug)]
@@ -2528,6 +2720,18 @@ impl RecordDeltas {
 
 fn record_deltas_encoded_bytes(deltas: &RecordDeltas) -> usize {
     deltas.deltas.iter().map(|delta| delta.record.len()).sum()
+}
+
+fn multisink_deltas_record_count(deltas: &MultisinkDeltas) -> usize {
+    deltas
+        .sinks
+        .values()
+        .map(|records| records.deltas.len())
+        .sum()
+}
+
+fn multisink_deltas_encoded_bytes(deltas: &MultisinkDeltas) -> usize {
+    deltas.sinks.values().map(record_deltas_encoded_bytes).sum()
 }
 
 fn project_record_deltas(
@@ -5473,6 +5677,12 @@ pub enum IvmRuntimeError {
     PersistRecordMismatch,
     #[error("binding sources can only be evaluated through prepared shapes")]
     BindingSourceRequiresPrepare,
+    #[error("multisink subscription must have at least one sink")]
+    EmptyMultisinkSubscription,
+    #[error("multisink sink already exists: {0}")]
+    DuplicateMultisinkSink(String),
+    #[error("multisink sink requires prepare because it contains a binding source: {0}")]
+    MultisinkSinkRequiresPrepare(String),
     #[error("binding source not found: {0}")]
     BindingSourceNotFound(String),
     #[error(transparent)]

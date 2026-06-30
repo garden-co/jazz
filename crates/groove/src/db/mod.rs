@@ -30,7 +30,8 @@ use crate::storage::{OrderedKvStorage, OwnedWriteOperation, RecordStore, WriteOp
 use thiserror::Error;
 
 pub use crate::ivm::{
-    GraphBuilder, IvmRuntimeError, PredicateExpr, PreparedShapeId, Subscription, SubscriptionId,
+    GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription, PredicateExpr,
+    PreparedShapeId, Subscription, SubscriptionId,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
@@ -195,6 +196,21 @@ where
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .subscribe(graph, &storage)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Subscribe to several named IVM graph outputs as one logical stream.
+    ///
+    /// The initial message includes every sink, even if that sink is empty.
+    /// Later messages are sent only when at least one sink has deltas.
+    pub fn subscribe_multisink<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+    {
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.ivm_runtime
+            .subscribe_multisink(sinks, &storage)
             .map_err(Error::IvmRuntime)
     }
 
