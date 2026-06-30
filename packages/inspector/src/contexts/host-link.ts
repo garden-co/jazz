@@ -30,7 +30,13 @@ export function readInspectorHostConfig(): InspectorConnectionConfig | null {
 
 export function readInspectorHostSchema(): WasmSchema | null {
   const host = readHost();
-  return host ? host.getWasmSchema() : null;
+  if (!host) return null;
+  try {
+    return host.getWasmSchema();
+  } catch {
+    // getRuntimeSchema throws until the host has created a client (run a query).
+    return null;
+  }
 }
 
 /**

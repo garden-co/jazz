@@ -585,7 +585,7 @@ export function TableDataGrid() {
     return <Navigate to="/data-explorer" replace />;
   }
 
-  const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
+  const { wasmSchema: schema, queryPropagation } = useDevtoolsContext();
   const db = useDb();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -710,7 +710,7 @@ export function TableDataGrid() {
     return builder.orderBy(sortColumn, sortDirection).limit(queryLimit).offset(queryOffset);
   }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);
   const builtQuery = useMemo(() => queryBuilder._build(), [queryBuilder]);
-  const mutationDurabilityTier = runtime === "standalone" ? "edge" : "local";
+  const mutationDurabilityTier = "edge";
   const queryOptions = useMemo(
     () =>
       ({

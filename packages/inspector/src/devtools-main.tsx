@@ -1,11 +1,11 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { createExtensionJazzClient } from "jazz-tools/react";
-import { InspectorApp } from "./inspector-app";
+import { ExtensionApp } from "./extension-app";
 import "./index.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <InspectorApp client={createExtensionJazzClient()} />
+    <ExtensionApp client={createExtensionJazzClient()} />
   </StrictMode>,
 );
