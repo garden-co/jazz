@@ -1,5 +1,6 @@
 import { resolveBrokerWorkerUrl } from "../../runtime/browser-broker-client.js";
 import type { Db } from "../../runtime/db.js";
+import { getRegisteredWasmSchema } from "../../typed-app.js";
 import {
   INSPECTOR_HOST_GLOBAL,
   INSPECTOR_SUBSCRIPTIONS_MESSAGE,
@@ -37,7 +38,11 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
       };
     },
     getWasmSchema() {
-      return db.getRuntimeSchema();
+      // Prefer the statically-registered app schema (known at defineApp time) so
+      // the overlay renders even before any query has created a runtime client —
+      // e.g. on a write-only page (useDb/insert, no useAll). Fall back to the
+      // live client's schema if the app wasn't built via defineApp.
+      return getRegisteredWasmSchema() ?? db.getRuntimeSchema();
     },
     getActiveSubscriptions() {
       return serializeActiveSubscriptions(db.getActiveQuerySubscriptions());
