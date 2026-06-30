@@ -797,16 +797,35 @@ fn source_requirements(
     }
 
     if let Some(app_rows) = &output.app_rows {
-        if !matches!(plan, AnalyzedQueryPlan::Linear(_)) {
+        if !matches!(
+            plan,
+            AnalyzedQueryPlan::Linear(_) | AnalyzedQueryPlan::CorrelatedPath(_)
+        ) {
             return Err(Box::new(CapabilityReport {
                 gaps: vec![UnsupportedReason::Operator(
-                    "app row materialization for path/relation projections is not lowered yet"
+                    "app row materialization for recursive relation projections is not lowered yet"
                         .to_owned(),
                 )],
                 explain: ExplainPlan {
+                    capabilities: vec!["recursive relation app rows are not lowered".to_owned()],
+                    ..ExplainPlan::default()
+                },
+            }));
+        }
+        if let Some(path_fact) = output.facts.iter().find(|fact| {
+            matches!(
+                (plan, fact),
+                (
+                    AnalyzedQueryPlan::CorrelatedPath(_),
+                    ProgramFactKey::PathEdges | ProgramFactKey::PathCorrelationCoverage
+                )
+            )
+        }) {
+            return Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Output(Box::new(path_fact.clone()))],
+                explain: ExplainPlan {
                     capabilities: vec![
-                        "path/relation lowering currently emits hidden facts separately from app rows"
-                            .to_owned(),
+                        "correlated path app rows lower to parent rows; path fact terminals require child path rows and cannot share that graph yet".to_owned(),
                     ],
                     ..ExplainPlan::default()
                 },
@@ -1131,40 +1150,7 @@ fn lower_plan_steps(
             lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)
         }
         AnalyzedQueryPlan::CorrelatedPath(path) => {
-            let parent = lower_linear_plan_steps(
-                graph,
-                &path.parent,
-                root_source,
-                resolved_sources,
-                request,
-            )?;
-            let child_root = path.child.root.source().ok_or_else(|| {
-                UnsupportedReason::Operator("path child must be a source".to_owned())
-            })?;
-            let child_source = resolved_sources.get(child_root).ok_or_else(|| {
-                UnsupportedReason::Runtime(format!(
-                    "path child source {:?} was not resolved",
-                    child_root
-                ))
-            })?;
-            let child = lower_linear_plan_steps(
-                child_source.graph.clone(),
-                &path.child,
-                child_source,
-                resolved_sources,
-                request,
-            )?;
-            let (parent_key, child_key) = lower_path_key_pair(
-                &path.correlation,
-                path.parent.root.source().ok_or_else(|| {
-                    UnsupportedReason::Operator("path parent must be a source".to_owned())
-                })?,
-                root_source,
-                child_root,
-                child_source,
-                request,
-            )?;
-            Ok(GraphBuilder::join(parent, child, [parent_key], [child_key]))
+            lower_correlated_path_plan(graph, path, root_source, resolved_sources, request)
         }
         AnalyzedQueryPlan::RecursiveRelation(relation) => lower_recursive_relation(
             Some(graph),
@@ -1173,6 +1159,65 @@ fn lower_plan_steps(
             resolved_sources,
             request,
         ),
+    }
+}
+
+fn lower_correlated_path_plan(
+    graph: GraphBuilder,
+    path: &CorrelatedPathPlan,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<GraphBuilder, UnsupportedReason> {
+    let parent =
+        lower_linear_plan_steps(graph, &path.parent, root_source, resolved_sources, request)?;
+    let child_root = path
+        .child
+        .root
+        .source()
+        .ok_or_else(|| UnsupportedReason::Operator("path child must be a source".to_owned()))?;
+    let child_source = resolved_sources.get(child_root).ok_or_else(|| {
+        UnsupportedReason::Runtime(format!(
+            "path child source {:?} was not resolved",
+            child_root
+        ))
+    })?;
+    let child = lower_linear_plan_steps(
+        child_source.graph.clone(),
+        &path.child,
+        child_source,
+        resolved_sources,
+        request,
+    )?;
+    let (parent_key, child_key) = lower_path_key_pair(
+        &path.correlation,
+        path.parent.root.source().ok_or_else(|| {
+            UnsupportedReason::Operator("path parent must be a source".to_owned())
+        })?,
+        root_source,
+        child_root,
+        child_source,
+        request,
+    )?;
+
+    if request.output.app_rows.is_none() {
+        return Ok(GraphBuilder::join(parent, child, [parent_key], [child_key]));
+    }
+
+    match path.requirement {
+        CorrelationRequirement::Optional => Ok(parent),
+        CorrelationRequirement::AtLeastOne => {
+            let joined = GraphBuilder::join(parent, child, [parent_key], [child_key])
+                .project_fields(project_left_source_fields(root_source));
+            Ok(GraphBuilder::arg_min_by(
+                joined,
+                [root_source.row_shape.row_uuid_field.clone()],
+                [root_source.row_shape.row_uuid_field.clone()],
+            ))
+        }
+        CorrelationRequirement::MatchCorrelationCardinality => Err(UnsupportedReason::Operator(
+            "match-correlation-cardinality app rows need cardinality coverage lowering".to_owned(),
+        )),
     }
 }
 

@@ -895,6 +895,202 @@ fn correlated_path_projection_lowers_with_path_fact_schemas() {
     }));
 }
 
+fn correlated_path_request(
+    requirement: CorrelationRequirement,
+    output: RowSetOutputRequest,
+) -> QueryProgramRequest {
+    let parent_node = RowSetNodeId("parent".to_owned());
+    let child_node = RowSetNodeId("child".to_owned());
+    let path_node = RowSetNodeId("path".to_owned());
+    let parent_source = source("todos", SourceRole::Root);
+    let child_source = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
+    let path = ProgramPathId {
+        owner: parent_source.clone(),
+        child: child_source.clone(),
+    };
+    QueryProgramRequest {
+        reads: QueryReadSet::primary(path_current_read_view()),
+        policy: system_policy_context(),
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x78),
+                    canonical: vec![0x78],
+                },
+                root: path_node.clone(),
+                result: ResultId::RealRow {
+                    table: "todos".to_owned(),
+                    row: ResultRowRef::Source(parent_source.clone()),
+                },
+                nodes: BTreeMap::from([
+                    (
+                        parent_node.clone(),
+                        RowSetExpr::Source {
+                            source: parent_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        child_node.clone(),
+                        RowSetExpr::Source {
+                            source: child_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        path_node,
+                        RowSetExpr::CorrelatedPathProjection {
+                            input: parent_node,
+                            child_input: child_node,
+                            path,
+                            correlation: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    parent_source.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: child_source,
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                            requirement,
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x78; 16])),
+                values: BTreeMap::new(),
+            },
+        },
+        output,
+    }
+}
+
+#[test]
+fn correlated_path_optional_app_rows_materialize_parent_rows() {
+    // Internal lowering test: the maintained graph shape, not public row contents,
+    // encodes whether optional array subqueries preserve childless parents.
+    let request = correlated_path_request(
+        CorrelationRequirement::Optional,
+        row_set_output(BTreeSet::new()),
+    );
+
+    let mut resolver = FakeSourceResolver::default();
+    let program =
+        lower_query_program(request, &mut resolver).expect("optional path app rows should lower");
+
+    assert!(matches!(
+        program.lowered.graph,
+        GraphBuilder::Table { ref table } if table == "resolved_todos"
+    ));
+    let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
+    assert!(
+        terminals
+            .iter()
+            .any(|terminal| matches!(terminal, OutputTerminalSchema::AppRows(_)))
+    );
+    assert_eq!(terminals.len(), 1);
+}
+
+#[test]
+fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_rows() {
+    // Internal lowering test: the graph uses the child correlation as an
+    // existence filter, then collapses matching children back to one parent row.
+    let request = correlated_path_request(
+        CorrelationRequirement::AtLeastOne,
+        row_set_output(BTreeSet::from([ProgramFactKey::ResultMembership])),
+    );
+
+    let mut resolver = FakeSourceResolver::default();
+    let program =
+        lower_query_program(request, &mut resolver).expect("required path app rows should lower");
+
+    assert!(matches!(
+        program.lowered.graph,
+        GraphBuilder::ArgMinBy {
+            ref input,
+            ref group_cols,
+            ref order_cols,
+        } if matches!(group_cols.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+            && matches!(order_cols.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+            && matches!(
+                input.as_ref(),
+                GraphBuilder::Project { input, fields }
+                    if fields.iter().any(|field| field.output_name == "row_uuid")
+                        && matches!(
+                            input.as_ref(),
+                            GraphBuilder::Join { left_on, right_on, .. }
+                                if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+                                    && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+                        )
+            )
+    ));
+    let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
+    assert!(
+        terminals
+            .iter()
+            .any(|terminal| matches!(terminal, OutputTerminalSchema::AppRows(_)))
+    );
+    assert!(terminals.iter().any(|terminal| {
+        matches!(
+            terminal,
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::ResultMembership,
+                schema: ProgramFactSchema::ResultMembership(_),
+            })
+        )
+    }));
+}
+
+#[test]
+fn correlated_path_cardinality_app_rows_report_operator_gap() {
+    // Internal lowering test: cardinality matching is stricter than existence
+    // and must not be approximated by the AtLeastOne app-row graph.
+    let request = correlated_path_request(
+        CorrelationRequirement::MatchCorrelationCardinality,
+        row_set_output(BTreeSet::new()),
+    );
+
+    let mut resolver = FakeSourceResolver::default();
+    let report = lower_query_program(request, &mut resolver)
+        .expect_err("cardinality app rows need coverage");
+
+    assert!(report.gaps.iter().any(|gap| {
+        matches!(
+            gap,
+            UnsupportedReason::Operator(message)
+                if message.contains("match-correlation-cardinality app rows")
+        )
+    }));
+}
+
+#[test]
+fn correlated_path_app_rows_reject_path_fact_terminals() {
+    // Internal lowering test: app-row correlated paths currently produce parent
+    // rows, so advertising path-fact schemas from the same graph would be a
+    // dishonest output contract.
+    let request = correlated_path_request(
+        CorrelationRequirement::Optional,
+        row_set_output(BTreeSet::from([
+            ProgramFactKey::PathEdges,
+            ProgramFactKey::PathCorrelationCoverage,
+        ])),
+    );
+
+    let mut resolver = FakeSourceResolver::default();
+    let report =
+        lower_query_program(request, &mut resolver).expect_err("mixed path outputs should fail");
+
+    assert!(resolver.requests.is_empty());
+    assert!(report.gaps.contains(&UnsupportedReason::Output(Box::new(
+        ProgramFactKey::PathEdges
+    ))));
+    assert!(report.explain.capabilities.iter().any(|capability| {
+        capability.contains("correlated path app rows lower to parent rows")
+    }));
+}
+
 #[test]
 fn recursive_relation_has_explicit_recursive_plan_and_path_facts() {
     let seed_node = RowSetNodeId("seed".to_owned());
