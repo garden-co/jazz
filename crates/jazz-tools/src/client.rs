@@ -30,9 +30,10 @@ use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
 #[cfg(feature = "rocksdb")]
 use jazz::groove::storage::RocksDbStorage as CoreRocksDbStorage;
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use jazz::node::OpenTxId as CoreOpenTxId;
 use jazz::tx::{
     DeletionEvent as CoreDeletionEvent, DurabilityTier as CoreDurabilityTier, Fate as CoreFate,
-    TxId as CoreTxId,
+    RejectionReason as CoreRejectionReason, TxId as CoreTxId,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -92,7 +93,14 @@ struct ClientDbInner {
     db: Backend,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
-    transactions: HashMap<BatchId, MergeableTransactionState>,
+    transactions: HashMap<BatchId, ExclusiveTransactionState>,
+    closed_transactions: HashMap<BatchId, ClosedTransactionState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClosedTransactionState {
+    Committed,
+    RolledBack,
 }
 
 enum Backend {
@@ -301,17 +309,6 @@ impl Backend {
         }
     }
 
-    fn commit_writes(
-        &self,
-        writes: Vec<MergeableTransactionWrite>,
-    ) -> std::result::Result<(CoreTxId, Vec<(ObjectId, String)>), CoreDbError> {
-        match self {
-            Self::Memory(db) => commit_core_writes(db, writes),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => commit_core_writes(db, writes),
-        }
-    }
-
     fn prepare_query(
         &self,
         query: &jazz::query::Query,
@@ -428,38 +425,74 @@ impl Backend {
             Self::RocksDb(db) => db.next_write_state_change(tx_id).await,
         }
     }
-}
 
-fn commit_core_writes<S>(
-    db: &CoreDb<S>,
-    writes: Vec<MergeableTransactionWrite>,
-) -> std::result::Result<(CoreTxId, Vec<(ObjectId, String)>), CoreDbError>
-where
-    S: jazz::groove::storage::OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
-{
-    let mut tx = db.mergeable_tx();
-    let mut touched_rows = Vec::new();
-    for write in writes {
-        match write.deletion {
-            Some(CoreDeletionEvent::Deleted) => {
-                tx.delete(&write.table, CoreRowUuid(*write.row_id.uuid()))?
-            }
-            Some(CoreDeletionEvent::Restored) => {
-                tx.restore(&write.table, CoreRowUuid(*write.row_id.uuid()), write.cells)?
-            }
-            None => tx.update(&write.table, CoreRowUuid(*write.row_id.uuid()), write.cells)?,
+    fn begin_exclusive(&self) -> std::result::Result<CoreOpenTxId, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.begin_exclusive(),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.begin_exclusive(),
         }
-        touched_rows.push((write.row_id, write.table));
     }
-    let tx_id = tx.commit()?;
-    Ok((tx_id, touched_rows))
+
+    fn exclusive_write(
+        &self,
+        tx_id: CoreOpenTxId,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: jazz::db::RowCells,
+    ) -> std::result::Result<(), CoreDbError> {
+        match self {
+            Self::Memory(db) => db.exclusive_write(tx_id, table, row_id, cells),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.exclusive_write(tx_id, table, row_id, cells),
+        }
+    }
+
+    fn exclusive_update(
+        &self,
+        tx_id: CoreOpenTxId,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: jazz::db::RowCells,
+    ) -> std::result::Result<(), CoreDbError> {
+        match self {
+            Self::Memory(db) => db.exclusive_update(tx_id, table, row_id, cells),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.exclusive_update(tx_id, table, row_id, cells),
+        }
+    }
+
+    fn exclusive_delete(
+        &self,
+        tx_id: CoreOpenTxId,
+        table: &str,
+        row_id: CoreRowUuid,
+    ) -> std::result::Result<(), CoreDbError> {
+        match self {
+            Self::Memory(db) => db.exclusive_delete(tx_id, table, row_id),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.exclusive_delete(tx_id, table, row_id),
+        }
+    }
+
+    fn commit_exclusive_handle(
+        &self,
+        tx_id: CoreOpenTxId,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.commit_exclusive_handle(tx_id),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.commit_exclusive_handle(tx_id),
+        }
+    }
 }
 
-struct MergeableTransactionState {
-    writes: Vec<MergeableTransactionWrite>,
+struct ExclusiveTransactionState {
+    tx_id: CoreOpenTxId,
+    writes: Vec<ExclusiveTransactionWrite>,
 }
 
-struct MergeableTransactionWrite {
+struct ExclusiveTransactionWrite {
     table: String,
     row_id: ObjectId,
     cells: jazz::db::RowCells,
@@ -606,11 +639,21 @@ impl ClientDb {
     ) -> Result<ObjectId> {
         let mut inner = self.inner.borrow_mut();
         let row_id = ObjectId::from_uuid(row_id.unwrap_or_else(Uuid::now_v7));
+        inner.ensure_transaction_open(batch_id)?;
+        let tx_id = inner
+            .transactions
+            .get(&batch_id)
+            .expect("transaction open checked above")
+            .tx_id;
+        inner
+            .db
+            .exclusive_write(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
             .get_mut(&batch_id)
-            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
-        tx.writes.push(MergeableTransactionWrite {
+            .expect("transaction open checked above");
+        tx.writes.push(ExclusiveTransactionWrite {
             table: table.clone(),
             row_id,
             cells,
@@ -653,11 +696,21 @@ impl ClientDb {
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let object_id = ObjectId::from_uuid(row_id);
+        inner.ensure_transaction_open(batch_id)?;
+        let tx_id = inner
+            .transactions
+            .get(&batch_id)
+            .expect("transaction open checked above")
+            .tx_id;
+        inner
+            .db
+            .exclusive_write(tx_id, &table, CoreRowUuid(row_id), cells.clone())
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
             .get_mut(&batch_id)
-            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
-        tx.writes.push(MergeableTransactionWrite {
+            .expect("transaction open checked above");
+        tx.writes.push(ExclusiveTransactionWrite {
             table: table.clone(),
             row_id: object_id,
             cells,
@@ -702,11 +755,21 @@ impl ClientDb {
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
+        inner.ensure_transaction_open(batch_id)?;
+        let tx_id = inner
+            .transactions
+            .get(&batch_id)
+            .expect("transaction open checked above")
+            .tx_id;
+        inner
+            .db
+            .exclusive_update(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
             .get_mut(&batch_id)
-            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
-        tx.writes.push(MergeableTransactionWrite {
+            .expect("transaction open checked above");
+        tx.writes.push(ExclusiveTransactionWrite {
             table,
             row_id,
             cells,
@@ -740,11 +803,21 @@ impl ClientDb {
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
         })?;
+        inner.ensure_transaction_open(batch_id)?;
+        let tx_id = inner
+            .transactions
+            .get(&batch_id)
+            .expect("transaction open checked above")
+            .tx_id;
+        inner
+            .db
+            .exclusive_delete(tx_id, &table, CoreRowUuid(*row_id.uuid()))
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
             .get_mut(&batch_id)
-            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
-        tx.writes.push(MergeableTransactionWrite {
+            .expect("transaction open checked above");
+        tx.writes.push(ExclusiveTransactionWrite {
             table,
             row_id,
             cells: jazz::db::RowCells::new(),
@@ -756,43 +829,69 @@ impl ClientDb {
     fn begin_transaction(&self) -> Result<BatchId> {
         let mut inner = self.inner.borrow_mut();
         let mut batch_id = BatchId::new();
-        while inner.transactions.contains_key(&batch_id) || inner.write_map.contains_key(&batch_id)
+        while inner.transactions.contains_key(&batch_id)
+            || inner.closed_transactions.contains_key(&batch_id)
+            || inner.write_map.contains_key(&batch_id)
         {
             batch_id = BatchId::new();
         }
-        inner
-            .transactions
-            .insert(batch_id, MergeableTransactionState { writes: Vec::new() });
+        let tx_id = inner
+            .db
+            .begin_exclusive()
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        inner.transactions.insert(
+            batch_id,
+            ExclusiveTransactionState {
+                tx_id,
+                writes: Vec::new(),
+            },
+        );
         Ok(batch_id)
     }
 
     fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let state = inner
+        inner.ensure_transaction_open(batch_id)?;
+        if inner
             .transactions
-            .remove(&batch_id)
-            .ok_or_else(|| JazzError::Write(format!("transaction {batch_id} is not open")))?;
-        if state.writes.is_empty() {
+            .get(&batch_id)
+            .expect("transaction open checked above")
+            .writes
+            .is_empty()
+        {
             return Err(JazzError::Write(
                 "transaction cannot commit without writes".to_string(),
             ));
         }
-        let (tx_id, touched_rows) = inner
+        let state = inner
+            .transactions
+            .remove(&batch_id)
+            .expect("transaction open checked above");
+        let tx_id = inner
             .db
-            .commit_writes(state.writes)
+            .commit_exclusive_handle(state.tx_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_core_write_not_rejected(&inner.db, tx_id)?;
         inner.write_map.insert(batch_id, tx_id);
         inner.write_map.insert(core_batch_id(tx_id), tx_id);
-        for (row_id, table) in touched_rows {
-            inner.row_tables.insert(row_id, table);
+        for write in state.writes {
+            inner.row_tables.insert(write.row_id, write.table);
         }
+        inner
+            .closed_transactions
+            .insert(batch_id, ClosedTransactionState::Committed);
         Ok(())
     }
 
     fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
         let mut inner = self.inner.borrow_mut();
-        Ok(inner.transactions.remove(&batch_id).is_some())
+        inner.ensure_transaction_open(batch_id)?;
+        let removed = inner.transactions.remove(&batch_id).is_some();
+        if removed {
+            inner
+                .closed_transactions
+                .insert(batch_id, ClosedTransactionState::RolledBack);
+        }
+        Ok(removed)
     }
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
@@ -856,7 +955,33 @@ impl ClientDbInner {
             write_map: HashMap::new(),
             row_tables: HashMap::new(),
             transactions: HashMap::new(),
+            closed_transactions: HashMap::new(),
         })
+    }
+
+    fn ensure_transaction_open(&self, batch_id: BatchId) -> Result<()> {
+        if self.transactions.contains_key(&batch_id) {
+            return Ok(());
+        }
+        if let Some(state) = self.closed_transactions.get(&batch_id) {
+            return Err(JazzError::Write(Self::closed_transaction_message(
+                batch_id, *state,
+            )));
+        }
+        Err(JazzError::Write(format!(
+            "transaction {batch_id} is not open"
+        )))
+    }
+
+    fn closed_transaction_message(batch_id: BatchId, state: ClosedTransactionState) -> String {
+        match state {
+            ClosedTransactionState::Committed => {
+                format!("transaction {batch_id} already committed")
+            }
+            ClosedTransactionState::RolledBack => {
+                format!("transaction {batch_id} completed or was never opened")
+            }
+        }
     }
 
     async fn handle_query(
@@ -985,9 +1110,10 @@ impl ClientDbInner {
                 .db
                 .write_state(tx_id)
                 .map_err(|error| JazzError::Sync(error.to_string()))?;
-            if matches!(state.fate, CoreFate::Rejected(_)) {
+            if let CoreFate::Rejected(reason) = state.fate {
                 return Err(JazzError::Sync(format!(
-                    "batch was rejected before reaching {tier:?} durability"
+                    "batch was rejected before reaching {tier:?} durability: {}",
+                    core_rejection_reason_label(&reason)
                 )));
             }
             if state.durability >= desired {
@@ -996,16 +1122,6 @@ impl ClientDbInner {
             if tokio::time::Instant::now() >= deadline {
                 return Err(JazzError::Sync(format!(
                     "timed out waiting for batch to reach {tier:?}"
-                )));
-            }
-            let state = inner
-                .borrow()
-                .db
-                .write_state(tx_id)
-                .map_err(|error| JazzError::Sync(error.to_string()))?;
-            if matches!(state.fate, CoreFate::Rejected(_)) {
-                return Err(JazzError::Sync(format!(
-                    "batch was rejected before reaching {tier:?} durability"
                 )));
             }
             if state.durability >= desired {
@@ -1227,6 +1343,17 @@ fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     }
 }
 
+fn core_rejection_reason_label(reason: &CoreRejectionReason) -> String {
+    match reason {
+        CoreRejectionReason::ClientClockTooFarAhead => "client_clock_too_far_ahead".to_owned(),
+        CoreRejectionReason::AuthorizationDenied => "authorization_denied".to_owned(),
+        CoreRejectionReason::ExclusiveConflict => "transaction_conflict".to_owned(),
+        CoreRejectionReason::CausalityViolation => "causality_violation".to_owned(),
+        CoreRejectionReason::Cascade { root } => format!("cascade:{root:?}"),
+        CoreRejectionReason::MalformedCommit(reason) => format!("malformed_commit:{reason}"),
+    }
+}
+
 impl JazzClient {
     fn write_identity(&self) -> Option<CoreAuthorId> {
         self.write_context
@@ -1432,10 +1559,15 @@ impl JazzClient {
         });
 
         let inner = self.db.inner.borrow();
-        let tx = inner
-            .transactions
-            .get(&batch_id)
-            .ok_or_else(|| JazzError::Query(format!("transaction {batch_id} is not open")))?;
+        let tx = inner.transactions.get(&batch_id).ok_or_else(|| {
+            let message = inner
+                .closed_transactions
+                .get(&batch_id)
+                .copied()
+                .map(|state| ClientDbInner::closed_transaction_message(batch_id, state))
+                .unwrap_or_else(|| format!("transaction {batch_id} is not open"));
+            JazzError::Query(message)
+        })?;
 
         for write in tx.writes.iter().filter(|write| write.table == table) {
             if write.deletion == Some(CoreDeletionEvent::Deleted) {
