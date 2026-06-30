@@ -11,9 +11,18 @@ export type InspectorSubscription = Omit<ActiveQuerySubscriptionTrace, "stack">;
  */
 export interface InspectorConnectionConfig {
   appId: string;
-  serverUrl: string;
+  /** Optional — the overlay can run purely on local storage when offline. */
+  serverUrl?: string;
   env: string;
   userBranch?: string;
+  /** OPFS namespace (default appId) — the overlay reuses it to join the host's store. */
+  dbName?: string;
+  /**
+   * The host broker's resolved SharedWorker URL. The overlay passes it back as
+   * `runtimeSources.brokerWorkerUrl` so its persistent driver joins the host's
+   * broker (same `(url, name)`) instead of spawning an empty one.
+   */
+  brokerWorkerUrl?: string;
   /** Local-first auth seed — pass through so the overlay inherits the host identity. */
   secret?: string;
   adminSecret?: string;

@@ -68,8 +68,22 @@ test.describe("inspector overlay (embedded, own worker connection end-to-end)", 
 
     const inspector = page.frameLocator('iframe[title="jazz-inspector"]');
 
-    // The overlay reads the handle, opens its OWN worker connection, and leaves
-    // the connecting state.
+    // The host publishes a resolved broker-worker URL, so the overlay's
+    // persistent driver joins the host's SharedWorker/OPFS store (same url+name)
+    // instead of spinning up an empty one. Without this it would default to its
+    // own broker and never see the host's local data offline.
+    const brokerWorkerUrl = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __jazzInspectorHost?: { getConnectionConfig(): { brokerWorkerUrl?: string } };
+          }
+        ).__jazzInspectorHost?.getConnectionConfig().brokerWorkerUrl,
+    );
+    expect(brokerWorkerUrl).toBeTruthy();
+
+    // The overlay reads the handle, opens its connection joining that store, and
+    // leaves the connecting state.
     await expect(inspector.getByText("Connecting…")).toBeHidden({ timeout: 30_000 });
 
     // It renders its real UI driven by the injected schema.

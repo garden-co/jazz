@@ -8,12 +8,7 @@
 import { StrictMode, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { JazzProvider, useAll, useJazzClient, useLocalFirstAuth } from "jazz-tools/react";
-import {
-  INSPECTOR_HOST_GLOBAL,
-  INSPECTOR_SUBSCRIPTIONS_MESSAGE,
-  serializeActiveSubscriptions,
-  type DbConfig,
-} from "jazz-tools";
+import { installInspectorHost, type DbConfig } from "jazz-tools";
 import { app } from "./schema.js";
 
 // Mirrors tests/browser/test-constants.ts (inlined: that module reads process.env).
@@ -33,39 +28,8 @@ function HostInner() {
   useEffect(() => {
     const iframeWindow = iframeRef.current?.contentWindow;
     if (!iframeWindow) return;
-
-    db.setDevMode(true);
-    (window as unknown as Record<string, unknown>)[INSPECTOR_HOST_GLOBAL] = {
-      getConnectionConfig() {
-        const c = db.getConfig();
-        return {
-          appId: c.appId,
-          serverUrl: c.serverUrl,
-          env: c.env ?? "",
-          userBranch: c.userBranch,
-          secret: c.secret,
-          adminSecret: c.adminSecret,
-          jwtToken: c.jwtToken,
-        };
-      },
-      getWasmSchema: () => db.getRuntimeSchema(),
-      getActiveSubscriptions: () => serializeActiveSubscriptions(db.getActiveQuerySubscriptions()),
-    };
-
-    const push = () =>
-      iframeWindow.postMessage(
-        {
-          type: INSPECTOR_SUBSCRIPTIONS_MESSAGE,
-          list: serializeActiveSubscriptions(db.getActiveQuerySubscriptions()),
-        },
-        window.location.origin,
-      );
-    const stop = db.onActiveQuerySubscriptionsChange(push);
-
-    return () => {
-      stop();
-      delete (window as unknown as Record<string, unknown>)[INSPECTOR_HOST_GLOBAL];
-    };
+    // The real host-side installer: publishes the handle + pushes subscriptions.
+    return installInspectorHost(db, iframeWindow, window.location.origin);
   }, [db]);
 
   return (
