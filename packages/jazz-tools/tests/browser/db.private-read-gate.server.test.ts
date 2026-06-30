@@ -762,6 +762,20 @@ describe("raw websocket private read gate", () => {
       ),
     ).resolves.toBeDefined();
 
+    const unsubscribeBobMessages = await waitForSubscription(
+      bob,
+      camelChatApp.messages
+        .where({ chatId: chat.id })
+        .include({ sender: true })
+        .orderBy("createdAt", "desc")
+        .limit(21),
+      (rows) => rows.some((row) => row.id === seedMessage.id),
+      "Bob should subscribe to private seed messages through normal membership",
+      15_000,
+      { tier: "edge" },
+    );
+    unsubscribeBobMessages();
+
     const bobMessage = await withTimeout(
       bob
         .insert(camelChatApp.messages, {
