@@ -187,6 +187,10 @@ harness = false
 name = "large_blob_permissions"
 required-features = ["test"]
 
+[[test]]
+name = "transactions"
+required-features = ["test-utils"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]

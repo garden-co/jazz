@@ -1728,6 +1728,85 @@ where
         })
     }
 
+    /// Open an owned exclusive transaction handle over the current local snapshot.
+    pub fn begin_exclusive(&self) -> Result<OpenTxId, Error> {
+        self.open_exclusive_handle()
+    }
+
+    /// Read one row inside an owned exclusive transaction handle.
+    pub fn exclusive_read(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<RowCells>, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_read(tx_id, table, row)
+            .map_err(Into::into)
+    }
+
+    /// Stage a full row value inside an owned exclusive transaction handle.
+    pub fn exclusive_write(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write(tx_id, table, row, cells, None)
+            .map_err(Into::into)
+    }
+
+    /// Stage an update inside an owned exclusive transaction handle.
+    pub fn exclusive_update(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<(), Error> {
+        let mut cells = self.exclusive_read(tx_id, table, row)?.unwrap_or_default();
+        cells.extend(patch);
+        self.exclusive_write(tx_id, table, row, cells)
+    }
+
+    /// Stage a soft delete inside an owned exclusive transaction handle.
+    pub fn exclusive_delete(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write(
+                tx_id,
+                table,
+                row,
+                BTreeMap::<String, Value>::new(),
+                Some(DeletionEvent::Deleted),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Commit an owned exclusive transaction handle.
+    pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
+        let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
+            open_tx_id,
+            self.identity.author,
+            self.next_now_ms(),
+        )?;
+        self.finalize_local_exclusive_unit(tx_id, unit)?;
+        self.refresh_subscriptions()?;
+        Ok(tx_id)
+    }
+
     pub(crate) fn open_exclusive_handle(&self) -> Result<OpenTxId, Error> {
         self.node
             .node
