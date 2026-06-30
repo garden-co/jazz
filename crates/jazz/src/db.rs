@@ -31,7 +31,7 @@ use crate::protocol::{
     SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
 };
 use crate::query::{
-    ArraySubquery, Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery,
+    ArraySubquery, Binding, Query, QueryError, RelationExpr, RelationQuery, ShapeId, ValidatedQuery,
 };
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
@@ -835,22 +835,7 @@ where
             let upstream_opts = RegisterShapeOptions { tier: read_tier };
             let upstream_subscriptions =
                 self.open_subscription_upstream_coverage(prepared, upstream_opts.clone())?;
-            let node = Rc::clone(&self.node.node);
-            let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
-            let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
-            let scheduler = Rc::clone(&self.node.scheduler);
-            cleanup = Some(Box::new(move || {
-                for upstream_subscription in upstream_subscriptions {
-                    node.borrow_mut().apply_unsubscribe(upstream_subscription);
-                    latest_coverage_subscriptions
-                        .borrow_mut()
-                        .retain(|_, subscription| *subscription != upstream_subscription);
-                    pending_upstream_subscriptions
-                        .borrow_mut()
-                        .push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
-                }
-                schedule_tick_in(&scheduler, TickUrgency::Immediate);
-            }) as Box<dyn FnOnce()>);
+            cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
         }
         Ok(SubscriptionStream {
             receiver,
@@ -902,10 +887,17 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
+        let mut cleanup = None;
+        if opts.propagation == Propagation::Full {
+            let upstream_opts = RegisterShapeOptions { tier: read_tier };
+            let upstream_subscriptions =
+                self.open_relation_subscription_upstream_coverage(query, upstream_opts.clone())?;
+            cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
+        }
         Ok(SubscriptionStream {
             receiver,
             _state: state,
-            cleanup: None,
+            cleanup,
         })
     }
 
@@ -928,6 +920,28 @@ where
             .collect())
     }
 
+    fn upstream_subscription_cleanup(
+        &self,
+        upstream_subscriptions: Vec<SubscriptionKey>,
+    ) -> Box<dyn FnOnce()> {
+        let node = Rc::clone(&self.node.node);
+        let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
+        let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
+        let scheduler = Rc::clone(&self.node.scheduler);
+        Box::new(move || {
+            for upstream_subscription in upstream_subscriptions {
+                node.borrow_mut().apply_unsubscribe(upstream_subscription);
+                latest_coverage_subscriptions
+                    .borrow_mut()
+                    .retain(|_, subscription| *subscription != upstream_subscription);
+                pending_upstream_subscriptions
+                    .borrow_mut()
+                    .push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
+            }
+            schedule_tick_in(&scheduler, TickUrgency::Immediate);
+        })
+    }
+
     fn collect_array_subquery_upstream_coverage(
         &self,
         subqueries: &[ArraySubquery],
@@ -947,6 +961,26 @@ where
             )?;
         }
         Ok(())
+    }
+
+    fn open_relation_subscription_upstream_coverage(
+        &self,
+        query: &RelationQuery,
+        opts: RegisterShapeOptions,
+    ) -> Result<Vec<SubscriptionKey>, Error> {
+        let schema = self.current_write_schema_for_query()?;
+        let mut tables = BTreeSet::new();
+        collect_relation_table_scans(&query.rel, &mut tables);
+        tables
+            .into_iter()
+            .map(|table| Query::from(table).validate(&schema))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|shape| {
+                let binding = shape.bind(BTreeMap::new())?;
+                Ok(self.attach_query_shape_binding_with_opts(&shape, &binding, opts.clone()))
+            })
+            .collect::<Result<Vec<_>, Error>>()
     }
 
     /// Insert a row locally, generating a uuidv7-shaped row id.
@@ -3911,6 +3945,33 @@ fn query_for_array_subquery_coverage(subquery: &ArraySubquery) -> Query {
     query.filters = subquery.filters.clone();
     query.array_subqueries = subquery.nested_arrays.clone();
     query
+}
+
+fn collect_relation_table_scans(expr: &RelationExpr, tables: &mut BTreeSet<String>) {
+    match expr {
+        RelationExpr::TableScan { table } => {
+            tables.insert(table.clone());
+        }
+        RelationExpr::Filter { input, .. }
+        | RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => collect_relation_table_scans(input, tables),
+        RelationExpr::Union { inputs } => {
+            for input in inputs {
+                collect_relation_table_scans(input, tables);
+            }
+        }
+        RelationExpr::Join { left, right, .. } => {
+            collect_relation_table_scans(left, tables);
+            collect_relation_table_scans(right, tables);
+        }
+        RelationExpr::Gather { seed, step, .. } => {
+            collect_relation_table_scans(seed, tables);
+            collect_relation_table_scans(step, tables);
+        }
+    }
 }
 
 fn binding_for_coverage_shape(

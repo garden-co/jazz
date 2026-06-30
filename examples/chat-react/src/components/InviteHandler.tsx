@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useDb, useSession } from "jazz-tools/react";
-import { navigate } from "@/hooks/useRouter";
+import { useRouter } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { app } from "../../schema.js";
-import { DurabilityTier } from "jazz-tools";
+import { type DurabilityTier } from "jazz-tools";
 
 interface InviteHandlerProps {
   chatId: string;
@@ -13,30 +13,18 @@ interface InviteHandlerProps {
 export function InviteHandler({ chatId, code }: InviteHandlerProps) {
   const db = useDb();
   const session = useSession();
+  const { navigate } = useRouter();
   const handled = useRef(false);
-  const [chatLoaded, setChatLoaded] = useState(false);
-  const sharedWriteOptions: { tier: DurabilityTier } = {
-    tier: db.getConfig().serverUrl ? "edge" : "local",
-  };
+  const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
+    () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),
+    [db],
+  );
 
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
 
   useEffect(() => {
-    if (!userId) return;
-    const unsubscribe = db.subscribeAll(
-      app.chats.where({ id: chatId }),
-      (delta) => {
-        if (delta.all.length > 0) setChatLoaded(true);
-      },
-      undefined,
-      { user_id: userId, claims: { join_code: code }, authMode: "external" },
-    );
-    return unsubscribe;
-  }, [db, userId, chatId, code]);
-
-  useEffect(() => {
-    if (!chatLoaded || handled.current || !userId || !myProfile) return;
+    if (handled.current || !userId || !myProfile) return;
     handled.current = true;
 
     void db
@@ -53,7 +41,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
         console.error("failed to accept invite", error);
         handled.current = false;
       });
-  }, [chatLoaded, db, userId, myProfile, chatId, code, sharedWriteOptions]);
+  }, [db, userId, myProfile, chatId, code, sharedWriteOptions, navigate]);
 
   return (
     <div id="joining-chat" className="p-8 text-center text-muted-foreground italic">
