@@ -2919,6 +2919,14 @@ fn lift_literal_filter(
                                 project_source_from_joined_filter_input(&input_output, source)?;
                             Ok(ProjectField::nullable(source, field.output_name.clone()))
                         }
+                        ProjectExpr::NullableFlat(source) => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::nullable_flat(
+                                source,
+                                field.output_name.clone(),
+                            ))
+                        }
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 fields.push(ProjectField::renamed(
@@ -3134,19 +3142,23 @@ fn project_fields_against_rewritten_input(
     fields
         .iter()
         .map(|field| {
-            let (field_ref, wrap_nullable) = match &field.expression {
-                ProjectExpr::Field(field_ref) => (field_ref, false),
-                ProjectExpr::Nullable(field_ref) => (field_ref, true),
+            let (field_ref, nullable_projection) = match &field.expression {
+                ProjectExpr::Field(field_ref) => (field_ref, None),
+                ProjectExpr::Nullable(field_ref) => (field_ref, Some(false)),
+                ProjectExpr::NullableFlat(field_ref) => (field_ref, Some(true)),
                 ProjectExpr::Literal(_) | ProjectExpr::Null(_) => return Ok(field.clone()),
             };
             let source = field_ref_name(&original_output, field_ref)?;
             if rewritten_output.field_index(&source).is_none() {
                 return Err(IvmRuntimeError::GraphFieldNotFound(source));
             }
-            if wrap_nullable {
-                Ok(ProjectField::nullable(source, field.output_name.clone()))
-            } else {
-                Ok(ProjectField::renamed(source, field.output_name.clone()))
+            match nullable_projection {
+                None => Ok(ProjectField::renamed(source, field.output_name.clone())),
+                Some(false) => Ok(ProjectField::nullable(source, field.output_name.clone())),
+                Some(true) => Ok(ProjectField::nullable_flat(
+                    source,
+                    field.output_name.clone(),
+                )),
             }
         })
         .collect()
@@ -3648,7 +3660,9 @@ fn plan_expr_names(expressions: &[PlanExpr]) -> Vec<String> {
     expressions
         .iter()
         .filter_map(|expr| match expr {
-            PlanExpr::Field(name) | PlanExpr::Nullable(name) => Some(name.clone()),
+            PlanExpr::Field(name) | PlanExpr::Nullable(name) | PlanExpr::NullableFlat(name) => {
+                Some(name.clone())
+            }
             PlanExpr::Literal(_) | PlanExpr::Null(_) => None,
         })
         .collect()
@@ -4543,6 +4557,19 @@ fn project_descriptor(
                         .clone();
                     ValueType::Nullable(Box::new(inner))
                 }
+                ProjectExpr::NullableFlat(source) => {
+                    let source_idx = resolve_field_ref(input, source)?;
+                    let inner = input
+                        .fields()
+                        .get(source_idx)
+                        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(source_idx))?
+                        .value_type
+                        .clone();
+                    match inner {
+                        ValueType::Nullable(_) => inner,
+                        other => ValueType::Nullable(Box::new(other)),
+                    }
+                }
             };
             Ok((project_field.output_name.clone(), value_type))
         })
@@ -4559,6 +4586,9 @@ fn project_field_expr(
         ProjectExpr::Literal(value) => Ok(PlanExpr::literal(value.clone())),
         ProjectExpr::Null(value_type) => Ok(PlanExpr::null(value_type.clone())),
         ProjectExpr::Nullable(source) => Ok(PlanExpr::nullable(field_ref_name(input, source)?)),
+        ProjectExpr::NullableFlat(source) => {
+            Ok(PlanExpr::nullable_flat(field_ref_name(input, source)?))
+        }
     }
 }
 
@@ -4585,6 +4615,14 @@ fn project_record(
             PlanExpr::Literal(value) => value.to_value(),
             PlanExpr::Null(_) => Value::Nullable(None),
             PlanExpr::Nullable(field) => Value::Nullable(Some(Box::new(input.get(field)?.clone()))),
+            PlanExpr::NullableFlat(field) => {
+                let value = input.get(field)?.clone();
+                if matches!(value, Value::Nullable(_)) {
+                    value
+                } else {
+                    Value::Nullable(Some(Box::new(value)))
+                }
+            }
         });
     }
     Ok(output_desc.create(&values)?)

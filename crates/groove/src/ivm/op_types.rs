@@ -232,6 +232,7 @@ pub enum PlanExpr {
     Literal(LiteralValue),
     Null(ValueType),
     Nullable(String),
+    NullableFlat(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -450,5 +451,9 @@ impl PlanExpr {
 
     pub fn nullable(name: impl Into<String>) -> Self {
         Self::Nullable(name.into())
+    }
+
+    pub fn nullable_flat(name: impl Into<String>) -> Self {
+        Self::NullableFlat(name.into())
     }
 }

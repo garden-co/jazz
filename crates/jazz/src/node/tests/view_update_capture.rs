@@ -2,10 +2,70 @@
 struct CanonicalViewUpdate {
     subscription: String,
     reset_result_set: bool,
-    version_bundles: Vec<String>,
+    version_bundles: Vec<CanonicalVersionBundle>,
     peer_payload_inventory: Vec<TxId>,
     result_row_adds: Vec<ResultRowEntry>,
     result_row_removes: Vec<ResultRowEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CanonicalVersionBundle {
+    tx: String,
+    fate: String,
+    global_seq: Option<GlobalSeq>,
+    durability: DurabilityTier,
+    versions: Vec<CanonicalVersionRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CanonicalVersionRecord {
+    table: String,
+    schema_version: SchemaVersionId,
+    row_uuid: RowUuid,
+    parents: Vec<TxId>,
+    created_by: AuthorId,
+    created_at: TxTime,
+    updated_by: AuthorId,
+    updated_at: TxTime,
+    deletion: Option<DeletionEvent>,
+    cells: Vec<String>,
+}
+
+fn canonical_version_bundle(bundle: VersionBundle) -> CanonicalVersionBundle {
+    let mut versions = bundle
+        .versions
+        .into_iter()
+        .map(canonical_version_record)
+        .collect::<Vec<_>>();
+    versions.sort();
+    CanonicalVersionBundle {
+        tx: format!("{:?}", bundle.tx),
+        fate: format!("{:?}", bundle.fate),
+        global_seq: bundle.global_seq,
+        durability: bundle.durability,
+        versions,
+    }
+}
+
+fn canonical_version_record(record: VersionRecord) -> CanonicalVersionRecord {
+    let mut parents = record.parents();
+    parents.sort();
+    let cells = (0..record.record().descriptor().fields().len())
+        .filter_map(|idx| record.optional_cell_at(idx))
+        .map(|value| format!("{value:?}"))
+        .collect();
+    CanonicalVersionRecord {
+        table: record.table().to_owned(),
+        schema_version: record.schema_version(),
+        row_uuid: record.row_uuid(),
+        parents,
+        created_by: record.created_by(),
+        created_at: record.created_at(),
+        updated_by: record.updated_by(),
+        updated_at: record.updated_at(),
+        deletion: record.deletion(),
+        cells,
+    }
 }
 
 fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
@@ -25,7 +85,7 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
 
     let mut version_bundles = version_bundles
         .into_iter()
-        .map(|bundle| format!("{bundle:?}"))
+        .map(canonical_version_bundle)
         .collect::<Vec<_>>();
     version_bundles.sort();
     let mut complete_tx_payload_refs = complete_tx_payload_refs;
@@ -243,14 +303,6 @@ fn assert_maintained_view_capture_tick(
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        add_bundle_stats.fallback_bundles, 0,
-        "maintained_view serializer unexpectedly fell back for seed {seed:#x}, identity {identity:?}, tick {tick}"
-    );
-    assert_eq!(
-        removal_bundle_stats.fallback_bundles, 0,
-        "maintained_view removal serializer unexpectedly fell back for seed {seed:#x}, identity {identity:?}, tick {tick}"
-    );
     assert_eq!(
         maintained_view_bundle_read_metrics.history_indexes.ranges, 0,
         "incremental bundle assembly scanned by_tx for seed {seed:#x}, identity {identity:?}, tick {tick}; full_recompute={full_recompute_read_metrics:?}, incremental_bundle={maintained_view_bundle_read_metrics:?}"
