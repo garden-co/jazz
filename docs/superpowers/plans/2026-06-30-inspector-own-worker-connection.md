@@ -141,26 +141,41 @@ export function serializeActiveSubscriptions(
 
 ---
 
-### Task 2: `Db` connection-config + schema-hash accessors (if missing)
+### Task 2: public `Db.getRuntimeSchema()` accessor
 
-The handle needs `appId/serverUrl/env/userBranch/adminSecret/jwtToken/schemaHash` from the live `Db`. The bridge got these via `sanitizeDbConfigForBridge` (`dev-tools.ts`) + private access.
+**CORRECTION (validated against code, Task-1 follow-up done):** `DbConfig` has
+**no** `schemaHash` — that's a server-fetch concept (`fetchStoredWasmSchema(...,
+{schemaHash})`, App.tsx:228). `getConfig()` already returns appId/serverUrl/env/
+userBranch/adminSecret/jwtToken (db.ts:1024). So the handle does **not** carry a
+schema hash; the host injects its **runtime schema** directly (plain serializable
+`WasmSchema`), and the overlay skips the server schema fetch. The handle type
+already reflects this (`getWasmSchema()`). The bridge reads the schema via private
+`db.connection.client.getSchema()` (`dev-tools.ts:141`); add a **public** accessor.
 
 **Files:**
 
 - Modify: `packages/jazz-tools/src/runtime/db.ts`
-- Test: `packages/jazz-tools/src/runtime/db.config-accessor.test.ts`
+- Test: `packages/jazz-tools/src/runtime/db.runtime-schema.test.ts`
 
-- [ ] **Step 1: Inventory what's already public.** Open `packages/jazz-tools/src/runtime/db.ts`; confirm `getConfig()` (returns a structuredClone of `DbConfig` incl. appId/serverUrl/env/userBranch/adminSecret/jwtToken) and whether a schema-hash is reachable. Open `packages/jazz-tools/src/dev-tools/dev-tools.ts:130-155` to see exactly how it reads schema + config today. If `getConfig()` already exposes everything except `schemaHash`, only add a schema-hash accessor.
+- [ ] **Step 1: Read the private access path.** `dev-tools.ts:130-142`
+      (`getDbClient(db)` → `db.connection.client.getSchema()`) and the `client.getSchema()`
+  - `normalizeRuntimeSchema(...)` calls in db.ts (`:654,1284,1422`). The client
+    exists once the Db has resolved a schema/connection. Read
+    `packages/jazz-tools/TESTING_GUIDELINES.md` first (repo rule).
 
-- [ ] **Step 2: Write the failing test** — assert `db.getConfig()` returns the connection fields and `db.getSchemaHash()` (new) returns a non-empty string for a configured `Db`. Build the `Db` with the existing test helper (see `packages/jazz-tools/TESTING_GUIDELINES.md` — read it first, per repo rule) and the public API only.
+- [ ] **Step 2: Write the failing test** — build a configured `Db` via the public
+      API, run one query so the client exists, then assert
+      `db.getRuntimeSchema()` deep-equals the schema the queries were built with.
 
 - [ ] **Step 3: Run — expect FAIL.**
 
-- [ ] **Step 4: Implement** a minimal public `getSchemaHash(): string` on `Db` returning the hash already computed for the connection (match the value the standalone `fetchStoredWasmSchema` uses — verify against `App.tsx` config + `fetchStoredWasmSchema`). Reuse `getConfig()` for the rest; do not add a second accessor if `getConfig()` suffices.
+- [ ] **Step 4: Implement** `getRuntimeSchema(): WasmSchema` on `Db` returning the
+      connection client's `getSchema()` normalized as db.ts:654 does; throw a clear
+      error if no client yet (match how `dev-tools.ts` resolves it at announce time).
 
 - [ ] **Step 5: Run — expect PASS.**
 
-- [ ] **Step 6: Commit** — `feat(db): expose schema hash for the inspector host handle`
+- [ ] **Step 6: Commit** — `feat(db): public getRuntimeSchema accessor for the inspector host handle`
 
 ---
 
