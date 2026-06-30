@@ -19,14 +19,15 @@ use super::maintained_subscription_view::MaintainedSubscriptionView;
 use super::policy::ViewEvaluationContext;
 use super::query_engine::{
     AppProjectionTree, AppRowOutputRequest, ClaimPath, ComparisonOp as NormalizedComparisonOp,
-    CoverageScope, DataSource, FieldProjection, JoinMode as NormalizedJoinMode, LensSelection,
-    NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
-    OrderKey as NormalizedOrderKey, PayloadProjection, PolicyContext, PolicyEnforcementMode,
-    PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProvenanceField,
-    QueryProgram, QueryProgramRequest, QueryReadSet, ReadView, RequestedReadSet,
-    RequestedSourceStage, ResolvedSource, ResultId, ResultRowRef, RowIdRef, RowSetExpr,
-    RowSetNodeId, RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
-    SchemaProjection, SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
+    CorrelationRequirement, CoverageScope, DataSource, FieldProjection,
+    JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
+    NormalizedValueRef, OrderKey as NormalizedOrderKey, PayloadProjection, PolicyContext,
+    PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
+    ProgramFactKey, ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest,
+    QueryReadSet, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
+    ResultRowRef, RowIdRef, RowSetExpr, RowSetNodeId, RowSetOutputRequest, RowSetProgramInput,
+    RowVisibility, SchemaFamilySelection, SchemaProjection,
+    SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
     SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
     SourceResolutionError, SourceResolver, SourceRole, SourceRowShape, StorageSchemaSelection,
     lower_query_program,
@@ -555,16 +556,155 @@ fn normalize_order_key(
 
 fn unsupported_query_markers(query: &JazzQuery) -> Vec<String> {
     let mut markers = Vec::new();
-    if !query.reachable.is_empty() {
-        markers.push("reachable".to_owned());
-    }
-    if !query.array_subqueries.is_empty() {
-        markers.push("array_subqueries".to_owned());
-    }
     if query.aggregate.is_some() {
         markers.push("aggregate".to_owned());
     }
     markers
+}
+
+fn normalization_gap(message: impl Into<String>) -> Error {
+    Error::QueryLowering(message.into())
+}
+
+fn array_requirement(requirement: ArraySubqueryRequirement) -> CorrelationRequirement {
+    match requirement {
+        ArraySubqueryRequirement::Optional => CorrelationRequirement::Optional,
+        ArraySubqueryRequirement::AtLeastOne => CorrelationRequirement::AtLeastOne,
+        ArraySubqueryRequirement::MatchCorrelationCardinality => {
+            CorrelationRequirement::MatchCorrelationCardinality
+        }
+    }
+}
+
+fn correlated_child_source_id(subquery: &ArraySubquery, index: usize) -> SourceId {
+    SourceId {
+        table: subquery.table.clone(),
+        path: SourcePath {
+            components: vec![
+                SourceRole::Root,
+                SourceRole::CorrelatedChild(format!("{index}:{}", subquery.column_name)),
+            ],
+        },
+    }
+}
+
+fn normalize_array_subquery(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    current: RowSetNodeId,
+    root_source: &SourceId,
+    subquery: &ArraySubquery,
+    index: usize,
+) -> Result<RowSetNodeId, Error> {
+    if !subquery.nested_arrays.is_empty() {
+        return Err(normalization_gap(format!(
+            "nested array_subqueries are not represented in normalized row-set shapes yet: {}",
+            subquery.column_name
+        )));
+    }
+
+    let child_source = correlated_child_source_id(subquery, index);
+    let child_node = RowSetNodeId(format!("array_subquery:{index}:source"));
+    nodes.insert(
+        child_node.clone(),
+        RowSetExpr::Source {
+            source: child_source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    let mut child_current = child_node;
+
+    if !subquery.filters.is_empty() {
+        let filter_node = RowSetNodeId(format!("array_subquery:{index}:filter"));
+        nodes.insert(
+            filter_node.clone(),
+            RowSetExpr::Filter {
+                input: child_current,
+                predicate: normalize_predicates(&child_source, &subquery.filters)
+                    .map_err(|err| normalization_gap(err.to_string()))?,
+            },
+        );
+        child_current = filter_node;
+    }
+
+    if !subquery.order_by.is_empty() {
+        let order_node = RowSetNodeId(format!("array_subquery:{index}:order"));
+        nodes.insert(
+            order_node.clone(),
+            RowSetExpr::OrderBy {
+                input: child_current,
+                keys: subquery
+                    .order_by
+                    .iter()
+                    .map(|order| normalize_order_key(&child_source, order))
+                    .collect::<Result<Vec<_>, Error>>()
+                    .map_err(|err| normalization_gap(err.to_string()))?,
+            },
+        );
+        child_current = order_node;
+    }
+
+    if subquery.limit.is_some() {
+        let slice_node = RowSetNodeId(format!("array_subquery:{index}:slice"));
+        nodes.insert(
+            slice_node.clone(),
+            RowSetExpr::Slice {
+                input: child_current,
+                partition_by: vec![NormalizedValueRef::SourceField {
+                    source: child_source.clone(),
+                    field: subquery.inner_column.clone(),
+                }],
+                limit: subquery
+                    .limit
+                    .map(|limit| limit.min(u32::MAX as usize) as u32),
+                offset: 0,
+                tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(
+                    child_source.clone(),
+                ))],
+                rank_output: None,
+            },
+        );
+        child_current = slice_node;
+    }
+
+    let path_node = RowSetNodeId(format!("array_subquery:{index}:path"));
+    nodes.insert(
+        path_node.clone(),
+        RowSetExpr::CorrelatedPathProjection {
+            input: current,
+            child_input: child_current,
+            path: ProgramPathId {
+                owner: root_source.clone(),
+                child: child_source.clone(),
+            },
+            correlation: NormalizedPredicateExpr::Compare {
+                left: NormalizedValueRef::SourceField {
+                    source: child_source,
+                    field: subquery.inner_column.clone(),
+                },
+                op: NormalizedComparisonOp::Eq,
+                right: normalize_operand(
+                    root_source,
+                    &Operand::Column(subquery.outer_column.clone()),
+                )
+                .map_err(|err| normalization_gap(err.to_string()))?,
+            },
+            requirement: array_requirement(subquery.requirement),
+        },
+    );
+    Ok(path_node)
+}
+
+fn normalize_reachable(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    current: RowSetNodeId,
+    root_source: &SourceId,
+    reachable: &crate::query::ReachableVia,
+    index: usize,
+) -> Result<RowSetNodeId, Error> {
+    let _ = (nodes, current, root_source, reachable, index);
+    Err(normalization_gap(
+        "reachable_via needs query-engine value-source/frontier lowering before public runtime use",
+    ))
 }
 
 fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
@@ -1016,6 +1156,14 @@ where
             current = join_node;
         }
 
+        for (index, reachable) in query.reachable.iter().enumerate() {
+            current = normalize_reachable(&mut nodes, current, &root_source, reachable, index)?;
+        }
+
+        for (index, subquery) in query.array_subqueries.iter().enumerate() {
+            current = normalize_array_subquery(&mut nodes, current, &root_source, subquery, index)?;
+        }
+
         if !query.order_by.is_empty() {
             let order_node = RowSetNodeId("order".to_owned());
             nodes.insert(
@@ -1305,7 +1453,7 @@ where
             self.finish_query_rows(query, &mut rows)?;
         } else {
             self.apply_include_modes(query, shape.schema_version(), &mut rows, tier, identity)?;
-            self.finish_engine_query_rows(query, &mut rows);
+            self.finish_engine_query_rows(query, &mut rows)?;
             self.apply_projection(query, &mut rows)?;
         }
         Ok(rows)
@@ -2217,10 +2365,15 @@ where
         self.apply_projection(query, rows)
     }
 
-    fn finish_engine_query_rows(&self, query: &crate::query::Query, rows: &mut [CurrentRow]) {
-        if query.order_by.is_empty() && query.limit.is_none() && query.offset == 0 {
-            sort_query_default_rows(rows);
-        }
+    fn finish_engine_query_rows(
+        &self,
+        query: &crate::query::Query,
+        rows: &mut [CurrentRow],
+    ) -> Result<(), Error> {
+        // Groove lowering owns membership/windowing, but one-shot APIs still
+        // return a deterministic Vec. Re-apply ordering to the selected rows
+        // without re-applying pagination.
+        self.apply_query_order(query, rows)
     }
 
     fn aggregate_rows(

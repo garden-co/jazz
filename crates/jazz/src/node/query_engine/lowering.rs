@@ -32,12 +32,12 @@ pub(crate) fn lower_query_program(
         physical: Vec::new(),
     };
 
-    let plan = match validate_current_root(&request) {
+    let plan = match analyze_query_plan(&request) {
         Ok(plan) => plan,
         Err(gaps) => {
             explain
                 .capabilities
-                .push("only table-rooted current lowering is implemented".to_owned());
+                .push("only current-source row-set lowering is implemented".to_owned());
             return Err(Box::new(CapabilityReport { gaps, explain }));
         }
     };
@@ -67,7 +67,7 @@ pub(crate) fn lower_query_program(
         resolved_sources.insert(source, resolved_source);
     }
     let resolved_root = resolved_sources
-        .get(&plan.root_source)
+        .get(plan.root_source())
         .cloned()
         .ok_or_else(|| {
             Box::new(CapabilityReport {
@@ -79,7 +79,7 @@ pub(crate) fn lower_query_program(
         })?;
     explain
         .capabilities
-        .push("table-rooted current lowering".to_owned());
+        .push(plan.capability_label().to_owned());
     let graph = lower_plan_steps(
         resolved_root.graph.clone(),
         &plan,
@@ -100,7 +100,9 @@ pub(crate) fn lower_query_program(
             parameters: ParameterDomain::default(),
             output: ProgramOutputSchemas::RowSet(output_terminals(
                 &request.output,
+                &plan,
                 &resolved_root,
+                &resolved_sources,
             )?),
         },
         request,
@@ -111,8 +113,51 @@ pub(crate) fn lower_query_program(
 #[derive(Clone, Debug)]
 struct LinearCurrentRoot {
     root_source: SourceId,
-    tier: DurabilityTier,
     steps: Vec<LinearStep>,
+}
+
+#[derive(Clone, Debug)]
+enum AnalyzedQueryPlan {
+    Linear(LinearCurrentRoot),
+    CorrelatedPath(CorrelatedPathPlan),
+    RecursiveRelation(RecursiveRelationPlan),
+}
+
+impl AnalyzedQueryPlan {
+    fn root_source(&self) -> &SourceId {
+        match self {
+            AnalyzedQueryPlan::Linear(plan) => &plan.root_source,
+            AnalyzedQueryPlan::CorrelatedPath(plan) => &plan.parent.root_source,
+            AnalyzedQueryPlan::RecursiveRelation(plan) => &plan.seed.root_source,
+        }
+    }
+
+    fn capability_label(&self) -> &'static str {
+        match self {
+            AnalyzedQueryPlan::Linear(_) => "table-rooted current lowering",
+            AnalyzedQueryPlan::CorrelatedPath(_) => "correlated path projection analysis",
+            AnalyzedQueryPlan::RecursiveRelation(_) => "recursive relation analysis",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CorrelatedPathPlan {
+    parent: LinearCurrentRoot,
+    child: LinearCurrentRoot,
+    path: ProgramPathId,
+    correlation: PredicateExpr,
+    requirement: CorrelationRequirement,
+}
+
+#[derive(Clone, Debug)]
+struct RecursiveRelationPlan {
+    seed: LinearCurrentRoot,
+    step: LinearCurrentRoot,
+    frontier: FrontierId,
+    frontier_key: NormalizedValueRef,
+    dedupe_keys: Vec<NormalizedValueRef>,
+    bound: RecursionBound,
 }
 
 #[derive(Clone, Debug)]
@@ -139,9 +184,9 @@ enum JoinRightStep {
     Filter(PredicateExpr),
 }
 
-fn validate_current_root(
+fn analyze_query_plan(
     request: &QueryProgramRequest,
-) -> Result<LinearCurrentRoot, Vec<UnsupportedReason>> {
+) -> Result<AnalyzedQueryPlan, Vec<UnsupportedReason>> {
     let mut gaps = Vec::new();
 
     if !request.reads.fact_reads.is_empty() {
@@ -153,49 +198,23 @@ fn validate_current_root(
         ));
     }
 
-    let mut visited = BTreeSet::new();
-    let analyzed = analyze_current_node(
-        &request.input.shape.root,
-        &request.input.shape.nodes,
-        &mut visited,
-    );
-    let Ok((source, steps)) = analyzed else {
+    let analyzed = analyze_root_node(request);
+    let Ok(plan) = analyzed else {
         gaps.push(analyzed.unwrap_err());
         return Err(gaps);
     };
-    if visited.len() != request.input.shape.nodes.len() {
-        gaps.push(UnsupportedReason::Operator(
-            "only one linear source/filter/order/slice chain is lowered yet".to_owned(),
-        ));
-    }
-    validate_step_order(&steps, &mut gaps);
-    if !matches!(
-        request.input.shape.result,
-        ResultId::RealRow {
-            row: ResultRowRef::Source(ref result_source),
-            ..
-        } if result_source == &source
-    ) {
-        gaps.push(UnsupportedReason::Operator(
-            "result must be the root source row".to_owned(),
-        ));
-    }
 
-    let mut tier = None;
-    for plan_source in plan_sources(&source, &steps) {
+    for plan_source in analyzed_plan_sources(&plan) {
         let read_source = request.reads.primary.sources.get(&plan_source);
         let Some(SourceExpr::VisibleCurrent {
             projection,
             data: DataSource::Current,
-            tier: source_tier,
+            tier: _,
         }) = read_source
         else {
             gaps.push(UnsupportedReason::Source(SourceGap::HistoricalStorageCut));
             continue;
         };
-        if plan_source == source {
-            tier = Some(*source_tier);
-        }
         if !matches!(projection.schema_family, SchemaFamilySelection::Current)
             || !matches!(projection.storage, StorageSchemaSelection::Single(_))
             || !matches!(projection.lens, LensSelection::Canonical)
@@ -204,14 +223,164 @@ fn validate_current_root(
         }
     }
 
-    if gaps.is_empty() {
-        Ok(LinearCurrentRoot {
-            root_source: source,
-            tier: tier.expect("root source tier was validated"),
-            steps,
-        })
+    if gaps.is_empty() { Ok(plan) } else { Err(gaps) }
+}
+
+fn analyze_root_node(
+    request: &QueryProgramRequest,
+) -> Result<AnalyzedQueryPlan, UnsupportedReason> {
+    let mut visited = BTreeSet::new();
+    let root_node = request
+        .input
+        .shape
+        .nodes
+        .get(&request.input.shape.root)
+        .ok_or_else(|| {
+            UnsupportedReason::Operator(format!(
+                "row-set root node {:?} is missing",
+                request.input.shape.root
+            ))
+        })?;
+
+    let plan = match root_node {
+        RowSetExpr::CorrelatedPathProjection {
+            input,
+            child_input,
+            path,
+            correlation,
+            requirement,
+        } => {
+            visited.insert(request.input.shape.root.clone());
+            let parent = analyze_linear_root(input, request, &mut visited)?;
+            let child =
+                analyze_linear_subplan(child_input, &request.input.shape.nodes, &mut visited)?;
+            validate_result_source(request, &parent.root_source)?;
+            AnalyzedQueryPlan::CorrelatedPath(CorrelatedPathPlan {
+                parent,
+                child,
+                path: path.clone(),
+                correlation: correlation.clone(),
+                requirement: *requirement,
+            })
+        }
+        RowSetExpr::RecursiveRelation {
+            seed,
+            step,
+            frontier,
+            frontier_key,
+            dedupe_keys,
+            bound,
+        } => {
+            visited.insert(request.input.shape.root.clone());
+            let seed = analyze_linear_root(seed, request, &mut visited)?;
+            let step = analyze_linear_subplan(step, &request.input.shape.nodes, &mut visited)?;
+            match &request.input.shape.result {
+                ResultId::RealRow {
+                    row: ResultRowRef::Source(result_source),
+                    ..
+                } if result_source == &seed.root_source || result_source == &step.root_source => {}
+                ResultId::PathTuple { .. } => {}
+                _ => {
+                    return Err(UnsupportedReason::Operator(
+                        "recursive relation result must be a seed/step real row or path tuple"
+                            .to_owned(),
+                    ));
+                }
+            }
+            AnalyzedQueryPlan::RecursiveRelation(RecursiveRelationPlan {
+                seed,
+                step,
+                frontier: frontier.clone(),
+                frontier_key: frontier_key.clone(),
+                dedupe_keys: dedupe_keys.clone(),
+                bound: *bound,
+            })
+        }
+        _ => {
+            let linear = analyze_linear_root(&request.input.shape.root, request, &mut visited)?;
+            validate_result_source(request, &linear.root_source)?;
+            AnalyzedQueryPlan::Linear(linear)
+        }
+    };
+
+    if visited.len() != request.input.shape.nodes.len() {
+        return Err(UnsupportedReason::Operator(
+            "only connected current source/filter/join/order/slice/path/relation plans are lowered yet"
+                .to_owned(),
+        ));
+    }
+    Ok(plan)
+}
+
+fn analyze_linear_root(
+    node_id: &RowSetNodeId,
+    request: &QueryProgramRequest,
+    visited: &mut BTreeSet<RowSetNodeId>,
+) -> Result<LinearCurrentRoot, UnsupportedReason> {
+    let (source, steps) = analyze_current_node(node_id, &request.input.shape.nodes, visited)?;
+    let mut gaps = Vec::new();
+    validate_step_order(&steps, &mut gaps);
+    if let Some(gap) = gaps.into_iter().next() {
+        return Err(gap);
+    }
+    Ok(LinearCurrentRoot {
+        root_source: source,
+        steps,
+    })
+}
+
+fn analyze_linear_subplan(
+    node_id: &RowSetNodeId,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    visited: &mut BTreeSet<RowSetNodeId>,
+) -> Result<LinearCurrentRoot, UnsupportedReason> {
+    let (source, steps) = analyze_current_node(node_id, nodes, visited)?;
+    let mut gaps = Vec::new();
+    validate_step_order(&steps, &mut gaps);
+    if let Some(gap) = gaps.into_iter().next() {
+        return Err(gap);
+    }
+    Ok(LinearCurrentRoot {
+        root_source: source,
+        steps,
+    })
+}
+
+fn validate_result_source(
+    request: &QueryProgramRequest,
+    source: &SourceId,
+) -> Result<(), UnsupportedReason> {
+    if matches!(
+        request.input.shape.result,
+        ResultId::RealRow {
+            row: ResultRowRef::Source(ref result_source),
+            ..
+        } if result_source == source
+    ) {
+        Ok(())
     } else {
-        Err(gaps)
+        Err(UnsupportedReason::Operator(
+            "result must be the root source row".to_owned(),
+        ))
+    }
+}
+
+fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
+    match plan {
+        AnalyzedQueryPlan::Linear(linear) => plan_sources(&linear.root_source, &linear.steps),
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            let mut sources = plan_sources(&path.parent.root_source, &path.parent.steps);
+            sources.extend(plan_sources(&path.child.root_source, &path.child.steps));
+            sources
+        }
+        AnalyzedQueryPlan::RecursiveRelation(relation) => {
+            let mut sources = plan_sources(&relation.seed.root_source, &relation.seed.steps);
+            sources.extend(plan_sources(
+                &relation.step.root_source,
+                &relation.step.steps,
+            ));
+            sources
+        }
     }
 }
 
@@ -457,21 +626,32 @@ fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) 
 
 fn source_requirements(
     output: &RowSetOutputRequest,
-    plan: &LinearCurrentRoot,
+    plan: &AnalyzedQueryPlan,
 ) -> CapabilityResult<BTreeMap<SourceId, SourceRequirements>> {
     let mut requirements = BTreeMap::<SourceId, SourceRequirements>::new();
-    requirements.insert(plan.root_source.clone(), SourceRequirements::default());
-    for step in &plan.steps {
-        if let LinearStep::Join { right_source, .. } = step {
-            requirements.entry(right_source.clone()).or_default();
-        }
+    for source in analyzed_plan_sources(plan) {
+        requirements.insert(source, SourceRequirements::default());
     }
 
-    let root_requirements = requirements
-        .get_mut(&plan.root_source)
-        .expect("root source requirements were initialized");
-
     if let Some(app_rows) = &output.app_rows {
+        if !matches!(plan, AnalyzedQueryPlan::Linear(_)) {
+            return Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Operator(
+                    "app row materialization for path/relation projections is not lowered yet"
+                        .to_owned(),
+                )],
+                explain: ExplainPlan {
+                    capabilities: vec![
+                        "path/relation lowering currently emits hidden facts separately from app rows"
+                            .to_owned(),
+                    ],
+                    ..ExplainPlan::default()
+                },
+            }));
+        }
+        let root_requirements = requirements
+            .get_mut(plan.root_source())
+            .expect("root source requirements were initialized");
         root_requirements.app_fields = match &app_rows.projection {
             PayloadProjection::ShapeDefault => FieldRequirement::All,
             PayloadProjection::Tree(tree) => tree.fields.clone().into(),
@@ -481,14 +661,27 @@ fn source_requirements(
     for fact in &output.facts {
         match fact {
             ProgramFactKey::ResultMembership | ProgramFactKey::VersionWitnesses => {
+                let root_requirements = requirements
+                    .get_mut(plan.root_source())
+                    .expect("root source requirements were initialized");
                 root_requirements
                     .metadata
                     .insert(SourceMetadataRequirement::VersionWitnesses);
             }
             ProgramFactKey::SourceCoverage(_) => {
+                let root_requirements = requirements
+                    .get_mut(plan.root_source())
+                    .expect("root source requirements were initialized");
                 root_requirements
                     .metadata
                     .insert(SourceMetadataRequirement::Coverage);
+            }
+            ProgramFactKey::PathEdges | ProgramFactKey::PathCorrelationCoverage => {
+                for source_requirements in requirements.values_mut() {
+                    source_requirements
+                        .metadata
+                        .insert(SourceMetadataRequirement::VersionWitnesses);
+                }
             }
             _ => {
                 return Err(Box::new(CapabilityReport {
@@ -502,13 +695,80 @@ fn source_requirements(
         }
     }
 
+    collect_plan_requirements(plan, &mut requirements)?;
+
+    Ok(requirements)
+}
+
+fn collect_plan_requirements(
+    plan: &AnalyzedQueryPlan,
+    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
+) -> CapabilityResult<()> {
+    match plan {
+        AnalyzedQueryPlan::Linear(linear) => collect_linear_requirements(linear, requirements),
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            collect_linear_requirements(&path.parent, requirements)?;
+            collect_linear_requirements(&path.child, requirements)?;
+            collect_predicate_requirements_for_all_sources(&path.correlation, requirements)
+        }
+        AnalyzedQueryPlan::RecursiveRelation(relation) => {
+            collect_linear_requirements(&relation.seed, requirements)?;
+            collect_linear_requirements(&relation.step, requirements)?;
+            collect_value_requirements_for_all_sources(&relation.frontier_key, requirements)?;
+            for key in &relation.dedupe_keys {
+                collect_value_requirements_for_all_sources(key, requirements)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn collect_linear_requirements(
+    plan: &LinearCurrentRoot,
+    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
+) -> CapabilityResult<()> {
     for step in &plan.steps {
-        for (source, source_requirements) in &mut requirements {
+        for (source, source_requirements) in requirements.iter_mut() {
             collect_step_requirements(step, source, source_requirements)?;
         }
     }
+    Ok(())
+}
 
-    Ok(requirements)
+fn collect_predicate_requirements_for_all_sources(
+    predicate: &PredicateExpr,
+    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
+) -> CapabilityResult<()> {
+    for (source, source_requirements) in requirements.iter_mut() {
+        collect_predicate_requirements(predicate, source, source_requirements).map_err(|gap| {
+            Box::new(CapabilityReport {
+                gaps: vec![gap],
+                explain: ExplainPlan {
+                    capabilities: vec!["path correlation requirements are not lowered".to_owned()],
+                    ..ExplainPlan::default()
+                },
+            })
+        })?;
+    }
+    Ok(())
+}
+
+fn collect_value_requirements_for_all_sources(
+    value: &NormalizedValueRef,
+    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
+) -> CapabilityResult<()> {
+    for (source, source_requirements) in requirements.iter_mut() {
+        collect_value_requirements(value, source, source_requirements).map_err(|gap| {
+            Box::new(CapabilityReport {
+                gaps: vec![gap],
+                explain: ExplainPlan {
+                    capabilities: vec!["relation key requirements are not lowered".to_owned()],
+                    ..ExplainPlan::default()
+                },
+            })
+        })?;
+    }
+    Ok(())
 }
 
 impl From<FieldProjection> for FieldRequirement {
@@ -670,6 +930,87 @@ fn add_required_app_field(requirements: &mut SourceRequirements, field: String) 
 const UNBOUNDED_ORDERED_WINDOW_LIMIT: usize = usize::MAX;
 
 fn lower_plan_steps(
+    graph: GraphBuilder,
+    plan: &AnalyzedQueryPlan,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<GraphBuilder, UnsupportedReason> {
+    match plan {
+        AnalyzedQueryPlan::Linear(linear) => {
+            lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)
+        }
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            let parent = lower_linear_plan_steps(
+                graph,
+                &path.parent,
+                root_source,
+                resolved_sources,
+                request,
+            )?;
+            let child_source = resolved_sources
+                .get(&path.child.root_source)
+                .ok_or_else(|| {
+                    UnsupportedReason::Runtime(format!(
+                        "path child source {:?} was not resolved",
+                        path.child.root_source
+                    ))
+                })?;
+            let child = lower_linear_plan_steps(
+                child_source.graph.clone(),
+                &path.child,
+                child_source,
+                resolved_sources,
+                request,
+            )?;
+            let (parent_key, child_key) = lower_path_key_pair(
+                &path.correlation,
+                &path.parent.root_source,
+                root_source,
+                &path.child.root_source,
+                child_source,
+                request,
+            )?;
+            Ok(GraphBuilder::join(parent, child, [parent_key], [child_key]))
+        }
+        AnalyzedQueryPlan::RecursiveRelation(relation) => {
+            let seed = lower_linear_plan_steps(
+                graph,
+                &relation.seed,
+                root_source,
+                resolved_sources,
+                request,
+            )?;
+            let step_source = resolved_sources
+                .get(&relation.step.root_source)
+                .ok_or_else(|| {
+                    UnsupportedReason::Runtime(format!(
+                        "recursive step source {:?} was not resolved",
+                        relation.step.root_source
+                    ))
+                })?;
+            let step = lower_linear_plan_steps(
+                step_source.graph.clone(),
+                &relation.step,
+                step_source,
+                resolved_sources,
+                request,
+            )?;
+            let max_iters = match relation.bound {
+                RecursionBound::Fixpoint => 128,
+                RecursionBound::MaxDepth(max_depth) => max_depth.max(1),
+            };
+            Ok(GraphBuilder::recursive(
+                seed,
+                step,
+                relation.frontier.0.clone(),
+                max_iters,
+            ))
+        }
+    }
+}
+
+fn lower_linear_plan_steps(
     mut graph: GraphBuilder,
     plan: &LinearCurrentRoot,
     root_source: &ResolvedSource,
@@ -772,6 +1113,43 @@ fn lower_plan_steps(
     }
 
     Ok(graph)
+}
+
+fn lower_path_key_pair(
+    predicate: &PredicateExpr,
+    parent_source_id: &SourceId,
+    parent_source: &ResolvedSource,
+    child_source_id: &SourceId,
+    child_source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<(String, String), UnsupportedReason> {
+    let PredicateExpr::Compare {
+        left,
+        op: ComparisonOp::Eq,
+        right,
+    } = predicate
+    else {
+        return Err(UnsupportedReason::Operator(
+            "correlated path projection only lowers equality correlations".to_owned(),
+        ));
+    };
+
+    match (
+        lower_join_key_ref(left, parent_source_id, parent_source, request),
+        lower_join_key_ref(right, child_source_id, child_source, request),
+    ) {
+        (Ok(parent_key), Ok(child_key)) => Ok((parent_key, child_key)),
+        _ => match (
+            lower_join_key_ref(right, parent_source_id, parent_source, request),
+            lower_join_key_ref(left, child_source_id, child_source, request),
+        ) {
+            (Ok(parent_key), Ok(child_key)) => Ok((parent_key, child_key)),
+            _ => Err(UnsupportedReason::Operator(
+                "correlated path projection correlation must compare parent and child fields"
+                    .to_owned(),
+            )),
+        },
+    }
 }
 
 fn lower_join_key_pair(
@@ -1243,7 +1621,9 @@ fn provenance_source_field(field: ProvenanceField) -> &'static str {
 
 fn output_terminals(
     request: &RowSetOutputRequest,
+    plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
 ) -> CapabilityResult<Vec<OutputTerminalSchema>> {
     let mut terminals = Vec::new();
     if request.app_rows.is_some() {
@@ -1254,7 +1634,12 @@ fn output_terminals(
     }
 
     for fact in &request.facts {
-        terminals.push(OutputTerminalSchema::Fact(fact_output(fact, source)?));
+        terminals.push(OutputTerminalSchema::Fact(fact_output(
+            fact,
+            plan,
+            source,
+            resolved_sources,
+        )?));
     }
 
     Ok(terminals)
@@ -1262,7 +1647,9 @@ fn output_terminals(
 
 fn fact_output(
     key: &ProgramFactKey,
+    plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
 ) -> CapabilityResult<ProgramFactOutput> {
     let schema = match key {
         ProgramFactKey::ResultMembership => {
@@ -1293,6 +1680,12 @@ fn fact_output(
                 deletion: None,
             })
         }
+        ProgramFactKey::PathEdges => {
+            ProgramFactSchema::PathEdges(path_edge_schema(plan, source, resolved_sources)?)
+        }
+        ProgramFactKey::PathCorrelationCoverage => ProgramFactSchema::PathCorrelationCoverage(
+            path_correlation_coverage_schema(plan, source, resolved_sources)?,
+        ),
         _ => {
             return Err(Box::new(CapabilityReport {
                 gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
@@ -1307,6 +1700,124 @@ fn fact_output(
     Ok(ProgramFactOutput {
         key: key.clone(),
         schema,
+    })
+}
+
+fn path_edge_schema(
+    plan: &AnalyzedQueryPlan,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<PathEdgeSchema> {
+    let (source, target, depth_field) = match plan {
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            let child = resolved_sources.get(&path.path.child).ok_or_else(|| {
+                Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Runtime(format!(
+                        "path child source {:?} was not resolved",
+                        path.path.child
+                    ))],
+                    explain: ExplainPlan::default(),
+                })
+            })?;
+            (root_source, child, None)
+        }
+        AnalyzedQueryPlan::RecursiveRelation(relation) => {
+            let step = resolved_sources
+                .get(&relation.step.root_source)
+                .ok_or_else(|| {
+                    Box::new(CapabilityReport {
+                        gaps: vec![UnsupportedReason::Runtime(format!(
+                            "recursive step source {:?} was not resolved",
+                            relation.step.root_source
+                        ))],
+                        explain: ExplainPlan::default(),
+                    })
+                })?;
+            (root_source, step, Some("depth".to_owned()))
+        }
+        AnalyzedQueryPlan::Linear(_) => {
+            return Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Output(Box::new(
+                    ProgramFactKey::PathEdges,
+                ))],
+                explain: ExplainPlan {
+                    capabilities: vec![
+                        "path edge facts require a path or recursive relation node".to_owned(),
+                    ],
+                    ..ExplainPlan::default()
+                },
+            }));
+        }
+    };
+
+    Ok(PathEdgeSchema {
+        source: versioned_row_ref_schema(source)?,
+        path_field: "path".to_owned(),
+        target: versioned_row_ref_schema(target)?,
+        kind_field: "kind".to_owned(),
+        depth_field,
+        edge_id_field: None,
+        branch_field: None,
+        role_field: Some("role".to_owned()),
+        order_field: None,
+        hole_state_field: None,
+    })
+}
+
+fn path_correlation_coverage_schema(
+    plan: &AnalyzedQueryPlan,
+    root_source: &ResolvedSource,
+    _resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<PathCorrelationCoverageSchema> {
+    match plan {
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            let expected_count_field = match path.requirement {
+                CorrelationRequirement::MatchCorrelationCardinality => {
+                    Some("expected_count".to_owned())
+                }
+                CorrelationRequirement::Optional | CorrelationRequirement::AtLeastOne => None,
+            };
+            Ok(PathCorrelationCoverageSchema {
+                parent: versioned_row_ref_schema(root_source)?,
+                path_field: "path".to_owned(),
+                correlation_field: "correlation".to_owned(),
+                expected_count_field,
+                readable_count_field: "readable_count".to_owned(),
+                coverage_state_field: "coverage_state".to_owned(),
+            })
+        }
+        AnalyzedQueryPlan::RecursiveRelation(_) => Ok(PathCorrelationCoverageSchema {
+            parent: versioned_row_ref_schema(root_source)?,
+            path_field: "path".to_owned(),
+            correlation_field: "frontier".to_owned(),
+            expected_count_field: None,
+            readable_count_field: "readable_count".to_owned(),
+            coverage_state_field: "coverage_state".to_owned(),
+        }),
+        AnalyzedQueryPlan::Linear(_) => Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Output(Box::new(
+                ProgramFactKey::PathCorrelationCoverage,
+            ))],
+            explain: ExplainPlan {
+                capabilities: vec![
+                    "path correlation coverage facts require a path or recursive relation node"
+                        .to_owned(),
+                ],
+                ..ExplainPlan::default()
+            },
+        })),
+    }
+}
+
+fn versioned_row_ref_schema(source: &ResolvedSource) -> CapabilityResult<VersionedRowRefSchema> {
+    let version = version_witness_fields(&source.row_shape)?;
+    Ok(VersionedRowRefSchema {
+        row: RowRefSchema {
+            source_field: "source".to_owned(),
+            table_field: "table".to_owned(),
+            row_field: source.row_shape.row_uuid_field.clone(),
+        },
+        version: Some(content_version_schema(&version)),
     })
 }
 
