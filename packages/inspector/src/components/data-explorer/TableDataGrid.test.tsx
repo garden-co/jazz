@@ -93,7 +93,6 @@ vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
     wasmSchema: mockWasmSchema,
     runtime: "overlay",
-    queryPropagation: "local-only",
   }),
 }));
 

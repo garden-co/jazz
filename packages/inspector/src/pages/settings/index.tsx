@@ -78,7 +78,8 @@ function ToggleRow({ id, label, description, checked, onChange }: ToggleRowProps
 }
 
 export function SettingsPage() {
-  const { isOverlay } = useDevtoolsContext();
+  const { runtime } = useDevtoolsContext();
+  const isOverlay = runtime === "overlay";
   const [hideLauncher, setHideLauncher] = useLocalStorageState<boolean>(
     OVERLAY_HIDE_LAUNCHER_STORAGE_KEY,
     false,

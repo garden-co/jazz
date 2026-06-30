@@ -27,7 +27,8 @@ function CloseIcon() {
 }
 
 export function InspectorLayout() {
-  const { isOverlay } = useDevtoolsContext();
+  const { runtime } = useDevtoolsContext();
+  const isOverlay = runtime === "overlay";
   const standaloneContext = useStandaloneContext();
 
   return (
