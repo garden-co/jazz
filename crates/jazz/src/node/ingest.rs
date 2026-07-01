@@ -48,15 +48,29 @@ where
         if extent.row != row {
             return Ok(false);
         }
+        let mut authorized_rows_by_table = BTreeMap::<String, BTreeSet<RowUuid>>::new();
         for tx_id in self.transaction_ids()? {
             for version in self.query_versions_for_tx(tx_id)? {
                 if version.row_uuid() != row || version.layer() != VersionLayer::Content {
                     continue;
                 }
-                let table = self.table(version.table())?.clone();
-                if !self.read_policy_allows_version(&table, &version, identity)? {
+                let table_name = version.table().to_owned();
+                if !authorized_rows_by_table.contains_key(&table_name) {
+                    let table = self.table(&table_name)?.clone();
+                    let authorized = self.read_policy_authorized_row_ids_for_table(
+                        &table,
+                        identity,
+                        DurabilityTier::Global,
+                    )?;
+                    authorized_rows_by_table.insert(table_name.clone(), authorized);
+                }
+                if !authorized_rows_by_table
+                    .get(&table_name)
+                    .is_some_and(|rows| rows.contains(&row))
+                {
                     continue;
                 }
+                let table = self.table(&table_name)?.clone();
                 if self.version_references_content_extent(&table, &version, extent)? {
                     return Ok(true);
                 }
