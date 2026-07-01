@@ -5288,7 +5288,7 @@ fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
     key.extend([0, 0]);
 }
 
-fn project_binding_source_deltas(
+pub(super) fn project_binding_source_deltas(
     input: &RecordDeltas,
     output_desc: &RecordDescriptor,
 ) -> Result<RecordDeltas, IvmRuntimeError> {
