@@ -635,6 +635,12 @@ fn validate_output_capabilities(
         ));
         return;
     }
+    if matches!(plan, AnalyzedQueryPlan::CorrelatedPath(_)) && request.output.app_rows.is_none() {
+        gaps.push(UnsupportedReason::Operator(
+            "maintained subscription views over array subqueries are not lowered yet".to_owned(),
+        ));
+        return;
+    }
     if maintained_result_membership_window_supported(plan) {
         return;
     }
