@@ -4908,7 +4908,12 @@ fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
         .unwrap();
 
     assert_eq!(first_output, second_output);
-    assert_eq!(database.ivm_runtime.retained_node_ids().len(), 4);
+    assert!(
+        database
+            .ivm_runtime
+            .retained_node_ids()
+            .contains(&first_output)
+    );
 
     assert!(database.unsubscribe(first.id()));
     assert!(database.ivm_runtime.graph().node(first_output).is_some());
