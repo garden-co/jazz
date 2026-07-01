@@ -315,10 +315,6 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        let previous_row_result_set = previous_member_result_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .collect::<BTreeSet<_>>();
         if self
             .subscriptions
             .get(&subscription)
@@ -352,20 +348,7 @@ impl PeerState {
                 Some(table),
             );
         }
-        let previous_tx_ids = previous_tx_ids(previous_row_result_set.iter());
-        let mut update = node
-            .seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
-                &shape,
-                &binding,
-                subscription,
-                self.acknowledged_complete_tx_payloads(),
-                previous_tx_ids,
-                previous_member_result_set,
-                self.identity(),
-            )?;
-        filter_view_update_to_result_table(&mut update, table);
-        self.record_outgoing_view_update(&update);
-        Ok(update)
+        unreachable!("maintained subscription view state is either absent or present")
     }
 
     /// Builds a query-binding view update, using tx-level refs for complete
@@ -1518,42 +1501,6 @@ pub(crate) fn unsupported_maintained_subscription_shape_error() -> Error {
 
 fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> bool {
     usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len())
-}
-
-fn filter_view_update_to_result_table(update: &mut SyncMessage, table: &str) {
-    let SyncMessage::ViewUpdate {
-        version_bundles,
-        peer_payload_inventory: _,
-        result_member_adds,
-        result_member_removes,
-        ..
-    } = update
-    else {
-        return;
-    };
-    result_member_adds.retain(|member| {
-        member
-            .as_row()
-            .is_some_and(|(entry_table, _, _)| entry_table.as_str() == table)
-    });
-    result_member_removes.retain(|member| {
-        member
-            .as_row()
-            .is_some_and(|(entry_table, _, _)| entry_table.as_str() == table)
-    });
-    let retained_tx_ids = result_member_adds
-        .iter()
-        .chain(result_member_removes.iter())
-        .filter_map(ResultMemberEntry::as_row)
-        .map(|(_, _, tx_id)| tx_id)
-        .collect::<BTreeSet<_>>();
-    version_bundles.retain(|bundle| {
-        retained_tx_ids.contains(&bundle.tx.tx_id)
-            || bundle
-                .versions
-                .iter()
-                .any(|version| version.table() == table)
-    });
 }
 
 fn view_update_reset_result_set(update: &mut SyncMessage) {

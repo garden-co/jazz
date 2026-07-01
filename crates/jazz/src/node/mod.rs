@@ -84,7 +84,6 @@ fn next_groove_runtime_token() -> u64 {
 #[cfg(test)]
 std::thread_local! {
     static QUERY_VERSIONS_FOR_TX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static MAINTAINED_VIEW_MATERIALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -100,21 +99,6 @@ pub(super) fn query_versions_for_tx_call_count() -> usize {
 #[cfg(test)]
 fn record_query_versions_for_tx_call() {
     QUERY_VERSIONS_FOR_TX_CALLS.with(|calls| calls.set(calls.get() + 1));
-}
-
-#[cfg(test)]
-pub(super) fn reset_maintained_view_materialize_call_count() {
-    MAINTAINED_VIEW_MATERIALIZE_CALLS.with(|calls| calls.set(0));
-}
-
-#[cfg(test)]
-pub(super) fn maintained_view_materialize_call_count() -> usize {
-    MAINTAINED_VIEW_MATERIALIZE_CALLS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn record_maintained_view_materialize_call() {
-    MAINTAINED_VIEW_MATERIALIZE_CALLS.with(|calls| calls.set(calls.get() + 1));
 }
 
 fn record_maintained_view_stream_b_add_bundle() {}
