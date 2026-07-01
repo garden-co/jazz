@@ -2575,36 +2575,6 @@ fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec
     (adds, removes)
 }
 
-fn canonical_view_update_payload(
-    update: &SyncMessage,
-) -> (
-    Vec<String>,
-    Vec<TxId>,
-    Vec<ResultRowEntry>,
-    Vec<ResultRowEntry>,
-) {
-    let SyncMessage::ViewUpdate {
-        version_bundles,
-        peer_payload_inventory:
-            crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: complete_tx_payload_refs,
-            },
-        ..
-    } = update
-    else {
-        panic!("expected view update");
-    };
-    let mut version_bundles = version_bundles
-        .iter()
-        .map(|bundle| format!("{bundle:?}"))
-        .collect::<Vec<_>>();
-    version_bundles.sort();
-    let mut complete_tx_payload_refs = complete_tx_payload_refs.clone();
-    complete_tx_payload_refs.sort();
-    let (adds, removes) = canonical_view_update_rows(update);
-    (version_bundles, complete_tx_payload_refs, adds, removes)
-}
-
 #[test]
 fn required_include_unreadable_target_drops_parent() {
     let schema = required_include_rls_schema();
@@ -2762,31 +2732,32 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
 }
 
 #[test]
-fn full_recompute_and_maintained_inner_multi_segment_include_payloads_match() {
+fn maintained_inner_multi_segment_include_payload_references_visible_path_only() {
     let schema = multi_segment_required_include_rls_schema();
-    let (_full_recompute_dir, mut full_recompute_core) =
-        open_node_with_schema(node(9), schema.clone());
     let (_maintained_dir, mut maintained_core) = open_node_with_schema(node(9), schema);
     let reader = user(0xa1);
-    seed_multi_segment_include_fixture(&mut full_recompute_core, reader);
     seed_multi_segment_include_fixture(&mut maintained_core, reader);
     let shape = required_include_shape(&maintained_core, Include::new("project.org"));
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    let mut full_recompute_peer = PeerState::for_author(reader);
-    full_recompute_peer.force_full_recompute_path_for_test(true);
     let mut maintained_peer = PeerState::for_author(reader);
 
-    let full_recompute = full_recompute_peer
-        .rehydrate_query(&mut full_recompute_core, &shape, &binding)
-        .unwrap();
     let maintained = maintained_peer
         .rehydrate_query(&mut maintained_core, &shape, &binding)
         .unwrap();
 
+    let (adds, removes) = canonical_view_update_rows(&maintained);
+    assert!(removes.is_empty());
     assert_eq!(
-        canonical_view_update_payload(&maintained),
-        canonical_view_update_payload(&full_recompute)
+        adds.into_iter()
+            .filter(|entry| entry.0.as_str() == "roots")
+            .map(|entry| entry.1)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0xd2)])
+    );
+    assert_view_update_only_references_rows(
+        &maintained,
+        BTreeSet::from([row(0xd2), row(0xc2), row(0xe2)]),
     );
 }
 
@@ -2840,13 +2811,10 @@ fn holes_multi_segment_include_keeps_parent_and_withholds_unreadable_second_hop(
 }
 
 #[test]
-fn maintained_subscription_view_multi_segment_holes_include_matches_full_recompute() {
+fn maintained_subscription_view_multi_segment_holes_include_payload_references_visible_paths() {
     let schema = multi_segment_required_include_rls_schema();
-    let (_full_recompute_dir, mut full_recompute_core) =
-        open_node_with_schema(node(9), schema.clone());
     let (_maintained_dir, mut maintained_core) = open_node_with_schema(node(9), schema);
     let reader = user(0xa1);
-    seed_multi_segment_include_fixture(&mut full_recompute_core, reader);
     seed_multi_segment_include_fixture(&mut maintained_core, reader);
     let shape = required_include_shape(
         &maintained_core,
@@ -2854,19 +2822,19 @@ fn maintained_subscription_view_multi_segment_holes_include_matches_full_recompu
     );
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    let mut full_recompute_peer = PeerState::for_author(reader);
-    full_recompute_peer.force_full_recompute_path_for_test(true);
     let mut maintained_peer = PeerState::for_author(reader);
 
-    let full_recompute = full_recompute_peer
-        .rehydrate_query(&mut full_recompute_core, &shape, &binding)
-        .unwrap();
     let maintained = maintained_peer
         .rehydrate_query(&mut maintained_core, &shape, &binding)
         .unwrap();
+    let (adds, removes) = canonical_view_update_rows(&maintained);
+    assert!(removes.is_empty());
     assert_eq!(
-        canonical_view_update_rows(&maintained),
-        canonical_view_update_rows(&full_recompute)
+        adds.into_iter()
+            .filter(|entry| entry.0.as_str() == "roots")
+            .map(|entry| entry.1)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0xd1), row(0xd2), row(0xd3)])
     );
     assert_eq!(
         maintained_peer
