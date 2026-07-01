@@ -129,10 +129,8 @@ pub(crate) struct JoinContribution {
     pub(crate) source: SourceId,
     /// Normalized node for the contributing join rows, including join filters.
     pub(crate) input: RowSetNodeId,
-    /// Root-side key that makes this join row contribute to a visible result.
-    pub(crate) root_key: NormalizedValueRef,
-    /// Join-side key that makes this join row contribute to a visible result.
-    pub(crate) join_key: NormalizedValueRef,
+    /// Root/join-side keys that make this join row contribute to a visible result.
+    pub(crate) key_pairs: Vec<(NormalizedValueRef, NormalizedValueRef)>,
 }
 
 /// One reachable-via access contribution rooted at the app result rows.
