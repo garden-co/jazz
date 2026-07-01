@@ -11,8 +11,19 @@ const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 pub(crate) struct ParameterDomain {
     /// User-supplied binding parameters.
     pub(crate) user_params: BTreeMap<String, ColumnType>,
+    /// Trusted claim parameters supplied by the runtime policy context.
+    pub(crate) claim_params: BTreeMap<String, ClaimParameter>,
     /// Parameters retained in terminal rows for usage-site routing.
     pub(crate) routing_params: BTreeSet<String>,
+}
+
+/// One trusted claim value carried through a prepared binding source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClaimParameter {
+    /// Claim path resolved from the active policy context.
+    pub(crate) path: ClaimPath,
+    /// Column type expected by the value-source column.
+    pub(crate) ty: ColumnType,
 }
 
 /// Result of lowering one query program.
@@ -108,10 +119,15 @@ pub(crate) fn lower_query_program(
             .collect(),
     );
 
+    let mut parameters = parameter_domain(&request.input.shape);
+    for terminal in &terminals {
+        collect_claim_binding_source_params(&terminal.graph, &mut parameters);
+    }
+
     Ok(QueryProgram {
         lowered: LoweredGraph {
             terminals,
-            parameters: parameter_domain(&request.input.shape),
+            parameters,
             output,
             maintained_terminal_tables: resolved_sources
                 .values()
@@ -131,6 +147,7 @@ pub(crate) fn lower_query_program(
 fn source_authorization_for_policy(policy: &PolicyContext) -> SourceAuthorizationRequest {
     match policy {
         PolicyContext::System => SourceAuthorizationRequest::System,
+        PolicyContext::AuthorizationSubplan { .. } => SourceAuthorizationRequest::System,
         PolicyContext::Identity {
             permission_subject, ..
         } => SourceAuthorizationRequest::PolicyFiltered {
@@ -159,6 +176,15 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
                     if let NormalizedValueRef::Param(param) = &column.value {
                         domain.user_params.insert(param.clone(), column.ty.clone());
                         domain.routing_params.insert(route_param_field(param));
+                    } else if let NormalizedValueRef::Claim(path) = &column.value {
+                        let param = claim_param_field(path);
+                        domain.claim_params.insert(
+                            param.clone(),
+                            ClaimParameter {
+                                path: path.clone(),
+                                ty: column.ty.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -182,6 +208,86 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
 
 fn route_param_field(param: &str) -> String {
     format!("{ROUTE_PARAM_PREFIX}{param}")
+}
+
+fn claim_param_field(path: &ClaimPath) -> String {
+    format!("__jazz_claim_{}", path.0.join("_"))
+}
+
+fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
+    field
+        .strip_prefix("__jazz_claim_")
+        .map(|path| ClaimPath(path.split('_').map(str::to_owned).collect()))
+}
+
+fn collect_claim_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDomain) {
+    match graph {
+        GraphBuilder::BindingSource { output, .. } => {
+            for field in output.fields() {
+                let Some(name) = field.name.as_deref() else {
+                    continue;
+                };
+                let Some(path) = claim_path_from_param_field(name) else {
+                    continue;
+                };
+                domain
+                    .claim_params
+                    .entry(name.to_owned())
+                    .or_insert_with(|| ClaimParameter {
+                        path,
+                        ty: column_type_from_value_type(&field.value_type),
+                    });
+            }
+        }
+        GraphBuilder::Recursive { seed, step, .. } => {
+            collect_claim_binding_source_params(seed, domain);
+            collect_claim_binding_source_params(step, domain);
+        }
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::Project { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. } => collect_claim_binding_source_params(input, domain),
+        GraphBuilder::Union { inputs } => {
+            for input in inputs {
+                collect_claim_binding_source_params(input, domain);
+            }
+        }
+        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+            collect_claim_binding_source_params(left, domain);
+            collect_claim_binding_source_params(right, domain);
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. } => {}
+    }
+}
+
+fn column_type_from_value_type(value_type: &ValueType) -> ColumnType {
+    match value_type {
+        ValueType::U8 => ColumnType::U8,
+        ValueType::U16 => ColumnType::U16,
+        ValueType::U32 => ColumnType::U32,
+        ValueType::U64 => ColumnType::U64,
+        ValueType::F64 => ColumnType::F64,
+        ValueType::Bool => ColumnType::Bool,
+        ValueType::String => ColumnType::String,
+        ValueType::Bytes => ColumnType::Bytes,
+        ValueType::Uuid => ColumnType::Uuid,
+        ValueType::Enum(schema) => ColumnType::Enum(schema.clone()),
+        ValueType::Tuple(members) => {
+            ColumnType::Tuple(members.iter().map(column_type_from_value_type).collect())
+        }
+        ValueType::Array(member) => {
+            ColumnType::Array(Box::new(column_type_from_value_type(member)))
+        }
+        ValueType::Nullable(inner) => {
+            ColumnType::Nullable(Box::new(column_type_from_value_type(inner)))
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2381,6 +2487,12 @@ fn lower_value_source(
                 .user_params
                 .iter()
                 .map(|(name, ty)| (name.clone(), ty.clone()))
+                .chain(
+                    domain
+                        .claim_params
+                        .iter()
+                        .map(|(name, param)| (name.clone(), param.ty.clone())),
+                )
                 .collect::<Vec<_>>();
             for column in columns {
                 match &column.value {
@@ -2398,7 +2510,17 @@ fn lower_value_source(
                         }
                     }
                     NormalizedValueRef::Claim(path) => {
-                        let _ = claim_value(path, &request.policy)?;
+                        let param = claim_param_field(path);
+                        let Some(existing) = domain.claim_params.get(&param) else {
+                            return Err(UnsupportedReason::Operator(format!(
+                                "claim parameter '{param}' is not part of the program parameter domain"
+                            )));
+                        };
+                        if existing.ty != column.ty {
+                            return Err(UnsupportedReason::Operator(format!(
+                                "claim parameter '{param}' has conflicting value-source types"
+                            )));
+                        }
                     }
                     NormalizedValueRef::Literal(_) => {}
                     _ => {
@@ -2433,7 +2555,11 @@ fn lower_value_source(
                 .iter()
                 .filter_map(|column| match &column.value {
                     NormalizedValueRef::Param(param) if domain.user_params.contains_key(param) => {
-                        Some(param)
+                        Some(param.clone())
+                    }
+                    NormalizedValueRef::Claim(path) => {
+                        let param = claim_param_field(path);
+                        domain.claim_params.contains_key(&param).then_some(param)
                     }
                     _ => None,
                 })
@@ -2441,7 +2567,7 @@ fn lower_value_source(
             let retained_routes = domain
                 .user_params
                 .keys()
-                .filter(|param| source_user_params.contains(param))
+                .filter(|param| source_user_params.contains(*param))
                 .filter_map(|param| {
                     let route_field = route_param_field(param);
                     (!projected.contains(&route_field))
@@ -2457,9 +2583,9 @@ fn lower_value_source(
                                 NormalizedValueRef::Param(param) => {
                                     ProjectField::renamed(param.clone(), column.name.clone())
                                 }
-                                NormalizedValueRef::Claim(path) => ProjectField::literal(
+                                NormalizedValueRef::Claim(path) => ProjectField::renamed(
+                                    claim_param_field(path),
                                     column.name.clone(),
-                                    claim_value(path, &request.policy)?,
                                 ),
                                 NormalizedValueRef::Literal(bytes) => {
                                     let value =
@@ -3526,15 +3652,22 @@ fn lower_value_ref(
 }
 
 fn claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Value, UnsupportedReason> {
-    let PolicyContext::Identity {
-        permission_subject,
-        claims,
-        ..
-    } = policy
-    else {
-        return Err(UnsupportedReason::Operator(
-            "claim values require an identity policy context".to_owned(),
-        ));
+    let (permission_subject, claims) = match policy {
+        PolicyContext::Identity {
+            permission_subject,
+            claims,
+            ..
+        }
+        | PolicyContext::AuthorizationSubplan {
+            permission_subject,
+            claims,
+            ..
+        } => (permission_subject, claims),
+        PolicyContext::System => {
+            return Err(UnsupportedReason::Operator(
+                "claim values require an identity policy context".to_owned(),
+            ));
+        }
     };
     let [name] = path.0.as_slice() else {
         return Err(UnsupportedReason::Operator(
