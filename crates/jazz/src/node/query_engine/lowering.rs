@@ -95,7 +95,7 @@ pub(crate) fn lower_query_program(
     explain
         .capabilities
         .push(plan.capability_label().to_owned());
-    let graph = lower_plan_steps(
+    let lowered = lower_plan_steps(
         resolved_root.graph.clone(),
         &plan,
         &resolved_root,
@@ -110,14 +110,14 @@ pub(crate) fn lower_query_program(
     })?;
 
     let mut parameters = parameter_domain(&request.input.shape);
-    collect_binding_source_params(&graph, &mut parameters);
+    collect_binding_source_params(&lowered.graph, &mut parameters);
     parameters.routing_params.retain(|field| {
         route_param_from_field(field)
             .is_some_and(|param| parameters.user_params.contains_key(param))
     });
 
     let terminals = lowered_terminals(
-        graph,
+        lowered.graph,
         &request,
         &plan,
         &resolved_root,
@@ -1863,7 +1863,7 @@ fn lower_plan_steps(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
-) -> Result<GraphBuilder, UnsupportedReason> {
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     match plan {
         AnalyzedQueryPlan::Linear(linear) => {
             lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)
@@ -1890,7 +1890,7 @@ fn lower_correlated_path_plan(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
-) -> Result<GraphBuilder, UnsupportedReason> {
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let parent =
         lower_linear_plan_steps(graph, &path.parent, root_source, resolved_sources, request)?;
     let child_root = path
@@ -1923,25 +1923,41 @@ fn lower_correlated_path_plan(
     )?;
     let parent_key_nullable = source_field_is_nullable(root_source, &parent_key);
     let child_key_nullable = source_field_is_nullable(child_source, &child_key);
-    let parent = unwrap_join_key_if_nullable(parent, parent_key.clone(), parent_key_nullable);
-    let child = unwrap_join_key_if_nullable(child, child_key.clone(), child_key_nullable);
+    let parent = unwrap_join_key_if_nullable(parent.graph, parent_key.clone(), parent_key_nullable);
+    let child = unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable);
 
     if request.output.app_rows.is_none() {
-        return Ok(GraphBuilder::join(parent, child, [parent_key], [child_key]));
+        let graph = GraphBuilder::join(parent, child, [parent_key], [child_key]);
+        return Ok(LoweredRelationInput {
+            graph,
+            root_source: None,
+            fields: BTreeSet::new(),
+            nullable_fields: BTreeSet::new(),
+        });
     }
 
-    match path.requirement {
-        CorrelationRequirement::Optional => Ok(parent),
+    let lowered = match path.requirement {
+        CorrelationRequirement::Optional => Ok(LoweredRelationInput {
+            graph: parent,
+            root_source: Some(root_source.clone()),
+            fields: source_fields(root_source).collect(),
+            nullable_fields: source_nullable_fields(root_source),
+        }),
         CorrelationRequirement::AtLeastOne => {
             let joined =
                 GraphBuilder::join(parent, child, [parent_key], [child_key]).project_fields(
                     project_source_fields_from_prefix(root_source, LEFT_JOIN_PREFIX),
                 );
-            Ok(GraphBuilder::arg_min_by(
-                joined,
-                [root_source.row_shape.row_uuid_field.clone()],
-                [root_source.row_shape.row_uuid_field.clone()],
-            ))
+            Ok(LoweredRelationInput {
+                graph: GraphBuilder::arg_min_by(
+                    joined,
+                    [root_source.row_shape.row_uuid_field.clone()],
+                    [root_source.row_shape.row_uuid_field.clone()],
+                ),
+                root_source: Some(root_source.clone()),
+                fields: source_fields(root_source).collect(),
+                nullable_fields: source_nullable_fields(root_source),
+            })
         }
         CorrelationRequirement::MatchCorrelationCardinality => {
             lower_cardinality_complete_parent_graph(
@@ -1951,19 +1967,26 @@ fn lower_correlated_path_plan(
                 parent_key,
                 child_key,
             )
+            .map(|graph| LoweredRelationInput {
+                graph,
+                root_source: Some(root_source.clone()),
+                fields: source_fields(root_source).collect(),
+                nullable_fields: source_nullable_fields(root_source),
+            })
         }
     }
-    .and_then(|graph| {
+    .and_then(|lowered| {
         if path.output_steps.is_empty() {
-            Ok(graph)
+            Ok(lowered)
         } else {
             let tail = LinearCurrentRoot {
                 root: path.parent.root.clone(),
                 steps: path.output_steps.clone(),
             };
-            lower_linear_plan_steps(graph, &tail, root_source, resolved_sources, request)
+            lower_linear_plan_steps(lowered.graph, &tail, root_source, resolved_sources, request)
         }
-    })
+    })?;
+    Ok(lowered)
 }
 
 fn lower_cardinality_complete_parent_graph(
@@ -2036,7 +2059,7 @@ fn lower_correlated_path_relation_graph(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
-) -> Result<GraphBuilder, UnsupportedReason> {
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let parent = lower_linear_plan_steps(
         root_source.graph.clone(),
         &path.parent,
@@ -2046,7 +2069,7 @@ fn lower_correlated_path_relation_graph(
     )?;
     lower_correlated_path_relation_graph_from_parent(
         path,
-        parent,
+        parent.graph,
         root_source,
         resolved_sources,
         request,
@@ -2059,7 +2082,7 @@ fn lower_correlated_path_relation_graph_from_parent(
     parent_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
-) -> Result<GraphBuilder, UnsupportedReason> {
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let child_root = path
         .child
         .root
@@ -2091,8 +2114,13 @@ fn lower_correlated_path_relation_graph_from_parent(
     let parent_key_nullable = source_field_is_nullable(parent_source, &parent_key);
     let child_key_nullable = source_field_is_nullable(child_source, &child_key);
     let parent = unwrap_join_key_if_nullable(parent, parent_key.clone(), parent_key_nullable);
-    let child = unwrap_join_key_if_nullable(child, child_key.clone(), child_key_nullable);
-    Ok(GraphBuilder::join(parent, child, [parent_key], [child_key]))
+    let child = unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable);
+    Ok(LoweredRelationInput {
+        graph: GraphBuilder::join(parent, child, [parent_key], [child_key]),
+        root_source: None,
+        fields: BTreeSet::new(),
+        nullable_fields: BTreeSet::new(),
+    })
 }
 
 fn unwrap_join_key_if_nullable(graph: GraphBuilder, field: String, nullable: bool) -> GraphBuilder {
@@ -2124,19 +2152,13 @@ fn lower_relation_input(
             let source = resolved_sources.get(source_id).cloned().ok_or_else(|| {
                 UnsupportedReason::Runtime(format!("join source {:?} was not resolved", source_id))
             })?;
-            let graph = lower_linear_plan_steps(
+            lower_linear_plan_steps(
                 source.graph.clone(),
                 linear,
                 &source,
                 resolved_sources,
                 request,
-            )?;
-            Ok(LoweredRelationInput {
-                graph,
-                fields: linear_output_fields(linear, &source, request),
-                nullable_fields: linear_nullable_output_fields(linear, &source),
-                root_source: Some(source),
-            })
+            )
         }
         RelationInputPlan::Union(union) => {
             lower_union_relation_input(union, resolved_sources, request)
@@ -2153,14 +2175,7 @@ fn lower_relation_input(
                     source_id
                 ))
             })?;
-            let graph =
-                lower_recursive_relation(None, relation, &source, resolved_sources, request)?;
-            Ok(LoweredRelationInput {
-                graph,
-                root_source: Some(source),
-                fields: recursive_output_fields(relation),
-                nullable_fields: BTreeSet::new(),
-            })
+            lower_recursive_relation(None, relation, &source, resolved_sources, request)
         }
     }
 }
@@ -2187,10 +2202,10 @@ fn lower_union_plan(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
-) -> Result<GraphBuilder, UnsupportedReason> {
-    let mut graphs = Vec::new();
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    let mut lowered = Vec::new();
     for branch in &union.branches {
-        let graph = match &branch.plan {
+        let input = match &branch.plan {
             RelationInputPlan::Linear(linear) => {
                 let source_id = linear.root.source().ok_or_else(|| {
                     UnsupportedReason::Operator("union branch must have a source".to_owned())
@@ -2217,12 +2232,12 @@ fn lower_union_plan(
                 lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)?
             }
             RelationInputPlan::Union(_) | RelationInputPlan::Recursive(_) => {
-                lower_relation_input(&branch.plan, resolved_sources, request)?.graph
+                lower_relation_input(&branch.plan, resolved_sources, request)?
             }
         };
-        graphs.push(graph);
+        lowered.push(input);
     }
-    Ok(GraphBuilder::union(graphs))
+    lower_union_inputs(lowered)
 }
 
 fn lower_union_inputs(
@@ -2261,62 +2276,6 @@ fn lower_union_inputs(
     })
 }
 
-fn linear_output_fields(
-    plan: &LinearCurrentRoot,
-    root_source: &ResolvedSource,
-    request: &QueryProgramRequest,
-) -> BTreeSet<String> {
-    if let Some(LinearStep::Project(columns)) = plan.steps.last() {
-        return columns
-            .iter()
-            .map(|column| column.output.name.clone())
-            .collect();
-    }
-    let mut fields: BTreeSet<String> = match &plan.root {
-        LinearRoot::Source { .. } => source_fields(root_source).collect(),
-        LinearRoot::Value { columns, .. } | LinearRoot::Frontier { columns, .. } => {
-            columns.iter().map(|column| column.name.clone()).collect()
-        }
-    };
-    if matches!(plan.root, LinearRoot::Source { .. }) {
-        let routing = parameter_domain(&request.input.shape).routing_params;
-        for step in &plan.steps {
-            if let LinearStep::Join { right, .. } = step {
-                let right_fields = relation_output_fields_for_routing(right, request);
-                fields.extend(
-                    routing
-                        .iter()
-                        .filter(|param| right_fields.contains(*param))
-                        .cloned(),
-                );
-            }
-        }
-    }
-    fields
-}
-
-fn linear_nullable_output_fields(
-    plan: &LinearCurrentRoot,
-    root_source: &ResolvedSource,
-) -> BTreeSet<String> {
-    if matches!(plan.steps.last(), Some(LinearStep::Project(_))) {
-        return BTreeSet::new();
-    }
-    if !matches!(plan.root, LinearRoot::Source { .. }) {
-        return BTreeSet::new();
-    }
-    root_source
-        .row_shape
-        .descriptor
-        .fields()
-        .iter()
-        .filter_map(|field| {
-            let name = field.name.as_ref()?;
-            matches!(&field.value_type, ValueType::Nullable(_)).then(|| name.clone())
-        })
-        .collect()
-}
-
 fn recursive_output_fields(relation: &RecursiveRelationPlan) -> BTreeSet<String> {
     if let Some(LinearStep::Project(columns)) = relation.step.steps.last() {
         return columns
@@ -2325,57 +2284,6 @@ fn recursive_output_fields(relation: &RecursiveRelationPlan) -> BTreeSet<String>
             .collect();
     }
     linear_root_fields(&relation.seed.root)
-}
-
-fn relation_output_fields_for_routing(
-    plan: &RelationInputPlan,
-    request: &QueryProgramRequest,
-) -> BTreeSet<String> {
-    match plan {
-        RelationInputPlan::Recursive(relation) => recursive_output_fields(relation),
-        RelationInputPlan::Union(union) => union_output_fields_for_routing(union, request),
-        RelationInputPlan::Linear(linear) => {
-            if let Some(LinearStep::Project(columns)) = linear.steps.last() {
-                return columns
-                    .iter()
-                    .map(|column| column.output.name.clone())
-                    .collect();
-            }
-            let mut fields = linear_root_fields(&linear.root);
-            if matches!(linear.root, LinearRoot::Source { .. }) {
-                let routing = parameter_domain(&request.input.shape).routing_params;
-                for step in &linear.steps {
-                    if let LinearStep::Join { right, .. } = step {
-                        let right_fields = relation_output_fields_for_routing(right, request);
-                        fields.extend(
-                            routing
-                                .iter()
-                                .filter(|param| right_fields.contains(*param))
-                                .cloned(),
-                        );
-                    }
-                }
-            }
-            fields
-        }
-    }
-}
-
-fn union_output_fields_for_routing(
-    union: &UnionPlan,
-    request: &QueryProgramRequest,
-) -> BTreeSet<String> {
-    let mut branches = union
-        .branches
-        .iter()
-        .map(|branch| relation_output_fields_for_routing(&branch.plan, request));
-    let Some(mut fields) = branches.next() else {
-        return BTreeSet::new();
-    };
-    for branch_fields in branches {
-        fields = fields.intersection(&branch_fields).cloned().collect();
-    }
-    fields
 }
 
 fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
@@ -2396,13 +2304,26 @@ fn source_fields(source: &ResolvedSource) -> impl Iterator<Item = String> + '_ {
         .filter_map(|field| field.name.clone())
 }
 
+fn source_nullable_fields(source: &ResolvedSource) -> BTreeSet<String> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| {
+            let name = field.name.as_ref()?;
+            matches!(&field.value_type, ValueType::Nullable(_)).then(|| name.clone())
+        })
+        .collect()
+}
+
 fn lower_recursive_relation(
     root_graph: Option<GraphBuilder>,
     relation: &RecursiveRelationPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
-) -> Result<GraphBuilder, UnsupportedReason> {
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let seed_root = relation.seed.root.source().and_then(|source| {
         resolved_sources
             .get(source)
@@ -2438,12 +2359,17 @@ fn lower_recursive_relation(
         RecursionBound::Fixpoint => FIXPOINT_MAX_ITERS,
         RecursionBound::MaxDepth(max_depth) => max_depth.max(1),
     };
-    Ok(GraphBuilder::recursive(
-        seed,
-        step,
-        relation.frontier.0.clone(),
-        max_iters,
-    ))
+    Ok(LoweredRelationInput {
+        graph: GraphBuilder::recursive(
+            seed.graph,
+            step.graph,
+            relation.frontier.0.clone(),
+            max_iters,
+        ),
+        root_source: Some(root_source.clone()),
+        fields: recursive_output_fields(relation),
+        nullable_fields: BTreeSet::new(),
+    })
 }
 
 fn lower_linear_plan_steps(
@@ -2452,7 +2378,7 @@ fn lower_linear_plan_steps(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
-) -> Result<GraphBuilder, UnsupportedReason> {
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut graph = match &plan.root {
         LinearRoot::Source { .. } => graph,
         LinearRoot::Value {
@@ -2463,6 +2389,17 @@ fn lower_linear_plan_steps(
         LinearRoot::Frontier { frontier, columns } => {
             GraphBuilder::frontier_source(frontier.0.clone(), value_source_descriptor(columns))
         }
+    };
+    let mut fields: BTreeSet<String> = match &plan.root {
+        LinearRoot::Source { .. } => source_fields(root_source).collect(),
+        LinearRoot::Value { columns, .. } | LinearRoot::Frontier { columns, .. } => {
+            columns.iter().map(|column| column.name.clone()).collect()
+        }
+    };
+    let mut nullable_fields = if matches!(plan.root, LinearRoot::Source { .. }) {
+        source_nullable_fields(root_source)
+    } else {
+        BTreeSet::new()
     };
     let mut pending_order: Option<Vec<OrderKey>> = None;
     let mut last_join_right: Option<(RelationInputPlan, BTreeSet<String>)> = None;
@@ -2541,13 +2478,17 @@ fn lower_linear_plan_steps(
                         &available_route_fields,
                         &introduced_route_fields,
                     ));
+                    fields = source_fields(root_source).collect();
+                    fields.extend(available_route_fields.iter().cloned());
+                    fields.extend(introduced_route_fields.iter().cloned());
+                    nullable_fields = source_nullable_fields(root_source);
                     available_route_fields.extend(introduced_route_fields);
                     last_join_right = None;
                 }
             }
             LinearStep::Project(columns) => {
                 let mut unwrap_fields = BTreeSet::new();
-                let fields = columns
+                let project_fields = columns
                     .iter()
                     .map(|column| {
                         let field = lower_projection_field(
@@ -2564,7 +2505,12 @@ fn lower_linear_plan_steps(
                 for field in unwrap_fields {
                     graph = graph.unwrap_nullable(field);
                 }
-                graph = graph.project_fields(fields);
+                graph = graph.project_fields(project_fields);
+                fields = columns
+                    .iter()
+                    .map(|column| column.output.name.clone())
+                    .collect();
+                nullable_fields = BTreeSet::new();
                 last_join_right = None;
             }
             LinearStep::OrderBy(keys) => {
@@ -2616,7 +2562,12 @@ fn lower_linear_plan_steps(
         )?;
     }
 
-    Ok(graph)
+    Ok(LoweredRelationInput {
+        graph,
+        root_source: Some(root_source.clone()),
+        fields,
+        nullable_fields,
+    })
 }
 
 fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
@@ -4253,6 +4204,7 @@ fn fact_input_graph(
     ) {
         if let AnalyzedQueryPlan::CorrelatedPath(path) = plan {
             return lower_correlated_path_relation_graph(path, source, resolved_sources, request)
+                .map(|lowered| lowered.graph)
                 .map_err(|gap| {
                     Box::new(CapabilityReport {
                         gaps: vec![gap],
@@ -5012,7 +4964,8 @@ fn correlated_relation_edge_graphs(
                     ..ExplainPlan::default()
                 },
             })
-        })?;
+        })?
+        .graph;
         graphs.extend(correlated_relation_edge_graphs(
             nested,
             nested_graph,
