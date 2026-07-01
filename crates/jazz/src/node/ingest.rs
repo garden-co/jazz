@@ -48,26 +48,13 @@ where
         if extent.row != row {
             return Ok(false);
         }
-        let mut authorized_rows_by_table = BTreeMap::<String, BTreeSet<RowUuid>>::new();
         for tx_id in self.transaction_ids()? {
             for version in self.query_versions_for_tx(tx_id)? {
                 if version.row_uuid() != row || version.layer() != VersionLayer::Content {
                     continue;
                 }
                 let table_name = version.table().to_owned();
-                if !authorized_rows_by_table.contains_key(&table_name) {
-                    let table = self.table(&table_name)?.clone();
-                    let authorized = self.read_policy_authorized_row_ids_for_table(
-                        &table,
-                        identity,
-                        DurabilityTier::Global,
-                    )?;
-                    authorized_rows_by_table.insert(table_name.clone(), authorized);
-                }
-                if !authorized_rows_by_table
-                    .get(&table_name)
-                    .is_some_and(|rows| rows.contains(&row))
-                {
+                if !self.content_extent_owner_visible_to(&table_name, row, identity)? {
                     continue;
                 }
                 let table = self.table(&table_name)?.clone();
@@ -77,6 +64,24 @@ where
             }
         }
         Ok(false)
+    }
+
+    fn content_extent_owner_visible_to(
+        &mut self,
+        table_name: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        let shape = crate::query::Query::from(table_name)
+            .filter(crate::query::eq(
+                crate::query::col("id"),
+                crate::query::lit(Value::Uuid(row.0)),
+            ))
+            .validate(&self.catalogue.schema)?;
+        let binding = shape.bind(BTreeMap::new())?;
+        Ok(!self
+            .query_rows_for_link(&shape, &binding, DurabilityTier::Global, identity)?
+            .is_empty())
     }
 
     /// Apply one sync message and return any outgoing sync messages.

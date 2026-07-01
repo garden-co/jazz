@@ -2819,8 +2819,6 @@ pub struct SyncMetrics {
 pub struct QueryEngineReadMetrics {
     /// Query-engine authorization terminal graphs constructed for read visibility.
     pub policy_authorization_graphs: u64,
-    /// One-shot materializations of authorized row-id sets.
-    pub policy_authorized_row_id_queries: u64,
     /// Source graphs filtered by query-engine authorization terminals.
     pub policy_authorized_source_joins: u64,
 }

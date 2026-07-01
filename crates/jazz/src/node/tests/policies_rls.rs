@@ -4613,20 +4613,28 @@ fn content_extent_visibility_requires_referencing_readable_version_row() {
         })
         .expect("large-value commit must reference a content extent");
     let mut owner_peer = PeerState::edge_client(owner);
+    core.reset_query_engine_read_metrics();
     assert!(matches!(
         owner_peer
             .serve_content_extents(&mut core, row_uuid, [extent.clone()])
             .unwrap(),
         SyncMessage::ContentExtents { extents } if extents.len() == 1 && extents[0].bytes == b"secret"
     ));
+    let owner_metrics = core.query_engine_read_metrics();
+    assert!(owner_metrics.policy_authorization_graphs > 0);
+    assert!(owner_metrics.policy_authorized_source_joins > 0);
 
     let mut other_peer = PeerState::edge_client(other);
+    core.reset_query_engine_read_metrics();
     assert!(matches!(
         other_peer.serve_content_extents(&mut core, row_uuid, [extent.clone()]),
         Err(Error::UnsupportedSyncMessage(
             "content extent is not visible for row"
         ))
     ));
+    let other_metrics = core.query_engine_read_metrics();
+    assert!(other_metrics.policy_authorization_graphs > 0);
+    assert!(other_metrics.policy_authorized_source_joins > 0);
 
     let unreferenced = core
         .content_store()
