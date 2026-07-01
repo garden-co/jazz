@@ -62,6 +62,8 @@ pub(crate) enum ProgramFactTerminal {
 /// Schema-only fact output variants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProgramFactSchema {
+    /// Row ids authorized by a policy proof subplan.
+    AuthorizedRows(AuthorizedRowsSchema),
     /// Root result-set membership rows.
     ResultMembership(ResultMembershipSchema),
     /// Relation edge rows.
@@ -95,6 +97,13 @@ pub(crate) enum ProgramFactSchema {
     PointReads(PointReadFactSchema),
     /// Large-value authorization/materialization extents.
     LargeValueExtents(LargeValueExtentSchema),
+}
+
+/// Authorized row-id terminal row schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AuthorizedRowsSchema {
+    /// Row identity field.
+    pub(crate) row_field: String,
 }
 
 /// Root result membership terminal row schema.
