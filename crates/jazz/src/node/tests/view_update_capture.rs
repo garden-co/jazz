@@ -394,7 +394,7 @@ impl MaintainedSubscriptionViewSubscription {
             previous_result_set: BTreeSet::new(),
             peer_complete_tx_payloads: BTreeSet::new(),
         };
-        let output_tables = core.maintained_view_terminal_tables(shape).unwrap();
+        let output_tables = driver.tables.clone();
         let result_member_adds = transitions
             .adds
             .into_iter()
@@ -432,7 +432,7 @@ impl MaintainedSubscriptionViewSubscription {
         identity: AuthorId,
     ) -> SyncMessage {
         core.flush_query_runtime().unwrap();
-        let output_tables = core.maintained_view_terminal_tables(shape).unwrap();
+        let output_tables = self.tables.clone();
         let mut states = BTreeMap::<ResultRowEntry, (bool, bool)>::new();
         loop {
             match self.subscription.try_recv() {

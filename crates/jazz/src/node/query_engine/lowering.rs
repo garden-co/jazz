@@ -115,6 +115,15 @@ pub(crate) fn lower_query_program(
             terminals,
             parameters: parameter_domain(&request.input.shape),
             output,
+            maintained_terminal_tables: resolved_sources
+                .values()
+                .map(|source| {
+                    (
+                        source.table_schema.name.clone(),
+                        source.table_schema.clone(),
+                    )
+                })
+                .collect(),
         },
         request,
         explain,
@@ -3066,7 +3075,7 @@ fn lowered_terminals(
                 graph: result_graph,
                 output: OutputTerminalSchema::Fact(output.clone()),
             });
-            for (source_id, closure_graph) in &closure.visible_members {
+            for (source_id, closure_graph) in &closure.result_members {
                 let Some(resolved_source) = resolved_sources.get(&source_id) else {
                     continue;
                 };
@@ -3212,14 +3221,14 @@ fn fact_input_graph(
 #[derive(Clone, Debug)]
 struct ClosureLowering {
     visible_root: GraphBuilder,
-    visible_members: BTreeMap<SourceId, GraphBuilder>,
+    result_members: BTreeMap<SourceId, GraphBuilder>,
 }
 
 impl ClosureLowering {
     fn all_visible_members(&self, root_source: SourceId) -> Vec<(SourceId, GraphBuilder)> {
         std::iter::once((root_source, self.visible_root.clone()))
             .chain(
-                self.visible_members
+                self.result_members
                     .iter()
                     .map(|(source, graph)| (source.clone(), graph.clone())),
             )
@@ -3247,7 +3256,7 @@ fn lower_closure_membership(
         )?;
     }
 
-    let mut visible_members = BTreeMap::<SourceId, GraphBuilder>::new();
+    let mut result_members = BTreeMap::<SourceId, GraphBuilder>::new();
     for path in &request.input.shape.closure_paths {
         for (_, source, graph) in closure_membership_graph_for_path(
             visible_root.clone(),
@@ -3260,7 +3269,7 @@ fn lower_closure_membership(
             };
             let graph =
                 graph.project_fields(project_source_fields_from_prefix(resolved_source, ""));
-            visible_members
+            result_members
                 .entry(source)
                 .and_modify(|existing| {
                     *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
@@ -3268,49 +3277,9 @@ fn lower_closure_membership(
                 .or_insert(graph);
         }
     }
-    for contribution in &request.input.shape.join_contributions {
-        let Some(resolved_source) = resolved_sources.get(&contribution.source) else {
-            continue;
-        };
-        let graph = join_contribution_membership_graph(
-            visible_root.clone(),
-            contribution,
-            root_source,
-            resolved_source,
-            &request.input.shape.nodes,
-            resolved_sources,
-            request,
-        )?;
-        visible_members
-            .entry(contribution.source.clone())
-            .and_modify(|existing| {
-                *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
-            })
-            .or_insert(graph);
-    }
-    for contribution in &request.input.shape.reachable_contributions {
-        let Some(resolved_source) = resolved_sources.get(&contribution.access_source) else {
-            continue;
-        };
-        let graph = reachable_contribution_membership_graph(
-            visible_root.clone(),
-            contribution,
-            root_source,
-            resolved_source,
-            &request.input.shape.nodes,
-            resolved_sources,
-            request,
-        )?;
-        visible_members
-            .entry(contribution.access_source.clone())
-            .and_modify(|existing| {
-                *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
-            })
-            .or_insert(graph);
-    }
     Ok(ClosureLowering {
         visible_root,
-        visible_members,
+        result_members,
     })
 }
 
@@ -4516,6 +4485,10 @@ pub(crate) struct LoweredGraph {
     pub(crate) parameters: ParameterDomain,
     /// App row and fact schemas emitted by the graph.
     pub(crate) output: ProgramOutputSchemas,
+    /// Table schemas needed to decode maintained fact terminals emitted by this
+    /// lowered program. This is derived from resolved query-engine sources, not
+    /// recollected from the public query shape.
+    pub(crate) maintained_terminal_tables: BTreeMap<String, TableSchema>,
 }
 
 /// One executable output terminal produced by query lowering.
