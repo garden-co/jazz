@@ -85,14 +85,16 @@ impl PeerRole {
 /// Server-side shipped-state for one downstream subscription on a `PeerState`.
 ///
 /// In a real topology this lives on the upstream/server node's per-peer link
-/// state and records what that peer has already been sent, including closure
-/// contributions needed to emit incremental view updates. This has the same
+/// state and records what that peer has already been sent. This has the same
 /// `ResultRowEntry` shape as `NodeState::settled_result_sets`, but that node
 /// map is the downstream subscriber's settled canonical binding-view
-/// result-set/completeness state, not a cryptographic proof or protocol authority.
+/// result-set/completeness state, not a cryptographic proof or protocol
+/// authority.
 #[derive(Debug, Default)]
 struct PeerSubscriptionState {
+    #[cfg(test)]
     closure_contributions: BTreeMap<ResultMemberEntry, BTreeSet<ResultMemberEntry>>,
+    #[cfg(test)]
     closure_contributions_complete: bool,
     result_member_set: BTreeSet<ResultMemberEntry>,
     member_index: BTreeMap<MemberIndexKey, MemberSlot>,
@@ -1712,8 +1714,11 @@ impl PeerState {
         };
         let state = self.subscriptions.entry(*subscription).or_default();
         if *reset_result_set {
-            state.closure_contributions.clear();
-            state.closure_contributions_complete = false;
+            #[cfg(test)]
+            {
+                state.closure_contributions.clear();
+                state.closure_contributions_complete = false;
+            }
             state.result_member_set.clear();
             state.member_index.clear();
         }
