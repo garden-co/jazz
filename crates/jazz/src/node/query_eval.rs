@@ -14,7 +14,7 @@ use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
 use groove::records::{EnumSchema, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
-use super::maintained_subscription_view::MaintainedSubscriptionView;
+use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
 use super::policy::ViewEvaluationContext;
 use super::query_engine::{
     AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathSegment,
@@ -59,6 +59,7 @@ pub(crate) struct ReachableGraphs {
 pub(crate) struct LocalMaintainedViewSubscription {
     subscription: MultisinkSubscription,
     maintained: MaintainedSubscriptionView,
+    terminal_schemas: MaintainedTerminalSchemas,
     tables: BTreeMap<String, TableSchema>,
     result_table: String,
     result_set: BTreeSet<ResultMemberEntry>,
@@ -85,12 +86,19 @@ pub(crate) fn take_optional_sink_deltas(
 pub(crate) fn apply_maintained_multisink_deltas(
     maintained: &mut MaintainedSubscriptionView,
     deltas: MultisinkDeltas,
+    terminal_schemas: &MaintainedTerminalSchemas,
     tables: &BTreeMap<String, TableSchema>,
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
 ) -> Result<super::maintained_subscription_view::ResultTransitions, Error> {
     let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
-    for (_sink, deltas) in deltas.sinks {
-        let delta_transitions = maintained.apply_tagged_deltas(&deltas, tables, node_aliases)?;
+    for (sink, deltas) in deltas.sinks {
+        let delta_transitions = maintained.apply_typed_deltas(
+            &sink,
+            &deltas,
+            terminal_schemas,
+            tables,
+            node_aliases,
+        )?;
         transitions.adds.extend(delta_transitions.adds);
         transitions.removes.extend(delta_transitions.removes);
     }
@@ -2419,11 +2427,12 @@ where
         identity: AuthorId,
         tier: DurabilityTier,
     ) -> Result<(LocalMaintainedViewSubscription, Vec<CurrentRow>), Error> {
-        let (subscription, maintained, transitions, tables) =
+        let (subscription, maintained, terminal_schemas, transitions, tables) =
             self.maintained_subscription_view_from_cold_snapshot(shape, binding, identity, tier)?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             maintained,
+            terminal_schemas,
             tables,
             result_table: shape.query().table.clone(),
             result_set: BTreeSet::new(),
@@ -2445,6 +2454,7 @@ where
                     let transitions = apply_maintained_multisink_deltas(
                         &mut local.maintained,
                         deltas,
+                        &local.terminal_schemas,
                         &local.tables,
                         &self.node_aliases,
                     )?;
@@ -4990,6 +5000,7 @@ where
         (
             MultisinkSubscription,
             MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
             super::maintained_subscription_view::ResultTransitions,
             BTreeMap<String, TableSchema>,
         ),
@@ -5012,6 +5023,7 @@ where
             identity,
             CurrentQueryProgramOutput::MaintainedView,
         )?;
+        let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
         let sinks = lowered_program_sinks(&program);
         self.database.flush().map_err(Error::Groove)?;
         let subscription = self.database.subscribe(sinks).map_err(Error::Groove)?;
@@ -5023,6 +5035,7 @@ where
         let snapshot_transitions = apply_maintained_multisink_deltas(
             &mut maintained,
             snapshot,
+            &terminal_schemas,
             &tables,
             &self.node_aliases,
         )?;
@@ -5034,6 +5047,7 @@ where
                     let delta_transitions = apply_maintained_multisink_deltas(
                         &mut maintained,
                         deltas,
+                        &terminal_schemas,
                         &tables,
                         &self.node_aliases,
                     )?;
@@ -5048,7 +5062,13 @@ where
                 }
             }
         }
-        Ok((subscription, maintained, transitions, tables))
+        Ok((
+            subscription,
+            maintained,
+            terminal_schemas,
+            transitions,
+            tables,
+        ))
     }
 
     // TODO(query-engine): this old maintained graph builder is retained only as

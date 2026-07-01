@@ -18,6 +18,7 @@ use crate::node::content_store::Extent;
 use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionView,
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
+    MaintainedTerminalSchemas,
 };
 use crate::node::{Error, NodeState, PreparedQueryPlan, apply_maintained_multisink_deltas};
 #[cfg(test)]
@@ -116,6 +117,7 @@ impl PeerSubscriptionState {
 struct MaintainedSubscriptionViewSubscription {
     subscription: MultisinkSubscription,
     maintained: MaintainedSubscriptionView,
+    terminal_schemas: MaintainedTerminalSchemas,
     tables: BTreeMap<String, TableSchema>,
 }
 
@@ -799,6 +801,7 @@ impl PeerState {
                         let transitions = apply_maintained_multisink_deltas(
                             &mut maintained_subscription_view.maintained,
                             deltas,
+                            &maintained_subscription_view.terminal_schemas,
                             &maintained_subscription_view.tables,
                             &node.node_aliases,
                         )?;
@@ -860,7 +863,7 @@ impl PeerState {
             result_table_filter,
             tier,
         } = request;
-        let (receiver, maintained, transitions, tables) = node
+        let (receiver, maintained, terminal_schemas, transitions, tables) = node
             .maintained_subscription_view_from_cold_snapshot(
                 shape,
                 binding,
@@ -914,6 +917,7 @@ impl PeerState {
         let maintained_subscription = MaintainedSubscriptionViewSubscription {
             subscription: receiver,
             maintained,
+            terminal_schemas,
             tables,
         };
         let state = self.subscriptions.entry(subscription).or_default();

@@ -7,6 +7,10 @@ use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value, nullable_value,
     tx_ids_from_value, version_tx_id_from_aliases,
 };
+use super::query_engine::{
+    OutputTerminalSchema, ProgramFactSchema, QueryProgram, ResultMembershipSchema,
+    VersionWitnessSchemas,
+};
 use super::query_eval::maintained_view_tagged_user_field;
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::ResultMemberEntry;
@@ -88,6 +92,20 @@ pub(crate) enum DecodedMaintainedEvent {
     ReplacementDeletion(VersionRow),
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MaintainedTerminalSchemas {
+    sinks: BTreeMap<String, MaintainedTerminalKind>,
+}
+
+#[derive(Clone, Debug)]
+enum MaintainedTerminalKind {
+    ResultCurrent(ResultMembershipSchema),
+    VersionContent(VersionWitnessSchemas),
+    VersionDeletion(VersionWitnessSchemas),
+    ReplacementContent(VersionWitnessSchemas),
+    ReplacementDeletion(VersionWitnessSchemas),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum EventIdentity {
     Result(ResultMemberEntry),
@@ -103,6 +121,13 @@ enum NetEvent {
 }
 
 impl MaintainedSubscriptionView {
+    pub(crate) fn terminal_schemas_for_program(
+        program: &QueryProgram,
+    ) -> MaintainedTerminalSchemas {
+        MaintainedTerminalSchemas::for_program(program)
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_tagged_deltas(
         &mut self,
         deltas: &RecordDeltas,
@@ -113,6 +138,25 @@ impl MaintainedSubscriptionView {
             .iter()
             .map(|(record, weight)| {
                 decode_tagged_terminal_record(record, tables, node_aliases)
+                    .map(|event| (event, weight))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.apply_decoded_deltas(decoded, node_aliases)
+    }
+
+    pub(crate) fn apply_typed_deltas(
+        &mut self,
+        sink: &str,
+        deltas: &RecordDeltas,
+        schemas: &MaintainedTerminalSchemas,
+        tables: &TableSchemas,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        let kind = schemas.get(sink)?;
+        let decoded = deltas
+            .iter()
+            .map(|(record, weight)| {
+                decode_typed_terminal_record(record, kind, tables, node_aliases)
                     .map(|event| (event, weight))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -222,6 +266,135 @@ impl MaintainedSubscriptionView {
         } else {
             self.result_weights.insert(entry, new);
         }
+    }
+}
+
+impl MaintainedTerminalSchemas {
+    fn for_program(program: &QueryProgram) -> Self {
+        let mut sinks = BTreeMap::new();
+        for terminal in &program.lowered.terminals {
+            let OutputTerminalSchema::Fact(fact) = &terminal.output else {
+                continue;
+            };
+            let kind = match &fact.schema {
+                ProgramFactSchema::ResultMembership(schema) => {
+                    Some(MaintainedTerminalKind::ResultCurrent(schema.clone()))
+                }
+                ProgramFactSchema::VersionWitnesses(schema)
+                    if terminal.sink.starts_with("maintained.version_deletion") =>
+                {
+                    Some(MaintainedTerminalKind::VersionDeletion(schema.clone()))
+                }
+                ProgramFactSchema::VersionWitnesses(schema) => {
+                    Some(MaintainedTerminalKind::VersionContent(schema.clone()))
+                }
+                ProgramFactSchema::ReplacementWitnesses(schema)
+                    if terminal.sink.starts_with("maintained.replacement_deletion") =>
+                {
+                    Some(MaintainedTerminalKind::ReplacementDeletion(schema.clone()))
+                }
+                ProgramFactSchema::ReplacementWitnesses(schema) => {
+                    Some(MaintainedTerminalKind::ReplacementContent(schema.clone()))
+                }
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                sinks.insert(terminal.sink.clone(), kind);
+            }
+        }
+        Self { sinks }
+    }
+
+    fn get(&self, sink: &str) -> Result<&MaintainedTerminalKind, super::Error> {
+        self.sinks.get(sink).ok_or(super::Error::InvalidStoredValue(
+            "maintained view delta arrived for an unknown query-engine terminal",
+        ))
+    }
+}
+
+fn decode_typed_terminal_record(
+    record: BorrowedRecord<'_>,
+    kind: &MaintainedTerminalKind,
+    tables: &TableSchemas,
+    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+) -> Result<DecodedMaintainedEvent, super::Error> {
+    match kind {
+        MaintainedTerminalKind::ResultCurrent(schema) => {
+            let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
+                Value::String(value) => value,
+                _ => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "maintained result membership table field must be string",
+                    ));
+                }
+            };
+            let table = tables
+                .get(&table_name)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "maintained result membership table_name must exist",
+                ))?;
+            let row_uuid = RowUuid(record.get_uuid(field_idx(record, &schema.row_field)?)?);
+            let (tx_time_field, tx_node_field) = match &schema.version {
+                super::query_engine::ResultMembershipVersionSchema::Content(content) => {
+                    (&content.tx_time_field, &content.tx_node_field)
+                }
+                super::query_engine::ResultMembershipVersionSchema::ContentOrDeletion {
+                    ..
+                } => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "maintained result membership does not support include-deleted schemas yet",
+                    ));
+                }
+            };
+            let tx_time = TxTime(record_u64(record, tx_time_field)?);
+            let tx_node_alias = NodeAlias(record_u64(record, tx_node_field)?);
+            let tx_node = node_aliases
+                .iter()
+                .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
+                .ok_or(super::Error::InvalidStoredValue(
+                    "result tx node alias must exist",
+                ))?;
+            Ok(DecodedMaintainedEvent::ResultCurrent(
+                (
+                    table.name.clone().into(),
+                    row_uuid,
+                    TxId::new(tx_time, tx_node),
+                )
+                    .into(),
+            ))
+        }
+        MaintainedTerminalKind::VersionContent(schema) => {
+            validate_witness_event_kind(record, schema, "version_content")?;
+            decode_tagged_terminal_record(record, tables, node_aliases)
+        }
+        MaintainedTerminalKind::VersionDeletion(schema) => {
+            validate_witness_event_kind(record, schema, "version_deletion")?;
+            decode_tagged_terminal_record(record, tables, node_aliases)
+        }
+        MaintainedTerminalKind::ReplacementContent(schema) => {
+            validate_witness_event_kind(record, schema, "replacement_content")?;
+            decode_tagged_terminal_record(record, tables, node_aliases)
+        }
+        MaintainedTerminalKind::ReplacementDeletion(schema) => {
+            validate_witness_event_kind(record, schema, "replacement_deletion")?;
+            decode_tagged_terminal_record(record, tables, node_aliases)
+        }
+    }
+}
+
+fn validate_witness_event_kind(
+    record: BorrowedRecord<'_>,
+    schema: &VersionWitnessSchemas,
+    expected: &str,
+) -> Result<(), super::Error> {
+    match record.get_idx(field_idx(record, &schema.role_field)?)? {
+        Value::String(value) if value == expected => Ok(()),
+        Value::String(_) => Err(super::Error::InvalidStoredValue(
+            "maintained witness event kind did not match query-engine terminal schema",
+        )),
+        _ => Err(super::Error::InvalidStoredValue(
+            "maintained witness event kind must be string",
+        )),
     }
 }
 

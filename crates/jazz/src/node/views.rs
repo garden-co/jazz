@@ -209,7 +209,7 @@ where
         let previous_member_result_set = previous_member_result_set
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let (receiver, maintained, transitions, tables) =
+        let (receiver, maintained, _terminal_schemas, transitions, tables) =
             self.maintained_subscription_view_from_cold_snapshot(shape, binding, identity, tier)?;
         debug_assert!(
             transitions.removes.is_empty(),

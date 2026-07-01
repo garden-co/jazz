@@ -357,6 +357,7 @@ fn assert_maintained_view_capture_tick(
 struct MaintainedSubscriptionViewSubscription {
     subscription: groove::ivm::MultisinkSubscription,
     maintained: crate::node::maintained_subscription_view::MaintainedSubscriptionView,
+    terminal_schemas: crate::node::maintained_subscription_view::MaintainedTerminalSchemas,
     tables: BTreeMap<String, TableSchema>,
     previous_result_set: BTreeSet<ResultRowEntry>,
     peer_complete_tx_payloads: BTreeSet<TxId>,
@@ -370,7 +371,7 @@ impl MaintainedSubscriptionViewSubscription {
         subscription_key: SubscriptionKey,
         identity: AuthorId,
     ) -> (Self, SyncMessage) {
-        let (subscription, maintained, transitions, tables) = core
+        let (subscription, maintained, terminal_schemas, transitions, tables) = core
             .maintained_subscription_view_from_cold_snapshot(
                 shape,
                 binding,
@@ -385,6 +386,7 @@ impl MaintainedSubscriptionViewSubscription {
         let mut driver = Self {
             subscription,
             maintained,
+            terminal_schemas,
             tables,
             previous_result_set: BTreeSet::new(),
             peer_complete_tx_payloads: BTreeSet::new(),
@@ -434,6 +436,7 @@ impl MaintainedSubscriptionViewSubscription {
                     let transitions = crate::node::apply_maintained_multisink_deltas(
                         &mut self.maintained,
                         deltas,
+                        &self.terminal_schemas,
                         &self.tables,
                         &core.node_aliases,
                     )

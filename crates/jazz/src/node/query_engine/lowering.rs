@@ -3221,10 +3221,13 @@ fn fact_output(
         ProgramFactKey::ResultMembership => {
             let version = version_witness_fields(&source.row_shape)?;
             ProgramFactSchema::ResultMembership(ResultMembershipSchema {
-                table_field: "table".to_owned(),
+                table_field: "table_name".to_owned(),
                 row_field: source.row_shape.row_uuid_field.clone(),
                 branch_or_prefix_field: version.branch_or_prefix_field.clone(),
-                version: content_version_schema(&version),
+                version: ResultMembershipVersionSchema::Content(ContentVersionFields {
+                    tx_time_field: "content_tx_time".to_owned(),
+                    tx_node_field: "content_tx_node_id".to_owned(),
+                }),
                 routing_param_fields: BTreeSet::new(),
             })
         }
@@ -3241,7 +3244,7 @@ fn fact_output(
         ProgramFactKey::VersionWitnesses => {
             let version = version_witness_fields(&source.row_shape)?;
             ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
-                role_field: "role".to_owned(),
+                role_field: "event_kind".to_owned(),
                 content: Some(version_witness_schema(source, &version)),
                 deletion: None,
             })
@@ -3249,7 +3252,7 @@ fn fact_output(
         ProgramFactKey::ReplacementWitnesses => {
             let version = version_witness_fields(&source.row_shape)?;
             ProgramFactSchema::ReplacementWitnesses(VersionWitnessSchemas {
-                role_field: "role".to_owned(),
+                role_field: "event_kind".to_owned(),
                 content: Some(version_witness_schema(source, &version)),
                 deletion: None,
             })
