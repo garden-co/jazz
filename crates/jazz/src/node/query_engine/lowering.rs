@@ -3243,18 +3243,20 @@ fn fact_output(
         }
         ProgramFactKey::VersionWitnesses => {
             let version = version_witness_fields(&source.row_shape)?;
+            let witness = version_witness_schema(source, &version);
             ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
                 role_field: "event_kind".to_owned(),
-                content: Some(version_witness_schema(source, &version)),
-                deletion: None,
+                content: Some(witness.clone()),
+                deletion: Some(witness),
             })
         }
         ProgramFactKey::ReplacementWitnesses => {
             let version = version_witness_fields(&source.row_shape)?;
+            let witness = version_witness_schema(source, &version);
             ProgramFactSchema::ReplacementWitnesses(VersionWitnessSchemas {
                 role_field: "event_kind".to_owned(),
-                content: Some(version_witness_schema(source, &version)),
-                deletion: None,
+                content: Some(witness.clone()),
+                deletion: Some(witness),
             })
         }
         ProgramFactKey::RelationEdges => {
@@ -3918,16 +3920,33 @@ fn version_witness_schema(
     VersionWitnessSchema {
         descriptor: source.row_shape.descriptor,
         identity: VersionIdentityFields {
-            table_field: "table".to_owned(),
+            table_field: "table_name".to_owned(),
             row_field: source.row_shape.row_uuid_field.clone(),
-            tx_time_field: version.tx_time_field.clone(),
-            tx_node_field: version.tx_node_field.clone(),
+            tx_time_field: "tx_time".to_owned(),
+            tx_node_field: "tx_node_id".to_owned(),
             batch_id_field: None,
             branch_or_prefix_field: version.branch_or_prefix_field.clone(),
             row_digest_field: None,
-            schema_field: version.schema_version_field.clone(),
+            schema_field: "schema_version".to_owned(),
             layer_field: "layer".to_owned(),
         },
+        created_by_field: "created_by".to_owned(),
+        created_at_field: "created_at".to_owned(),
+        updated_by_field: "updated_by".to_owned(),
+        updated_at_field: "updated_at".to_owned(),
+        parents_field: "parents".to_owned(),
+        deletion_field: "_deletion".to_owned(),
+        user_fields: source
+            .table_schema
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.name.clone(),
+                    format!("user__{}__{}", source.table_schema.name, column.name),
+                )
+            })
+            .collect(),
     }
 }
 

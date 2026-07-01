@@ -204,6 +204,20 @@ pub(crate) struct VersionWitnessSchema {
     pub(crate) descriptor: RecordDescriptor,
     /// Fields that identify the concrete row version.
     pub(crate) identity: VersionIdentityFields,
+    /// Created-by author field.
+    pub(crate) created_by_field: String,
+    /// Created-at HLC field.
+    pub(crate) created_at_field: String,
+    /// Updated-by author field.
+    pub(crate) updated_by_field: String,
+    /// Updated-at HLC field.
+    pub(crate) updated_at_field: String,
+    /// Parent transaction set field.
+    pub(crate) parents_field: String,
+    /// Nullable deletion event field.
+    pub(crate) deletion_field: String,
+    /// Terminal field name for each app column.
+    pub(crate) user_fields: BTreeMap<String, String>,
 }
 
 /// Field names needed to identify a concrete row version.
