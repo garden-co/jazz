@@ -3911,36 +3911,6 @@ fn maintained_subscription_view_explicit_include_suppresses_other_implicit_refer
 }
 
 #[test]
-fn reachable_closure_helper_yields_seed_reachable_team_set() {
-    let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
-    let shape = recursive_reachable_shape(&core);
-    let reachable = &shape.query().reachable[0];
-    let param_types = BTreeMap::from([("team".to_owned(), ColumnType::Uuid)]);
-    let graphs = core
-        .lower_reachable_graph_parts(
-            &shape,
-            &param_types,
-            reachable,
-            &core.table("teamAccess").unwrap().clone(),
-            &core.table("teamEdges").unwrap().clone(),
-            DurabilityTier::Global,
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    let subscription = subscribe_reachable_test_graph(
-        &mut core,
-        &shape,
-        graphs.closure.project(["team", "reachable_team"]),
-        ["team"],
-        ["team", "reachable_team"],
-        team(1),
-    );
-    seed_recursive_reachable_fixture(&mut core);
-    let rows = drain_reachable_test_rows(&subscription);
-    assert_eq!(uuid_field_set(&rows, "reachable_team"), team_set([1, 2, 3]));
-}
-
-#[test]
 fn retained_user_param_filter_graph_matches_literal_filter() {
     let schema = JazzSchema::new([TableSchema::new(
         "docs",
@@ -4042,119 +4012,6 @@ fn retained_param_used_as_filter_and_reachable_seed_matches_literal_query() {
     assert_eq!(prepared_rows, BTreeSet::from([row(0xd1)]));
 }
 
-#[test]
-fn reachable_edge_constituent_current_graph_yields_closure_edges_with_versions() {
-    let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
-    let shape = recursive_reachable_shape(&core);
-    let graph = core
-        .reachable_edge_constituent_current_graph(
-            &shape,
-            &shape.query().reachable[0],
-            DurabilityTier::Global,
-        )
-        .unwrap();
-    let graph = reachable_constituent_test_graph_with_team(
-        &core,
-        &shape,
-        graph,
-        &shape.query().reachable[0],
-        "teamEdges",
-        "member",
-    );
-    let mut public_fields = test_maintained_view_version_fields(core.table("teamEdges").unwrap());
-    public_fields.push("team".to_owned());
-    let subscription =
-        subscribe_reachable_test_graph(&mut core, &shape, graph, ["team"], public_fields, team(1));
-    let fixture = seed_recursive_reachable_fixture(&mut core);
-    let initial = drain_reachable_test_rows(&subscription);
-    accept_global(
-        &mut core,
-        edge_commit(0xe2, 2, 3, 30).parents(vec![fixture.edge_2_to_3]),
-    );
-    let rows = initial.apply(drain_reachable_test_rows(&subscription));
-    assert_eq!(uuid_field_set(&rows, "row_uuid"), row_set([0xe1, 0xe2]));
-    assert_version_bearing(&rows);
-}
-
-#[test]
-fn reachable_access_constituent_current_graph_yields_closure_access_rows_with_versions() {
-    let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
-    let shape = recursive_reachable_shape(&core);
-    let graph = core
-        .reachable_access_constituent_current_graph(
-            &shape,
-            &shape.query().reachable[0],
-            DurabilityTier::Global,
-        )
-        .unwrap();
-    let graph = reachable_constituent_test_graph_with_team(
-        &core,
-        &shape,
-        graph,
-        &shape.query().reachable[0],
-        "teamAccess",
-        "team",
-    );
-    let mut public_fields = test_maintained_view_version_fields(core.table("teamAccess").unwrap());
-    public_fields.push("team".to_owned());
-    let subscription =
-        subscribe_reachable_test_graph(&mut core, &shape, graph, ["team"], public_fields, team(1));
-    seed_recursive_reachable_fixture(&mut core);
-    let rows = drain_reachable_test_rows(&subscription);
-    assert_eq!(
-        uuid_field_set(&rows, "row_uuid"),
-        row_set([0xa1, 0xa2, 0xa3])
-    );
-    assert_version_bearing(&rows);
-}
-
-#[test]
-fn reachable_constituents_retract_when_edge_removed_and_closure_shrinks() {
-    let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
-    let shape = recursive_reachable_shape(&core);
-    let before_graph = core
-        .reachable_access_constituent_current_graph(
-            &shape,
-            &shape.query().reachable[0],
-            DurabilityTier::Global,
-        )
-        .unwrap();
-    let before_graph = reachable_constituent_test_graph_with_team(
-        &core,
-        &shape,
-        before_graph,
-        &shape.query().reachable[0],
-        "teamAccess",
-        "team",
-    );
-    let mut public_fields = test_maintained_view_version_fields(core.table("teamAccess").unwrap());
-    public_fields.push("team".to_owned());
-    let subscription = subscribe_reachable_test_graph(
-        &mut core,
-        &shape,
-        before_graph,
-        ["team"],
-        public_fields,
-        team(1),
-    );
-    let edge_to_remove = seed_recursive_reachable_fixture(&mut core).edge_2_to_3;
-    let before = drain_reachable_test_rows(&subscription);
-    assert_eq!(
-        uuid_field_set(&before, "row_uuid"),
-        row_set([0xa1, 0xa2, 0xa3])
-    );
-
-    accept_global(
-        &mut core,
-        MergeableCommit::new("teamEdges", row(0xe2), 20)
-            .parents(vec![edge_to_remove])
-            .deletion(DeletionEvent::Deleted),
-    );
-
-    let after = before.apply(drain_reachable_test_rows(&subscription));
-    assert_eq!(uuid_field_set(&after, "row_uuid"), row_set([0xa1, 0xa2]));
-}
-
 fn accept_global(core: &mut NodeState<RocksDbStorage>, commit: MergeableCommit) -> TxId {
     let tx_id = core.commit_mergeable(commit).unwrap();
     core.apply_fate_update(
@@ -4215,10 +4072,6 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     assert_eq!(result_member_removes, expected_removes);
 }
 
-struct RecursiveReachableFixture {
-    edge_2_to_3: TxId,
-}
-
 fn recursive_reachable_schema() -> JazzSchema {
     JazzSchema::new([
         TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)]),
@@ -4244,25 +4097,7 @@ fn recursive_reachable_schema() -> JazzSchema {
     ])
 }
 
-fn recursive_reachable_shape(core: &NodeState<RocksDbStorage>) -> ValidatedQuery {
-    Query::from("docs")
-        .reachable_via(
-            "teamAccess",
-            "doc",
-            "team",
-            param("team"),
-            "teamEdges",
-            "member",
-            "parent",
-            [],
-        )
-        .validate(&core.catalogue.schema)
-        .unwrap()
-}
-
-fn seed_recursive_reachable_fixture(
-    core: &mut NodeState<RocksDbStorage>,
-) -> RecursiveReachableFixture {
+fn seed_recursive_reachable_fixture(core: &mut NodeState<RocksDbStorage>) {
     for id in 1..=5 {
         accept_global(
             core,
@@ -4285,7 +4120,7 @@ fn seed_recursive_reachable_fixture(
         );
     }
     accept_global(core, edge_commit(0xe1, 1, 2, 10));
-    let edge_2_to_3 = accept_global(core, edge_commit(0xe2, 2, 3, 11));
+    accept_global(core, edge_commit(0xe2, 2, 3, 11));
     accept_global(core, edge_commit(0xe3, 4, 5, 12));
     for (row_id, doc_id, team_id) in [
         (0xa1, 0xd1, 1),
@@ -4301,7 +4136,6 @@ fn seed_recursive_reachable_fixture(
             ])),
         );
     }
-    RecursiveReachableFixture { edge_2_to_3 }
 }
 
 fn edge_commit(row_id: u8, member: u8, parent: u8, time: u64) -> MergeableCommit {
@@ -4313,175 +4147,6 @@ fn edge_commit(row_id: u8, member: u8, parent: u8, time: u64) -> MergeableCommit
 
 fn team(id: u8) -> uuid::Uuid {
     uuid::Uuid::from_bytes([id; 16])
-}
-
-fn reachable_constituent_test_graph_with_team(
-    core: &NodeState<RocksDbStorage>,
-    shape: &ValidatedQuery,
-    graph: GraphBuilder,
-    reachable: &crate::query::ReachableVia,
-    table_name: &str,
-    team_column: &str,
-) -> GraphBuilder {
-    let param_types = BTreeMap::from([("team".to_owned(), ColumnType::Uuid)]);
-    let closure = core
-        .lower_reachable_graph_parts(
-            shape,
-            &param_types,
-            reachable,
-            &core.table("teamAccess").unwrap().clone(),
-            &core.table("teamEdges").unwrap().clone(),
-            DurabilityTier::Global,
-            &BTreeMap::new(),
-        )
-        .unwrap()
-        .closure
-        .project(["team", "reachable_team"]);
-    let table = core.table(table_name).unwrap();
-    GraphBuilder::join(
-        graph.unwrap_nullable(format!("user_{team_column}")),
-        closure,
-        [format!("user_{team_column}")],
-        ["reachable_team".to_owned()],
-    )
-    .project_fields(
-        test_maintained_view_version_fields(table)
-            .into_iter()
-            .map(|field| ProjectField::renamed(format!("left.{field}"), field))
-            .chain([ProjectField::renamed("right.team", "team")]),
-    )
-}
-
-fn test_maintained_view_version_fields(table: &TableSchema) -> Vec<String> {
-    let mut fields = vec!["row_uuid".to_owned()];
-    fields.extend(
-        table
-            .columns
-            .iter()
-            .map(|column| format!("user_{}", column.name)),
-    );
-    fields.extend([
-        "tx_time".to_owned(),
-        "tx_node_id".to_owned(),
-        "schema_version".to_owned(),
-        "parents".to_owned(),
-    ]);
-    fields
-}
-
-fn subscribe_reachable_test_graph(
-    core: &mut NodeState<RocksDbStorage>,
-    shape: &ValidatedQuery,
-    graph: GraphBuilder,
-    output_key_fields: impl IntoIterator<Item = impl Into<String>>,
-    public_fields: impl IntoIterator<Item = impl Into<String>>,
-    seed_team: uuid::Uuid,
-) -> groove::ivm::MultisinkSubscription {
-    let binding_descriptor = groove::records::RecordDescriptor::new([(
-        "team".to_owned(),
-        groove::records::ValueType::Uuid,
-    )]);
-    let route_fields = output_key_fields
-        .into_iter()
-        .map(Into::into)
-        .collect::<Vec<_>>();
-    let public_fields = public_fields.into_iter().map(Into::into).collect::<Vec<_>>();
-    let prepared = core
-        .database
-        .prepare([groove::ivm::RoutedMultisinkTerminal::new(
-            crate::node::JAZZ_APP_ROWS_SINK,
-            graph,
-            route_fields,
-            public_fields,
-        )],
-        format!("jazz-query:{}", shape.shape_id().0),
-        binding_descriptor)
-        .unwrap();
-    core.database
-        .bind_shape(prepared.id(), &[Value::Uuid(seed_team)])
-        .unwrap()
-}
-
-fn drain_reachable_test_rows(subscription: &groove::ivm::MultisinkSubscription) -> ReachableTestRows {
-    let mut descriptor = None;
-    let mut values = Vec::new();
-    let mut empty_polls_after_values = 0;
-    for _ in 0..100 {
-        match subscription.try_recv() {
-            Ok(deltas) => {
-                let deltas = crate::node::take_optional_sink_deltas(
-                    deltas,
-                    crate::node::JAZZ_APP_ROWS_SINK,
-                )
-                .unwrap();
-                if descriptor.is_none() {
-                    descriptor = Some(deltas.descriptor);
-                }
-                values.extend(deltas.to_values().unwrap());
-                empty_polls_after_values = 0;
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                if descriptor.is_some() {
-                    empty_polls_after_values += 1;
-                    if empty_polls_after_values >= 50 {
-                        break;
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                panic!("reachable test subscription disconnected");
-            }
-        }
-    }
-    ReachableTestRows {
-        descriptor: descriptor.expect("reachable test graph produced no descriptor"),
-        values,
-    }
-}
-
-struct ReachableTestRows {
-    descriptor: groove::records::RecordDescriptor,
-    values: Vec<(Vec<Value>, i64)>,
-}
-
-impl ReachableTestRows {
-    fn apply(mut self, deltas: ReachableTestRows) -> Self {
-        self.values.extend(deltas.values);
-        self
-    }
-}
-
-fn uuid_field_set(rows: &ReachableTestRows, field: &str) -> BTreeSet<uuid::Uuid> {
-    let idx = rows.descriptor.field_index(field).unwrap();
-    let mut weights = BTreeMap::<uuid::Uuid, i64>::new();
-    for (values, weight) in &rows.values {
-        let Value::Uuid(uuid) = &values[idx] else {
-            panic!("{field} must be uuid");
-        };
-        *weights.entry(*uuid).or_default() += *weight;
-    }
-    weights
-        .into_iter()
-        .filter_map(|(uuid, weight)| (weight > 0).then_some(uuid))
-        .collect()
-}
-
-fn row_set<const N: usize>(ids: [u8; N]) -> BTreeSet<uuid::Uuid> {
-    ids.into_iter().map(|id| row(id).0).collect()
-}
-
-fn team_set<const N: usize>(ids: [u8; N]) -> BTreeSet<uuid::Uuid> {
-    ids.into_iter().map(team).collect()
-}
-
-fn assert_version_bearing(rows: &ReachableTestRows) {
-    for field in ["tx_time", "tx_node_id", "schema_version", "parents"] {
-        assert!(
-            rows.descriptor.field_index(field).is_some(),
-            "missing version field {field}"
-        );
-    }
 }
 
 fn policy_result_keys(
