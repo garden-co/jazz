@@ -1852,7 +1852,7 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
 }
 
 #[test]
-fn prepared_subscription_can_route_with_separate_clean_output_projection() {
+fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
@@ -1882,17 +1882,6 @@ fn prepared_subscription_can_route_with_separate_clean_output_projection() {
         .bind_shape(shape.id(), &[Value::String("Blue Train".to_owned())])
         .unwrap();
 
-    let public_output = RecordDescriptor::new([
-        ("id", ColumnType::U64.value_type()),
-        ("title", ColumnType::String.value_type()),
-    ]);
-    assert_eq!(
-        *database
-            .ivm_runtime
-            .subscription_output(subscription.id())
-            .unwrap(),
-        public_output
-    );
     let initial = subscription.recv().unwrap();
     assert_eq!(
         initial.descriptor,
