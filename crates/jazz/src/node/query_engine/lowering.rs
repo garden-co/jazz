@@ -362,6 +362,7 @@ fn analyze_query_plan(
         gaps.push(analyzed.unwrap_err());
         return Err(gaps);
     };
+    validate_output_capabilities(request, &plan, &mut gaps);
 
     for plan_source in analyzed_plan_sources(&plan) {
         let read_source = request.reads.primary.sources.get(&plan_source);
@@ -378,6 +379,88 @@ fn analyze_query_plan(
     }
 
     if gaps.is_empty() { Ok(plan) } else { Err(gaps) }
+}
+
+fn validate_output_capabilities(
+    request: &QueryProgramRequest,
+    plan: &AnalyzedQueryPlan,
+    gaps: &mut Vec<UnsupportedReason>,
+) {
+    if !request
+        .output
+        .facts
+        .contains(&ProgramFactKey::ResultMembership)
+    {
+        return;
+    }
+    if maintained_result_membership_window_supported(plan) {
+        return;
+    }
+    gaps.push(UnsupportedReason::Operator(
+        "maintained subscription view window shape is not lowered yet".to_owned(),
+    ));
+}
+
+fn maintained_result_membership_window_supported(plan: &AnalyzedQueryPlan) -> bool {
+    match plan {
+        AnalyzedQueryPlan::Linear(linear) => linear_window_supported(&linear.steps),
+        AnalyzedQueryPlan::Union(union) => union
+            .branches
+            .iter()
+            .all(|branch| relation_window_supported(&branch.plan)),
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            linear_window_supported(&path.parent.steps)
+                && linear_window_supported(&path.output_steps)
+                && linear_window_supported(&path.child.steps)
+                && path.nested.iter().all(correlated_path_window_supported)
+        }
+        AnalyzedQueryPlan::RecursiveRelation(relation) => {
+            linear_window_supported(&relation.seed.steps)
+                && linear_window_supported(&relation.step.steps)
+        }
+    }
+}
+
+fn correlated_path_window_supported(path: &CorrelatedPathPlan) -> bool {
+    linear_window_supported(&path.parent.steps)
+        && linear_window_supported(&path.output_steps)
+        && linear_window_supported(&path.child.steps)
+        && path.nested.iter().all(correlated_path_window_supported)
+}
+
+fn relation_window_supported(plan: &RelationInputPlan) -> bool {
+    match plan {
+        RelationInputPlan::Linear(linear) => linear_window_supported(&linear.steps),
+        RelationInputPlan::Union(union) => union
+            .branches
+            .iter()
+            .all(|branch| relation_window_supported(&branch.plan)),
+        RelationInputPlan::Recursive(relation) => {
+            linear_window_supported(&relation.seed.steps)
+                && linear_window_supported(&relation.step.steps)
+        }
+    }
+}
+
+fn linear_window_supported(steps: &[LinearStep]) -> bool {
+    let mut has_order = false;
+    for step in steps {
+        match step {
+            LinearStep::OrderBy(_) => has_order = true,
+            LinearStep::Slice { limit, offset, .. } => {
+                if !has_order && (*offset != 0 || !matches!(limit, None | Some(1))) {
+                    return false;
+                }
+            }
+            LinearStep::Join { right, .. } => {
+                if !relation_window_supported(right) {
+                    return false;
+                }
+            }
+            LinearStep::Filter(_) | LinearStep::Project(_) => {}
+        }
+    }
+    true
 }
 
 fn analyze_root_node(
