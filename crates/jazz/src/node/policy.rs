@@ -8,10 +8,13 @@
 use super::*;
 
 pub(super) struct ViewEvaluationContext {
+    #[cfg(test)]
     policy_read_tier: DurabilityTier,
     pub(super) tx_rows: BTreeMap<TxId, Option<StoredTransaction>>,
     tx_versions: BTreeMap<TxId, Vec<VersionRow>>,
+    #[cfg(test)]
     result_entry_read_policy: BTreeMap<(String, RowUuid, TxId, AuthorId, DurabilityTier), bool>,
+    #[cfg(test)]
     version_read_policy: BTreeMap<
         (
             String,
@@ -24,6 +27,7 @@ pub(super) struct ViewEvaluationContext {
         ),
         bool,
     >,
+    #[cfg(test)]
     policy_join_rows_by_value: BTreeMap<PolicyJoinRowsKey, BTreeMap<Vec<u8>, Vec<CurrentRow>>>,
 }
 
@@ -35,17 +39,23 @@ impl Default for ViewEvaluationContext {
 
 impl ViewEvaluationContext {
     pub(super) fn for_policy_read_tier(policy_read_tier: DurabilityTier) -> Self {
+        let _ = policy_read_tier;
         Self {
+            #[cfg(test)]
             policy_read_tier,
             tx_rows: BTreeMap::new(),
             tx_versions: BTreeMap::new(),
+            #[cfg(test)]
             result_entry_read_policy: BTreeMap::new(),
+            #[cfg(test)]
             version_read_policy: BTreeMap::new(),
+            #[cfg(test)]
             policy_join_rows_by_value: BTreeMap::new(),
         }
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct PolicyJoinRowsKey {
     schema_version: SchemaVersionId,
@@ -58,7 +68,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn result_set_entry_read_policy_allows(
         &mut self,
         table_name: &str,
@@ -76,6 +86,7 @@ where
         )
     }
 
+    #[cfg(test)]
     pub(super) fn result_set_entry_read_policy_allows_memo(
         &mut self,
         table_name: &str,
@@ -251,6 +262,7 @@ where
         self.policy_allows_current_row(&table, &policy, &row, author)
     }
 
+    #[cfg(test)]
     pub(super) fn read_policy_allows_version(
         &mut self,
         table: &TableSchema,
@@ -265,6 +277,7 @@ where
         self.read_policy_allows_version_memo(table, version, identity, &mut context)
     }
 
+    #[cfg(test)]
     pub(super) fn read_policy_allows_version_memo(
         &mut self,
         _table: &TableSchema,
@@ -315,7 +328,7 @@ where
         Ok(allows)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn read_policy_allows_deletion_version(
         &mut self,
         table: &TableSchema,
@@ -326,6 +339,7 @@ where
         self.read_policy_allows_deletion_version_memo(table, version, identity, &mut context)
     }
 
+    #[cfg(test)]
     pub(super) fn read_policy_allows_deletion_version_memo(
         &mut self,
         table: &TableSchema,
@@ -578,6 +592,7 @@ where
         )
     }
 
+    #[cfg(test)]
     fn policy_allows_memo(
         &mut self,
         table: &TableSchema,
@@ -616,6 +631,7 @@ where
         self.policy_base_allows_memo(table, policy, row_uuid, identity, column_value, context)
     }
 
+    #[cfg(test)]
     fn policy_base_allows_memo(
         &mut self,
         table: &TableSchema,
@@ -1041,6 +1057,7 @@ where
         Ok(true)
     }
 
+    #[cfg(test)]
     fn policy_joins_allow_memo(
         &mut self,
         table: &TableSchema,
@@ -1112,6 +1129,7 @@ where
         Ok(true)
     }
 
+    #[cfg(test)]
     fn policy_join_rows_by_target_memo<'a>(
         &mut self,
         join_table: &TableSchema,
