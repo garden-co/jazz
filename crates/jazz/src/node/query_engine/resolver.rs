@@ -38,6 +38,11 @@ pub(crate) struct PolicyAuthorizationPlan {
     pub(crate) role: PolicyDecisionRole,
     /// Row id field in the protected source graph.
     pub(crate) protected_row_field: String,
+    /// Binding-source shape shared with the enclosing prepared program.
+    pub(crate) binding_source_shape: Option<String>,
+    /// User params from the enclosing prepared program that must be present in
+    /// the shared binding descriptor.
+    pub(crate) binding_user_params: BTreeMap<String, ColumnType>,
 }
 
 /// Orthogonal source row requirements derived from app output and requested
