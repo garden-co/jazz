@@ -18,6 +18,7 @@ use groove::schema::ColumnType;
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
 use super::policy::ViewEvaluationContext;
 use super::query_engine::{
+    AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
     AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathKind,
     ClosurePathSegment, ClosureRootGate, ComparisonOp as NormalizedComparisonOp,
     CorrelationRequirement, DataSource, FieldProjection, FrontierId, JoinContribution,
@@ -1144,12 +1145,59 @@ fn normalize_order_key(
     })
 }
 
-fn unsupported_query_markers(query: &JazzQuery) -> Vec<String> {
-    let mut markers = Vec::new();
-    if query.aggregate.is_some() {
-        markers.push("aggregate".to_owned());
+fn normalized_aggregate_group_by(
+    source: &SourceId,
+    aggregate: &AggregateQuery,
+) -> Result<Vec<NormalizedValueRef>, Error> {
+    aggregate
+        .group_by
+        .iter()
+        .map(|column| normalize_operand(source, &Operand::Column(column.clone())))
+        .collect()
+}
+
+fn normalized_aggregate_outputs(
+    source: &SourceId,
+    aggregate: &AggregateQuery,
+) -> Result<Vec<NormalizedAggregateExpr>, Error> {
+    aggregate
+        .aggregates
+        .iter()
+        .map(|aggregate| {
+            Ok(NormalizedAggregateExpr {
+                output: typed_output_field(
+                    format!("user_{}", aggregate.alias),
+                    normalized_aggregate_output_type(aggregate),
+                ),
+                function: normalized_aggregate_function(aggregate.function),
+                input: aggregate
+                    .column
+                    .as_ref()
+                    .map(|column| normalize_operand(source, &Operand::Column(column.clone())))
+                    .transpose()?,
+            })
+        })
+        .collect()
+}
+
+fn normalized_aggregate_function(function: AggregateFunction) -> NormalizedAggregateFunction {
+    match function {
+        AggregateFunction::Count => NormalizedAggregateFunction::Count,
+        AggregateFunction::Sum => NormalizedAggregateFunction::Sum,
+        AggregateFunction::Min => NormalizedAggregateFunction::Min,
+        AggregateFunction::Max => NormalizedAggregateFunction::Max,
     }
-    markers
+}
+
+fn normalized_aggregate_output_type(aggregate: &Aggregate) -> ColumnType {
+    match aggregate.function {
+        AggregateFunction::Count => ColumnType::U64,
+        // Aggregate lowering is currently reported as an unsupported
+        // query-engine capability before Groove needs the exact result type.
+        AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
+            ColumnType::Nullable(Box::new(ColumnType::Bytes))
+        }
+    }
 }
 
 fn normalization_gap(message: impl Into<String>) -> Error {
@@ -2493,16 +2541,17 @@ where
             current = node;
         }
 
-        for marker in unsupported_query_markers(query) {
-            let node = RowSetNodeId(format!("unsupported:{marker}"));
+        if let Some(aggregate) = &query.aggregate {
+            let aggregate_node = RowSetNodeId("aggregate".to_owned());
             nodes.insert(
-                node.clone(),
-                RowSetExpr::Distinct {
+                aggregate_node.clone(),
+                RowSetExpr::Aggregate {
                     input: current,
-                    keys: vec![NormalizedValueRef::Literal(marker.into_bytes())],
+                    group_by: normalized_aggregate_group_by(&root_source, aggregate)?,
+                    outputs: normalized_aggregate_outputs(&root_source, aggregate)?,
                 },
             );
-            current = node;
+            current = aggregate_node;
         }
 
         Ok(NormalizedRowSetShape {
@@ -6265,7 +6314,7 @@ where
 }
 
 fn maintained_view_query_slice_supported(query: &crate::query::Query) -> bool {
-    query.aggregate.is_none() && maintained_view_window_supported(query)
+    maintained_view_window_supported(query)
 }
 
 fn maintained_view_window_supported(query: &crate::query::Query) -> bool {
@@ -9806,6 +9855,22 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].test_cells_by_descriptor()["count"], Value::U64(3));
+    }
+
+    #[test]
+    fn aggregate_query_normalizes_to_query_engine_aggregate_node() {
+        let (_dir, node) = open_node();
+        let shape = Query::from("issues")
+            .filter(eq(col("state"), lit("open")))
+            .count()
+            .validate(&schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
+        assert!(matches!(
+            normalized.nodes.get(&normalized.root),
+            Some(RowSetExpr::Aggregate { .. })
+        ));
     }
 
     #[test]

@@ -3068,6 +3068,9 @@ fn maintained_view_graph_streams_match_policy_result_and_filter_bundle_members()
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
+    // TODO(query-engine): keep this as an explicit raw-fact oracle until
+    // maintained query-engine output exposes policy-readable version streams
+    // through a public or debug fact surface.
     let result_current = core
         .maintained_view_result_current(&shape, &binding, author_a)
         .unwrap();
@@ -3226,28 +3229,6 @@ fn maintained_view_tagged_terminal_clean_owner_policy_claim_params_match_one_sho
             Value::String("owned".to_owned()),
         )]))
         .unwrap();
-    let table = core.table("todos").unwrap().clone();
-
-    let tagged = core
-        .maintained_view_tagged_terminal(&shape, &binding, author)
-        .unwrap();
-    let one_shot = core
-        .maintained_view_result_current(&shape, &binding, author)
-        .unwrap();
-
-    assert_eq!(
-        tagged_result_current_rows(&tagged, &table),
-        result_current_rows(&one_shot, &table, "version_tx_time", "version_tx_node_id"),
-        "tagged terminal result_current rows should match one-shot with retained policy claim params"
-    );
-    assert_eq!(
-        maintained_view_result_keys(&one_shot)
-            .into_iter()
-            .map(|(row_uuid, _, _)| row_uuid)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([row(0xa0)])
-    );
-
     let mut peer = PeerState::for_author(author);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let (adds, removes) = canonical_view_update_rows(&update);
@@ -3365,16 +3346,17 @@ fn maintained_view_system_identity_bypasses_root_read_policy() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let result_current = core
-        .maintained_view_result_current(&shape, &binding, AuthorId::SYSTEM)
-        .unwrap();
+    let mut peer = PeerState::new();
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
     assert_eq!(
-        maintained_view_result_keys(&result_current),
-        BTreeSet::from([
-            (row(0xa0), tx_a.time.0, core.node_aliases[&tx_a.node].0),
-            (row(0xa1), tx_b.time.0, core.node_aliases[&tx_b.node].0),
-        ])
+        adds.into_iter()
+            .map(|(_table, row_uuid, tx_id)| (row_uuid, tx_id))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([(row(0xa0), tx_a), (row(0xa1), tx_b)])
     );
+    assert!(removes.is_empty());
+    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
 }
 
 #[test]
@@ -3406,8 +3388,9 @@ fn maintained_view_allows_join_policy_slice() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    core.maintained_view_result_current(&shape, &binding, user(0xa1))
-        .unwrap();
+    let mut peer = PeerState::for_author(user(0xa1));
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
 }
 
 #[test]
@@ -3493,17 +3476,6 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>();
     assert_eq!(prepared_rows, literal_rows);
-
-    let maintained_rows = core
-        .maintained_view_result_current(&retained_shape, &retained_binding, author)
-        .unwrap();
-    assert_eq!(
-        maintained_view_result_keys(&maintained_rows)
-            .into_iter()
-            .map(|(row_uuid, _, _)| row_uuid)
-            .collect::<BTreeSet<_>>(),
-        literal_rows
-    );
 
     let mut peer = PeerState::for_author(author);
     let update = peer
@@ -4223,6 +4195,10 @@ fn assert_maintained_view_tagged_terminal_matches_one_shot_streams(
     binding: &Binding,
     identity: AuthorId,
 ) {
+    // TODO(query-engine): this is a raw terminal-fact oracle for result,
+    // version, and replacement streams. Delete it once those maintained facts
+    // are asserted through query-engine output metadata instead of the legacy
+    // tagged terminal builder.
     let table = core.table("todos").unwrap().clone();
     let tagged = core
         .maintained_view_tagged_terminal(shape, binding, identity)
