@@ -140,6 +140,29 @@ fn assert_real_peer_tick(
     );
 }
 
+fn result_row(table: &str, row_uuid: RowUuid, tx_id: TxId) -> ResultRowEntry {
+    (groove::Intern::new(table.to_owned()), row_uuid, tx_id)
+}
+
+fn assert_maintained_subscription_view_tick(
+    update: SyncMessage,
+    expected_adds: &[ResultRowEntry],
+    expected_removes: &[ResultRowEntry],
+    expected_reset_result_set: bool,
+    case: (AuthorId, u64, &str),
+) -> SyncMessage {
+    let (identity, seed, tick) = case;
+    let capture = capture_view_update(update.clone());
+    assert_real_peer_tick(
+        capture,
+        expected_adds,
+        expected_removes,
+        expected_reset_result_set,
+        (identity, seed, tick),
+    );
+    update
+}
+
 fn maintained_view_capture_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
@@ -835,35 +858,32 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
     let multi_match_b = row(base.wrapping_add(12));
     let rls_revoked = row(base.wrapping_add(13));
     let mut parents = BTreeMap::<RowUuid, TxId>::new();
+    let mut txs = BTreeMap::<RowUuid, TxId>::new();
 
-    accept_owner_capture_row(&mut core, &mut parents, initial_alice, alice, "match", 1_000);
-    accept_owner_capture_row(&mut core, &mut parents, initial_bob, bob, "match", 1_001);
-    accept_owner_capture_row(&mut core, &mut parents, predicate_remove, alice, "match", 1_002);
-    accept_owner_capture_row(&mut core, &mut parents, deleted, alice, "match", 1_003);
-    accept_owner_capture_row(&mut core, &mut parents, never_match, alice, "other", 1_004);
-    let rls_revoked_initial_tx =
-        accept_owner_capture_row(&mut core, &mut parents, rls_revoked, alice, "match", 1_005);
+    for (row_uuid, owner, title, made_at) in [
+        (initial_alice, alice, "match", 1_000),
+        (initial_bob, bob, "match", 1_001),
+        (predicate_remove, alice, "match", 1_002),
+        (deleted, alice, "match", 1_003),
+        (never_match, alice, "other", 1_004),
+        (rls_revoked, alice, "match", 1_005),
+    ] {
+        let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
+        txs.insert(row_uuid, tx_id);
+    }
+    let rls_revoked_initial_tx = txs[&rls_revoked];
 
     let shape = Query::from("todos")
         .filter(eq(col("title"), lit("match")))
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut peer = if identity == AuthorId::SYSTEM {
-        PeerState::new()
-    } else {
-        PeerState::for_author(identity)
-    };
-    peer.force_full_recompute_path_for_test(true);
-    peer.track_query_for_test(&mut core, &shape, &binding)
-        .unwrap();
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
     read_view: Default::default(),
 };
 
-    let full_recompute_initial = peer.query_update(&mut core, &shape, &binding).unwrap();
     let (mut maintained, maintained_initial) = MaintainedSubscriptionViewSubscription::new(
         &mut core,
         &shape,
@@ -871,20 +891,51 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         subscription,
         identity,
     );
-    assert_eq!(
-        capture_view_update(maintained_initial),
-        capture_view_update(full_recompute_initial),
-        "maintained subscription view serializer diverged from full recompute for seed {seed:#x}, identity {identity:?}, tick initial"
+    let expected_initial = if identity == AuthorId::SYSTEM {
+        vec![
+            result_row("todos", initial_alice, txs[&initial_alice]),
+            result_row("todos", initial_bob, txs[&initial_bob]),
+            result_row("todos", predicate_remove, txs[&predicate_remove]),
+            result_row("todos", deleted, txs[&deleted]),
+            result_row("todos", rls_revoked, txs[&rls_revoked]),
+        ]
+    } else {
+        vec![
+            result_row("todos", initial_alice, txs[&initial_alice]),
+            result_row("todos", predicate_remove, txs[&predicate_remove]),
+            result_row("todos", deleted, txs[&deleted]),
+            result_row("todos", rls_revoked, txs[&rls_revoked]),
+        ]
+    };
+    assert_maintained_subscription_view_tick(
+        maintained_initial,
+        &expected_initial,
+        &[],
+        false,
+        (identity, seed, "initial"),
     );
 
-    accept_owner_capture_row(&mut core, &mut parents, added, alice, "match", 2_000);
-    accept_owner_capture_row(&mut core, &mut parents, hidden_added, bob, "match", 2_001);
-    let _ = assert_maintained_subscription_view_capture_tick(
-        &mut core,
-        &mut peer,
-        &mut maintained,
-        &shape,
-        &binding,
+    for (row_uuid, owner, title, made_at) in [
+        (added, alice, "match", 2_000),
+        (hidden_added, bob, "match", 2_001),
+    ] {
+        let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
+        txs.insert(row_uuid, tx_id);
+    }
+    let add_rows = if identity == AuthorId::SYSTEM {
+        vec![
+            result_row("todos", added, txs[&added]),
+            result_row("todos", hidden_added, txs[&hidden_added]),
+        ]
+    } else {
+        vec![result_row("todos", added, txs[&added])]
+    };
+    let update = maintained.update(&mut core, &shape, subscription, identity);
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &add_rows,
+        &[],
+        false,
         (identity, seed, "add"),
     );
 
@@ -905,12 +956,23 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let sibling_update = assert_maintained_subscription_view_capture_tick(
-        &mut core,
-        &mut peer,
-        &mut maintained,
-        &shape,
-        &binding,
+    txs.insert(sibling_match, sibling_tx);
+    txs.insert(sibling_nonmatch, sibling_tx);
+    txs.insert(sibling_hidden, sibling_tx);
+    let sibling_add_rows = if identity == AuthorId::SYSTEM {
+        vec![
+            result_row("todos", sibling_match, txs[&sibling_match]),
+            result_row("todos", sibling_hidden, txs[&sibling_hidden]),
+        ]
+    } else {
+        vec![result_row("todos", sibling_match, txs[&sibling_match])]
+    };
+    let update = maintained.update(&mut core, &shape, subscription, identity);
+    let sibling_update = assert_maintained_subscription_view_tick(
+        update,
+        &sibling_add_rows,
+        &[],
+        false,
         (identity, seed, "sibling-add"),
     );
     if identity == alice {
@@ -937,12 +999,17 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let multi_update = assert_maintained_subscription_view_capture_tick(
-        &mut core,
-        &mut peer,
-        &mut maintained,
-        &shape,
-        &binding,
+    txs.insert(multi_match_a, multi_tx);
+    txs.insert(multi_match_b, multi_tx);
+    let update = maintained.update(&mut core, &shape, subscription, identity);
+    let multi_update = assert_maintained_subscription_view_tick(
+        update,
+        &[
+            result_row("todos", multi_match_a, txs[&multi_match_a]),
+            result_row("todos", multi_match_b, txs[&multi_match_b]),
+        ],
+        &[],
+        false,
         (identity, seed, "multi-add"),
     );
     assert_shipped_content_rows(
@@ -954,14 +1021,20 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
 
     let rls_revoked_unreadable_tx =
         accept_owner_capture_row(&mut core, &mut parents, rls_revoked, bob, "match", 2_300);
-    let revocation_update = assert_maintained_subscription_view_capture_tick(
-        &mut core,
-        &mut peer,
-        &mut maintained,
-        &shape,
-        &binding,
+    let rls_adds = if identity == AuthorId::SYSTEM {
+        vec![result_row("todos", rls_revoked, rls_revoked_unreadable_tx)]
+    } else {
+        vec![]
+    };
+    let update = maintained.update(&mut core, &shape, subscription, identity);
+    let revocation_update = assert_maintained_subscription_view_tick(
+        update,
+        &rls_adds,
+        &[result_row("todos", rls_revoked, rls_revoked_initial_tx)],
+        false,
         (identity, seed, "rls-revocation"),
     );
+    txs.insert(rls_revoked, rls_revoked_unreadable_tx);
     if identity == alice {
         assert_retraction_without_replacement_leak(
             &revocation_update,
@@ -971,7 +1044,8 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         );
     }
 
-    accept_owner_capture_row(
+    let previous_predicate_remove_tx = txs[&predicate_remove];
+    let predicate_remove_tx = accept_owner_capture_row(
         &mut core,
         &mut parents,
         predicate_remove,
@@ -979,32 +1053,39 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         "other",
         3_000,
     );
-    let _ = assert_maintained_subscription_view_capture_tick(
-        &mut core,
-        &mut peer,
-        &mut maintained,
-        &shape,
-        &binding,
+    let update = maintained.update(&mut core, &shape, subscription, identity);
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &[],
+        &[result_row(
+            "todos",
+            predicate_remove,
+            previous_predicate_remove_tx,
+        )],
+        false,
         (identity, seed, "predicate-remove"),
     );
+    txs.insert(predicate_remove, predicate_remove_tx);
 
+    let previous_deleted_tx = txs[&deleted];
     accept_capture_delete(&mut core, &mut parents, deleted, 4_000);
-    let _ = assert_maintained_subscription_view_capture_tick(
-        &mut core,
-        &mut peer,
-        &mut maintained,
-        &shape,
-        &binding,
+    let update = maintained.update(&mut core, &shape, subscription, identity);
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &[],
+        &[result_row("todos", deleted, previous_deleted_tx)],
+        false,
         (identity, seed, "delete"),
     );
 
-    accept_owner_capture_row(&mut core, &mut parents, deleted, alice, "match", 5_000);
-    let _ = assert_maintained_subscription_view_capture_tick(
-        &mut core,
-        &mut peer,
-        &mut maintained,
-        &shape,
-        &binding,
+    let deleted_tx = accept_owner_capture_row(&mut core, &mut parents, deleted, alice, "match", 5_000);
+    txs.insert(deleted, deleted_tx);
+    let update = maintained.update(&mut core, &shape, subscription, identity);
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &[],
+        &[],
+        false,
         (identity, seed, "restore"),
     );
 }
@@ -1205,7 +1286,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         team_cells("other"),
         902,
     );
-    accept_recursive_row(
+    let direct_doc_tx = accept_recursive_row(
         &mut core,
         &mut parents,
         "docs",
@@ -1213,7 +1294,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         doc_cells("direct", "match"),
         1_000,
     );
-    accept_recursive_row(
+    let closure_doc_tx = accept_recursive_row(
         &mut core,
         &mut parents,
         "docs",
@@ -1276,17 +1357,6 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         binding_id: binding.binding_id(),
     read_view: Default::default(),
 };
-    let mut peer = if identity == AuthorId::SYSTEM {
-        PeerState::new()
-    } else {
-        PeerState::for_author(identity)
-    };
-    peer.force_full_recompute_path_for_test(true);
-    peer.track_query_for_test(&mut core, &shape, &binding)
-        .unwrap();
-    peer.clear_query_subscription_for_test(subscription);
-
-    let full_recompute_initial = peer.query_update(&mut core, &shape, &binding).unwrap();
     let (mut maintained, maintained_initial) = MaintainedSubscriptionViewSubscription::new(
         &mut core,
         &shape,
@@ -1294,13 +1364,15 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         subscription,
         identity,
     );
-    assert_eq!(
-        capture_view_update(maintained_initial),
-        capture_view_update(full_recompute_initial),
-        "maintained subscription view recursive RLS diverged from full recompute for seed {seed:#x}, identity {identity:?}, tick initial"
+    assert_maintained_subscription_view_tick(
+        maintained_initial,
+        &[result_row("docs", direct_doc, direct_doc_tx)],
+        &[],
+        false,
+        (identity, seed, "recursive-initial"),
     );
 
-    accept_recursive_row(
+    let added_doc_tx = accept_recursive_row(
         &mut core,
         &mut parents,
         "docs",
@@ -1316,13 +1388,17 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         doc_access_cells(added_doc, alice),
         2_001,
     );
-    peer.clear_query_subscription_for_test(subscription);
-    let _ = assert_maintained_subscription_view_capture_tick(
+    let update = maintained.update(
         &mut core,
-        &mut peer,
-        &mut maintained,
         &shape,
-        &binding,
+        subscription,
+        identity,
+    );
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &[result_row("docs", added_doc, added_doc_tx)],
+        &[],
+        false,
         (identity, seed, "recursive-add"),
     );
 
@@ -1334,24 +1410,32 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         team_edge_cells(alice, parent_team),
         3_000,
     );
-    peer.clear_query_subscription_for_test(subscription);
-    let _ = assert_maintained_subscription_view_capture_tick(
+    let update = maintained.update(
         &mut core,
-        &mut peer,
-        &mut maintained,
         &shape,
-        &binding,
+        subscription,
+        identity,
+    );
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &[result_row("docs", closure_doc, closure_doc_tx)],
+        &[],
+        false,
         (identity, seed, "recursive-edge-add"),
     );
 
     delete_recursive_row(&mut core, &mut parents, "team_edges", edge, 4_000);
-    peer.clear_query_subscription_for_test(subscription);
-    let _ = assert_maintained_subscription_view_capture_tick(
+    let update = maintained.update(
         &mut core,
-        &mut peer,
-        &mut maintained,
         &shape,
-        &binding,
+        subscription,
+        identity,
+    );
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &[],
+        &[result_row("docs", closure_doc, closure_doc_tx)],
+        false,
         (identity, seed, "recursive-edge-remove"),
     );
 }
@@ -1925,7 +2009,7 @@ fn incremental_serializer_matches_full_recompute_view_update_capture() {
 }
 
 #[test]
-fn maintained_subscription_view_matches_full_recompute_view_update_capture() {
+fn maintained_subscription_view_emits_expected_owner_policy_updates() {
     let seeds = if let Ok(seed) = std::env::var("JAZZ_SEED") {
         vec![seed.parse::<u64>().expect("JAZZ_SEED must be a u64")]
     } else {
@@ -1935,7 +2019,7 @@ fn maintained_subscription_view_matches_full_recompute_view_update_capture() {
         (0x5eed..0x5eed + count).collect::<Vec<_>>()
     };
     println!(
-        "maintained_subscription_view_matches_full_recompute_view_update_capture seeds={}",
+        "maintained_subscription_view_emits_expected_owner_policy_updates seeds={}",
         seeds.len()
     );
     for seed in seeds {
@@ -1972,7 +2056,7 @@ fn maintained_subscription_view_multitable_matches_full_recompute_view_update_ca
 }
 
 #[test]
-fn maintained_subscription_view_recursive_rls_matches_full_recompute_view_update_capture() {
+fn maintained_subscription_view_recursive_rls_emits_expected_updates() {
     let seeds = if let Ok(seed) = std::env::var("JAZZ_SEED") {
         vec![seed.parse::<u64>().expect("JAZZ_SEED must be a u64")]
     } else {
@@ -1982,7 +2066,7 @@ fn maintained_subscription_view_recursive_rls_matches_full_recompute_view_update
         (0x7eed..0x7eed + count).collect::<Vec<_>>()
     };
     println!(
-        "maintained_subscription_view_recursive_rls_matches_full_recompute_view_update_capture seeds={}",
+        "maintained_subscription_view_recursive_rls_emits_expected_updates seeds={}",
         seeds.len()
     );
     for seed in seeds {
