@@ -45,7 +45,6 @@ use crate::query::{
     QUERY_NAMESPACE, Query as JazzQuery, ShapeId, ValidatedQuery,
 };
 
-const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
 const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 
@@ -117,7 +116,7 @@ fn lowered_program_sinks(program: &QueryProgram) -> Vec<(String, GraphBuilder)> 
 fn prepared_params_from_domain(
     parameters: &super::query_engine::ParameterDomain,
 ) -> Vec<PreparedQueryParam> {
-    parameters
+    let mut params = parameters
         .user_params
         .iter()
         .map(|(name, ty)| PreparedQueryParam {
@@ -125,7 +124,18 @@ fn prepared_params_from_domain(
             ty: ty.clone(),
             source: PreparedQueryParamSource::User,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    params.extend(
+        parameters
+            .claim_params
+            .iter()
+            .map(|(name, claim)| PreparedQueryParam {
+                name: name.clone(),
+                ty: claim.ty.clone(),
+                source: PreparedQueryParamSource::Claim(claim.path.clone()),
+            }),
+    );
+    params
 }
 
 fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain) -> Vec<String> {
@@ -617,6 +627,7 @@ where
                 base.clone(),
                 &output_fields,
                 tier,
+                *permission_subject,
             )?;
             storage_graph.project_fields(storage_to_canonical_current_source_fields(
                 table,
@@ -2596,15 +2607,30 @@ where
         &mut self,
         policy_shape: &ValidatedQuery,
         tier: DurabilityTier,
+        permission_subject: AuthorId,
     ) -> Result<GraphBuilder, Error> {
         let binding = policy_shape.bind(BTreeMap::new())?;
-        let request = self.current_query_program_request(
+        let mut request = self.current_query_program_request(
             policy_shape,
             &binding,
             tier,
-            AuthorId::SYSTEM,
+            permission_subject,
             CurrentQueryProgramOutput::AppRows,
         )?;
+        if let PolicyContext::Identity {
+            mode,
+            permission_subject,
+            claims,
+            attribution,
+        } = request.policy
+        {
+            request.policy = PolicyContext::AuthorizationSubplan {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            };
+        }
         let program = self.compile_query_program_request(request)?;
         Ok(lowered_app_rows_graph(&program)?.project(["row_uuid"]))
     }
@@ -3020,13 +3046,14 @@ where
                     .expect("program is compiled when no prepared plan is supplied")
                     .lowered
                     .parameters;
-                !parameters.user_params.is_empty()
+                !parameters.user_params.is_empty() || !parameters.claim_params.is_empty()
             } =>
             {
                 Some(self.prepared_query_plan(shape, binding, tier, identity)?)
             }
             None => None,
         };
+        let policy = self.query_program_policy_context(identity);
         let table_schema = self.table(&shape.query().table)?.clone();
         let deltas_result = match plan {
             None => self
@@ -3036,7 +3063,7 @@ where
                 )?)
                 .map_err(Error::Groove),
             Some(PreparedQueryPlan::Prepared { shape, params }) => {
-                let values = binding_values_for_plan(binding, &params)?;
+                let values = binding_values_for_plan(binding, &params, &policy)?;
                 self.database
                     .bind_shape(shape, &values)
                     .map_err(Error::Groove)
@@ -3402,15 +3429,7 @@ where
             &self.catalogue.schema,
             ParamBindingMode::RetainAllParams,
         )?;
-        let mut values = binding.values().clone();
-        insert_claim_bindings(
-            &mut values,
-            shape.params(),
-            identity,
-            self.session_claims.get(&identity),
-        );
-        let binding = shape.bind(values)?;
-        let plan = self.prepared_query_plan(&shape, &binding, tier, AuthorId::SYSTEM)?;
+        let plan = self.prepared_query_plan(&shape, &binding, tier, identity)?;
         Ok((shape, binding, plan))
     }
 
@@ -4160,7 +4179,7 @@ where
         let prepared =
             self.database
                 .prepare(terminals, binding_source_shape, binding_descriptor)?;
-        let values = binding_values_for_plan(binding, &params)?;
+        let values = binding_values_for_plan(binding, &params, &program.request.policy)?;
         self.database
             .bind_shape(prepared.id(), &values)
             .map_err(Error::Groove)
@@ -4172,6 +4191,7 @@ where
         base: GraphBuilder,
         output_fields: &[String],
         tier: DurabilityTier,
+        permission_subject: AuthorId,
     ) -> Result<GraphBuilder, Error> {
         // TODO(query-engine): replace this bridge with a first-class policy
         // authorization subplan in the query-engine IR. `SourceRequest::authorization`
@@ -4183,7 +4203,8 @@ where
                     .to_owned(),
             ));
         }
-        let authorized = self.policy_authorization_row_id_graph(policy_shape, tier)?;
+        let authorized =
+            self.policy_authorization_row_id_graph(policy_shape, tier, permission_subject)?;
         Ok(
             GraphBuilder::join(base, authorized, ["row_uuid"], ["row_uuid"]).project_fields(
                 output_fields
@@ -4209,6 +4230,12 @@ where
                 "maintained subscription view policy slice does not support include policies",
             ));
         }
+        let policy_shape = inline_authorization_bridge_reachable_seed_claims(
+            &policy_shape,
+            identity,
+            self.session_claims.get(&identity),
+            &self.catalogue.schema,
+        )?;
         let policy_shape = maintained_view_bind_filter_literals_with_mode(
             &policy_shape,
             &policy_binding,
@@ -4287,7 +4314,7 @@ where
         query
             .reachable
             .extend(policy.reachable.into_iter().map(|mut reachable| {
-                reachable.from = rewrite_claim_operand_for_binding(reachable.from);
+                reachable.from = retain_claim_operand(reachable.from);
                 reachable.access_filters = reachable
                     .access_filters
                     .into_iter()
@@ -4313,12 +4340,7 @@ where
                 compose_policy_branch(branch, &base_filters, &base_joins, &base_reachable, claims)
             }));
         let composed = query.validate(&self.catalogue.schema)?;
-        let mut values = binding.values().clone();
-        // Claim bindings are derived from the authenticated peer identity on
-        // the server. Clients never supply these values, so they cannot widen
-        // their own subscription by choosing a different claim binding.
-        insert_claim_bindings(&mut values, composed.params(), identity, claims);
-        let binding = composed.bind(values)?;
+        let binding = composed.bind(binding.values().clone())?;
         Ok((composed, binding))
     }
 
@@ -4346,7 +4368,7 @@ where
             .reachable
             .into_iter()
             .map(|mut reachable| {
-                reachable.from = rewrite_claim_operand_for_binding(reachable.from);
+                reachable.from = retain_claim_operand(reachable.from);
                 reachable.access_filters = reachable
                     .access_filters
                     .into_iter()
@@ -4367,11 +4389,61 @@ where
             })
             .collect();
         let shape = query.validate(&self.catalogue.schema)?;
-        let mut values = BTreeMap::new();
-        insert_claim_bindings(&mut values, shape.params(), writer, claims);
-        let binding = shape.bind(values)?;
+        let binding = shape.bind(BTreeMap::new())?;
         Ok(Some((shape, binding)))
     }
+}
+
+fn inline_authorization_bridge_reachable_seed_claims(
+    shape: &ValidatedQuery,
+    identity: AuthorId,
+    claims: Option<&BTreeMap<String, Value>>,
+    schema: &JazzSchema,
+) -> Result<ValidatedQuery, Error> {
+    let mut query = shape.query().clone();
+    for reachable in &mut query.reachable {
+        reachable.from = inline_authorization_bridge_claim_operand(
+            std::mem::replace(&mut reachable.from, Operand::Literal(Value::Bool(false))),
+            identity,
+            claims,
+        );
+    }
+    for branch in &mut query.policy_branches {
+        for reachable in &mut branch.reachable {
+            reachable.from = inline_authorization_bridge_claim_operand(
+                std::mem::replace(&mut reachable.from, Operand::Literal(Value::Bool(false))),
+                identity,
+                claims,
+            );
+        }
+    }
+    let rebound = query.validate(schema)?;
+    if rebound.schema_version() != shape.schema_version() {
+        return Err(Error::InvalidStoredValue(
+            "authorization bridge rebound query schema changed",
+        ));
+    }
+    Ok(rebound)
+}
+
+fn inline_authorization_bridge_claim_operand(
+    operand: Operand,
+    identity: AuthorId,
+    claims: Option<&BTreeMap<String, Value>>,
+) -> Operand {
+    let Operand::Claim(name) = operand else {
+        return operand;
+    };
+    let value = claims
+        .and_then(|claims| claims.get(&name))
+        .cloned()
+        .unwrap_or_else(|| match name.as_str() {
+            "sub" => Value::Uuid(identity.0),
+            "user_id" => Value::String(identity.0.to_string()),
+            "isAdmin" => Value::Bool(false),
+            _ => Value::Bool(false),
+        });
+    Operand::Literal(value)
 }
 
 impl<S> HistoricalRead<'_, S>
@@ -4458,7 +4530,7 @@ fn rewrite_claim_reachable_for_binding(
     mut reachable: crate::query::ReachableVia,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> crate::query::ReachableVia {
-    reachable.from = rewrite_claim_operand_for_binding(reachable.from);
+    reachable.from = retain_claim_operand(reachable.from);
     reachable.access_filters = reachable
         .access_filters
         .into_iter()
@@ -4504,17 +4576,15 @@ fn rewrite_claim_predicate_for_binding(
         Predicate::Eq(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Eq(left, right) => Predicate::Eq(
-            rewrite_claim_operand_for_binding(left),
-            rewrite_claim_operand_for_binding(right),
-        ),
+        Predicate::Eq(left, right) => {
+            Predicate::Eq(retain_claim_operand(left), retain_claim_operand(right))
+        }
         Predicate::Ne(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Ne(left, right) => Predicate::Ne(
-            rewrite_claim_operand_for_binding(left),
-            rewrite_claim_operand_for_binding(right),
-        ),
+        Predicate::Ne(left, right) => {
+            Predicate::Ne(retain_claim_operand(left), retain_claim_operand(right))
+        }
         Predicate::In(left, values)
             if operands_contain_unbound_claim(
                 std::iter::once(&left)
@@ -4526,65 +4596,50 @@ fn rewrite_claim_predicate_for_binding(
             false_predicate()
         }
         Predicate::In(left, values) => Predicate::In(
-            rewrite_claim_operand_for_binding(left),
-            values
-                .into_iter()
-                .map(rewrite_claim_operand_for_binding)
-                .collect(),
+            retain_claim_operand(left),
+            values.into_iter().map(retain_claim_operand).collect(),
         ),
         Predicate::Gt(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Gt(left, right) => Predicate::Gt(
-            rewrite_claim_operand_for_binding(left),
-            rewrite_claim_operand_for_binding(right),
-        ),
+        Predicate::Gt(left, right) => {
+            Predicate::Gt(retain_claim_operand(left), retain_claim_operand(right))
+        }
         Predicate::Gte(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Gte(left, right) => Predicate::Gte(
-            rewrite_claim_operand_for_binding(left),
-            rewrite_claim_operand_for_binding(right),
-        ),
+        Predicate::Gte(left, right) => {
+            Predicate::Gte(retain_claim_operand(left), retain_claim_operand(right))
+        }
         Predicate::Lt(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Lt(left, right) => Predicate::Lt(
-            rewrite_claim_operand_for_binding(left),
-            rewrite_claim_operand_for_binding(right),
-        ),
+        Predicate::Lt(left, right) => {
+            Predicate::Lt(retain_claim_operand(left), retain_claim_operand(right))
+        }
         Predicate::Lte(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Lte(left, right) => Predicate::Lte(
-            rewrite_claim_operand_for_binding(left),
-            rewrite_claim_operand_for_binding(right),
-        ),
+        Predicate::Lte(left, right) => {
+            Predicate::Lte(retain_claim_operand(left), retain_claim_operand(right))
+        }
         Predicate::Contains(left, right)
             if operands_contain_unbound_claim([&left, &right], claims) =>
         {
             false_predicate()
         }
-        Predicate::Contains(left, right) => Predicate::Contains(
-            rewrite_claim_operand_for_binding(left),
-            rewrite_claim_operand_for_binding(right),
-        ),
+        Predicate::Contains(left, right) => {
+            Predicate::Contains(retain_claim_operand(left), retain_claim_operand(right))
+        }
         Predicate::IsNull(operand) if operand_contains_unbound_claim(&operand, claims) => {
             false_predicate()
         }
-        Predicate::IsNull(operand) => Predicate::IsNull(rewrite_claim_operand_for_binding(operand)),
+        Predicate::IsNull(operand) => Predicate::IsNull(retain_claim_operand(operand)),
     }
 }
 
-fn rewrite_claim_operand_for_binding(operand: Operand) -> Operand {
-    match operand {
-        Operand::Claim(name) => Operand::Param(claim_param_name(&name)),
-        other => other,
-    }
-}
-
-fn claim_param_name(name: &str) -> String {
-    format!("{CLAIM_PARAM_PREFIX}{name}")
+fn retain_claim_operand(operand: Operand) -> Operand {
+    operand
 }
 
 fn false_predicate() -> Predicate {
@@ -4634,93 +4689,6 @@ fn operand_contains_unbound_claim(
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
     matches!(operand, Operand::Claim(name) if name != "sub" && name != "user_id" && name != "isAdmin" && !claims.is_some_and(|claims| claims.contains_key(name)))
-}
-
-fn insert_claim_bindings(
-    values: &mut BTreeMap<String, Value>,
-    params: &BTreeMap<String, ColumnType>,
-    identity: AuthorId,
-    claims: Option<&BTreeMap<String, Value>>,
-) {
-    let sub = claim_param_name("sub");
-    if params.contains_key(&sub) {
-        values.insert(
-            sub.clone(),
-            claim_binding_value(
-                params.get(&sub),
-                claims
-                    .and_then(|claims| claims.get("sub"))
-                    .cloned()
-                    .unwrap_or(Value::Uuid(identity.0)),
-            ),
-        );
-    }
-    let user_id = claim_param_name("user_id");
-    if params.contains_key(&user_id) {
-        values.insert(
-            user_id.clone(),
-            claim_binding_value(
-                params.get(&user_id),
-                claims
-                    .and_then(|claims| claims.get("user_id"))
-                    .cloned()
-                    .unwrap_or_else(|| Value::String(identity.0.to_string())),
-            ),
-        );
-    }
-    let is_admin = claim_param_name("isAdmin");
-    if params.contains_key(&is_admin) {
-        values.insert(
-            is_admin.clone(),
-            claim_binding_value(
-                params.get(&is_admin),
-                claims
-                    .and_then(|claims| claims.get("isAdmin"))
-                    .cloned()
-                    .unwrap_or(Value::Bool(false)),
-            ),
-        );
-    }
-    if let Some(claims) = claims {
-        for (name, value) in claims {
-            let param = claim_param_name(name);
-            if params.contains_key(&param) && param != sub && param != user_id && param != is_admin
-            {
-                values.insert(
-                    param.clone(),
-                    claim_binding_value(params.get(&param), value.clone()),
-                );
-            }
-        }
-    }
-}
-
-fn claim_binding_value(column_type: Option<&ColumnType>, value: Value) -> Value {
-    match column_type {
-        Some(ColumnType::Uuid) => match value {
-            Value::String(value) => uuid::Uuid::parse_str(&value)
-                .map(Value::Uuid)
-                .unwrap_or(Value::String(value)),
-            other => other,
-        },
-        Some(ColumnType::Array(member_type)) => match value {
-            Value::Array(values) => Value::Array(
-                values
-                    .into_iter()
-                    .map(|value| claim_binding_value(Some(member_type.as_ref()), value))
-                    .collect(),
-            ),
-            other => other,
-        },
-        Some(ColumnType::Nullable(_)) if !matches!(value, Value::Nullable(_)) => {
-            let inner = match column_type {
-                Some(ColumnType::Nullable(inner)) => Some(inner.as_ref()),
-                _ => None,
-            };
-            Value::Nullable(Some(Box::new(claim_binding_value(inner, value))))
-        }
-        _ => value,
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -5144,6 +5112,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
 fn binding_values_for_plan(
     binding: &Binding,
     params: &[PreparedQueryParam],
+    policy: &PolicyContext,
 ) -> Result<Vec<Value>, Error> {
     params
         .iter()
@@ -5156,8 +5125,48 @@ fn binding_values_for_plan(
                     .ok_or_else(|| QueryError::MissingParam(param.name.clone()))?;
                 Ok(coerce_prepared_binding_value(value, &param.ty))
             }
+            PreparedQueryParamSource::Claim(ref path) => {
+                let value = prepared_claim_value(path, policy)?;
+                Ok(coerce_prepared_binding_value(value, &param.ty))
+            }
         })
         .collect()
+}
+
+fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Value, Error> {
+    let (permission_subject, claims) = match policy {
+        PolicyContext::Identity {
+            permission_subject,
+            claims,
+            ..
+        }
+        | PolicyContext::AuthorizationSubplan {
+            permission_subject,
+            claims,
+            ..
+        } => (permission_subject, claims),
+        PolicyContext::System => {
+            return Err(Error::InvalidStoredValue(
+                "claim prepared params require an identity policy context",
+            ));
+        }
+    };
+    let [name] = path.0.as_slice() else {
+        return Err(Error::InvalidStoredValue(
+            "nested claim prepared params are not supported yet",
+        ));
+    };
+    if let Some(value) = claims.get(name) {
+        return Ok(value.clone());
+    }
+    match name.as_str() {
+        "sub" => Ok(Value::Uuid(permission_subject.0)),
+        "user_id" => Ok(Value::String(permission_subject.0.to_string())),
+        "isAdmin" => Ok(Value::Bool(false)),
+        _ => Err(Error::InvalidStoredValue(
+            "claim prepared param is not bound",
+        )),
+    }
 }
 
 fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::ColumnType) -> Value {

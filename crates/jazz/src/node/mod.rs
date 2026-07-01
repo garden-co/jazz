@@ -3105,6 +3105,7 @@ pub(crate) struct PreparedQueryParam {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreparedQueryParamSource {
     User,
+    Claim(query_engine::ClaimPath),
 }
 
 fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> Result<(), Error> {

@@ -1891,6 +1891,15 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
         BTreeMap::from([("route".to_owned(), ColumnType::String)])
     );
     assert_eq!(
+        program
+            .lowered
+            .parameters
+            .claim_params
+            .get("__jazz_claim_sub")
+            .map(|param| (&param.path, &param.ty)),
+        Some((&ClaimPath(vec!["sub".to_owned()]), &ColumnType::Uuid))
+    );
+    assert_eq!(
         program.lowered.parameters.routing_params,
         BTreeSet::from(["__jazz_route_route".to_owned()])
     );
@@ -2077,9 +2086,29 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
     let GraphBuilder::Recursive { seed, .. } = &program.lowered.terminals[0].graph else {
         panic!("expected recursive graph");
     };
-    assert!(matches!(seed.as_ref(), GraphBuilder::InlineRecords { .. }));
+    assert!(matches!(
+        seed.as_ref(),
+        GraphBuilder::Project { input, fields }
+            if fields.iter().any(|field| field.output_name == "team")
+                && fields.iter().any(|field| field.output_name == "reachable_team")
+                && matches!(
+                    input.as_ref(),
+                    GraphBuilder::BindingSource { shape, output }
+                        if shape == "reachable-claim"
+                            && output.field_index("__jazz_claim_sub").is_some()
+                )
+    ));
     assert!(program.lowered.parameters.user_params.is_empty());
-    assert!(program.lowered.parameters.routing_params.is_empty());
+    assert_eq!(
+        program
+            .lowered
+            .parameters
+            .claim_params
+            .get("__jazz_claim_sub")
+            .map(|param| (&param.path, &param.ty)),
+        Some((&ClaimPath(vec!["sub".to_owned()]), &ColumnType::Uuid))
+    );
+    assert_eq!(program.lowered.parameters.routing_params, BTreeSet::new());
 }
 
 #[test]
