@@ -3057,7 +3057,8 @@ where
             let mut rows = self
                 .query_rows_including_deleted_with_query_engine(shape, binding, tier, identity)?;
             let query = shape.query();
-            self.finish_query_rows(query, &mut rows)?;
+            self.finish_engine_query_rows(query, &mut rows)?;
+            self.apply_projection(query, &mut rows)?;
             return Ok(rows);
         }
         let program = if prepared_plan.is_some() {
@@ -3139,8 +3140,20 @@ where
         binding: &Binding,
         position: GlobalSeq,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let mut rows = self.query_rows_at_with_query_engine(shape, binding, position)?;
-        self.finish_query_rows(shape.query(), &mut rows)?;
+        self.query_rows_at_for_identity(shape, binding, position, AuthorId::SYSTEM)
+    }
+
+    fn query_rows_at_for_identity(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        position: GlobalSeq,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut rows = self.query_rows_at_with_query_engine(shape, binding, position, identity)?;
+        let query = shape.query();
+        self.finish_engine_query_rows(query, &mut rows)?;
+        self.apply_projection(query, &mut rows)?;
         Ok(rows)
     }
 
@@ -3149,6 +3162,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         position: GlobalSeq,
+        identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_schema = self
             .catalogue
@@ -3162,7 +3176,7 @@ where
             &lowered_shape,
             &binding,
             position,
-            AuthorId::SYSTEM,
+            identity,
             CurrentQueryProgramOutput::AppRows,
         )?;
         let deltas = self
@@ -3631,7 +3645,7 @@ where
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
-        self.query_rows_at(&shape, &binding, position)
+        self.query_rows_at_for_identity(&shape, &binding, position, identity)
     }
 
     pub(crate) fn uses_partitioned_or_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
