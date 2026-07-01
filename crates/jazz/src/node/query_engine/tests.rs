@@ -172,6 +172,55 @@ fn chained_row_set_input(byte: u8, binding_values: BTreeMap<String, Value>) -> R
     }
 }
 
+fn claim_filtered_row_set_input(byte: u8, claim: &str) -> RowSetProgramInput {
+    let root = RowSetNodeId("root".to_owned());
+    let filter = RowSetNodeId("filter".to_owned());
+    let root_source = source("todos", SourceRole::Root);
+    RowSetProgramInput {
+        shape: NormalizedRowSetShape {
+            identity: NormalizedShapeIdentity {
+                shape_id: shape(byte),
+                canonical: vec![byte],
+            },
+            root: filter.clone(),
+            result: ResultId::RealRow {
+                table: "todos".to_owned(),
+                row: ResultRowRef::Source(root_source.clone()),
+            },
+            auxiliary_sources: BTreeSet::new(),
+            closure_paths: Vec::new(),
+            join_contributions: Vec::new(),
+            nodes: BTreeMap::from([
+                (
+                    root.clone(),
+                    RowSetExpr::Source {
+                        source: root_source.clone(),
+                        visibility: RowVisibility::Visible,
+                    },
+                ),
+                (
+                    filter.clone(),
+                    RowSetExpr::Filter {
+                        input: root,
+                        predicate: PredicateExpr::Compare {
+                            left: NormalizedValueRef::SourceField {
+                                source: root_source,
+                                field: "title".to_owned(),
+                            },
+                            op: ComparisonOp::Eq,
+                            right: NormalizedValueRef::Claim(ClaimPath(vec![claim.to_owned()])),
+                        },
+                    },
+                ),
+            ]),
+        },
+        binding: ProgramBinding {
+            id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            values: BTreeMap::new(),
+        },
+    }
+}
+
 fn current_read_view() -> RequestedReadView {
     current_read_view_at(DurabilityTier::Global)
 }
@@ -1433,6 +1482,66 @@ fn unbound_filter_param_reports_operator_gap() {
         err.gaps.as_slice(),
         [UnsupportedReason::Operator(message)]
             if message.contains("binding parameter 'title' is not bound")
+    ));
+}
+
+#[test]
+fn claim_filter_lowers_from_identity_policy_context() {
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: PolicyContext::Identity {
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0xa1),
+            claims: BTreeMap::from([("title".to_owned(), Value::String("mine".to_owned()))]),
+            attribution: None,
+        },
+        input: claim_filtered_row_set_input(0x73, "title"),
+        output: row_set_output(BTreeSet::new()),
+    };
+
+    let program =
+        lower_query_program(request, &mut FakeSourceResolver::default()).expect("claim lowers");
+    let graph = format!("{:?}", program.lowered.terminals[0].graph);
+    assert!(graph.contains("mine"), "{graph}");
+}
+
+#[test]
+fn built_in_sub_claim_lowers_to_permission_subject() {
+    let subject = author(0xa5);
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: PolicyContext::Identity {
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: subject,
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input: claim_filtered_row_set_input(0x74, "sub"),
+        output: row_set_output(BTreeSet::new()),
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("built-in sub claim lowers");
+    let graph = format!("{:?}", program.lowered.terminals[0].graph);
+    assert!(graph.contains(&subject.0.to_string()), "{graph}");
+}
+
+#[test]
+fn missing_claim_reports_operator_gap() {
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: policy_context(),
+        input: claim_filtered_row_set_input(0x75, "team"),
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::new(),
+        },
+    };
+
+    let err = lower_query_program(request, &mut FakeSourceResolver::default()).unwrap_err();
+    assert!(matches!(
+        err.gaps.as_slice(),
+        [UnsupportedReason::Operator(message)] if message.contains("claim 'team' is not bound")
     ));
 }
 
