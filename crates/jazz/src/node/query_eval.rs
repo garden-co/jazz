@@ -625,7 +625,7 @@ where
             }
             let binding_source_shape = plan.binding_source_shape.clone();
             let binding_user_params = plan.binding_user_params.clone();
-            let policy_shape = node.maintained_view_table_policy_shape_with_mode(
+            let policy_shape = node.table_read_policy_authorization_shape(
                 table,
                 *permission_subject,
                 ParamBindingMode::InlineAllReachableSeeds,
@@ -4255,22 +4255,22 @@ where
         )
     }
 
-    fn maintained_view_table_policy_shape_with_mode(
+    fn table_read_policy_authorization_shape(
         &self,
         table: &TableSchema,
         identity: AuthorId,
         param_binding_mode: ParamBindingMode,
     ) -> Result<ValidatedQuery, Error> {
-        let policy_shape =
-            crate::query::Query::from(table.name.as_str()).validate(&self.catalogue.schema)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let (policy_shape, policy_binding) =
-            self.policy_composed_shape_binding(&policy_shape, &policy_binding, identity)?;
-        if !policy_shape.query().includes.is_empty() {
+        let claims = self.session_claims.get(&identity);
+        let mut query = authorization_query_from_read_policy(table);
+        rewrite_policy_claims_for_authorization(&mut query, claims);
+        if !query.includes.is_empty() {
             return Err(Error::InvalidStoredValue(
                 "maintained subscription view policy slice does not support include policies",
             ));
         }
+        let policy_shape = query.validate(&self.catalogue.schema)?;
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
             &policy_binding,
@@ -4481,6 +4481,41 @@ fn compose_policy_branch(
         joins,
         reachable,
     }
+}
+
+fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
+    let Some(policy) = &table.read_policy else {
+        return crate::query::Query::from(table.name.as_str());
+    };
+    let mut query = crate::query::Query::from(table.name.as_str());
+    query.filters = policy.filters.clone();
+    query.joins = policy.joins.clone();
+    query.reachable = policy.reachable.clone();
+    query.includes = policy.includes.clone();
+    query.policy_branches = policy.policy_branches.clone();
+    query
+}
+
+fn rewrite_policy_claims_for_authorization(
+    query: &mut JazzQuery,
+    claims: Option<&BTreeMap<String, Value>>,
+) {
+    query.filters = std::mem::take(&mut query.filters)
+        .into_iter()
+        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
+        .collect();
+    query.joins = std::mem::take(&mut query.joins)
+        .into_iter()
+        .map(|join| rewrite_claim_join_for_binding(join, claims))
+        .collect();
+    query.reachable = std::mem::take(&mut query.reachable)
+        .into_iter()
+        .map(|reachable| rewrite_claim_reachable_for_binding(reachable, claims))
+        .collect();
+    query.policy_branches = std::mem::take(&mut query.policy_branches)
+        .into_iter()
+        .map(|branch| compose_policy_branch(branch, &[], &[], &[], claims))
+        .collect();
 }
 
 fn rewrite_claim_join_for_binding(
