@@ -64,7 +64,7 @@ pub(crate) fn lower_query_program(
         let source_request = SourceRequest {
             source: source.clone(),
             visibility,
-            authorization: source_authorization_for_source(&request, &source),
+            authorization: source_authorization_for_source(&request, &source)?,
             requirements,
         };
         let resolved_source = source_resolver
@@ -166,57 +166,38 @@ pub(crate) fn lower_query_program(
 fn source_authorization_for_source(
     request: &QueryProgramRequest,
     source: &SourceId,
-) -> SourceAuthorizationRequest {
+) -> CapabilityResult<SourceAuthorizationRequest> {
     match &request.policy {
-        PolicyContext::System => SourceAuthorizationRequest::System,
-        PolicyContext::AuthorizationSubplan { .. } => SourceAuthorizationRequest::System,
+        PolicyContext::System => Ok(SourceAuthorizationRequest::System),
+        PolicyContext::AuthorizationSubplan { .. } => Ok(SourceAuthorizationRequest::System),
         PolicyContext::Identity {
             permission_subject, ..
-        } => SourceAuthorizationRequest::PolicyFiltered {
+        } => Ok(SourceAuthorizationRequest::PolicyFiltered {
             permission_subject: *permission_subject,
             plan: PolicyAuthorizationPlan {
                 protected_source: source.clone(),
                 role: PolicyDecisionRole::Read,
                 protected_row_field: "row_uuid".to_owned(),
                 binding_source_shape: request.input.binding.source_shape.clone(),
-                binding_user_params: request
-                    .input
-                    .binding
-                    .values
-                    .iter()
-                    .map(|(name, value)| (name.clone(), column_type_from_value(value)))
-                    .collect(),
+                binding_user_params: binding_user_param_types(&request.input.binding)?,
             },
-        },
+        }),
     }
 }
 
-fn column_type_from_value(value: &Value) -> ColumnType {
-    match value {
-        Value::U8(_) => ColumnType::U8,
-        Value::U16(_) => ColumnType::U16,
-        Value::U32(_) => ColumnType::U32,
-        Value::U64(_) => ColumnType::U64,
-        Value::F64(_) => ColumnType::F64,
-        Value::Bool(_) => ColumnType::Bool,
-        Value::String(_) => ColumnType::String,
-        Value::Bytes(_) => ColumnType::Bytes,
-        Value::Uuid(_) => ColumnType::Uuid,
-        Value::Array(values) => ColumnType::Array(Box::new(
-            values
-                .first()
-                .map(column_type_from_value)
-                .unwrap_or(ColumnType::Bytes),
-        )),
-        Value::Tuple(values) => {
-            ColumnType::Tuple(values.iter().map(column_type_from_value).collect())
-        }
-        Value::Nullable(Some(value)) => {
-            ColumnType::Nullable(Box::new(column_type_from_value(value)))
-        }
-        Value::Nullable(None) => ColumnType::Nullable(Box::new(ColumnType::Bytes)),
-        Value::Enum(_) => ColumnType::U8,
+fn binding_user_param_types(
+    binding: &ProgramBinding,
+) -> CapabilityResult<BTreeMap<String, ColumnType>> {
+    let mut params = binding.extra_user_params.clone();
+    for name in binding.values.keys() {
+        let Some(ty) = binding.param_types.get(name) else {
+            return Err(single_gap_report(UnsupportedReason::Runtime(format!(
+                "binding parameter '{name}' is missing a validated type"
+            ))));
+        };
+        params.insert(name.clone(), ty.clone());
     }
+    Ok(params)
 }
 
 fn single_gap_report(gap: UnsupportedReason) -> Box<CapabilityReport> {
