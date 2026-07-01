@@ -42,7 +42,7 @@ pub(crate) fn lower_query_program(
         }
     };
 
-    let source_requirements = source_requirements(&request.output, &plan)?;
+    let source_requirements = source_requirements(&request, &plan)?;
     let mut resolved_sources = BTreeMap::new();
     for (source, requirements) in source_requirements {
         let source_request = SourceRequest {
@@ -94,19 +94,29 @@ pub(crate) fn lower_query_program(
         })
     })?;
 
+    let terminals = lowered_terminals(graph, &request, &plan, &resolved_root, &resolved_sources)?;
+    let output = ProgramOutputSchemas::RowSet(
+        terminals
+            .iter()
+            .map(|terminal| terminal.output.clone())
+            .collect(),
+    );
+
     Ok(QueryProgram {
         lowered: LoweredGraph {
-            graph,
+            terminals,
             parameters: parameter_domain(&request.input.shape),
-            output: ProgramOutputSchemas::RowSet(output_terminals(
-                &request.output,
-                &plan,
-                &resolved_root,
-                &resolved_sources,
-            )?),
+            output,
         },
         request,
         explain,
+    })
+}
+
+fn single_gap_report(gap: UnsupportedReason) -> Box<CapabilityReport> {
+    Box::new(CapabilityReport {
+        gaps: vec![gap],
+        explain: ExplainPlan::default(),
     })
 }
 
@@ -294,12 +304,6 @@ fn analyze_query_plan(
     if !request.reads.fact_reads.is_empty() {
         gaps.push(UnsupportedReason::Source(SourceGap::TransactionReadOverlay));
     }
-    if !matches!(request.policy, PolicyContext::System) {
-        gaps.push(UnsupportedReason::Policy(
-            "policy augmentation is not lowered yet".to_owned(),
-        ));
-    }
-
     let analyzed = analyze_root_node(request);
     let Ok(plan) = analyzed else {
         gaps.push(analyzed.unwrap_err());
@@ -492,6 +496,12 @@ fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
             sources
         }
     }
+}
+
+fn program_sources(request: &QueryProgramRequest, plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
+    let mut sources = analyzed_plan_sources(plan);
+    sources.extend(request.input.shape.auxiliary_sources.iter().cloned());
+    sources
 }
 
 fn linear_plan_sources(plan: &LinearCurrentRoot) -> BTreeSet<SourceId> {
@@ -788,11 +798,12 @@ fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) 
 }
 
 fn source_requirements(
-    output: &RowSetOutputRequest,
+    request: &QueryProgramRequest,
     plan: &AnalyzedQueryPlan,
 ) -> CapabilityResult<BTreeMap<SourceId, SourceRequirements>> {
+    let output = &request.output;
     let mut requirements = BTreeMap::<SourceId, SourceRequirements>::new();
-    for source in analyzed_plan_sources(plan) {
+    for source in program_sources(request, plan) {
         requirements.insert(source, SourceRequirements::default());
     }
 
@@ -842,13 +853,20 @@ fn source_requirements(
 
     for fact in &output.facts {
         match fact {
-            ProgramFactKey::ResultMembership | ProgramFactKey::VersionWitnesses => {
+            ProgramFactKey::ResultMembership => {
                 let root_requirements = requirements
                     .get_mut(plan.root_source())
                     .expect("root source requirements were initialized");
                 root_requirements
                     .metadata
                     .insert(SourceMetadataRequirement::VersionWitnesses);
+            }
+            ProgramFactKey::VersionWitnesses | ProgramFactKey::ReplacementWitnesses => {
+                for source_requirements in requirements.values_mut() {
+                    source_requirements
+                        .metadata
+                        .insert(SourceMetadataRequirement::VersionWitnesses);
+                }
             }
             ProgramFactKey::SourceCoverage(_) => {
                 let root_requirements = requirements
@@ -1607,19 +1625,22 @@ fn lower_value_source(
     let descriptor = value_source_descriptor(columns);
     match mode {
         ValueSourceMode::Binding => {
-            let mut params = BTreeMap::<String, ColumnType>::new();
+            let params = parameter_domain(&request.input.shape).user_params;
             for column in columns {
                 let NormalizedValueRef::Param(param) = &column.value else {
                     return Err(UnsupportedReason::Operator(
                         "binding value source columns must reference binding params".to_owned(),
                     ));
                 };
-                if let Some(existing) = params.insert(param.clone(), column.ty.clone()) {
-                    if existing != column.ty {
-                        return Err(UnsupportedReason::Operator(format!(
-                            "binding parameter '{param}' has conflicting value-source types"
-                        )));
-                    }
+                let Some(existing) = params.get(param) else {
+                    return Err(UnsupportedReason::Operator(format!(
+                        "binding parameter '{param}' is not part of the program parameter domain"
+                    )));
+                };
+                if *existing != column.ty {
+                    return Err(UnsupportedReason::Operator(format!(
+                        "binding parameter '{param}' has conflicting value-source types"
+                    )));
                 }
             }
             let input_descriptor = RecordDescriptor::new(
@@ -2472,6 +2493,318 @@ fn provenance_source_field(field: ProvenanceField) -> &'static str {
     }
 }
 
+fn lowered_terminals(
+    graph: GraphBuilder,
+    request: &QueryProgramRequest,
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<Vec<LoweredTerminal>> {
+    let mut terminals = Vec::new();
+    let closure = lower_closure_membership(graph.clone(), request, source, resolved_sources)?;
+    if request.output.app_rows.is_some() {
+        terminals.push(LoweredTerminal {
+            sink: "app_rows".to_owned(),
+            graph: closure.visible_root.clone(),
+            output: OutputTerminalSchema::AppRows(AppRowSchema {
+                descriptor: source.row_shape.descriptor,
+                hidden_fields: hidden_source_fields(&source.row_shape),
+            }),
+        });
+    }
+
+    for fact in &request.output.facts {
+        if matches!(fact, ProgramFactKey::ResultMembership) {
+            let output = fact_output(fact, plan, source, resolved_sources)?;
+            let result_graph = fact_terminal_graph(
+                fact,
+                closure.visible_root.clone(),
+                plan,
+                source,
+                resolved_sources,
+            )?;
+            terminals.push(LoweredTerminal {
+                sink: fact_sink_name(fact),
+                graph: result_graph,
+                output: OutputTerminalSchema::Fact(output.clone()),
+            });
+            for (source_id, closure_graph) in &closure.visible_members {
+                let Some(resolved_source) = resolved_sources.get(&source_id) else {
+                    continue;
+                };
+                let graph = fact_terminal_graph(
+                    fact,
+                    closure_graph.clone(),
+                    plan,
+                    resolved_source,
+                    resolved_sources,
+                )?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_fact_sink_name(fact, &source_id),
+                    graph,
+                    output: OutputTerminalSchema::Fact(output.clone()),
+                });
+            }
+            continue;
+        }
+        if matches!(fact, ProgramFactKey::VersionWitnesses) {
+            for (source_id, resolved_source) in resolved_sources {
+                let output = fact_output(fact, plan, resolved_source, resolved_sources)?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_fact_sink_name(fact, source_id),
+                    graph: resolved_source.graph.clone().project_fields(
+                        version_witness_fields_for_tagged_rows(resolved_source, "version_content")?,
+                    ),
+                    output: OutputTerminalSchema::Fact(output.clone()),
+                });
+                terminals.push(LoweredTerminal {
+                    sink: scoped_deletion_fact_sink_name(fact, source_id),
+                    graph: deletion_witness_graph_for_current_register(
+                        resolved_source,
+                        request,
+                        "version_deletion",
+                    )?,
+                    output: OutputTerminalSchema::Fact(output),
+                });
+            }
+            continue;
+        }
+        if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
+            for (source_id, resolved_source) in resolved_sources {
+                let output = fact_output(fact, plan, resolved_source, resolved_sources)?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_fact_sink_name(fact, source_id),
+                    graph: resolved_source.graph.clone().project_fields(
+                        version_witness_fields_for_tagged_rows(
+                            resolved_source,
+                            "replacement_content",
+                        )?,
+                    ),
+                    output: OutputTerminalSchema::Fact(output.clone()),
+                });
+                terminals.push(LoweredTerminal {
+                    sink: scoped_deletion_fact_sink_name(fact, source_id),
+                    graph: deletion_witness_graph_for_current_register(
+                        resolved_source,
+                        request,
+                        "replacement_deletion",
+                    )?,
+                    output: OutputTerminalSchema::Fact(output),
+                });
+            }
+            continue;
+        }
+        let output = fact_output(fact, plan, source, resolved_sources)?;
+        let graph = fact_terminal_graph(fact, graph.clone(), plan, source, resolved_sources)?;
+        terminals.push(LoweredTerminal {
+            sink: fact_sink_name(fact),
+            graph,
+            output: OutputTerminalSchema::Fact(output),
+        });
+    }
+
+    Ok(terminals)
+}
+
+#[derive(Clone, Debug)]
+struct ClosureLowering {
+    visible_root: GraphBuilder,
+    visible_members: BTreeMap<SourceId, GraphBuilder>,
+}
+
+impl ClosureLowering {
+    fn all_visible_members(&self, root_source: SourceId) -> Vec<(SourceId, GraphBuilder)> {
+        std::iter::once((root_source, self.visible_root.clone()))
+            .chain(
+                self.visible_members
+                    .iter()
+                    .map(|(source, graph)| (source.clone(), graph.clone())),
+            )
+            .collect()
+    }
+}
+
+fn lower_closure_membership(
+    root_graph: GraphBuilder,
+    request: &QueryProgramRequest,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<ClosureLowering> {
+    let mut visible_root = root_graph;
+    for path in &request.input.shape.closure_paths {
+        if !path.gates_root {
+            continue;
+        }
+        let path_members = closure_membership_graph_for_path(
+            visible_root.clone(),
+            path,
+            root_source,
+            resolved_sources,
+        )?;
+        let Some((_, _, closure_graph)) = path_members.last().cloned() else {
+            continue;
+        };
+        visible_root = GraphBuilder::join(
+            visible_root,
+            closure_graph.project(["__closure_root_row_uuid"]),
+            [root_source.row_shape.row_uuid_field.clone()],
+            ["__closure_root_row_uuid"],
+        )
+        .project_fields(project_source_fields_from_prefix(root_source, "left."));
+    }
+
+    let mut visible_members = BTreeMap::<SourceId, GraphBuilder>::new();
+    for path in &request.input.shape.closure_paths {
+        for (_, source, graph) in closure_membership_graph_for_path(
+            visible_root.clone(),
+            path,
+            root_source,
+            resolved_sources,
+        )? {
+            let Some(resolved_source) = resolved_sources.get(&source) else {
+                continue;
+            };
+            let graph =
+                graph.project_fields(project_source_fields_from_prefix(resolved_source, ""));
+            visible_members
+                .entry(source)
+                .and_modify(|existing| {
+                    *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
+                })
+                .or_insert(graph);
+        }
+    }
+    for contribution in &request.input.shape.join_contributions {
+        let Some(resolved_source) = resolved_sources.get(&contribution.source) else {
+            continue;
+        };
+        let graph = join_contribution_membership_graph(
+            visible_root.clone(),
+            contribution,
+            root_source,
+            resolved_source,
+            &request.input.shape.nodes,
+            resolved_sources,
+            request,
+        )?;
+        visible_members
+            .entry(contribution.source.clone())
+            .and_modify(|existing| {
+                *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
+            })
+            .or_insert(graph);
+    }
+    Ok(ClosureLowering {
+        visible_root,
+        visible_members,
+    })
+}
+
+fn join_contribution_membership_graph(
+    visible_root: GraphBuilder,
+    contribution: &JoinContribution,
+    root_source: &ResolvedSource,
+    contribution_source: &ResolvedSource,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<GraphBuilder> {
+    let mut visited = BTreeSet::new();
+    let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
+        .map_err(single_gap_report)?;
+    let lowered =
+        lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
+    let join_field = format!("user_{}", contribution.root_ref_field);
+    if !lowered.fields.contains(&join_field) {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Operator(format!(
+                "join contribution {} does not provide root reference field {join_field}",
+                contribution.id
+            ))],
+            explain: ExplainPlan {
+                capabilities: vec![
+                    "join contribution payload requires root reference field".to_owned(),
+                ],
+                ..ExplainPlan::default()
+            },
+        }));
+    }
+    let mut contribution_graph = lowered.graph;
+    if lowered.nullable_fields.contains(&join_field) {
+        contribution_graph = contribution_graph.unwrap_nullable(join_field.clone());
+    }
+    Ok(GraphBuilder::join(
+        visible_root,
+        contribution_graph,
+        [root_source.row_shape.row_uuid_field.clone()],
+        [join_field],
+    )
+    .project_fields(project_source_fields_from_prefix(
+        contribution_source,
+        "right.",
+    )))
+}
+
+fn closure_membership_graph_for_path(
+    root_graph: GraphBuilder,
+    path: &ClosurePath,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<Vec<(usize, SourceId, GraphBuilder)>> {
+    let mut current_graph = root_graph.project_fields(
+        project_source_fields_from_prefix(root_source, "")
+            .into_iter()
+            .chain([ProjectField::renamed(
+                root_source.row_shape.row_uuid_field.clone(),
+                "__closure_root_row_uuid",
+            )]),
+    );
+    let mut current_source = root_source.clone();
+    let mut outputs = Vec::new();
+    for (index, segment) in path.segments.iter().enumerate() {
+        let target = resolved_sources.get(&segment.target).ok_or_else(|| {
+            Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Runtime(format!(
+                    "closure target source {:?} was not resolved",
+                    segment.target
+                ))],
+                explain: ExplainPlan::default(),
+            })
+        })?;
+        let source_key = format!("user_{}", segment.source_field);
+        let joined = GraphBuilder::join(
+            current_graph.unwrap_nullable(source_key.clone()),
+            target.graph.clone(),
+            [source_key],
+            [target.row_shape.row_uuid_field.clone()],
+        )
+        .project_fields(
+            project_source_fields_from_prefix(target, "right.")
+                .into_iter()
+                .chain([ProjectField::renamed(
+                    "left.__closure_root_row_uuid",
+                    "__closure_root_row_uuid",
+                )]),
+        );
+        outputs.push((index, segment.target.clone(), joined.clone()));
+        current_graph = joined;
+        current_source = target.clone();
+    }
+    let _ = current_source;
+    Ok(outputs)
+}
+
+fn project_source_fields_from_prefix(source: &ResolvedSource, prefix: &str) -> Vec<ProjectField> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| field.name.as_ref())
+        .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field.clone()))
+        .collect()
+}
+
 fn output_terminals(
     request: &RowSetOutputRequest,
     plan: &AnalyzedQueryPlan,
@@ -2533,6 +2866,14 @@ fn fact_output(
                 deletion: None,
             })
         }
+        ProgramFactKey::ReplacementWitnesses => {
+            let version = version_witness_fields(&source.row_shape)?;
+            ProgramFactSchema::ReplacementWitnesses(VersionWitnessSchemas {
+                role_field: "role".to_owned(),
+                content: Some(version_witness_schema(source, &version)),
+                deletion: None,
+            })
+        }
         ProgramFactKey::RelationEdges => {
             ProgramFactSchema::RelationEdges(relation_edge_schema(plan, source, resolved_sources)?)
         }
@@ -2554,6 +2895,311 @@ fn fact_output(
         key: key.clone(),
         schema,
     })
+}
+
+fn fact_sink_name(key: &ProgramFactKey) -> String {
+    match key {
+        ProgramFactKey::ResultMembership => "maintained.result_current".to_owned(),
+        ProgramFactKey::VersionWitnesses => "maintained.version_content".to_owned(),
+        ProgramFactKey::ReplacementWitnesses => "maintained.replacement_content".to_owned(),
+        ProgramFactKey::RelationEdges => "maintained.relation_edges".to_owned(),
+        ProgramFactKey::PathCorrelationCoverage => "maintained.path_coverage".to_owned(),
+        ProgramFactKey::SourceCoverage(_) => "maintained.source_coverage".to_owned(),
+        other => format!("fact.{other:?}"),
+    }
+}
+
+fn scoped_fact_sink_name(key: &ProgramFactKey, source: &SourceId) -> String {
+    let base = fact_sink_name(key);
+    let path = source_path_sink_fragment(source);
+    format!("{base}.{}.{}", source.table, path)
+}
+
+fn scoped_deletion_fact_sink_name(key: &ProgramFactKey, source: &SourceId) -> String {
+    let base = match key {
+        ProgramFactKey::VersionWitnesses => "maintained.version_deletion",
+        ProgramFactKey::ReplacementWitnesses => "maintained.replacement_deletion",
+        _ => return scoped_fact_sink_name(key, source),
+    };
+    format!(
+        "{base}.{}.{}",
+        source.table,
+        source_path_sink_fragment(source)
+    )
+}
+
+fn source_path_sink_fragment(source: &SourceId) -> String {
+    source
+        .path
+        .components
+        .iter()
+        .map(|component| match component {
+            SourceRole::Root => "root".to_owned(),
+            SourceRole::Alias(alias) => alias.replace(|ch: char| !ch.is_ascii_alphanumeric(), "_"),
+            SourceRole::RecursiveSeed(name) => format!(
+                "recursive_seed_{}",
+                name.replace(|ch: char| !ch.is_ascii_alphanumeric(), "_")
+            ),
+            SourceRole::RecursiveStep(name) => format!(
+                "recursive_step_{}",
+                name.replace(|ch: char| !ch.is_ascii_alphanumeric(), "_")
+            ),
+            SourceRole::CorrelatedChild(name) => format!(
+                "correlated_child_{}",
+                name.replace(|ch: char| !ch.is_ascii_alphanumeric(), "_")
+            ),
+            SourceRole::Policy(name) => {
+                format!(
+                    "policy_{}",
+                    name.replace(|ch: char| !ch.is_ascii_alphanumeric(), "_")
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn fact_terminal_graph(
+    key: &ProgramFactKey,
+    graph: GraphBuilder,
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<GraphBuilder> {
+    match key {
+        ProgramFactKey::ResultMembership => {
+            Ok(graph.project_fields(result_membership_fields(source)?))
+        }
+        ProgramFactKey::VersionWitnesses => Ok(graph.project_fields(
+            version_witness_fields_for_tagged_rows(source, "version_content")?,
+        )),
+        ProgramFactKey::ReplacementWitnesses => Ok(graph.project_fields(
+            version_witness_fields_for_tagged_rows(source, "replacement_content")?,
+        )),
+        ProgramFactKey::RelationEdges => {
+            let _ = relation_edge_schema(plan, source, resolved_sources)?;
+            Ok(graph)
+        }
+        ProgramFactKey::PathCorrelationCoverage => {
+            let _ = path_correlation_coverage_schema(plan, source, resolved_sources)?;
+            Ok(graph)
+        }
+        ProgramFactKey::SourceCoverage(_) => {
+            let coverage = coverage_fields(&source.row_shape)?;
+            Ok(graph.project_fields(vec![
+                ProjectField::literal(
+                    "source",
+                    Value::String(source.row_shape.source.table.clone()),
+                ),
+                ProjectField::literal("table", Value::String(source.table_schema.name.clone())),
+                ProjectField::renamed(coverage.coverage_field, "coverage"),
+            ]))
+        }
+        _ => Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
+            explain: ExplainPlan {
+                capabilities: vec!["requested fact graph is not lowered yet".to_owned()],
+                ..ExplainPlan::default()
+            },
+        })),
+    }
+}
+
+fn deletion_witness_graph_for_members(
+    member_graph: GraphBuilder,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+    event_kind: &str,
+) -> CapabilityResult<GraphBuilder> {
+    let tier =
+        source_current_tier(request, &source.row_shape.source).unwrap_or(DurabilityTier::Local);
+    let table = &source.table_schema.name;
+    let deletion_current = register_current_keys_graph(table, tier);
+    let graph = GraphBuilder::join(
+        GraphBuilder::table(register_table_name_for_query_engine(table)),
+        deletion_current,
+        ["row_uuid", "tx_time", "tx_node_id"],
+        ["row_uuid", "tx_time", "tx_node_id"],
+    )
+    .project_fields(register_storage_fields("left."));
+    let graph = GraphBuilder::join(
+        graph,
+        member_graph.project([source.row_shape.row_uuid_field.clone()]),
+        ["row_uuid"],
+        [source.row_shape.row_uuid_field.clone()],
+    )
+    .project_fields(register_storage_fields("left."));
+    Ok(graph.project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
+}
+
+fn deletion_witness_graph_for_current_register(
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+    event_kind: &str,
+) -> CapabilityResult<GraphBuilder> {
+    let tier =
+        source_current_tier(request, &source.row_shape.source).unwrap_or(DurabilityTier::Local);
+    let table = &source.table_schema.name;
+    let deletion_current = register_current_keys_graph(table, tier);
+    let graph = GraphBuilder::join(
+        GraphBuilder::table(register_table_name_for_query_engine(table)),
+        deletion_current,
+        ["row_uuid", "tx_time", "tx_node_id"],
+        ["row_uuid", "tx_time", "tx_node_id"],
+    )
+    .project_fields(register_storage_fields("left."));
+    Ok(graph.project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
+}
+
+fn register_table_name_for_query_engine(table: &str) -> String {
+    format!("jazz_{table}_register")
+}
+
+fn register_global_current_table_name_for_query_engine(table: &str) -> String {
+    format!("jazz_{table}_register_global_current")
+}
+
+fn register_ahead_current_table_name_for_query_engine(table: &str) -> String {
+    format!("jazz_{table}_register_ahead_current")
+}
+
+fn register_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
+    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
+    if tier == DurabilityTier::Global {
+        return GraphBuilder::table(register_global_current_table_name_for_query_engine(table))
+            .project(key_fields);
+    }
+    let ahead_table = register_ahead_current_table_name_for_query_engine(table);
+    let ahead = if tier == DurabilityTier::Edge {
+        GraphBuilder::join(
+            GraphBuilder::table(ahead_table).project(key_fields),
+            GraphBuilder::table("jazz_transactions")
+                .filter(
+                    GroovePredicateExpr::Or(vec![
+                        GroovePredicateExpr::eq("durability", Value::Enum(2)),
+                        GroovePredicateExpr::eq("durability", Value::Enum(3)),
+                    ])
+                    .canonicalize(),
+                )
+                .project(["time", "node_id"]),
+            ["tx_time", "tx_node_id"],
+            ["time", "node_id"],
+        )
+        .project_fields(
+            key_fields
+                .into_iter()
+                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+        )
+    } else {
+        GraphBuilder::table(ahead_table).project(key_fields)
+    };
+    GraphBuilder::arg_max_by(
+        GraphBuilder::union([
+            GraphBuilder::table(register_global_current_table_name_for_query_engine(table))
+                .project(key_fields),
+            ahead,
+        ]),
+        ["row_uuid"],
+        ["tx_time", "tx_node_id"],
+    )
+    .project(key_fields)
+}
+
+fn register_storage_fields(prefix: &str) -> Vec<ProjectField> {
+    [
+        "row_uuid",
+        "tx_time",
+        "tx_node_id",
+        "schema_version",
+        "parents",
+        "created_by",
+        "created_at",
+        "updated_by",
+        "updated_at",
+        "_deletion",
+    ]
+    .into_iter()
+    .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
+    .collect()
+}
+
+fn result_membership_fields(source: &ResolvedSource) -> CapabilityResult<Vec<ProjectField>> {
+    let version = version_witness_fields(&source.row_shape)?;
+    Ok(vec![
+        ProjectField::literal("event_kind", Value::String("result_current".to_owned())),
+        ProjectField::literal(
+            "table_name",
+            Value::String(source.table_schema.name.clone()),
+        ),
+        ProjectField::named(source.row_shape.row_uuid_field.clone()),
+        ProjectField::renamed(version.tx_time_field, "content_tx_time"),
+        ProjectField::renamed(version.tx_node_field, "content_tx_node_id"),
+    ])
+}
+
+fn version_witness_fields_for_tagged_rows(
+    source: &ResolvedSource,
+    event_kind: &str,
+) -> CapabilityResult<Vec<ProjectField>> {
+    let version = version_witness_fields(&source.row_shape)?;
+    let mut fields = vec![
+        ProjectField::literal("event_kind", Value::String(event_kind.to_owned())),
+        ProjectField::literal(
+            "table_name",
+            Value::String(source.table_schema.name.clone()),
+        ),
+        ProjectField::named(source.row_shape.row_uuid_field.clone()),
+        ProjectField::renamed(version.tx_time_field.clone(), "content_tx_time"),
+        ProjectField::renamed(version.tx_node_field.clone(), "content_tx_node_id"),
+        ProjectField::renamed(version.tx_time_field, "tx_time"),
+        ProjectField::renamed(version.tx_node_field, "tx_node_id"),
+        ProjectField::renamed(version.schema_version_field, "schema_version"),
+        ProjectField::named("parents"),
+        ProjectField::renamed("$createdBy", "created_by"),
+        ProjectField::renamed("$createdAt", "created_at"),
+        ProjectField::renamed("$updatedBy", "updated_by"),
+        ProjectField::renamed("$updatedAt", "updated_at"),
+        ProjectField::null_typed("_deletion", ValueType::Nullable(Box::new(ValueType::U8))),
+    ];
+    fields.extend(source.table_schema.columns.iter().map(|column| {
+        ProjectField::renamed(
+            format!("user_{}", column.name),
+            format!("user__{}__{}", source.table_schema.name, column.name),
+        )
+    }));
+    Ok(fields)
+}
+
+fn deletion_witness_fields_for_tagged_rows(
+    source: &ResolvedSource,
+    event_kind: &str,
+) -> CapabilityResult<Vec<ProjectField>> {
+    let mut fields = vec![
+        ProjectField::literal("event_kind", Value::String(event_kind.to_owned())),
+        ProjectField::literal(
+            "table_name",
+            Value::String(source.table_schema.name.clone()),
+        ),
+        ProjectField::named(source.row_shape.row_uuid_field.clone()),
+        ProjectField::renamed("tx_time", "content_tx_time"),
+        ProjectField::renamed("tx_node_id", "content_tx_node_id"),
+        ProjectField::named("tx_time"),
+        ProjectField::named("tx_node_id"),
+        ProjectField::named("schema_version"),
+        ProjectField::named("parents"),
+        ProjectField::named("created_by"),
+        ProjectField::named("created_at"),
+        ProjectField::named("updated_by"),
+        ProjectField::named("updated_at"),
+        ProjectField::nullable("_deletion", "_deletion"),
+    ];
+    fields.extend(source.table_schema.columns.iter().map(|column| {
+        ProjectField::null_typed(
+            format!("user__{}__{}", source.table_schema.name, column.name),
+            ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+        )
+    }));
+    Ok(fields)
 }
 
 fn relation_edge_schema(
@@ -2835,10 +3481,21 @@ pub(crate) struct QueryProgram {
 /// Groove graph plus the semantic contracts needed to consume it.
 #[derive(Clone, Debug)]
 pub(crate) struct LoweredGraph {
-    /// Executable groove graph.
-    pub(crate) graph: GraphBuilder,
+    /// Executable named groove terminals emitted by this program.
+    pub(crate) terminals: Vec<LoweredTerminal>,
     /// Parameter domains expected by the graph.
     pub(crate) parameters: ParameterDomain,
     /// App row and fact schemas emitted by the graph.
     pub(crate) output: ProgramOutputSchemas,
+}
+
+/// One executable output terminal produced by query lowering.
+#[derive(Clone, Debug)]
+pub(crate) struct LoweredTerminal {
+    /// Stable sink name for the terminal.
+    pub(crate) sink: String,
+    /// Executable groove graph for this terminal.
+    pub(crate) graph: GraphBuilder,
+    /// Typed terminal output contract.
+    pub(crate) output: OutputTerminalSchema,
 }

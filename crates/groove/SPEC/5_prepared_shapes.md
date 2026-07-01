@@ -34,8 +34,8 @@ evaluation as data.
 This is why prepared shapes must be entered through the prepared APIs. A graph
 that contains a `BindingSource` has no standalone meaning: the binding rows are
 supplied by the prepared-shape machinery, not by literals embedded in the graph.
-Ordinary `query_snapshot`, `subscribe`, and `subscribe_query` therefore reject
-such graphs (`INV-SHAPE-1`).
+Ordinary `query_snapshot`, `subscribe_one_sink`, and `subscribe_query` APIs
+therefore reject such graphs (`INV-SHAPE-1`).
 
 Shape identity is structural. Graphs are hash-consed by `NodeDescriptor`
 (ch. 3), so identical prepares share the same nodes and arrangements. Sharing is

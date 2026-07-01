@@ -826,7 +826,7 @@ fn drain_param_feed_subscription(
 
 fn sqlite_feed_rows(conn: &Connection, user_id: u64) -> BTreeMap<FeedRow, i64> {
     let mut stmt = conn
-        .prepare_one_sink(
+        .prepare(
             "
             SELECT p.author_id, p.id, p.created_at
             FROM follows f
@@ -1689,7 +1689,7 @@ fn drain_param_acl_subscription(
 
 fn sqlite_acl_rows(conn: &Connection, principal: u64) -> BTreeMap<AclRow, i64> {
     let mut stmt = conn
-        .prepare_one_sink(
+        .prepare(
             "
             WITH RECURSIVE reachable(principal_id) AS (
                 SELECT parent_id FROM group_membership WHERE child_id = ?1

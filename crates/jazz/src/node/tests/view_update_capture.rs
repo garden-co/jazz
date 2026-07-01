@@ -360,7 +360,7 @@ fn assert_maintained_view_capture_tick(
 }
 
 struct MaintainedSubscriptionViewSubscription {
-    subscription: groove::ivm::Subscription,
+    subscription: groove::ivm::MultisinkSubscription,
     maintained: crate::node::maintained_subscription_view::MaintainedSubscriptionView,
     tables: BTreeMap<String, TableSchema>,
     previous_result_set: BTreeSet<ResultRowEntry>,
@@ -448,10 +448,13 @@ impl MaintainedSubscriptionViewSubscription {
         loop {
             match self.subscription.try_recv() {
                 Ok(deltas) => {
-                    let transitions = self
-                        .maintained
-                        .apply_tagged_deltas(&deltas, &self.tables, &core.node_aliases)
-                        .unwrap();
+                    let transitions = crate::node::apply_maintained_multisink_deltas(
+                        &mut self.maintained,
+                        deltas,
+                        &self.tables,
+                        &core.node_aliases,
+                    )
+                    .unwrap();
                     for member in transitions.adds {
                         let Some(entry) = member.as_row() else {
                             continue;
