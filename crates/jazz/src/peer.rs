@@ -296,13 +296,6 @@ impl PeerState {
         self.force_full_recompute_path_for_test = force;
     }
 
-    #[cfg(test)]
-    pub(crate) fn clear_query_subscription_for_test(&mut self, subscription: SubscriptionKey) {
-        if let Some(state) = self.subscriptions.get_mut(&subscription) {
-            state.query_subscription = None;
-        }
-    }
-
     fn force_full_recompute_path(&self) -> bool {
         #[cfg(test)]
         {
