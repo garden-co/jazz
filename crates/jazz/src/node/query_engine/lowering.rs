@@ -4,7 +4,6 @@ use groove::ivm::{
 };
 use groove::records::ValueType;
 
-const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
 const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 
 /// Parameter domains attached to one lowered graph.
@@ -148,14 +147,8 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
             } => {
                 for column in columns {
                     if let NormalizedValueRef::Param(param) = &column.value {
-                        if param.strip_prefix(CLAIM_PARAM_PREFIX).is_some() {
-                            domain
-                                .hidden_params
-                                .insert(param.clone(), column.ty.clone());
-                        } else {
-                            domain.user_params.insert(param.clone(), column.ty.clone());
-                            domain.routing_params.insert(route_param_field(param));
-                        }
+                        domain.user_params.insert(param.clone(), column.ty.clone());
+                        domain.routing_params.insert(route_param_field(param));
                     }
                 }
             }
@@ -2054,25 +2047,45 @@ fn lower_value_source(
             let params = domain
                 .user_params
                 .iter()
-                .chain(domain.hidden_params.iter())
                 .map(|(name, ty)| (name.clone(), ty.clone()))
                 .collect::<Vec<_>>();
             for column in columns {
-                let NormalizedValueRef::Param(param) = &column.value else {
-                    return Err(UnsupportedReason::Operator(
-                        "binding value source columns must reference binding params".to_owned(),
-                    ));
-                };
-                let Some((_, existing)) = params.iter().find(|(name, _)| name == param) else {
-                    return Err(UnsupportedReason::Operator(format!(
-                        "binding parameter '{param}' is not part of the program parameter domain"
-                    )));
-                };
-                if *existing != column.ty {
-                    return Err(UnsupportedReason::Operator(format!(
-                        "binding parameter '{param}' has conflicting value-source types"
-                    )));
+                match &column.value {
+                    NormalizedValueRef::Param(param) => {
+                        let Some((_, existing)) = params.iter().find(|(name, _)| name == param)
+                        else {
+                            return Err(UnsupportedReason::Operator(format!(
+                                "binding parameter '{param}' is not part of the program parameter domain"
+                            )));
+                        };
+                        if *existing != column.ty {
+                            return Err(UnsupportedReason::Operator(format!(
+                                "binding parameter '{param}' has conflicting value-source types"
+                            )));
+                        }
+                    }
+                    NormalizedValueRef::Claim(path) => {
+                        let _ = claim_value(path, &request.policy)?;
+                    }
+                    NormalizedValueRef::Literal(_) => {}
+                    _ => {
+                        return Err(UnsupportedReason::Operator(
+                            "binding value source columns must reference binding params, claims, or literals"
+                                .to_owned(),
+                        ));
+                    }
                 }
+            }
+            if params.is_empty() {
+                let row = columns
+                    .iter()
+                    .map(|column| lower_value_source_column(column, request))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return GraphBuilder::values(descriptor, [row]).map_err(|err| {
+                    UnsupportedReason::Operator(format!(
+                        "binding value source could not encode constant row: {err}"
+                    ))
+                });
             }
             let input_descriptor = RecordDescriptor::new(
                 params
@@ -2107,11 +2120,28 @@ fn lower_value_source(
                     columns
                         .iter()
                         .map(|column| {
-                            let NormalizedValueRef::Param(param) = &column.value else {
-                                unreachable!("checked above");
-                            };
-                            ProjectField::renamed(param.clone(), column.name.clone())
+                            Ok(match &column.value {
+                                NormalizedValueRef::Param(param) => {
+                                    ProjectField::renamed(param.clone(), column.name.clone())
+                                }
+                                NormalizedValueRef::Claim(path) => ProjectField::literal(
+                                    column.name.clone(),
+                                    claim_value(path, &request.policy)?,
+                                ),
+                                NormalizedValueRef::Literal(bytes) => {
+                                    let value =
+                                        postcard::from_bytes::<Value>(bytes).map_err(|err| {
+                                            UnsupportedReason::Operator(format!(
+                                                "literal value could not be decoded: {err}"
+                                            ))
+                                        })?;
+                                    ProjectField::literal(column.name.clone(), value)
+                                }
+                                _ => unreachable!("checked above"),
+                            })
                         })
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter()
                         .chain(retained_routes),
                 ),
             )
