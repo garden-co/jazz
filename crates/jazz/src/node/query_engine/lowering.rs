@@ -233,6 +233,7 @@ struct CorrelatedPathPlan {
     path: ProgramPathId,
     correlation: PredicateExpr,
     requirement: CorrelationRequirement,
+    output_steps: Vec<LinearStep>,
 }
 
 #[derive(Clone, Debug)]
@@ -372,6 +373,7 @@ fn analyze_root_node(
                 path: path.clone(),
                 correlation: correlation.clone(),
                 requirement: *requirement,
+                output_steps: Vec::new(),
             })
         }
         RowSetExpr::RecursiveRelation {
@@ -409,14 +411,28 @@ fn analyze_root_node(
             })
         }
         _ => {
-            let linear = analyze_linear_root(&request.input.shape.root, request, &mut visited)?;
-            validate_result_source(
-                request,
-                linear.root.source().ok_or_else(|| {
-                    UnsupportedReason::Operator("result must be the root source row".to_owned())
-                })?,
-            )?;
-            AnalyzedQueryPlan::Linear(linear)
+            let mut path_visited = visited.clone();
+            if let Ok(plan) =
+                analyze_correlated_path_root(&request.input.shape.root, request, &mut path_visited)
+            {
+                validate_result_source(
+                    request,
+                    plan.parent.root.source().ok_or_else(|| {
+                        UnsupportedReason::Operator("path parent must be a source".to_owned())
+                    })?,
+                )?;
+                visited = path_visited;
+                AnalyzedQueryPlan::CorrelatedPath(plan)
+            } else {
+                let linear = analyze_linear_root(&request.input.shape.root, request, &mut visited)?;
+                validate_result_source(
+                    request,
+                    linear.root.source().ok_or_else(|| {
+                        UnsupportedReason::Operator("result must be the root source row".to_owned())
+                    })?,
+                )?;
+                AnalyzedQueryPlan::Linear(linear)
+            }
         }
     };
 
@@ -427,6 +443,68 @@ fn analyze_root_node(
         ));
     }
     Ok(plan)
+}
+
+fn analyze_correlated_path_root(
+    node_id: &RowSetNodeId,
+    request: &QueryProgramRequest,
+    visited: &mut BTreeSet<RowSetNodeId>,
+) -> Result<CorrelatedPathPlan, UnsupportedReason> {
+    let node = request.input.shape.nodes.get(node_id).ok_or_else(|| {
+        UnsupportedReason::Operator(format!("row-set node {:?} is missing", node_id))
+    })?;
+    visited.insert(node_id.clone());
+    match node {
+        RowSetExpr::CorrelatedPathProjection {
+            input,
+            child_input,
+            path,
+            correlation,
+            requirement,
+        } => {
+            let parent = analyze_linear_root(input, request, visited)?;
+            let child = analyze_linear_subplan(child_input, &request.input.shape.nodes, visited)?;
+            Ok(CorrelatedPathPlan {
+                parent,
+                child,
+                path: path.clone(),
+                correlation: correlation.clone(),
+                requirement: *requirement,
+                output_steps: Vec::new(),
+            })
+        }
+        RowSetExpr::OrderBy { input, keys } => {
+            let mut plan = analyze_correlated_path_root(input, request, visited)?;
+            plan.output_steps.push(LinearStep::OrderBy(keys.clone()));
+            Ok(plan)
+        }
+        RowSetExpr::Slice {
+            input,
+            partition_by,
+            limit,
+            offset,
+            tie_breaker,
+            rank_output,
+        } => {
+            let mut plan = analyze_correlated_path_root(input, request, visited)?;
+            plan.output_steps.push(LinearStep::Slice {
+                partition_by: partition_by.clone(),
+                limit: *limit,
+                offset: *offset,
+                tie_breaker: tie_breaker.clone(),
+                rank_output: rank_output.clone(),
+            });
+            Ok(plan)
+        }
+        RowSetExpr::Project { input, columns } => {
+            let mut plan = analyze_correlated_path_root(input, request, visited)?;
+            plan.output_steps.push(LinearStep::Project(columns.clone()));
+            Ok(plan)
+        }
+        _ => Err(UnsupportedReason::Operator(
+            "root is not a correlated path plan".to_owned(),
+        )),
+    }
 }
 
 fn analyze_linear_root(
@@ -890,7 +968,13 @@ fn collect_plan_requirements(
         AnalyzedQueryPlan::CorrelatedPath(path) => {
             collect_linear_requirements(&path.parent, requirements)?;
             collect_linear_requirements(&path.child, requirements)?;
-            collect_predicate_requirements_for_all_sources(&path.correlation, requirements)
+            collect_predicate_requirements_for_all_sources(&path.correlation, requirements)?;
+            for step in &path.output_steps {
+                for (source, source_requirements) in requirements.iter_mut() {
+                    collect_step_requirements(step, source, source_requirements)?;
+                }
+            }
+            Ok(())
         }
         AnalyzedQueryPlan::RecursiveRelation(relation) => {
             collect_linear_requirements(&relation.seed, requirements)?;
@@ -1218,10 +1302,91 @@ fn lower_correlated_path_plan(
                 [root_source.row_shape.row_uuid_field.clone()],
             ))
         }
-        CorrelationRequirement::MatchCorrelationCardinality => Err(UnsupportedReason::Operator(
-            "match-correlation-cardinality app rows need cardinality coverage lowering".to_owned(),
-        )),
+        CorrelationRequirement::MatchCorrelationCardinality => {
+            lower_cardinality_complete_parent_graph(
+                parent,
+                child,
+                root_source,
+                parent_key,
+                child_key,
+            )
+        }
     }
+    .and_then(|graph| {
+        if path.output_steps.is_empty() {
+            Ok(graph)
+        } else {
+            let tail = LinearCurrentRoot {
+                root: path.parent.root.clone(),
+                steps: path.output_steps.clone(),
+            };
+            lower_linear_plan_steps(graph, &tail, root_source, resolved_sources, request)
+        }
+    })
+}
+
+fn lower_cardinality_complete_parent_graph(
+    parent: GraphBuilder,
+    child: GraphBuilder,
+    root_source: &ResolvedSource,
+    parent_key: String,
+    child_key: String,
+) -> Result<GraphBuilder, UnsupportedReason> {
+    let Some(parent_key_type) = source_field_type(root_source, &parent_key) else {
+        return Err(UnsupportedReason::Operator(format!(
+            "match-correlation-cardinality parent key {parent_key:?} is not projected"
+        )));
+    };
+    let is_array_key = match parent_key_type {
+        ValueType::Array(_) => true,
+        ValueType::Nullable(inner) => matches!(inner.as_ref(), ValueType::Array(_)),
+        _ => false,
+    };
+    if !is_array_key {
+        let joined = GraphBuilder::join(parent, child, [parent_key], [child_key])
+            .project_fields(project_left_source_fields(root_source));
+        return Ok(GraphBuilder::arg_min_by(
+            joined,
+            [root_source.row_shape.row_uuid_field.clone()],
+            [root_source.row_shape.row_uuid_field.clone()],
+        ));
+    }
+
+    let required_element_field = "__jazz_required_correlation_element";
+    let required = parent
+        .clone()
+        .unnest(parent_key.clone(), required_element_field);
+    let mut covered_fields = project_left_source_fields(root_source);
+    covered_fields.push(ProjectField::renamed(
+        format!("left.{required_element_field}"),
+        required_element_field,
+    ));
+    let covered = GraphBuilder::join(
+        required.clone(),
+        child,
+        [required_element_field],
+        [child_key],
+    )
+    .project_fields(covered_fields);
+    let missing = GraphBuilder::anti_join(
+        required,
+        covered,
+        [
+            root_source.row_shape.row_uuid_field.clone(),
+            required_element_field.to_owned(),
+        ],
+        [
+            root_source.row_shape.row_uuid_field.clone(),
+            required_element_field.to_owned(),
+        ],
+    )
+    .project_fields(project_source_fields(root_source));
+    Ok(GraphBuilder::anti_join(
+        parent,
+        missing,
+        [root_source.row_shape.row_uuid_field.clone()],
+        [root_source.row_shape.row_uuid_field.clone()],
+    ))
 }
 
 fn lower_correlated_path_relation_graph(
@@ -2092,6 +2257,15 @@ fn lower_join_key_ref(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<String, UnsupportedReason> {
+    if let NormalizedValueRef::SourceField {
+        source: value_source,
+        field,
+    } = value
+        && value_source == source_id
+        && field == "id"
+    {
+        return require_source_field(source, &source.row_shape.row_uuid_field);
+    }
     match lower_value_ref(value, source_id, source, request)? {
         LoweredValueRef::Field(field) => Ok(field),
         LoweredValueRef::Literal(_) => Err(UnsupportedReason::Operator(
@@ -2101,12 +2275,17 @@ fn lower_join_key_ref(
 }
 
 fn source_field_is_nullable(source: &ResolvedSource, field: &str) -> bool {
+    source_field_type(source, field)
+        .is_some_and(|field_type| matches!(field_type, ValueType::Nullable(_)))
+}
+
+fn source_field_type<'a>(source: &'a ResolvedSource, field: &str) -> Option<&'a ValueType> {
     source
         .row_shape
         .descriptor
         .field_index(field)
         .and_then(|index| source.row_shape.descriptor.fields().get(index))
-        .is_some_and(|field| matches!(&field.value_type, ValueType::Nullable(_)))
+        .map(|field| &field.value_type)
 }
 
 fn project_left_source_fields(source: &ResolvedSource) -> Vec<ProjectField> {
@@ -2117,6 +2296,17 @@ fn project_left_source_fields(source: &ResolvedSource) -> Vec<ProjectField> {
         .iter()
         .filter_map(|field| field.name.as_ref())
         .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone()))
+        .collect()
+}
+
+fn project_source_fields(source: &ResolvedSource) -> Vec<ProjectField> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| field.name.as_ref())
+        .map(|field| ProjectField::renamed(field.clone(), field.clone()))
         .collect()
 }
 

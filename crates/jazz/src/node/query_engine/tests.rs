@@ -1073,25 +1073,21 @@ fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_row
 }
 
 #[test]
-fn correlated_path_cardinality_app_rows_report_operator_gap() {
-    // Internal lowering test: cardinality matching is stricter than existence
-    // and must not be approximated by the AtLeastOne app-row graph.
+fn correlated_path_cardinality_scalar_correlation_lowers_like_at_least_one() {
+    // Internal lowering test: legacy relation semantics treat non-array
+    // cardinality correlations as "at least one readable child".
     let request = correlated_path_request(
         CorrelationRequirement::MatchCorrelationCardinality,
         row_set_output(BTreeSet::new()),
     );
 
     let mut resolver = FakeSourceResolver::default();
-    let report = lower_query_program(request, &mut resolver)
-        .expect_err("cardinality app rows need coverage");
+    let program = lower_query_program(request, &mut resolver).expect("cardinality lowers");
 
-    assert!(report.gaps.iter().any(|gap| {
-        matches!(
-            gap,
-            UnsupportedReason::Operator(message)
-                if message.contains("match-correlation-cardinality app rows")
-        )
-    }));
+    assert!(matches!(
+        program.lowered.terminals[0].graph,
+        GraphBuilder::ArgMinBy { .. }
+    ));
 }
 
 #[test]

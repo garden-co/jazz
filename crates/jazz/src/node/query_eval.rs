@@ -605,13 +605,9 @@ fn app_row_payload_projection(query: &JazzQuery) -> PayloadProjection {
 
 fn relation_snapshot_root_membership_can_use_query_engine(subqueries: &[ArraySubquery]) -> bool {
     subqueries.iter().all(|subquery| {
-        // TODO(query-engine): remove this guard once correlated path lowering
-        // supports cardinality coverage and nested array paths as first-class
-        // relation/path inputs.
-        !matches!(
-            subquery.requirement,
-            ArraySubqueryRequirement::MatchCorrelationCardinality
-        ) && subquery.nested_arrays.is_empty()
+        // TODO(query-engine): remove this guard once nested array paths are
+        // first-class relation/path inputs.
+        subquery.nested_arrays.is_empty()
     })
 }
 
