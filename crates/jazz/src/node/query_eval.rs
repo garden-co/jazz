@@ -352,21 +352,10 @@ struct LoweredQueryClauseOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LoweredQuerySource {
     IncludeDeletedCurrent { table: String, tier: DurabilityTier },
-    HistoricalCurrent { table: String, position: GlobalSeq },
     InlineCurrent { table: String },
 }
 
 impl LoweredQuerySource {
-    fn is_historical_current_for(&self, table: &str, position: GlobalSeq) -> bool {
-        matches!(
-            self,
-            Self::HistoricalCurrent {
-                table: source_table,
-                position: source_position,
-            } if source_table == table && *source_position == position
-        )
-    }
-
     fn is_include_deleted_current_for(&self, table: &str, tier: DurabilityTier) -> bool {
         matches!(
             self,
@@ -394,7 +383,7 @@ enum CurrentQueryProgramOutput {
 }
 
 struct CurrentQuerySourceResolver<'a, S> {
-    node: &'a NodeState<S>,
+    node: &'a mut NodeState<S>,
     read_view: &'a ReadView<RequestedSourceStage>,
     policy: &'a PolicyContext,
 }
@@ -410,16 +399,23 @@ where
         let Some(source) = self.read_view.sources.get(&request.source) else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
-        let SourceExpr::VisibleCurrent {
-            projection,
-            data: DataSource::Current,
-            tier,
-        } = source
-        else {
-            return Err(source_resolution_error(
-                request,
-                SourceGap::HistoricalStorageCut,
-            ));
+        let (projection, graph_tier, history_position) = match source {
+            SourceExpr::VisibleCurrent {
+                projection,
+                data: DataSource::Current,
+                tier,
+            } => (projection, Some(*tier), None),
+            SourceExpr::HistoryCut {
+                projection,
+                data: DataSource::Current,
+                position,
+            } => (projection, None, Some(*position)),
+            _ => {
+                return Err(source_resolution_error(
+                    request,
+                    SourceGap::HistoricalStorageCut,
+                ));
+            }
         };
         if !matches!(projection.schema_family, SchemaFamilySelection::Current)
             || !matches!(projection.storage, StorageSchemaSelection::Single(_))
@@ -440,14 +436,29 @@ where
             .node
             .table_in_schema(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let (graph, descriptor, metadata) = resolved_current_source_graph(
-            self.node,
-            &table,
-            *tier,
-            &request.requirements,
-            self.policy,
-        )
-        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+        let (graph, descriptor, metadata) = if let Some(position) = history_position {
+            let rows = self
+                .node
+                .current_rows_for_schema_at(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    position,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+            let graph = inline_current_graph(&table, rows)
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+            let descriptor = current_row_descriptor(&table);
+            (graph, descriptor, BTreeMap::new())
+        } else {
+            resolved_current_source_graph(
+                self.node,
+                &table,
+                graph_tier.expect("visible current source has a tier"),
+                &request.requirements,
+                self.policy,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+        };
         Ok(ResolvedSource {
             table_schema: table,
             graph,
@@ -729,6 +740,38 @@ fn current_query_read_set(
             },
         );
     }
+    QueryReadSet::primary(ReadView {
+        read_schema: schema_version,
+        policy_schema: schema_version,
+        sources,
+    })
+}
+
+fn historical_query_read_set(
+    shape: &NormalizedRowSetShape,
+    schema_version: SchemaVersionId,
+    position: GlobalSeq,
+) -> RequestedReadSet {
+    let projection = SchemaProjection {
+        schema_family: SchemaFamilySelection::Current,
+        storage: StorageSchemaSelection::Single(schema_version),
+        lens: LensSelection::Canonical,
+    };
+    let sources = shape
+        .nodes
+        .values()
+        .filter_map(|node| match node {
+            RowSetExpr::Source { source, .. } => Some((
+                source.clone(),
+                SourceExpr::HistoryCut {
+                    projection: projection.clone(),
+                    data: DataSource::Current,
+                    position,
+                },
+            )),
+            _ => None,
+        })
+        .collect();
     QueryReadSet::primary(ReadView {
         read_schema: schema_version,
         policy_schema: schema_version,
@@ -1885,7 +1928,7 @@ where
     }
 
     fn compile_current_query_program(
-        &self,
+        &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
@@ -1893,6 +1936,37 @@ where
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request(shape, binding, tier, identity, output)?;
+        self.compile_query_program_request(request)
+    }
+
+    fn compile_historical_query_program(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        position: GlobalSeq,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+    ) -> Result<QueryProgram, Error> {
+        let input = RowSetProgramInput {
+            shape: self.normalized_row_set_shape(shape, binding)?,
+            binding: ProgramBinding {
+                id: binding.binding_id(),
+                values: binding.values().clone(),
+            },
+        };
+        let request = QueryProgramRequest {
+            reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
+            policy: self.query_program_policy_context(identity),
+            input,
+            output: current_query_output_request(output, shape.query()),
+        };
+        self.compile_query_program_request(request)
+    }
+
+    fn compile_query_program_request(
+        &mut self,
+        request: QueryProgramRequest,
+    ) -> Result<QueryProgram, Error> {
         let read_view = request.reads.primary.clone();
         let policy = request.policy.clone();
         let mut resolver = CurrentQuerySourceResolver {
@@ -2417,23 +2491,21 @@ where
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
-        let query = lowered_shape.query();
+        let binding = lowered_shape.bind(BTreeMap::new())?;
+        let program = self.compile_historical_query_program(
+            &lowered_shape,
+            &binding,
+            position,
+            AuthorId::SYSTEM,
+            CurrentQueryProgramOutput::AppRows,
+        )?;
+        let deltas = self
+            .database
+            .query_graph(lowered_app_rows_graph(&program)?)
+            .map_err(Error::Groove)?;
         let table = self
-            .table_in_schema(&query.table, lowered_shape.schema_version())?
+            .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
             .clone();
-        let LoweredQueryCore {
-            source,
-            graph,
-            param_names,
-            param_types,
-        } = self.lower_historical_query_core(&lowered_shape, position)?;
-        debug_assert!(source.is_historical_current_for(&query.table, position));
-        if !param_names.is_empty() || !param_types.is_empty() {
-            return Err(Error::InvalidStoredValue(
-                "historical snapshot lowering must bind all params",
-            ));
-        }
-        let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
         self.materialize_historical_query_rows(table, deltas)
     }
 
@@ -4042,94 +4114,6 @@ where
         };
         self.query.query_shape_cache.insert(key, plan.clone());
         Ok(plan)
-    }
-
-    fn lower_historical_query_core(
-        &mut self,
-        shape: &ValidatedQuery,
-        position: GlobalSeq,
-    ) -> Result<LoweredQueryCore, Error> {
-        let query = shape.query();
-        let table = self
-            .table_in_schema(&query.table, shape.schema_version())?
-            .clone();
-        let param_types = self.inline_current_param_types(shape, &table)?;
-        let rows =
-            self.current_rows_for_schema_at(&query.table, shape.schema_version(), position)?;
-        let (source_overrides, table_overrides) =
-            self.historical_source_overrides_for_position(shape, position)?;
-        let graph = self.apply_lowered_query_clauses(
-            inline_current_graph(&table, rows)?,
-            shape,
-            &table,
-            &param_types,
-            LoweredQueryClauseOptions {
-                tier: DurabilityTier::Global,
-                output_fields: current_row_fields(&table),
-                keep_binding_params_in_output: true,
-                binding_source_shape: historical_query_binding_source_shape(shape, position),
-                source_overrides,
-                table_overrides,
-            },
-        )?;
-        let param_names = param_types.keys().cloned().collect::<Vec<_>>();
-        let param_types = param_names
-            .iter()
-            .map(|name| {
-                param_types
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| QueryError::MissingParam(name.clone()).into())
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(LoweredQueryCore {
-            source: LoweredQuerySource::HistoricalCurrent {
-                table: table.name.clone(),
-                position,
-            },
-            graph,
-            param_names,
-            param_types,
-        })
-    }
-
-    fn historical_source_overrides_for_position(
-        &mut self,
-        shape: &ValidatedQuery,
-        position: GlobalSeq,
-    ) -> Result<
-        (
-            BTreeMap<String, GraphBuilder>,
-            BTreeMap<String, TableSchema>,
-        ),
-        Error,
-    > {
-        let mut sources = BTreeMap::new();
-        let mut tables = BTreeMap::new();
-        for table_name in collect_join_source_tables(shape.query()) {
-            let table = self
-                .table_in_schema(&table_name, shape.schema_version())?
-                .clone();
-            let rows =
-                self.current_rows_for_schema_at(&table_name, shape.schema_version(), position)?;
-            sources.insert(table_name.clone(), inline_current_graph(&table, rows)?);
-            tables.insert(table_name, table);
-        }
-        for reachable in &shape.query().reachable {
-            for table_name in [&reachable.access_table, &reachable.edge_table] {
-                if sources.contains_key(table_name) {
-                    continue;
-                }
-                let table = self
-                    .table_in_schema(table_name, shape.schema_version())?
-                    .clone();
-                let rows =
-                    self.current_rows_for_schema_at(table_name, shape.schema_version(), position)?;
-                sources.insert(table_name.clone(), inline_current_graph(&table, rows)?);
-                tables.insert(table_name.clone(), table);
-            }
-        }
-        Ok((sources, tables))
     }
 
     fn lower_include_deleted_query_core(
@@ -8709,15 +8693,6 @@ fn query_binding_source_shape_for_binding(shape: &ValidatedQuery, binding: &Bind
         "jazz-query:{}:{}",
         shape.shape_id().0,
         query_binding_value_signature(binding)
-    )
-}
-
-fn historical_query_binding_source_shape(shape: &ValidatedQuery, position: GlobalSeq) -> String {
-    format!(
-        "jazz-query-at:{}:{}:{}",
-        shape.shape_id().0,
-        position.0,
-        query_binding_param_signature(shape)
     )
 }
 
