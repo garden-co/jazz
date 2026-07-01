@@ -2110,8 +2110,9 @@ fn lower_value_source_column(
         NormalizedValueRef::Literal(bytes) => postcard::from_bytes::<Value>(bytes).map_err(|err| {
             UnsupportedReason::Operator(format!("literal value could not be decoded: {err}"))
         }),
+        NormalizedValueRef::Claim(path) => claim_value(path, &request.policy),
         _ => Err(UnsupportedReason::Operator(
-            "value source columns must be binding params or literals".to_owned(),
+            "value source columns must be binding params, literals, or claims".to_owned(),
         )),
     }
 }
