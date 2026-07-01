@@ -2614,6 +2614,23 @@ where
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))
     }
 
+    fn policy_authorization_row_id_graph(
+        &mut self,
+        policy_shape: &ValidatedQuery,
+        tier: DurabilityTier,
+    ) -> Result<GraphBuilder, Error> {
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let request = self.current_query_program_request(
+            policy_shape,
+            &binding,
+            tier,
+            AuthorId::SYSTEM,
+            CurrentQueryProgramOutput::AppRows,
+        )?;
+        let program = self.compile_query_program_request(request)?;
+        Ok(lowered_app_rows_graph(&program)?.project(["row_uuid"]))
+    }
+
     fn current_query_program_request(
         &self,
         shape: &ValidatedQuery,
@@ -4181,25 +4198,17 @@ where
         output_fields: &[String],
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
-        // TODO(query-engine): replace this bridge with first-class policy
-        // source authorization lowering. `SourceRequest::authorization` now
-        // makes the semantic need explicit, but physical policy-row graph
-        // construction still re-enters the compile boundary here.
+        // TODO(query-engine): replace this bridge with a first-class policy
+        // authorization subplan in the query-engine IR. `SourceRequest::authorization`
+        // now makes the semantic need explicit, but physical policy-row graph
+        // construction still compiles an app-row authorization graph here.
         if !policy_shape.params().is_empty() {
             return Err(Error::QueryCapability(
                 "maintained policy source filters with runtime parameters must lower through query-engine binding sources"
                     .to_owned(),
             ));
         }
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let program = self.compile_current_query_program(
-            policy_shape,
-            &binding,
-            tier,
-            AuthorId::SYSTEM,
-            CurrentQueryProgramOutput::AppRows,
-        )?;
-        let authorized = lowered_app_rows_graph(&program)?.project(["row_uuid"]);
+        let authorized = self.policy_authorization_row_id_graph(policy_shape, tier)?;
         Ok(
             GraphBuilder::join(base, authorized, ["row_uuid"], ["row_uuid"]).project_fields(
                 output_fields
