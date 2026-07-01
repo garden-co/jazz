@@ -149,6 +149,7 @@ where
         Some(TxId::new(tx_time, tx_node))
     }
 
+    #[cfg(test)]
     pub(super) fn visible_global_content_version_now(
         &mut self,
         table: &str,

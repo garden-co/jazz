@@ -8,7 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::TryRecvError;
 
-use groove::ivm::{MultisinkSubscription, RecordDeltas};
+use groove::ivm::MultisinkSubscription;
+#[cfg(test)]
+use groove::ivm::RecordDeltas;
 use groove::storage::OrderedKvStorage;
 
 use crate::ids::{AuthorId, RowUuid};
@@ -17,18 +19,20 @@ use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionView,
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
 };
-use crate::node::{
-    Error, JAZZ_APP_ROWS_SINK, NodeState, PreparedQueryPlan, apply_maintained_multisink_deltas,
-    take_optional_sink_deltas,
-};
+use crate::node::{Error, NodeState, PreparedQueryPlan, apply_maintained_multisink_deltas};
+#[cfg(test)]
+use crate::node::{JAZZ_APP_ROWS_SINK, take_optional_sink_deltas};
+#[cfg(test)]
+use crate::protocol::PeerPayloadInventory;
 use crate::protocol::{
-    ContentExtent, LargeValueOwnerRef, PeerPayloadInventory, RegisterShapeOptions,
-    ResultMemberEntry, ResultRowEntry, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    ContentExtent, LargeValueOwnerRef, RegisterShapeOptions, ResultMemberEntry, ResultRowEntry,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
 };
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
 use crate::tx::{DurabilityTier, Transaction, TxId, TxKind};
 
+#[cfg(test)]
 const LARGE_REHYDRATE_RESULT_ROWS: usize = 1024;
 const DEFAULT_EDGE_SCOPE_TTL_MS: u64 = 5_000;
 
@@ -89,6 +93,7 @@ struct PeerSubscriptionState {
     closure_contributions_complete: bool,
     result_member_set: BTreeSet<ResultMemberEntry>,
     member_index: BTreeMap<MemberIndexKey, MemberSlot>,
+    #[cfg(test)]
     query_subscription: Option<MultisinkSubscription>,
     maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
     prepared_query: Option<CachedPeerQueryPlan>,
@@ -97,7 +102,10 @@ struct PeerSubscriptionState {
 
 impl PeerSubscriptionState {
     fn clear_groove_runtime_handles(&mut self) {
-        self.query_subscription = None;
+        #[cfg(test)]
+        {
+            self.query_subscription = None;
+        }
         self.maintained_subscription_view = None;
         self.prepared_query = None;
         self.groove_runtime_token = None;
@@ -181,10 +189,12 @@ impl PeerSubscriptionState {
             .collect()
     }
 
+    #[cfg(test)]
     fn contains_member(&self, member: &ResultMemberEntry) -> bool {
         self.result_member_set.contains(member)
     }
 
+    #[cfg(test)]
     fn member_for_row_key(&self, key: RowKey) -> Option<ResultMemberEntry> {
         self.member_index
             .get(&MemberIndexKey::Row(key))
@@ -435,11 +445,13 @@ impl PeerState {
         filter_view_update_to_result_table(&mut update, table);
         self.record_outgoing_view_update(&update);
         let update = update;
-        if self
-            .subscriptions
-            .get(&subscription)
-            .and_then(|state| state.query_subscription.as_ref())
-            .is_none()
+        #[cfg(test)]
+        if self.full_recompute_oracle_enabled()
+            && self
+                .subscriptions
+                .get(&subscription)
+                .and_then(|state| state.query_subscription.as_ref())
+                .is_none()
             && self
                 .subscriptions
                 .get(&subscription)
@@ -605,6 +617,7 @@ impl PeerState {
             self.record_outgoing_view_update(&update);
             return Ok(update);
         }
+        #[cfg(test)]
         if let Some(receiver) = state.query_subscription.as_ref() {
             let mut drained = Vec::new();
             loop {
@@ -912,6 +925,7 @@ impl PeerState {
         Ok(update)
     }
 
+    #[cfg(test)]
     fn rehydrate_query_full_recompute_path<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -1056,10 +1070,12 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
+        #[cfg(test)]
         let previous_row_result_set = previous_member_result_set
             .iter()
             .filter_map(ResultMemberEntry::as_row)
             .collect::<BTreeSet<_>>();
+        #[cfg(test)]
         let previous_tx_ids = previous_tx_ids(previous_row_result_set.iter());
         self.forget_subscription_with_node(node, subscription);
         let (prepared_shape, prepared_binding, plan) = node
@@ -1074,6 +1090,7 @@ impl PeerState {
         let state = self.subscriptions.entry(subscription).or_default();
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
+        #[cfg(test)]
         if self.full_recompute_oracle_enabled() {
             return self.rehydrate_query_full_recompute_path(
                 node,
@@ -1577,9 +1594,11 @@ impl PeerState {
                 unsettled.push(subscription);
                 continue;
             }
-            if self.subscriptions.get(&subscription).is_some_and(|state| {
-                state.query_subscription.is_some() || state.maintained_subscription_view.is_some()
-            }) {
+            if self
+                .subscriptions
+                .get(&subscription)
+                .is_some_and(|state| state.maintained_subscription_view.is_some())
+            {
                 continue;
             }
             let previous_role = self.role;
@@ -1718,6 +1737,7 @@ impl PeerState {
         }
     }
 
+    #[cfg(test)]
     fn query_update_from_deltas<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -1872,6 +1892,7 @@ impl PeerState {
         )
     }
 
+    #[cfg(test)]
     fn repair_touched_output_closure_contributions<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -1914,6 +1935,7 @@ impl PeerState {
         Ok(())
     }
 
+    #[cfg(test)]
     fn repair_missing_exclusive_sibling_touches<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -1955,6 +1977,7 @@ impl PeerState {
         Ok(())
     }
 
+    #[cfg(test)]
     fn can_apply_whole_table_delta_without_sibling_repair(
         &self,
         shape: &ValidatedQuery,
@@ -1963,6 +1986,7 @@ impl PeerState {
         self.identity() == AuthorId::SYSTEM && is_degenerate_whole_table(shape, binding)
     }
 
+    #[cfg(test)]
     fn rebuild_closure_contributions<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -1987,6 +2011,7 @@ impl PeerState {
         self.rebuild_closure_contributions_from_set(node, shape, binding, subscription, &result_set)
     }
 
+    #[cfg(test)]
     fn rebuild_closure_contributions_from_set<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -2094,6 +2119,7 @@ fn apply_contribution_remove<'a>(
     }
 }
 
+#[cfg(test)]
 fn replace_index_entry(
     state: &mut PeerSubscriptionState,
     member: ResultMemberEntry,
@@ -2113,6 +2139,7 @@ fn replace_index_entry(
     }
 }
 
+#[cfg(test)]
 fn remove_index_key(
     state: &mut PeerSubscriptionState,
     key: RowKey,
@@ -2124,6 +2151,7 @@ fn remove_index_key(
     }
 }
 
+#[cfg(test)]
 fn rebuild_member_index_from_contributions(state: &mut PeerSubscriptionState) {
     state.member_index.clear();
     state.result_member_set.clear();
@@ -2140,6 +2168,7 @@ fn rebuild_member_index_from_contributions(state: &mut PeerSubscriptionState) {
     );
 }
 
+#[cfg(test)]
 fn debug_assert_subscription_state(
     #[allow(unused_variables)] state: &PeerSubscriptionState,
     #[allow(unused_variables)] subscription: SubscriptionKey,
@@ -2203,6 +2232,7 @@ fn normalize_maintained_subscription_unsupported_error(error: Error) -> Error {
     }
 }
 
+#[cfg(test)]
 fn previous_member_tx_ids<'a>(
     members: impl IntoIterator<Item = &'a ResultMemberEntry>,
 ) -> BTreeSet<TxId> {
@@ -2253,6 +2283,7 @@ fn filter_view_update_to_result_table(update: &mut SyncMessage, table: &str) {
     });
 }
 
+#[cfg(test)]
 fn drain_initial_subscription_snapshot(receiver: &MultisinkSubscription) {
     while receiver.try_recv().is_ok() {}
 }
@@ -2267,6 +2298,7 @@ fn view_update_reset_result_set(update: &mut SyncMessage) {
     *reset_result_set = true;
 }
 
+#[cfg(test)]
 fn view_update_result_add_count(update: &SyncMessage) -> usize {
     let SyncMessage::ViewUpdate {
         result_member_adds, ..
@@ -2277,6 +2309,7 @@ fn view_update_result_add_count(update: &SyncMessage) -> usize {
     result_member_adds.len()
 }
 
+#[cfg(test)]
 fn is_degenerate_whole_table(shape: &ValidatedQuery, binding: &Binding) -> bool {
     let query = shape.query();
     query.filters.is_empty()
@@ -2285,6 +2318,7 @@ fn is_degenerate_whole_table(shape: &ValidatedQuery, binding: &Binding) -> bool 
         && binding.values().is_empty()
 }
 
+#[cfg(test)]
 fn merge_rehydrate_diff(update: &mut SyncMessage, diff: SyncMessage) {
     let SyncMessage::ViewUpdate {
         version_bundles,

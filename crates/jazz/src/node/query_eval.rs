@@ -74,6 +74,7 @@ pub(crate) fn take_required_sink_deltas(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn take_optional_sink_deltas(
     mut deltas: MultisinkDeltas,
     sink: &str,
@@ -2328,6 +2329,7 @@ where
         Ok(row_ids)
     }
 
+    #[cfg(test)]
     pub(crate) fn subscribe_query_binding_with_plan(
         &mut self,
         binding: &Binding,

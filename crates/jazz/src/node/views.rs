@@ -7,10 +7,12 @@
 //! emits [`crate::protocol::SyncMessage`] values.
 
 use super::policy::ViewEvaluationContext;
+#[cfg(test)]
 use super::query_eval::binding_for_shape;
 use super::*;
 use crate::protocol::{PeerPayloadInventory, ResultMemberEntry};
 
+#[cfg(test)]
 #[derive(Default)]
 struct ClosureExpansionMemo {
     current_rows: BTreeMap<(String, RowUuid), Option<CurrentRow>>,
@@ -18,6 +20,7 @@ struct ClosureExpansionMemo {
     join_rows_by_target: BTreeMap<JoinRowsKey, BTreeMap<RowUuid, Vec<CurrentRow>>>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct JoinRowsKey {
     shape_id: ShapeId,
@@ -250,6 +253,7 @@ where
     }
 
     /// Translate one query output delta record into the typed output member.
+    #[cfg(test)]
     pub(crate) fn query_output_entry_from_delta(
         &mut self,
         shape: &ValidatedQuery,
@@ -282,6 +286,7 @@ where
     /// entry. Retractions must carry their tx in the record itself: resolving
     /// against currently-visible state would name the wrong version (or none)
     /// for a row that just changed or vanished.
+    #[cfg(test)]
     pub(crate) fn query_output_entry_from_retraction(
         &mut self,
         shape: &ValidatedQuery,
@@ -311,6 +316,7 @@ where
     /// result set it already tracks for the subscription, and exists only so output
     /// removals can retract their exact closure contribution without full
     /// per-binding re-evaluation on the hot path.
+    #[cfg(test)]
     pub(crate) fn query_output_closure_contribution(
         &mut self,
         shape: &ValidatedQuery,
@@ -330,6 +336,7 @@ where
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn query_output_closure_contributions(
         &mut self,
         shape: &ValidatedQuery,
@@ -354,6 +361,7 @@ where
         Ok(contributions)
     }
 
+    #[cfg(test)]
     fn query_output_closure_contribution_with_memo(
         &mut self,
         shape: &ValidatedQuery,
@@ -389,6 +397,7 @@ where
     }
 
     /// Build a view update from already-computed result set adds/removes.
+    #[cfg(test)]
     pub(crate) fn view_update_for_query_result_delta(
         &mut self,
         subscription: SubscriptionKey,
@@ -790,6 +799,7 @@ where
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn visible_exclusive_tx_result_entries_for_table(
         &mut self,
         table_name: &str,
@@ -1046,6 +1056,7 @@ where
         Ok((shape, binding))
     }
 
+    #[cfg(test)]
     fn add_visible_result_set_entry_with_memo(
         &mut self,
         set: &mut BTreeSet<ResultRowEntry>,
@@ -1066,6 +1077,7 @@ where
         }
     }
 
+    #[cfg(test)]
     fn add_optional_visible_result_set_entry_with_memo(
         &mut self,
         set: &mut BTreeSet<ResultRowEntry>,
@@ -1082,6 +1094,7 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
     fn expand_join_closure_for_output(
         &mut self,
         shape: &ValidatedQuery,
@@ -1147,6 +1160,7 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
     fn expand_reference_closure(
         &mut self,
         table_name: &str,
@@ -1179,6 +1193,7 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
     fn expand_include_path(
         &mut self,
         table: &TableSchema,
@@ -1233,6 +1248,7 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
     fn current_row_now_with_memo(
         &mut self,
         table_name: &str,
@@ -1251,6 +1267,7 @@ where
         Ok(row)
     }
 
+    #[cfg(test)]
     fn visible_content_tx_id_for_view_tier_with_memo(
         &mut self,
         table_name: &str,
@@ -1263,6 +1280,7 @@ where
             .map(|(_, tx_id)| tx_id))
     }
 
+    #[cfg(test)]
     fn visible_current_row_for_view_tier_with_memo(
         &mut self,
         table_name: &str,
@@ -1295,6 +1313,7 @@ where
         Ok(visible)
     }
 
+    #[cfg(test)]
     fn join_rows_by_target_with_memo<'a>(
         &mut self,
         join_shape: &ValidatedQuery,
@@ -1329,6 +1348,7 @@ where
             .expect("join rows memo populated"))
     }
 
+    #[cfg(test)]
     fn current_layer_winner_for_view_tier(
         &mut self,
         table: &str,
@@ -1350,6 +1370,7 @@ where
         }
     }
 
+    #[cfg(test)]
     pub(super) fn version_bundle_for_view_memo(
         &mut self,
         table: &TableSchema,
@@ -1369,6 +1390,7 @@ where
         )
     }
 
+    #[cfg(test)]
     pub(super) fn version_bundle_for_view_memo_with_versions(
         &mut self,
         table: &TableSchema,
