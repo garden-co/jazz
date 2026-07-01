@@ -1198,6 +1198,10 @@ fn lower_correlated_path_plan(
         child_source,
         request,
     )?;
+    let parent_key_nullable = source_field_is_nullable(root_source, &parent_key);
+    let child_key_nullable = source_field_is_nullable(child_source, &child_key);
+    let parent = unwrap_join_key_if_nullable(parent, parent_key.clone(), parent_key_nullable);
+    let child = unwrap_join_key_if_nullable(child, child_key.clone(), child_key_nullable);
 
     if request.output.app_rows.is_none() {
         return Ok(GraphBuilder::join(parent, child, [parent_key], [child_key]));
@@ -1261,7 +1265,19 @@ fn lower_correlated_path_relation_graph(
         child_source,
         request,
     )?;
+    let parent_key_nullable = source_field_is_nullable(root_source, &parent_key);
+    let child_key_nullable = source_field_is_nullable(child_source, &child_key);
+    let parent = unwrap_join_key_if_nullable(parent, parent_key.clone(), parent_key_nullable);
+    let child = unwrap_join_key_if_nullable(child, child_key.clone(), child_key_nullable);
     Ok(GraphBuilder::join(parent, child, [parent_key], [child_key]))
+}
+
+fn unwrap_join_key_if_nullable(graph: GraphBuilder, field: String, nullable: bool) -> GraphBuilder {
+    if nullable {
+        graph.unwrap_nullable(field)
+    } else {
+        graph
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3039,7 +3055,7 @@ fn fact_terminal_graph(
         )),
         ProgramFactKey::RelationEdges => {
             let _ = relation_edge_schema(plan, source, resolved_sources)?;
-            Ok(graph)
+            relation_edge_graph(key, graph, plan, source, resolved_sources)
         }
         ProgramFactKey::PathCorrelationCoverage => {
             let _ = path_correlation_coverage_schema(plan, source, resolved_sources)?;
@@ -3064,6 +3080,111 @@ fn fact_terminal_graph(
             },
         })),
     }
+}
+
+fn relation_edge_graph(
+    key: &ProgramFactKey,
+    graph: GraphBuilder,
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<GraphBuilder> {
+    match plan {
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            let target = resolved_sources.get(&path.path.child).ok_or_else(|| {
+                Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Runtime(format!(
+                        "path child source {:?} was not resolved",
+                        path.path.child
+                    ))],
+                    explain: ExplainPlan::default(),
+                })
+            })?;
+            Ok(graph.project_fields(correlated_relation_edge_fields(source, target, path)?))
+        }
+        AnalyzedQueryPlan::RecursiveRelation(_) => Ok(graph),
+        AnalyzedQueryPlan::Linear(_) => Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
+            explain: ExplainPlan {
+                capabilities: vec![
+                    "relation edge facts require a path or recursive relation node".to_owned(),
+                ],
+                ..ExplainPlan::default()
+            },
+        })),
+    }
+}
+
+fn correlated_relation_edge_fields(
+    source: &ResolvedSource,
+    target: &ResolvedSource,
+    path: &CorrelatedPathPlan,
+) -> CapabilityResult<Vec<ProjectField>> {
+    let source_version = version_witness_fields(&source.row_shape)?;
+    let target_version = version_witness_fields(&target.row_shape)?;
+    Ok(vec![
+        ProjectField::literal(
+            "source_source",
+            Value::String(source.row_shape.source.table.clone()),
+        ),
+        ProjectField::literal(
+            "source_table",
+            Value::String(source.table_schema.name.clone()),
+        ),
+        ProjectField::renamed(
+            format!("left.{}", source.row_shape.row_uuid_field),
+            "source_row",
+        ),
+        ProjectField::renamed(
+            format!("left.{}", source_version.tx_time_field),
+            "source_tx_time",
+        ),
+        ProjectField::renamed(
+            format!("left.{}", source_version.tx_node_field),
+            "source_tx_node_id",
+        ),
+        ProjectField::literal("path", Value::String(correlated_relation_name(path))),
+        ProjectField::literal("kind", Value::String("array_subquery".to_owned())),
+        ProjectField::literal("role", Value::String("terminal".to_owned())),
+        ProjectField::literal(
+            "target_source",
+            Value::String(target.row_shape.source.table.clone()),
+        ),
+        ProjectField::literal(
+            "target_table",
+            Value::String(target.table_schema.name.clone()),
+        ),
+        ProjectField::renamed(
+            format!("right.{}", target.row_shape.row_uuid_field),
+            "target_row",
+        ),
+        ProjectField::renamed(
+            format!("right.{}", target_version.tx_time_field),
+            "target_tx_time",
+        ),
+        ProjectField::renamed(
+            format!("right.{}", target_version.tx_node_field),
+            "target_tx_node_id",
+        ),
+    ])
+}
+
+fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
+    path.path
+        .child
+        .path
+        .components
+        .iter()
+        .rev()
+        .find_map(|role| match role {
+            SourceRole::CorrelatedChild(name) => Some(
+                name.split_once(':')
+                    .map_or(name.as_str(), |(_, tail)| tail)
+                    .to_owned(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_else(|| path.path.child.table.clone())
 }
 
 fn deletion_witness_graph_for_members(
@@ -3279,7 +3400,18 @@ fn relation_edge_schema(
                     explain: ExplainPlan::default(),
                 })
             })?;
-            (root_source, child, None)
+            return Ok(RelationEdgeSchema {
+                source: prefixed_versioned_row_ref_schema(root_source, "source")?,
+                path_field: "path".to_owned(),
+                target: prefixed_versioned_row_ref_schema(child, "target")?,
+                kind_field: "kind".to_owned(),
+                depth_field: None,
+                edge_id_field: None,
+                branch_field: None,
+                role_field: Some("role".to_owned()),
+                order_field: None,
+                hole_state_field: None,
+            });
         }
         AnalyzedQueryPlan::RecursiveRelation(relation) => {
             let step_source = relation
@@ -3390,6 +3522,25 @@ fn versioned_row_ref_schema(source: &ResolvedSource) -> CapabilityResult<Version
             row_field: source.row_shape.row_uuid_field.clone(),
         },
         version: Some(content_version_schema(&version)),
+    })
+}
+
+fn prefixed_versioned_row_ref_schema(
+    _source: &ResolvedSource,
+    prefix: &str,
+) -> CapabilityResult<VersionedRowRefSchema> {
+    Ok(VersionedRowRefSchema {
+        row: RowRefSchema {
+            source_field: format!("{prefix}_source"),
+            table_field: format!("{prefix}_table"),
+            row_field: format!("{prefix}_row"),
+        },
+        version: Some(ResultMembershipVersionSchema::Content(
+            ContentVersionFields {
+                tx_time_field: format!("{prefix}_tx_time"),
+                tx_node_field: format!("{prefix}_tx_node_id"),
+            },
+        )),
     })
 }
 

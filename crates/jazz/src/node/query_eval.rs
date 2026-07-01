@@ -616,6 +616,18 @@ fn relation_snapshot_root_membership_can_use_query_engine(subqueries: &[ArraySub
     })
 }
 
+fn relation_snapshot_payload_can_use_query_engine(subqueries: &[ArraySubquery]) -> bool {
+    relation_snapshot_root_membership_can_use_query_engine(subqueries)
+}
+
+fn required_field_idx(descriptor: &RecordDescriptor, field: &str) -> Result<usize, Error> {
+    descriptor.field_index(field).ok_or_else(|| {
+        Error::QueryLowering(format!(
+            "query-engine relation snapshot sink did not emit field '{field}'"
+        ))
+    })
+}
+
 fn include_modes_can_drop_parent(query: &JazzQuery) -> bool {
     query
         .includes
@@ -2567,6 +2579,25 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
+        if relation_snapshot_payload_can_use_query_engine(&shape.query().array_subqueries) {
+            let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
+            let program = self.compile_current_query_program(
+                &shape,
+                &binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::RelationSnapshot,
+            )?;
+            let snapshots = self
+                .database
+                .query_graphs(lowered_program_sinks(&program))
+                .map_err(Error::Groove)?;
+            if let Some(snapshot) =
+                self.try_materialize_relation_snapshot_from_query_engine(&shape, &snapshots)?
+            {
+                return Ok(snapshot);
+            }
+        }
         let mut snapshot = RelationSnapshot::default();
         let mut relation_source_rows =
             self.query_relation_source_rows_before_pagination(shape, binding, tier, identity)?;
@@ -2654,6 +2685,101 @@ where
         };
         let table = self
             .table_in_schema(&source_shape.query().table, source_shape.schema_version())?
+            .clone();
+        let mut rows = Vec::new();
+        for (record, weight) in app_rows.iter() {
+            if weight > 0 {
+                let row = decode_current_row(&table, record)?;
+                rows.push(self.materialize_current_row(&table, row)?);
+            }
+        }
+        Ok(rows)
+    }
+
+    fn try_materialize_relation_snapshot_from_query_engine(
+        &mut self,
+        shape: &ValidatedQuery,
+        snapshots: &MultisinkDeltas,
+    ) -> Result<Option<RelationSnapshot>, Error> {
+        if !relation_snapshot_payload_can_use_query_engine(&shape.query().array_subqueries) {
+            return Ok(None);
+        }
+        let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots)?;
+        let root_count = root_rows.len();
+        let mut snapshot = RelationSnapshot {
+            root_count,
+            rows: root_rows,
+            edges: Vec::new(),
+        };
+        let mut row_keys = snapshot
+            .rows
+            .iter()
+            .map(|row| (row.table().to_owned(), row.row_uuid()))
+            .collect::<BTreeSet<_>>();
+        let Some(edges) = snapshots.get("maintained.relation_edges") else {
+            return Ok(Some(snapshot));
+        };
+        let descriptor = &edges.descriptor;
+        let source_table_idx = required_field_idx(descriptor, "source_table")?;
+        let source_row_idx = required_field_idx(descriptor, "source_row")?;
+        let relation_idx = required_field_idx(descriptor, "path")?;
+        let target_table_idx = required_field_idx(descriptor, "target_table")?;
+        let target_row_idx = required_field_idx(descriptor, "target_row")?;
+        let target_tx_time_idx = required_field_idx(descriptor, "target_tx_time")?;
+        let target_tx_node_idx = required_field_idx(descriptor, "target_tx_node_id")?;
+        for (record, weight) in edges.iter() {
+            if weight <= 0 {
+                continue;
+            }
+            let source_table = record.get_str(source_table_idx)?.to_owned();
+            let source_row = RowUuid(record.get_uuid(source_row_idx)?);
+            let relation = record.get_str(relation_idx)?.to_owned();
+            let target_table_name = record.get_str(target_table_idx)?.to_owned();
+            let target_row = RowUuid(record.get_uuid(target_row_idx)?);
+            let target_tx_time = TxTime(record.get_u64(target_tx_time_idx)?);
+            let target_tx_node = NodeAlias(record.get_u64(target_tx_node_idx)?);
+            snapshot.edges.push(RelationEdge {
+                source_table,
+                source_row,
+                relation,
+                target_table: target_table_name.clone(),
+                target_row,
+            });
+            if row_keys.insert((target_table_name.clone(), target_row)) {
+                let target_table = self
+                    .table_in_schema(&target_table_name, shape.schema_version())?
+                    .clone();
+                let version = self
+                    .query_version_by_alias_with_descriptor(
+                        &target_table_name,
+                        target_row,
+                        VersionLayer::Content,
+                        target_tx_time,
+                        target_tx_node,
+                        &target_table.history_storage_table().record_schema(),
+                    )?
+                    .ok_or(Error::InvalidStoredValue(
+                        "relation edge target version is missing",
+                    ))?;
+                let row = self.current_row_from_materialized_version(&target_table, &version)?;
+                snapshot.rows.push(row);
+            }
+        }
+        Ok(Some(snapshot))
+    }
+
+    fn materialize_relation_snapshot_root_rows(
+        &mut self,
+        shape: &ValidatedQuery,
+        snapshots: &MultisinkDeltas,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let Some(app_rows) = snapshots.get(JAZZ_APP_ROWS_SINK) else {
+            return Err(Error::QueryLowering(
+                "relation snapshot program did not emit app rows".to_owned(),
+            ));
+        };
+        let table = self
+            .table_in_schema(&shape.query().table, shape.schema_version())?
             .clone();
         let mut rows = Vec::new();
         for (record, weight) in app_rows.iter() {
