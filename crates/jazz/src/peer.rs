@@ -18,7 +18,7 @@ use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
     MaintainedTerminalSchemas,
 };
-use crate::node::{Error, NodeState, apply_maintained_multisink_deltas};
+use crate::node::{Error, NodeState};
 use crate::protocol::{
     ContentExtent, LargeValueOwnerRef, RegisterShapeOptions, ResultMemberEntry, ResultRowEntry,
     SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
@@ -553,13 +553,14 @@ impl PeerState {
                 match maintained_subscription_view.subscription.try_recv() {
                     Ok(deltas) => {
                         self.metrics.maintained_subscription_view.delta_batches_in += 1;
-                        let transitions = apply_maintained_multisink_deltas(
-                            &mut maintained_subscription_view.maintained,
-                            deltas,
-                            &maintained_subscription_view.terminal_schemas,
-                            &maintained_subscription_view.tables,
-                            &node.node_aliases,
-                        )?;
+                        let transitions = maintained_subscription_view
+                            .maintained
+                            .apply_multisink_deltas(
+                                deltas,
+                                &maintained_subscription_view.terminal_schemas,
+                                &maintained_subscription_view.tables,
+                                &node.node_aliases,
+                            )?;
                         for member in transitions.adds {
                             let before = previous_member_result_set.contains(&member);
                             states
