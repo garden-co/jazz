@@ -1756,6 +1756,20 @@ mod tests {
         (shape, binding)
     }
 
+    fn title_param_eq_column_shape_binding(title: &str) -> (ValidatedQuery, Binding) {
+        let shape = Query::from("todos")
+            .filter(eq(param("title"), col("title")))
+            .validate(&schema())
+            .unwrap();
+        let binding = shape
+            .bind(BTreeMap::from([(
+                "title".to_owned(),
+                Value::String(title.to_owned()),
+            )]))
+            .unwrap();
+        (shape, binding)
+    }
+
     fn title_contains_shape_binding(needle: &str) -> (ValidatedQuery, Binding) {
         let shape = Query::from("todos")
             .filter(crate::query::contains(
@@ -3104,6 +3118,38 @@ mod tests {
         );
         assert!(result_member_removes.is_empty());
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
+    }
+
+    #[test]
+    fn maintained_subscription_view_eq_param_left_stays_maintained() {
+        let (_dir, mut core) = open_node_with_uuid(node(0x9f));
+        let tx_id = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(0x6f), 1_000).cells(title_cells("match")),
+            )
+            .unwrap();
+        accept_global(&mut core, tx_id, 1);
+        let excluded = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(0x70), 1_001).cells(title_cells("other")),
+            )
+            .unwrap();
+        accept_global(&mut core, excluded, 2);
+        let (shape, binding) = title_param_eq_column_shape_binding("match");
+        let subscription = subscription_key(&shape, &binding);
+        let mut peer = PeerState::new();
+
+        peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        assert!(maintained_subscription_id(&peer, subscription).is_some());
+        assert_eq!(
+            row_result_set(&peer, subscription),
+            Some(BTreeSet::from([(
+                "todos".to_owned().into(),
+                row(0x6f),
+                tx_id,
+            )]))
+        );
     }
 
     #[test]
