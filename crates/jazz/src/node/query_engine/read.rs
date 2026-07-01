@@ -128,6 +128,16 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         /// Snapshot frontier.
         snapshot: Snapshot,
     },
+    /// Receiver-side settled result set for one registered binding/view.
+    ///
+    /// This is how view-complete partial exclusive payloads participate in
+    /// one-shot reads without pretending to be globally current table state.
+    SettledBindingView {
+        /// Schema/storage/lens projection used by this source.
+        projection: SchemaProjection<R>,
+        /// Canonical registered binding/view result-set identity.
+        binding_view: BindingViewKey,
+    },
     /// Overlay local/branch/transactional writes on top of another source.
     WithOverlays {
         /// Base source expression.
@@ -172,6 +182,7 @@ impl<R: SourceResolution> SourceExpr<R> {
                 }
             }
             SourceExpr::HistoryCut { .. } | SourceExpr::SnapshotRef { .. } => None,
+            SourceExpr::SettledBindingView { .. } => None,
         }
     }
 }
