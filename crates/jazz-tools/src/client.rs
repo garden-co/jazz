@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::public_schema::OrderedRowDelta;
+use crate::public_api::types::{OrderedAdded, OrderedRemoved, OrderedUpdated};
 use crate::public_schema::Schema;
 use crate::public_schema::TableName;
+use crate::public_schema::{OrderedRowDelta, Row};
 use crate::public_schema::{Query, Session, Value, WriteContext};
 use crate::server::core_websocket_transport::WebSocketTransport;
 use crate::server::public_schema_convert::convert_public_schema;
@@ -157,6 +158,14 @@ impl Backend {
             Self::RocksDb(db) => {
                 db.connect_upstream(transport);
             }
+        }
+    }
+
+    fn set_identity_claims(&self, identity: CoreAuthorId, claims: HashMap<String, CoreValue>) {
+        match self {
+            Self::Memory(db) => db.set_identity_claims(identity, claims.into_iter().collect()),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.set_identity_claims(identity, claims.into_iter().collect()),
         }
     }
 
@@ -1043,15 +1052,62 @@ impl ClientDbInner {
         let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
             let mut stream = stream;
+            let mut previous_rows: Vec<ObjectId> = Vec::new();
             loop {
                 match stream.next_event().await {
-                    Some(CoreSubscriptionEvent::Opened { current, .. })
-                    | Some(CoreSubscriptionEvent::Reset { current, .. }) => {
+                    Some(CoreSubscriptionEvent::Opened { current, .. }) => {
                         inner.borrow_mut().remember_rows(&table, &current.rows);
-                        let _ = tx.send(OrderedRowDelta::default());
+                        let Ok(delta) =
+                            JazzClient::core_subscription_snapshot_delta(&db, &current.rows)
+                        else {
+                            break;
+                        };
+                        previous_rows = current
+                            .rows
+                            .iter()
+                            .map(|row| ObjectId::from_uuid(row.row_uuid().0))
+                            .collect();
+                        let _ = tx.send(delta);
                     }
-                    Some(CoreSubscriptionEvent::Delta { .. }) => {
-                        let _ = tx.send(OrderedRowDelta::default());
+                    Some(CoreSubscriptionEvent::Reset { current, .. }) => {
+                        inner.borrow_mut().remember_rows(&table, &current.rows);
+                        let Ok(delta) = JazzClient::core_subscription_reset_delta(
+                            &db,
+                            &previous_rows,
+                            &current.rows,
+                        ) else {
+                            break;
+                        };
+                        previous_rows = current
+                            .rows
+                            .iter()
+                            .map(|row| ObjectId::from_uuid(row.row_uuid().0))
+                            .collect();
+                        let _ = tx.send(delta);
+                    }
+                    Some(CoreSubscriptionEvent::Delta {
+                        current,
+                        added,
+                        updated,
+                        removed,
+                        ..
+                    }) => {
+                        inner.borrow_mut().remember_rows(&table, &current.rows);
+                        let Ok(delta) = JazzClient::core_subscription_change_delta(
+                            &db,
+                            &current.rows,
+                            &added,
+                            &updated,
+                            &removed,
+                        ) else {
+                            break;
+                        };
+                        previous_rows = current
+                            .rows
+                            .iter()
+                            .map(|row| ObjectId::from_uuid(row.row_uuid().0))
+                            .collect();
+                        let _ = tx.send(delta);
                     }
                     Some(CoreSubscriptionEvent::Closed) | None => break,
                 }
@@ -1280,6 +1336,84 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
     }
 }
 
+fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue> {
+    match value {
+        serde_json::Value::Null => Ok(CoreValue::Nullable(None)),
+        serde_json::Value::Bool(value) => Ok(CoreValue::Bool(value)),
+        serde_json::Value::String(value) => Ok(CoreValue::String(value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                u32::try_from(value)
+                    .map(CoreValue::U32)
+                    .or(Ok(CoreValue::U64(value)))
+            } else if let Some(value) = value.as_i64() {
+                i32::try_from(value)
+                    .map(|value| CoreValue::U32(encode_signed_i32_for_core(value)))
+                    .map_err(|_| {
+                        JazzError::Connection(format!(
+                            "signed JWT claim number {value} is outside supported i32 range"
+                        ))
+                    })
+            } else if let Some(value) = value.as_f64() {
+                Ok(CoreValue::F64(value))
+            } else {
+                Err(JazzError::Connection(
+                    "JWT claim number is not representable".to_string(),
+                ))
+            }
+        }
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(json_claim_to_core_value)
+            .collect::<Result<Vec<_>>>()
+            .map(CoreValue::Array),
+        serde_json::Value::Object(_) => Err(JazzError::Connection(
+            "nested JWT claim objects are not supported by core policy claims yet".to_string(),
+        )),
+    }
+}
+
+fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, CoreValue>> {
+    let serde_json::Value::Object(claims) = session.claims.clone() else {
+        return Err(JazzError::Connection(
+            "JWT claims payload must be a JSON object".to_string(),
+        ));
+    };
+    let mut core_claims = HashMap::new();
+    core_claims.insert("sub".to_owned(), CoreValue::String(session.user_id.clone()));
+    core_claims.insert(
+        "user_id".to_owned(),
+        CoreValue::String(session.user_id.clone()),
+    );
+    core_claims.insert(
+        "authMode".to_owned(),
+        CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
+    );
+    for (name, value) in claims {
+        core_claims.insert(name, json_claim_to_core_value(value)?);
+    }
+    Ok(core_claims)
+}
+
+fn auth_mode_claim_value(auth_mode: crate::public_api::session::AuthMode) -> &'static str {
+    match auth_mode {
+        crate::public_api::session::AuthMode::External => "external",
+        crate::public_api::session::AuthMode::LocalFirst => "local-first",
+        crate::public_api::session::AuthMode::Anonymous => "anonymous",
+    }
+}
+
+fn core_row_provenance_to_public(
+    provenance: jazz::node::RowProvenance,
+) -> crate::metadata::RowProvenance {
+    crate::metadata::RowProvenance {
+        created_by: provenance.created_by.0.to_string(),
+        created_at: provenance.created_at.physical_ms(),
+        updated_by: provenance.updated_by.0.to_string(),
+        updated_at: provenance.updated_at.physical_ms(),
+    }
+}
+
 fn encode_signed_i32_for_core(value: i32) -> u32 {
     u32::from_ne_bytes(value.to_ne_bytes()) ^ 0x8000_0000
 }
@@ -1431,6 +1565,112 @@ impl JazzClient {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    fn core_subscription_row_to_public(db: &Backend, row: &jazz::node::CurrentRow) -> Result<Row> {
+        let (_, encoded) = row.encoded_record();
+        let provenance = db
+            .row_provenance(row)
+            .map_err(|error| JazzError::Query(error.to_string()))?
+            .map(core_row_provenance_to_public)
+            .unwrap_or_else(|| crate::metadata::RowProvenance::for_insert("jazz:unknown", 0));
+        Ok(Row::new(
+            ObjectId::from_uuid(row.row_uuid().0),
+            encoded.to_vec(),
+            BatchId([0; 16]),
+            provenance,
+        ))
+    }
+
+    fn core_subscription_snapshot_delta(
+        db: &Backend,
+        rows: &[jazz::node::CurrentRow],
+    ) -> Result<OrderedRowDelta> {
+        let added = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let public = Self::core_subscription_row_to_public(db, row)?;
+                Ok(OrderedAdded {
+                    id: public.id,
+                    index,
+                    row: public,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(OrderedRowDelta {
+            added,
+            ..OrderedRowDelta::default()
+        })
+    }
+
+    fn core_subscription_reset_delta(
+        db: &Backend,
+        previous_rows: &[ObjectId],
+        rows: &[jazz::node::CurrentRow],
+    ) -> Result<OrderedRowDelta> {
+        let removed = previous_rows
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| OrderedRemoved { id, index })
+            .collect();
+        let mut delta = Self::core_subscription_snapshot_delta(db, rows)?;
+        delta.removed = removed;
+        Ok(delta)
+    }
+
+    fn core_subscription_change_delta(
+        db: &Backend,
+        current_rows: &[jazz::node::CurrentRow],
+        added_rows: &[jazz::node::CurrentRow],
+        updated_rows: &[jazz::node::CurrentRow],
+        removed_rows: &[jazz::db::RemovedRow],
+    ) -> Result<OrderedRowDelta> {
+        let index_of = |id: ObjectId| {
+            current_rows
+                .iter()
+                .position(|row| ObjectId::from_uuid(row.row_uuid().0) == id)
+                .unwrap_or(0)
+        };
+        let added = added_rows
+            .iter()
+            .map(|row| {
+                let public = Self::core_subscription_row_to_public(db, row)?;
+                Ok(OrderedAdded {
+                    id: public.id,
+                    index: index_of(public.id),
+                    row: public,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let updated = updated_rows
+            .iter()
+            .map(|row| {
+                let public = Self::core_subscription_row_to_public(db, row)?;
+                let index = index_of(public.id);
+                Ok(OrderedUpdated {
+                    id: public.id,
+                    old_index: index,
+                    new_index: index,
+                    row: Some(public),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let removed = removed_rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| OrderedRemoved {
+                id: ObjectId::from_uuid(row.row_uuid.0),
+                index,
+            })
+            .collect();
+        Ok(OrderedRowDelta {
+            added,
+            removed,
+            updated,
+            pending: false,
+        })
     }
 
     fn core_magic_value(
@@ -1591,6 +1831,13 @@ impl JazzClient {
             )
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;
+            if let Some(session) = default_session.as_ref() {
+                let claims = session_claims_to_core_claims(session)?;
+                db.inner
+                    .borrow()
+                    .db
+                    .set_identity_claims(identity.author, claims);
+            }
             let client = Self {
                 default_session,
                 write_context: None,
