@@ -43,7 +43,7 @@ use crate::query::{
     Include, JoinTarget, JoinVia, Operand, OrderDirection, PolicyBranch, Predicate,
     Query as JazzQuery, ShapeId, ValidatedQuery,
 };
-use crate::schema::branch_metadata_table_schema;
+use crate::schema::{ColumnSchema, branch_metadata_table_schema};
 
 const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
@@ -439,14 +439,6 @@ where
                 SourceGap::SchemaProjection,
             ));
         }
-        if history_position.is_none()
-            && self.read_view.read_schema != self.node.catalogue.current_schema_version_id
-        {
-            return Err(source_resolution_error(
-                request,
-                SourceGap::SchemaProjection,
-            ));
-        }
         let table = self
             .node
             .table_in_schema_or_branch_metadata(&request.source.table, self.read_view.read_schema)
@@ -578,12 +570,108 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
             let descriptor = current_row_descriptor(&table);
             (graph, descriptor, BTreeMap::new())
-        } else if request.visibility == RowVisibility::IncludeDeleted {
-            (
-                include_deleted_current_graph(
-                    &table,
+        } else if request.visibility == RowVisibility::Visible
+            && (self.read_view.read_schema != self.node.catalogue.current_schema_version_id
+                || self
+                    .node
+                    .catalogue
+                    .partitions
+                    .iter()
+                    .any(|(logical, version)| {
+                        logical == &request.source.table
+                            && *version != self.node.catalogue.current_schema_version_id
+                    }))
+        {
+            if !request.requirements.metadata.is_empty() {
+                return Err(source_resolution_error(
+                    request,
+                    SourceGap::SchemaProjection,
+                ));
+            }
+            let rows = self
+                .node
+                .current_rows_for_schema(
+                    &request.source.table,
+                    self.read_view.read_schema,
                     graph_tier.expect("visible current source has a tier"),
-                ),
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let base = inline_current_graph(&table, rows)
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let graph = match &request.authorization {
+                SourceAuthorizationRequest::System => base,
+                SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                } => {
+                    if plan.protected_source.table != table.name
+                        || plan.role != PolicyDecisionRole::Read
+                        || plan.protected_row_field != "row_uuid"
+                    {
+                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    }
+                    let policy_request = self
+                        .node
+                        .table_read_policy_authorization_request(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            ParamBindingMode::InlineAllReachableSeeds,
+                            graph_tier.expect("visible current source has a tier"),
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                    self.node
+                        .policy_filtered_current_source_graph_via_query_engine(
+                            policy_request,
+                            base,
+                            &current_row_fields(&table),
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                }
+            };
+            let descriptor = current_row_descriptor(&table);
+            (graph, descriptor, BTreeMap::new())
+        } else if request.visibility == RowVisibility::IncludeDeleted {
+            let tier = graph_tier.expect("visible current source has a tier");
+            let base = include_deleted_current_graph(&table, tier);
+            let graph = match &request.authorization {
+                SourceAuthorizationRequest::System => base,
+                SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                } => {
+                    if plan.protected_source.table != table.name
+                        || plan.role != PolicyDecisionRole::Read
+                        || plan.protected_row_field != "row_uuid"
+                    {
+                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    }
+                    let policy_request = self
+                        .node
+                        .table_read_policy_authorization_request_for_include_deleted(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            tier,
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                    let mut output_fields = current_row_fields(&table);
+                    output_fields.push("__jazz_deleted".to_owned());
+                    self.node
+                        .policy_filtered_current_source_graph_via_query_engine(
+                            policy_request,
+                            base,
+                            &output_fields,
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                }
+            };
+            (
+                graph,
                 include_deleted_current_row_descriptor(&table),
                 BTreeMap::new(),
             )
@@ -594,6 +682,7 @@ where
                 graph_tier.expect("visible current source has a tier"),
                 &request.requirements,
                 &request.authorization,
+                self.read_view.policy_schema,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
         };
@@ -623,6 +712,7 @@ fn resolved_current_source_graph<S>(
     tier: DurabilityTier,
     requirements: &SourceRequirements,
     authorization: &SourceAuthorizationRequest,
+    policy_schema: SchemaVersionId,
 ) -> Result<
     (
         GraphBuilder,
@@ -716,7 +806,8 @@ where
             let binding_source_shape = plan.binding_source_shape.clone();
             let binding_user_params = plan.binding_user_params.clone();
             let policy_request = node.table_read_policy_authorization_request(
-                table,
+                policy_schema,
+                &table.name,
                 *permission_subject,
                 ParamBindingMode::InlineAllReachableSeeds,
                 tier,
@@ -891,13 +982,14 @@ fn join_lookup_source_id(lookup: &crate::query::JoinSourceLookup, path: &str) ->
 
 fn current_query_read_set(
     shape: &NormalizedRowSetShape,
-    schema_version: SchemaVersionId,
+    read_schema: SchemaVersionId,
+    policy_schema: SchemaVersionId,
     tier: DurabilityTier,
     settled_binding_view: Option<BindingViewKey>,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
         schema_family: SchemaFamilySelection::Current,
-        storage: StorageSchemaSelection::Single(schema_version),
+        storage: StorageSchemaSelection::Single(read_schema),
         lens: LensSelection::Canonical,
     };
     let mut sources = shape
@@ -940,8 +1032,8 @@ fn current_query_read_set(
         );
     }
     QueryReadSet::primary(ReadView {
-        read_schema: schema_version,
-        policy_schema: schema_version,
+        read_schema,
+        policy_schema,
         sources,
     })
 }
@@ -2230,7 +2322,11 @@ fn normalize_filter_join_chain(
     }
 
     for (index, join) in chain.joins.iter().enumerate() {
-        let path = format!("{prefix}:join_via:{index}");
+        let path = if prefix == "query" {
+            format!("join_via:{index}")
+        } else {
+            format!("{prefix}:join_via:{index}")
+        };
         let (right, join_source) =
             normalize_join_via_right(nodes, auxiliary_sources, schema, join, &path)?;
         let join_predicate = join_via_predicate(root_source, &join_source, join);
@@ -2642,7 +2738,13 @@ where
             },
         };
         let request = QueryProgramRequest {
-            reads: current_query_read_set(&input.shape, shape.schema_version(), tier, None),
+            reads: current_query_read_set(
+                &input.shape,
+                shape.schema_version(),
+                self.catalogue.current_schema_version_id,
+                tier,
+                None,
+            ),
             policy: self.query_program_policy_context(identity),
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
@@ -2783,7 +2885,8 @@ where
         tier: DurabilityTier,
     ) -> Result<BTreeSet<RowUuid>, Error> {
         let request = self.table_read_policy_authorization_request(
-            table,
+            self.catalogue.current_schema_version_id,
+            &table.name,
             identity,
             ParamBindingMode::InlineAllReachableSeeds,
             tier,
@@ -2853,6 +2956,7 @@ where
             reads: current_query_read_set(
                 &input.shape,
                 policy_shape.schema_version(),
+                policy_shape.schema_version(),
                 DurabilityTier::Local,
                 None,
             ),
@@ -2904,6 +3008,21 @@ where
         output: CurrentQueryProgramOutput,
         settled_binding_view: Option<BindingViewKey>,
     ) -> Result<QueryProgramRequest, Error> {
+        let lowered_shape;
+        let lowered_binding;
+        let (shape, binding) = if !self.can_use_prepared_current_query_plan(shape) {
+            let read_schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&shape.schema_version())
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+            lowered_shape =
+                inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
+            lowered_binding = lowered_shape.bind(BTreeMap::new())?;
+            (&lowered_shape, &lowered_binding)
+        } else {
+            (shape, binding)
+        };
         let input = RowSetProgramInput {
             shape: self.normalized_row_set_shape(shape, binding)?,
             binding: ProgramBinding {
@@ -2917,6 +3036,7 @@ where
             reads: current_query_read_set(
                 &input.shape,
                 shape.schema_version(),
+                self.catalogue.current_schema_version_id,
                 tier,
                 settled_binding_view,
             ),
@@ -3078,7 +3198,7 @@ where
                 normalize_array_subquery(&mut nodes, current, &root_source, subquery, &[index])?;
         }
 
-        if !query.order_by.is_empty() {
+        if query.aggregate.is_none() && !query.order_by.is_empty() {
             let order_node = RowSetNodeId("order".to_owned());
             nodes.insert(
                 order_node.clone(),
@@ -3093,7 +3213,7 @@ where
             );
             current = order_node;
         }
-        if query.limit.is_some() || query.offset != 0 {
+        if query.aggregate.is_none() && (query.limit.is_some() || query.offset != 0) {
             let slice_node = RowSetNodeId("slice".to_owned());
             nodes.insert(
                 slice_node.clone(),
@@ -3312,20 +3432,32 @@ where
                 settled_binding_view,
             )?)
         };
+        let needs_binding = || {
+            let parameters = &program
+                .as_ref()
+                .expect("program is compiled when no prepared plan is supplied")
+                .lowered
+                .parameters;
+            !parameters.user_params.is_empty() || !parameters.claim_params.is_empty()
+        };
         let plan = match prepared_plan {
             Some(plan) if settled_binding_view.is_none() => Some(plan.clone()),
             Some(_) => None,
-            None if settled_binding_view.is_none() && {
-                let parameters = &program
-                    .as_ref()
-                    .expect("program is compiled when no prepared plan is supplied")
-                    .lowered
-                    .parameters;
-                !parameters.user_params.is_empty() || !parameters.claim_params.is_empty()
-            } =>
+            None if settled_binding_view.is_none()
+                && self.can_use_prepared_current_query_plan(shape)
+                && needs_binding() =>
             {
                 Some(self.prepared_query_plan(shape, binding, tier, identity)?)
             }
+            None if settled_binding_view.is_none() && needs_binding() => Some(
+                self.prepared_query_plan_from_program(
+                    program
+                        .as_ref()
+                        .expect("program is compiled when no prepared plan is supplied"),
+                    shape,
+                    binding,
+                )?,
+            ),
             None => None,
         };
         let policy = self.query_program_policy_context(identity);
@@ -3374,6 +3506,9 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Option<BindingViewKey>, Error> {
+        if !self.can_use_prepared_current_query_plan(shape) {
+            return Ok(None);
+        }
         let binding_view_key = BindingViewKey::new(
             shape.shape_id(),
             binding.binding_id(),
@@ -3384,6 +3519,14 @@ where
             .settled_result_sets
             .contains_key(&binding_view_key)
             .then_some(binding_view_key))
+    }
+
+    fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
+        shape.schema_version() == self.catalogue.current_schema_version_id
+            && !self.catalogue.partitions.iter().any(|(table, version)| {
+                table == &shape.query().table
+                    && *version != self.catalogue.current_schema_version_id
+            })
     }
 
     fn settled_binding_view_source_rows(
@@ -3996,8 +4139,14 @@ where
     fn finish_engine_query_rows(
         &self,
         query: &crate::query::Query,
-        rows: &mut [CurrentRow],
+        rows: &mut Vec<CurrentRow>,
     ) -> Result<(), Error> {
+        if query.aggregate.is_some() {
+            *rows = self.aggregate_query_rows(query, rows)?;
+            self.apply_query_order(query, rows)?;
+            apply_query_window(query, rows);
+            return Ok(());
+        }
         // Groove lowering owns membership/windowing, but one-shot APIs still
         // return a deterministic Vec. Re-apply ordering to the selected rows
         // without re-applying pagination.
@@ -4051,6 +4200,53 @@ where
             left.row_uuid().to_bytes().cmp(&right.row_uuid().to_bytes())
         });
         Ok(())
+    }
+
+    fn aggregate_query_rows(
+        &self,
+        query: &crate::query::Query,
+        rows: &[CurrentRow],
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let Some(aggregate) = &query.aggregate else {
+            return Ok(rows.to_vec());
+        };
+        let source_table = self.table(&query.table)?.clone();
+        let mut groups = BTreeMap::<String, (Option<Value>, Vec<CurrentRow>)>::new();
+        if let Some(group_by) = &aggregate.group_by {
+            for row in rows {
+                let value = query_order_value(row, &source_table, group_by);
+                let key = value
+                    .as_ref()
+                    .map(|value| format!("{value:?}"))
+                    .unwrap_or_else(|| "<null>".to_owned());
+                groups
+                    .entry(key)
+                    .or_insert_with(|| (value.clone(), Vec::new()))
+                    .1
+                    .push(row.clone());
+            }
+        } else {
+            groups.insert("<all>".to_owned(), (None, rows.to_vec()));
+        }
+
+        let aggregate_table = aggregate_result_table(query, &source_table)?;
+        groups
+            .into_values()
+            .enumerate()
+            .map(|(idx, (group_value, rows))| {
+                let mut cells = BTreeMap::new();
+                if let (Some(group_by), Some(value)) = (&aggregate.group_by, group_value) {
+                    cells.insert(group_by.clone(), value);
+                }
+                for aggregate in &aggregate.aggregates {
+                    cells.insert(
+                        aggregate.alias.clone(),
+                        aggregate_value(aggregate, &source_table, &rows)?,
+                    );
+                }
+                current_row_from_cells(&aggregate_table, aggregate_row_uuid(idx), &cells)
+            })
+            .collect()
     }
 
     fn apply_projection(
@@ -4302,6 +4498,17 @@ where
             identity,
             CurrentQueryProgramOutput::AppRows,
         )?;
+        let plan = self.prepared_query_plan_from_program(&program, shape, binding)?;
+        self.query.query_shape_cache.insert(key, plan.clone());
+        Ok(plan)
+    }
+
+    fn prepared_query_plan_from_program(
+        &mut self,
+        program: &QueryProgram,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<PreparedQueryPlan, Error> {
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_app_rows_graph(&program)?;
         let params = prepared_params_from_domain(&program.lowered.parameters);
@@ -4316,10 +4523,16 @@ where
                 .cloned()
                 .zip(params.iter().map(|param| param.ty.value_type())),
         );
-        let plan = if params.is_empty() {
-            PreparedQueryPlan::Graph(graph)
+        if params.is_empty() {
+            Ok(PreparedQueryPlan::Graph(graph))
         } else {
-            let binding_source_shape = self.query_binding_source_shape_for_binding(shape, binding);
+            let binding_source_shape = program
+                .request
+                .input
+                .binding
+                .source_shape
+                .clone()
+                .unwrap_or_else(|| self.query_binding_source_shape_for_binding(shape, binding));
             let route_fields = terminal_route_fields(&route_params, &app_row_fields);
             let prepared = self.database.prepare(
                 [groove::ivm::RoutedMultisinkTerminal::new(
@@ -4331,13 +4544,11 @@ where
                 binding_source_shape,
                 binding_descriptor,
             )?;
-            PreparedQueryPlan::Prepared {
+            Ok(PreparedQueryPlan::Prepared {
                 shape: prepared.id(),
                 params,
-            }
-        };
-        self.query.query_shape_cache.insert(key, plan.clone());
-        Ok(plan)
+            })
+        }
     }
 
     pub(crate) fn open_seeded_maintained_subscription_view(
@@ -4489,13 +4700,71 @@ where
 
     fn table_read_policy_authorization_request(
         &self,
-        table: &TableSchema,
+        policy_schema_version: SchemaVersionId,
+        table_name: &str,
         identity: AuthorId,
         param_binding_mode: ParamBindingMode,
         tier: DurabilityTier,
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
     ) -> Result<QueryProgramRequest, Error> {
+        self.table_read_policy_authorization_request_with_root_visibility(
+            policy_schema_version,
+            table_name,
+            identity,
+            param_binding_mode,
+            tier,
+            binding_source_shape,
+            binding_user_params,
+            false,
+        )
+    }
+
+    fn table_read_policy_authorization_request_for_include_deleted(
+        &self,
+        policy_schema_version: SchemaVersionId,
+        table_name: &str,
+        identity: AuthorId,
+        tier: DurabilityTier,
+        binding_source_shape: Option<String>,
+        binding_user_params: BTreeMap<String, ColumnType>,
+    ) -> Result<QueryProgramRequest, Error> {
+        self.table_read_policy_authorization_request_with_root_visibility(
+            policy_schema_version,
+            table_name,
+            identity,
+            ParamBindingMode::InlineAllReachableSeeds,
+            tier,
+            binding_source_shape,
+            binding_user_params,
+            true,
+        )
+    }
+
+    fn table_read_policy_authorization_request_with_root_visibility(
+        &self,
+        policy_schema_version: SchemaVersionId,
+        table_name: &str,
+        identity: AuthorId,
+        param_binding_mode: ParamBindingMode,
+        tier: DurabilityTier,
+        binding_source_shape: Option<String>,
+        binding_user_params: BTreeMap<String, ColumnType>,
+        include_deleted_root: bool,
+    ) -> Result<QueryProgramRequest, Error> {
+        let policy_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&policy_schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "policy schema version is unknown",
+            ))?;
+        let table = policy_schema
+            .schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
         let claims = self.session_claims.get(&identity);
         let mut query = authorization_query_from_read_policy(table);
         rewrite_policy_claims_for_authorization(&mut query, claims);
@@ -4504,12 +4773,12 @@ where
                 "maintained subscription view policy slice does not support include policies",
             ));
         }
-        let policy_shape = query.validate(&self.catalogue.schema)?;
+        let policy_shape = query.validate(&policy_schema.schema)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
             &policy_binding,
-            &self.catalogue.schema,
+            &policy_schema.schema,
             param_binding_mode,
         )?;
         if !policy_shape.params().is_empty() {
@@ -4519,7 +4788,11 @@ where
             ));
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
-        let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let mut input_shape = if include_deleted_root {
+            self.normalized_include_deleted_row_set_shape(&policy_shape, &binding)?
+        } else {
+            self.normalized_row_set_shape(&policy_shape, &binding)?
+        };
         if let Some(binding_source_shape) = binding_source_shape.clone() {
             retarget_binding_value_sources(&mut input_shape, &binding_source_shape);
         }
@@ -4533,7 +4806,13 @@ where
             },
         };
         Ok(QueryProgramRequest {
-            reads: current_query_read_set(&input.shape, policy_shape.schema_version(), tier, None),
+            reads: current_query_read_set(
+                &input.shape,
+                policy_schema_version,
+                policy_schema_version,
+                tier,
+                None,
+            ),
             policy: match self.query_program_policy_context(identity) {
                 PolicyContext::Identity {
                     mode,
@@ -4956,32 +5235,16 @@ fn rewrite_claim_predicate_for_binding(
             false_predicate()
         }
         Predicate::In(left, values) => Predicate::In(left, values),
-        Predicate::Gt(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
+        Predicate::Gt(_, _) | Predicate::Gte(_, _) | Predicate::Lt(_, _) | Predicate::Lte(_, _) => {
             false_predicate()
         }
-        Predicate::Gt(left, right) => Predicate::Gt(left, right),
-        Predicate::Gte(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
-            false_predicate()
-        }
-        Predicate::Gte(left, right) => Predicate::Gte(left, right),
-        Predicate::Lt(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
-            false_predicate()
-        }
-        Predicate::Lt(left, right) => Predicate::Lt(left, right),
-        Predicate::Lte(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
-            false_predicate()
-        }
-        Predicate::Lte(left, right) => Predicate::Lte(left, right),
         Predicate::Contains(left, right)
             if operands_contain_unbound_claim([&left, &right], claims) =>
         {
             false_predicate()
         }
         Predicate::Contains(left, right) => Predicate::Contains(left, right),
-        Predicate::IsNull(operand) if operand_contains_unbound_claim(&operand, claims) => {
-            false_predicate()
-        }
-        Predicate::IsNull(operand) => Predicate::IsNull(operand),
+        Predicate::IsNull(_) => false_predicate(),
     }
 }
 
@@ -5454,6 +5717,129 @@ fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Option<Value> {
         field.name.as_deref() == Some(user_name.as_str()) || field.name.as_deref() == Some(column)
     })?;
     nullable_value(row.record.borrowed().get_idx(idx).ok()?).ok()?
+}
+
+fn aggregate_result_table(
+    query: &crate::query::Query,
+    source_table: &TableSchema,
+) -> Result<TableSchema, Error> {
+    let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
+        "aggregate query missing aggregate",
+    ))?;
+    let mut columns = Vec::new();
+    if let Some(group_by) = &aggregate.group_by {
+        let column = source_table
+            .columns
+            .iter()
+            .find(|column| &column.name == group_by)
+            .ok_or(Error::InvalidStoredValue("aggregate group column missing"))?;
+        columns.push(ColumnSchema::new(&column.name, column.column_type.clone()));
+    }
+    for aggregate in &aggregate.aggregates {
+        columns.push(ColumnSchema::new(
+            &aggregate.alias,
+            aggregate_result_column_type(aggregate, source_table)?,
+        ));
+    }
+    Ok(TableSchema::new(&query.table, columns))
+}
+
+fn aggregate_result_column_type(
+    aggregate: &Aggregate,
+    source_table: &TableSchema,
+) -> Result<ColumnType, Error> {
+    match aggregate.function {
+        AggregateFunction::Count => Ok(ColumnType::U64),
+        AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
+            let column = aggregate
+                .column
+                .as_ref()
+                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
+            source_table
+                .columns
+                .iter()
+                .find(|candidate| &candidate.name == column)
+                .map(|column| column.column_type.clone())
+                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))
+        }
+    }
+}
+
+fn aggregate_value(
+    aggregate: &Aggregate,
+    source_table: &TableSchema,
+    rows: &[CurrentRow],
+) -> Result<Value, Error> {
+    match aggregate.function {
+        AggregateFunction::Count => Ok(Value::U64(rows.len() as u64)),
+        AggregateFunction::Sum => {
+            let column = aggregate
+                .column
+                .as_deref()
+                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
+            let mut sum_u64 = 0_u64;
+            let mut sum_f64 = 0.0_f64;
+            let mut saw_f64 = false;
+            for row in rows {
+                match query_order_value(row, source_table, column) {
+                    Some(Value::U8(value)) => sum_u64 += value as u64,
+                    Some(Value::U16(value)) => sum_u64 += value as u64,
+                    Some(Value::U32(value)) => sum_u64 += value as u64,
+                    Some(Value::U64(value)) => sum_u64 += value,
+                    Some(Value::F64(value)) => {
+                        saw_f64 = true;
+                        sum_f64 += value;
+                    }
+                    Some(_) | None => {}
+                }
+            }
+            if saw_f64 {
+                Ok(Value::F64(sum_f64 + sum_u64 as f64))
+            } else {
+                Ok(Value::U64(sum_u64))
+            }
+        }
+        AggregateFunction::Min | AggregateFunction::Max => {
+            let column = aggregate
+                .column
+                .as_deref()
+                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
+            let mut selected = None::<Value>;
+            for value in rows
+                .iter()
+                .filter_map(|row| query_order_value(row, source_table, column))
+            {
+                let replace = selected.as_ref().is_none_or(|current| {
+                    let ordering = compare_order_values(&value, current);
+                    match aggregate.function {
+                        AggregateFunction::Min => ordering == Ordering::Less,
+                        AggregateFunction::Max => ordering == Ordering::Greater,
+                        AggregateFunction::Count | AggregateFunction::Sum => false,
+                    }
+                });
+                if replace {
+                    selected = Some(value);
+                }
+            }
+            Ok(selected.unwrap_or(Value::Nullable(None)))
+        }
+    }
+}
+
+fn aggregate_row_uuid(index: usize) -> RowUuid {
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(b"jazzagg:");
+    bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
+    RowUuid::from_bytes(bytes)
+}
+
+fn apply_query_window(query: &crate::query::Query, rows: &mut Vec<CurrentRow>) {
+    let offset = query.offset.min(rows.len());
+    let limit = query.limit.unwrap_or(rows.len().saturating_sub(offset));
+    let end = offset.saturating_add(limit).min(rows.len());
+    if offset > 0 || end < rows.len() {
+        *rows = rows[offset..end].to_vec();
+    }
 }
 
 fn compare_order_values(left: &Value, right: &Value) -> Ordering {

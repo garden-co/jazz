@@ -2279,20 +2279,30 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let table = core.table("todos").unwrap().clone();
-    let deletion_version = core
-        .query_global_layer_winner("todos", row_uuid, VersionLayer::Deletion)
-        .unwrap()
+    let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let owner_rows = core
+        .query_rows_including_deleted_for_identity(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            None,
+            owner,
+        )
         .unwrap();
-
+    assert_eq!(owner_rows.len(), 1);
+    assert_eq!(owner_rows[0].row_uuid(), row_uuid);
+    assert!(owner_rows[0].is_deleted());
     assert!(
-        core.read_policy_allows_deletion_version(&table, &deletion_version, owner)
-            .unwrap()
-    );
-    assert!(
-        !core
-            .read_policy_allows_deletion_version(&table, &deletion_version, other)
-            .unwrap()
+        core.query_rows_including_deleted_for_identity(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            None,
+            other,
+        )
+        .unwrap()
+        .is_empty()
     );
 
     let orphan_row = row(0x82);
@@ -2308,14 +2318,17 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let orphan_version = core
-        .query_global_layer_winner("todos", orphan_row, VersionLayer::Deletion)
-        .unwrap()
-        .unwrap();
     assert!(
-        !core
-            .read_policy_allows_deletion_version(&table, &orphan_version, owner)
-            .unwrap()
+        core.query_rows_including_deleted_for_identity(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            None,
+            owner,
+        )
+        .unwrap()
+        .into_iter()
+        .all(|row| row.row_uuid() != orphan_row)
     );
 }
 
@@ -4003,12 +4016,12 @@ fn unsupported_policy_predicates_deny_instead_of_allowing() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let table = core.table("todos").unwrap().clone();
-    let version = core.query_versions_for_tx(tx).unwrap().remove(0);
+    let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
     assert!(
-        !core
-            .read_policy_allows_version(&table, &version, user(0xa1))
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, user(0xa1))
             .unwrap()
+            .is_empty()
     );
 }
 
@@ -4031,12 +4044,12 @@ fn unresolved_policy_operands_deny_instead_of_allowing() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let table = core.table("todos").unwrap().clone();
-    let version = core.query_versions_for_tx(tx).unwrap().remove(0);
+    let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
     assert!(
-        !core
-            .read_policy_allows_version(&table, &version, user(0xa1))
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, user(0xa1))
             .unwrap()
+            .is_empty()
     );
 }
 
@@ -4502,15 +4515,6 @@ fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let table = core.table("todos").unwrap().clone();
-    let version = core.query_versions_for_tx(tx).unwrap().remove(0);
-
-    assert!(
-        !core
-            .read_policy_allows_version(&table, &version, user(0xa1))
-            .unwrap()
-    );
-
     let mut edge = PeerState::edge_client(user(0xa1));
     assert_view_update_only_references_rows(
         &edge.current_rows_update(&mut core, "todos").unwrap(),
