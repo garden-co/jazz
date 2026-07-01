@@ -234,6 +234,7 @@ struct CorrelatedPathPlan {
     correlation: PredicateExpr,
     requirement: CorrelationRequirement,
     output_steps: Vec<LinearStep>,
+    nested: Vec<CorrelatedPathPlan>,
 }
 
 #[derive(Clone, Debug)]
@@ -368,12 +369,17 @@ fn analyze_root_node(
                 })?,
             )?;
             AnalyzedQueryPlan::CorrelatedPath(CorrelatedPathPlan {
-                parent,
-                child,
                 path: path.clone(),
                 correlation: correlation.clone(),
                 requirement: *requirement,
                 output_steps: Vec::new(),
+                nested: collect_nested_correlated_paths(
+                    &path.child,
+                    &request.input.shape.nodes,
+                    &mut visited,
+                )?,
+                parent,
+                child,
             })
         }
         RowSetExpr::RecursiveRelation {
@@ -415,6 +421,12 @@ fn analyze_root_node(
             if let Ok(plan) =
                 analyze_correlated_path_root(&request.input.shape.root, request, &mut path_visited)
             {
+                let mut plan = plan;
+                plan.nested = collect_nested_correlated_paths(
+                    &plan.path.child,
+                    &request.input.shape.nodes,
+                    &mut path_visited,
+                )?;
                 validate_result_source(
                     request,
                     plan.parent.root.source().ok_or_else(|| {
@@ -471,6 +483,11 @@ fn analyze_correlated_path_root(
                 correlation: correlation.clone(),
                 requirement: *requirement,
                 output_steps: Vec::new(),
+                nested: collect_nested_correlated_paths(
+                    &path.child,
+                    &request.input.shape.nodes,
+                    visited,
+                )?,
             })
         }
         RowSetExpr::OrderBy { input, keys } => {
@@ -505,6 +522,46 @@ fn analyze_correlated_path_root(
             "root is not a correlated path plan".to_owned(),
         )),
     }
+}
+
+fn collect_nested_correlated_paths(
+    owner: &SourceId,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    visited: &mut BTreeSet<RowSetNodeId>,
+) -> Result<Vec<CorrelatedPathPlan>, UnsupportedReason> {
+    let mut paths = Vec::new();
+    for (node_id, node) in nodes {
+        let RowSetExpr::CorrelatedPathProjection {
+            input,
+            child_input,
+            path,
+            correlation,
+            requirement,
+        } = node
+        else {
+            continue;
+        };
+        if &path.owner != owner {
+            continue;
+        }
+        visited.insert(node_id.clone());
+        let mut parent_visited = BTreeSet::new();
+        let parent = analyze_linear_subplan(input, nodes, &mut parent_visited)?;
+        visited.extend(parent_visited);
+        let mut child_visited = BTreeSet::new();
+        let child = analyze_linear_subplan(child_input, nodes, &mut child_visited)?;
+        visited.extend(child_visited);
+        paths.push(CorrelatedPathPlan {
+            parent,
+            child,
+            path: path.clone(),
+            correlation: correlation.clone(),
+            requirement: *requirement,
+            output_steps: Vec::new(),
+            nested: collect_nested_correlated_paths(&path.child, nodes, visited)?,
+        });
+    }
+    Ok(paths)
 }
 
 fn analyze_linear_root(
@@ -565,7 +622,7 @@ fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
         AnalyzedQueryPlan::Linear(linear) => linear_plan_sources(linear),
         AnalyzedQueryPlan::CorrelatedPath(path) => {
             let mut sources = linear_plan_sources(&path.parent);
-            sources.extend(linear_plan_sources(&path.child));
+            collect_correlated_path_sources(path, &mut sources);
             sources
         }
         AnalyzedQueryPlan::RecursiveRelation(relation) => {
@@ -573,6 +630,14 @@ fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
             sources.extend(linear_plan_sources(&relation.step));
             sources
         }
+    }
+}
+
+fn collect_correlated_path_sources(path: &CorrelatedPathPlan, sources: &mut BTreeSet<SourceId>) {
+    sources.extend(linear_plan_sources(&path.child));
+    for nested in &path.nested {
+        sources.extend(linear_plan_sources(&nested.parent));
+        collect_correlated_path_sources(nested, sources);
     }
 }
 
@@ -967,8 +1032,7 @@ fn collect_plan_requirements(
         AnalyzedQueryPlan::Linear(linear) => collect_linear_requirements(linear, requirements),
         AnalyzedQueryPlan::CorrelatedPath(path) => {
             collect_linear_requirements(&path.parent, requirements)?;
-            collect_linear_requirements(&path.child, requirements)?;
-            collect_predicate_requirements_for_all_sources(&path.correlation, requirements)?;
+            collect_correlated_path_requirements(path, requirements)?;
             for step in &path.output_steps {
                 for (source, source_requirements) in requirements.iter_mut() {
                     collect_step_requirements(step, source, source_requirements)?;
@@ -1002,6 +1066,19 @@ fn collect_plan_requirements(
             Ok(())
         }
     }
+}
+
+fn collect_correlated_path_requirements(
+    path: &CorrelatedPathPlan,
+    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
+) -> CapabilityResult<()> {
+    collect_linear_requirements(&path.child, requirements)?;
+    collect_predicate_requirements_for_all_sources(&path.correlation, requirements)?;
+    for nested in &path.nested {
+        collect_linear_requirements(&nested.parent, requirements)?;
+        collect_correlated_path_requirements(nested, requirements)?;
+    }
+    Ok(())
 }
 
 fn collect_linear_requirements(
@@ -1402,6 +1479,22 @@ fn lower_correlated_path_relation_graph(
         resolved_sources,
         request,
     )?;
+    lower_correlated_path_relation_graph_from_parent(
+        path,
+        parent,
+        root_source,
+        resolved_sources,
+        request,
+    )
+}
+
+fn lower_correlated_path_relation_graph_from_parent(
+    path: &CorrelatedPathPlan,
+    parent: GraphBuilder,
+    parent_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<GraphBuilder, UnsupportedReason> {
     let child_root = path
         .child
         .root
@@ -1425,12 +1518,12 @@ fn lower_correlated_path_relation_graph(
         path.parent.root.source().ok_or_else(|| {
             UnsupportedReason::Operator("path parent must be a source".to_owned())
         })?,
-        root_source,
+        parent_source,
         child_root,
         child_source,
         request,
     )?;
-    let parent_key_nullable = source_field_is_nullable(root_source, &parent_key);
+    let parent_key_nullable = source_field_is_nullable(parent_source, &parent_key);
     let child_key_nullable = source_field_is_nullable(child_source, &child_key);
     let parent = unwrap_join_key_if_nullable(parent, parent_key.clone(), parent_key_nullable);
     let child = unwrap_join_key_if_nullable(child, child_key.clone(), child_key_nullable);
@@ -2310,6 +2403,17 @@ fn project_source_fields(source: &ResolvedSource) -> Vec<ProjectField> {
         .collect()
 }
 
+fn project_right_source_fields(source: &ResolvedSource) -> Vec<ProjectField> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| field.name.as_ref())
+        .map(|field| ProjectField::renamed(format!("right.{field}"), field.clone()))
+        .collect()
+}
+
 fn project_left_source_fields_with_routing(
     source: &ResolvedSource,
     right_fields: &BTreeSet<String>,
@@ -2753,6 +2857,7 @@ fn lowered_terminals(
                 plan,
                 source,
                 resolved_sources,
+                request,
             )?;
             terminals.push(LoweredTerminal {
                 sink: fact_sink_name(fact),
@@ -2769,6 +2874,7 @@ fn lowered_terminals(
                     plan,
                     resolved_source,
                     resolved_sources,
+                    request,
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, &source_id),
@@ -2828,7 +2934,14 @@ fn lowered_terminals(
         let output = fact_output(fact, plan, source, resolved_sources)?;
         let terminal_graph =
             fact_input_graph(fact, graph.clone(), plan, source, resolved_sources, request)?;
-        let graph = fact_terminal_graph(fact, terminal_graph, plan, source, resolved_sources)?;
+        let graph = fact_terminal_graph(
+            fact,
+            terminal_graph,
+            plan,
+            source,
+            resolved_sources,
+            request,
+        )?;
         terminals.push(LoweredTerminal {
             sink: fact_sink_name(fact),
             graph,
@@ -3232,6 +3345,7 @@ fn fact_terminal_graph(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
 ) -> CapabilityResult<GraphBuilder> {
     match key {
         ProgramFactKey::ResultMembership => {
@@ -3245,7 +3359,7 @@ fn fact_terminal_graph(
         )),
         ProgramFactKey::RelationEdges => {
             let _ = relation_edge_schema(plan, source, resolved_sources)?;
-            relation_edge_graph(key, graph, plan, source, resolved_sources)
+            relation_edge_graph(key, graph, plan, source, resolved_sources, request)
         }
         ProgramFactKey::PathCorrelationCoverage => {
             let _ = path_correlation_coverage_schema(plan, source, resolved_sources)?;
@@ -3278,19 +3392,17 @@ fn relation_edge_graph(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
 ) -> CapabilityResult<GraphBuilder> {
     match plan {
         AnalyzedQueryPlan::CorrelatedPath(path) => {
-            let target = resolved_sources.get(&path.path.child).ok_or_else(|| {
-                Box::new(CapabilityReport {
-                    gaps: vec![UnsupportedReason::Runtime(format!(
-                        "path child source {:?} was not resolved",
-                        path.path.child
-                    ))],
-                    explain: ExplainPlan::default(),
-                })
-            })?;
-            Ok(graph.project_fields(correlated_relation_edge_fields(source, target, path)?))
+            let mut graphs =
+                correlated_relation_edge_graphs(path, graph, source, resolved_sources, request)?;
+            if graphs.len() == 1 {
+                Ok(graphs.remove(0))
+            } else {
+                Ok(GraphBuilder::union(graphs))
+            }
         }
         AnalyzedQueryPlan::RecursiveRelation(_) => Ok(graph),
         AnalyzedQueryPlan::Linear(_) => Err(Box::new(CapabilityReport {
@@ -3303,6 +3415,61 @@ fn relation_edge_graph(
             },
         })),
     }
+}
+
+fn correlated_relation_edge_graphs(
+    path: &CorrelatedPathPlan,
+    graph: GraphBuilder,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<Vec<GraphBuilder>> {
+    let target = resolved_sources.get(&path.path.child).ok_or_else(|| {
+        Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(format!(
+                "path child source {:?} was not resolved",
+                path.path.child
+            ))],
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    let mut graphs = vec![
+        graph
+            .clone()
+            .project_fields(correlated_relation_edge_fields(source, target, path)?),
+    ];
+    for nested in &path.nested {
+        let nested_parent = graph
+            .clone()
+            .project_fields(project_right_source_fields(target));
+        let nested_graph = lower_correlated_path_relation_graph_from_parent(
+            nested,
+            nested_parent,
+            target,
+            resolved_sources,
+            request,
+        )
+        .map_err(|gap| {
+            Box::new(CapabilityReport {
+                gaps: vec![gap],
+                explain: ExplainPlan {
+                    capabilities: vec![
+                        "nested correlated path relation facts lower from parent-child path graphs"
+                            .to_owned(),
+                    ],
+                    ..ExplainPlan::default()
+                },
+            })
+        })?;
+        graphs.extend(correlated_relation_edge_graphs(
+            nested,
+            nested_graph,
+            target,
+            resolved_sources,
+            request,
+        )?);
+    }
+    Ok(graphs)
 }
 
 fn correlated_relation_edge_fields(
