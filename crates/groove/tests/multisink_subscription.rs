@@ -131,6 +131,23 @@ fn routed_terminals() -> [RoutedMultisinkTerminal; 2] {
     ]
 }
 
+fn routed_doc_output_terminals() -> [RoutedMultisinkTerminal; 2] {
+    [
+        RoutedMultisinkTerminal::new(
+            "ids",
+            docs_terminal_graph(),
+            ["__route_org_id", "__route_project_id"],
+            ["id"],
+        ),
+        RoutedMultisinkTerminal::new(
+            "rows",
+            docs_terminal_graph(),
+            ["__route_org_id", "__route_project_id"],
+            ["id", "title"],
+        ),
+    ]
+}
+
 fn insert_doc(
     batch: &mut groove::db::DatabaseBatch,
     id: u64,
@@ -166,6 +183,116 @@ fn insert_comment(
             Value::U64(doc_id),
             Value::String(body.to_owned()),
         ],
+    );
+}
+
+#[test]
+fn routed_multisink_combines_binding_sets_with_user_output_routings() {
+    let mut db = project_database();
+    let mut batch = db.open_batch();
+    insert_doc(&mut batch, 1, 10, 20, "Spec");
+    insert_doc(&mut batch, 2, 10, 21, "Roadmap");
+    insert_doc(&mut batch, 3, 11, 20, "Other org");
+    db.commit_batch(batch).unwrap();
+
+    let shape = db
+        .prepare_routed_multisink(
+            routed_doc_output_terminals(),
+            "project_route",
+            route_descriptor(),
+        )
+        .unwrap();
+
+    let project_20 = db
+        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .unwrap();
+    let initial_20 = project_20.recv().unwrap();
+    assert_eq!(initial_20.sinks.len(), 2);
+    assert_eq!(
+        initial_20.get("ids").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1)], 1,)]
+    );
+    assert_eq!(
+        initial_20.get("rows").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::String("Spec".to_owned())], 1,)]
+    );
+
+    let project_21 = db
+        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(21)])
+        .unwrap();
+    assert!(
+        matches!(project_20.try_recv(), Err(TryRecvError::Empty)),
+        "binding a second tuple should not notify existing bindings"
+    );
+    let initial_21 = project_21.recv().unwrap();
+    assert_eq!(
+        initial_21.get("ids").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(2)], 1,)]
+    );
+    assert_eq!(
+        initial_21.get("rows").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(2), Value::String("Roadmap".to_owned())], 1,)]
+    );
+
+    let project_20_again = db
+        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .unwrap();
+    assert!(
+        matches!(project_20.try_recv(), Err(TryRecvError::Empty)),
+        "refcounting the same binding should not notify existing subscribers"
+    );
+    let duplicate_initial_20 = project_20_again.recv().unwrap();
+    assert_eq!(
+        duplicate_initial_20
+            .get("ids")
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(vec![Value::U64(1)], 1,)]
+    );
+    assert_eq!(
+        duplicate_initial_20
+            .get("rows")
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(vec![Value::U64(1), Value::String("Spec".to_owned())], 1,)]
+    );
+
+    let mut batch = db.open_batch();
+    insert_doc(&mut batch, 4, 10, 20, "Design");
+    insert_doc(&mut batch, 5, 10, 21, "Launch");
+    insert_doc(&mut batch, 6, 10, 22, "Wrong project");
+    db.commit_batch(batch).unwrap();
+
+    let tick_20 = project_20.recv().unwrap();
+    assert_eq!(
+        tick_20.get("ids").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(4)], 1,)]
+    );
+    assert_eq!(
+        tick_20.get("rows").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(4), Value::String("Design".to_owned())], 1,)]
+    );
+
+    let duplicate_tick_20 = project_20_again.recv().unwrap();
+    assert_eq!(
+        duplicate_tick_20.get("ids").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(4)], 1,)]
+    );
+    assert_eq!(
+        duplicate_tick_20.get("rows").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(4), Value::String("Design".to_owned())], 1,)]
+    );
+
+    let tick_21 = project_21.recv().unwrap();
+    assert_eq!(
+        tick_21.get("ids").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(5)], 1,)]
+    );
+    assert_eq!(
+        tick_21.get("rows").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(5), Value::String("Launch".to_owned())], 1,)]
     );
 }
 
