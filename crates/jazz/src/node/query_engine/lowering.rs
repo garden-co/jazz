@@ -3933,16 +3933,20 @@ fn lower_closure_membership(
 ) -> CapabilityResult<ClosureLowering> {
     let mut visible_root = root_graph;
     for path in &request.input.shape.closure_paths {
-        let Some(root_gate) = path.root_gate else {
-            continue;
-        };
-        visible_root = required_closure_parent_graph(
-            visible_root,
-            path,
-            root_gate,
-            root_source,
-            resolved_sources,
-        )?;
+        if let ClosurePath::ExplicitInclude {
+            segments,
+            root_gate: Some(root_gate),
+            ..
+        } = path
+        {
+            visible_root = required_closure_parent_graph(
+                visible_root,
+                segments,
+                *root_gate,
+                root_source,
+                resolved_sources,
+            )?;
+        }
     }
 
     let mut result_members = BTreeMap::<SourceId, GraphBuilder>::new();
@@ -4074,14 +4078,14 @@ fn join_contribution_membership_graph(
 
 fn required_closure_parent_graph(
     parent_graph: GraphBuilder,
-    path: &ClosurePath,
+    segments: &[ClosurePathSegment],
     root_gate: ClosureRootGate,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
 ) -> CapabilityResult<GraphBuilder> {
     required_closure_parent_graph_from_segment(
         parent_graph,
-        &path.segments,
+        segments,
         0,
         root_gate,
         root_source,
@@ -4220,6 +4224,7 @@ fn closure_membership_graph_for_path(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
 ) -> CapabilityResult<Vec<(usize, SourceId, GraphBuilder)>> {
+    let segments = closure_path_segments(path);
     let mut current_graph = root_graph.project_fields(
         project_source_fields_from_prefix(root_source, "")
             .into_iter()
@@ -4230,7 +4235,7 @@ fn closure_membership_graph_for_path(
     );
     let mut current_source = root_source.clone();
     let mut outputs = Vec::new();
-    for (index, segment) in path.segments.iter().enumerate() {
+    for (index, segment) in segments.iter().enumerate() {
         let target = resolved_sources.get(&segment.target).ok_or_else(|| {
             Box::new(CapabilityReport {
                 gaps: vec![UnsupportedReason::Runtime(format!(
@@ -4261,6 +4266,13 @@ fn closure_membership_graph_for_path(
     }
     let _ = current_source;
     Ok(outputs)
+}
+
+fn closure_path_segments(path: &ClosurePath) -> Vec<&ClosurePathSegment> {
+    match path {
+        ClosurePath::ImplicitRootReference { segment, .. } => vec![segment],
+        ClosurePath::ExplicitInclude { segments, .. } => segments.iter().collect(),
+    }
 }
 
 fn project_source_fields_from_prefix(source: &ResolvedSource, prefix: &str) -> Vec<ProjectField> {
