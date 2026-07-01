@@ -7,8 +7,24 @@ pub(crate) struct SourceRequest {
     pub(crate) source: SourceId,
     /// Query-visible row scope expected from this source.
     pub(crate) visibility: RowVisibility,
+    /// Authorization semantics that must be applied to this source before it
+    /// participates in the program.
+    pub(crate) authorization: SourceAuthorizationRequest,
     /// Structural row metadata required by all consumers of this source.
     pub(crate) requirements: SourceRequirements,
+}
+
+/// Source authorization requested by query-engine lowering.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SourceAuthorizationRequest {
+    /// System/internal program. The source is already authorized by the caller.
+    #[default]
+    System,
+    /// User-visible source filtered by the active policy context.
+    PolicyFiltered {
+        /// Identity whose row-level read permission gates the source.
+        permission_subject: AuthorId,
+    },
 }
 
 /// Orthogonal source row requirements derived from app output and requested
