@@ -3599,7 +3599,7 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
 }
 
 #[test]
-fn maintained_subscription_view_explicit_include_suppresses_other_implicit_references() {
+fn maintained_subscription_view_explicit_include_keeps_other_implicit_references() {
     let schema = JazzSchema::new([
         TableSchema::new(
             "roots",
@@ -3644,7 +3644,7 @@ fn maintained_subscription_view_explicit_include_suppresses_other_implicit_refer
     let mut peer = PeerState::for_author(user(0xa1));
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
-    assert_view_update_only_ships_rows(&update, BTreeSet::from([root, included]));
+    assert_view_update_only_ships_rows(&update, BTreeSet::from([root, included, excluded]));
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.unsupported_skips_out, 0);
 }
