@@ -620,6 +620,29 @@ fn validate_output_capabilities(
         .output
         .facts
         .contains(&ProgramFactKey::ResultMembership)
+        && !request
+            .output
+            .facts
+            .contains(&ProgramFactKey::AuthorizedRows)
+    {
+        return;
+    }
+    if matches!(plan, AnalyzedQueryPlan::CorrelatedPath(_))
+        && request.output.app_rows.is_none()
+        && request
+            .output
+            .facts
+            .contains(&ProgramFactKey::AuthorizedRows)
+    {
+        gaps.push(UnsupportedReason::Operator(
+            "policy shapes with array subqueries are not lowered yet".to_owned(),
+        ));
+        return;
+    }
+    if !request
+        .output
+        .facts
+        .contains(&ProgramFactKey::ResultMembership)
     {
         return;
     }
@@ -4054,16 +4077,12 @@ fn claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Value, Unsupp
     }
     match name.as_str() {
         "sub" => Ok(Value::Uuid(permission_subject.0)),
-        "user_id" => Ok(Value::String(permission_subject.0.to_string())),
-        "isAdmin" => Ok(Value::Bool(false)),
-        _ => Err(UnsupportedReason::Policy(format!(
-            "claim '{name}' is not bound"
-        ))),
+        _ => Err(UnsupportedReason::UnboundClaim(path.clone())),
     }
 }
 
 fn is_unbound_claim_reason(reason: &UnsupportedReason) -> bool {
-    matches!(reason, UnsupportedReason::Policy(message) if message.starts_with("claim '") && message.ends_with("' is not bound"))
+    matches!(reason, UnsupportedReason::UnboundClaim(_))
 }
 
 fn require_source_field(source: &ResolvedSource, field: &str) -> Result<String, UnsupportedReason> {

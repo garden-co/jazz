@@ -1758,6 +1758,14 @@ fn production_output_profiles_lower_for_linear_shapes_and_gate_correlated_mainta
         );
         let result = lower_query_program(correlated_request, &mut FakeSourceResolver::default());
         match profile {
+            ProductionOutputProfile::AuthorizedRows => {
+                let err = result.expect_err("correlated authorized rows should capability-gap");
+                assert!(matches!(
+                    err.gaps.as_slice(),
+                    [UnsupportedReason::Operator(message)]
+                        if message == "policy shapes with array subqueries are not lowered yet"
+                ));
+            }
             ProductionOutputProfile::MaintainedView => {
                 let err = result.expect_err("correlated maintained view should capability-gap");
                 assert!(matches!(

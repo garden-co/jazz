@@ -231,6 +231,8 @@ impl CapabilityReport {
 pub(crate) enum UnsupportedReason {
     /// Source/frontier/schema view is not yet representable.
     Source(SourceGap),
+    /// A policy/session claim was referenced but not present in the policy context.
+    UnboundClaim(ClaimPath),
     /// Query/relation operator is not yet represented.
     Operator(String),
     /// Requested output fact is not yet emitted.

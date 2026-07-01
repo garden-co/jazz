@@ -3455,14 +3455,14 @@ where
         if identity == AuthorId::SYSTEM {
             PolicyContext::System
         } else {
+            let mut claims = default_policy_claim_values(identity);
+            if let Some(session_claims) = self.session_claims.get(&identity) {
+                claims.extend(session_claims.clone());
+            }
             PolicyContext::Identity {
                 mode: PolicyEnforcementMode::Enforcing,
                 permission_subject: identity,
-                claims: self
-                    .session_claims
-                    .get(&identity)
-                    .cloned()
-                    .unwrap_or_default(),
+                claims,
                 attribution: None,
             }
         }
@@ -5397,6 +5397,12 @@ fn rewrite_claim_predicate_for_binding(
 }
 
 fn default_permission_scope_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
+    default_policy_claim_values(writer)
+}
+
+fn default_policy_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
+    // Alpha-compat built-ins live at the node admission/query boundary, not in
+    // the compiler: lowering receives ordinary claim values plus spec `sub`.
     BTreeMap::from([
         ("sub".to_owned(), Value::Uuid(writer.0)),
         ("user_id".to_owned(), Value::String(writer.0.to_string())),
@@ -5541,7 +5547,7 @@ fn operand_contains_unbound_claim(
     operand: &Operand,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
-    matches!(operand, Operand::Claim(name) if name != "sub" && name != "user_id" && name != "isAdmin" && !claims.is_some_and(|claims| claims.contains_key(name)))
+    matches!(operand, Operand::Claim(name) if !default_policy_claim_values(AuthorId::SYSTEM).contains_key(name) && !claims.is_some_and(|claims| claims.contains_key(name)))
 }
 
 #[derive(Clone, Copy)]
@@ -5884,14 +5890,12 @@ fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Valu
     if let Some(value) = claims.get(name) {
         return Ok(value.clone());
     }
-    match name.as_str() {
-        "sub" => Ok(Value::Uuid(permission_subject.0)),
-        "user_id" => Ok(Value::String(permission_subject.0.to_string())),
-        "isAdmin" => Ok(Value::Bool(false)),
-        _ => Err(Error::InvalidStoredValue(
-            "claim prepared param is not bound",
-        )),
+    if let Some(value) = default_policy_claim_values(*permission_subject).get(name) {
+        return Ok(value.clone());
     }
+    Err(Error::InvalidStoredValue(
+        "claim prepared param is not bound",
+    ))
 }
 
 fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::ColumnType) -> Value {
