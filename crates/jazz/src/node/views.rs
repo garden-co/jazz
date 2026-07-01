@@ -1086,28 +1086,6 @@ where
         Ok(entries)
     }
 
-    pub(crate) fn expand_maintained_view_result_rows(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        rows: impl IntoIterator<Item = ResultRowEntry>,
-        identity: AuthorId,
-        tier: DurabilityTier,
-    ) -> Result<BTreeSet<ResultRowEntry>, Error> {
-        let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
-        let mut set = rows.into_iter().collect::<BTreeSet<_>>();
-        let root_table = shape.query().table.clone();
-        let root_result_entries = set
-            .iter()
-            .filter(|(entry_table, _, _)| entry_table.as_str() == root_table)
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        self.expand_query_closure(shape, binding, &mut set, tier)?;
-        self.retain_policy_atomic_rows(&mut set, identity, &mut context)?;
-        set.extend(root_result_entries);
-        Ok(set)
-    }
-
     /// Apply a downstream current-row view update.
     pub(super) fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         let ViewUpdateParts {
