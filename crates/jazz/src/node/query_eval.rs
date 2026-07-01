@@ -30,11 +30,11 @@ use super::query_engine::{
     ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
-    SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
-    SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
-    SourceResolutionError, SourceResolver, SourceRole, SourceRowShape, StorageSchemaSelection,
-    TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields,
-    VersionedRowRefSchema, lower_query_program,
+    SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
+    SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest,
+    SourceRequirements, SourceResolutionError, SourceResolver, SourceRole, SourceRowShape,
+    StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
+    VersionIdentityFields, VersionedRowRefSchema, lower_query_program,
 };
 use crate::protocol::{
     BindingViewKey, ResultMemberEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
@@ -338,7 +338,6 @@ enum CurrentQueryProgramOutput {
 struct CurrentQuerySourceResolver<'a, S> {
     node: &'a mut NodeState<S>,
     read_view: &'a ReadView<RequestedSourceStage>,
-    policy: &'a PolicyContext,
 }
 
 impl<S> SourceResolver for CurrentQuerySourceResolver<'_, S>
@@ -516,7 +515,7 @@ where
                 &table,
                 graph_tier.expect("visible current source has a tier"),
                 &request.requirements,
-                self.policy,
+                &request.authorization,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
         };
@@ -545,7 +544,7 @@ fn resolved_current_source_graph<S>(
     table: &TableSchema,
     tier: DurabilityTier,
     requirements: &SourceRequirements,
-    policy: &PolicyContext,
+    authorization: &SourceAuthorizationRequest,
 ) -> Result<
     (
         GraphBuilder,
@@ -614,8 +613,8 @@ where
     }
 
     let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
-    let base = match policy {
-        PolicyContext::System => {
+    let base = match authorization {
+        SourceAuthorizationRequest::System => {
             if needs_version_witnesses {
                 node.maintained_view_content_current_with_version(table, tier)?
                     .project_fields(storage_to_canonical_current_source_fields(table, true))
@@ -624,9 +623,7 @@ where
                     .project_fields(canonical_current_source_fields(table, false))
             }
         }
-        PolicyContext::Identity {
-            permission_subject, ..
-        } => {
+        SourceAuthorizationRequest::PolicyFiltered { permission_subject } => {
             let policy_shape = node.maintained_view_table_policy_shape_with_mode(
                 table,
                 *permission_subject,
@@ -2609,11 +2606,9 @@ where
         request: QueryProgramRequest,
     ) -> Result<QueryProgram, Error> {
         let read_view = request.reads.primary.clone();
-        let policy = request.policy.clone();
         let mut resolver = CurrentQuerySourceResolver {
             node: self,
             read_view: &read_view,
-            policy: &policy,
         };
         lower_query_program(request, &mut resolver)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))
