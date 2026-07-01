@@ -561,7 +561,7 @@ fn source_resolution_error(request: &SourceRequest, gap: SourceGap) -> SourceRes
 }
 
 fn resolved_current_source_graph<S>(
-    node: &NodeState<S>,
+    node: &mut NodeState<S>,
     table: &TableSchema,
     tier: DurabilityTier,
     requirements: &SourceRequirements,
@@ -657,11 +657,30 @@ where
                 output_fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
             }
             let base = node.maintained_view_content_current_with_version(table, tier)?;
-            node.apply_maintained_view_filters(base, &policy_shape, table, output_fields, tier)?
-                .project_fields(storage_to_canonical_current_source_fields(
-                    table,
-                    needs_version_witnesses,
-                ))
+            let storage_graph = match node.policy_filtered_current_source_graph_via_query_engine(
+                &policy_shape,
+                base.clone(),
+                &output_fields,
+                tier,
+            )? {
+                Some(graph) => graph,
+                None => {
+                    // TODO(query-engine): remove this manual policy-source lowering once
+                    // rich policy branches, source-lookups, nested joins, and legacy reachable
+                    // policy slices are all represented by normalized query-engine nodes.
+                    node.apply_maintained_view_filters(
+                        base,
+                        &policy_shape,
+                        table,
+                        output_fields,
+                        tier,
+                    )?
+                }
+            };
+            storage_graph.project_fields(storage_to_canonical_current_source_fields(
+                table,
+                needs_version_witnesses,
+            ))
         }
     };
     let graph = if metadata.is_empty() {
@@ -4340,6 +4359,55 @@ where
         self.database
             .bind_shape(prepared.id(), &values)
             .map_err(Error::Groove)
+    }
+
+    fn policy_filtered_current_source_graph_via_query_engine(
+        &mut self,
+        policy_shape: &ValidatedQuery,
+        base: GraphBuilder,
+        output_fields: &[String],
+        tier: DurabilityTier,
+    ) -> Result<Option<GraphBuilder>, Error> {
+        if !policy_shape.params().is_empty() {
+            return Ok(None);
+        }
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let input = RowSetProgramInput {
+            shape: self.normalized_row_set_shape(policy_shape, &binding)?,
+            binding: ProgramBinding {
+                id: binding.binding_id(),
+                values: BTreeMap::new(),
+            },
+        };
+        let reads = current_query_read_set(&input.shape, policy_shape.schema_version(), tier);
+        let read_view = reads.primary.clone();
+        let policy = PolicyContext::System;
+        let mut resolver = CurrentQuerySourceResolver {
+            node: self,
+            read_view: &read_view,
+            policy: &policy,
+        };
+        let request = QueryProgramRequest {
+            reads,
+            policy: policy.clone(),
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                policy_shape.query(),
+            ),
+        };
+        let program = match lower_query_program(request, &mut resolver) {
+            Ok(program) => program,
+            Err(_) => return Ok(None),
+        };
+        let authorized = lowered_app_rows_graph(&program)?.project(["row_uuid"]);
+        Ok(Some(
+            GraphBuilder::join(base, authorized, ["row_uuid"], ["row_uuid"]).project_fields(
+                output_fields
+                    .iter()
+                    .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone())),
+            ),
+        ))
     }
 
     fn maintained_view_table_policy_shape_with_mode(
