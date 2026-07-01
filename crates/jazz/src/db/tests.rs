@@ -91,15 +91,6 @@ fn branch_read_opts() -> ReadOpts {
     }
 }
 
-fn assert_unsupported_read_view(error: Error) {
-    assert_eq!(error.code, ErrorCode::Query);
-    assert!(
-        error.message.contains("non-default read_view"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
 fn assert_unsupported_subscription_include_deleted(error: Error) {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(
@@ -776,9 +767,76 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
         .unwrap();
     db.detach_query(attachment);
 
-    assert_unsupported_read_view(expect_error(doctest_support::block_on(
-        db.all_relation_snapshot(&prepared_query, opts.clone()),
-    )));
+    let snapshot =
+        doctest_support::block_on(db.all_relation_snapshot(&prepared_query, opts.clone())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0x42)]);
+}
+
+#[test]
+fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    db.node
+        .node
+        .borrow_mut()
+        .create_branch(branch)
+        .expect("create branch");
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("users", row(0xa1), 10).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String("alice".to_owned()),
+            )])),
+        )
+        .expect("commit branch user");
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x11), 11).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("branch todo".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+            ])),
+        )
+        .expect("commit branch todo");
+
+    let query = Query::from("users").array_subquery(ArraySubquery::new(
+        "todosViaOwner",
+        "todos",
+        "owner_id",
+        "id",
+    ));
+    let prepared_query = prepared(&db, &query);
+    let snapshot =
+        doctest_support::block_on(db.all_relation_snapshot(&prepared_query, branch_read_opts()))
+            .unwrap();
+
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .map(|row| (row.table().to_owned(), row.row_uuid()))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            ("todos".to_owned(), row(0x11)),
+            ("users".to_owned(), row(0xa1)),
+        ])
+    );
+    assert_eq!(
+        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([RelationEdge {
+            source_table: "users".to_owned(),
+            source_row: row(0xa1),
+            relation: "todosViaOwner".to_owned(),
+            target_table: "todos".to_owned(),
+            target_row: row(0x11),
+        }])
+    );
 }
 
 #[test]

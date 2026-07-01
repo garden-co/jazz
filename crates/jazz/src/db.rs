@@ -563,7 +563,7 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
-        ensure_default_read_view(&opts)?;
+        ensure_supported_read_view(&opts)?;
         if opts.include_deleted {
             return Err(Error::new(
                 ErrorCode::Query,
@@ -574,7 +574,13 @@ where
         self.node
             .node
             .borrow_mut()
-            .query_relation_snapshot_for_link(&prepared.shape, &prepared.binding, tier, author)
+            .query_relation_snapshot_for_link_in_read_view(
+                &prepared.shape,
+                &prepared.binding,
+                tier,
+                author,
+                &opts.read_view,
+            )
             .map_err(Into::into)
     }
 
