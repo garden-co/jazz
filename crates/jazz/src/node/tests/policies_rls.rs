@@ -3352,6 +3352,7 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_query_engine_read_metrics();
     let full_recompute_rows = core
         .query_rows_for_link(&shape, &binding, DurabilityTier::Global, author)
         .unwrap()
@@ -3359,8 +3360,12 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>();
     assert_eq!(full_recompute_rows, BTreeSet::from([row(0xa0)]));
+    let one_shot_metrics = core.query_engine_read_metrics();
+    assert!(one_shot_metrics.policy_authorization_graphs > 0);
+    assert!(one_shot_metrics.policy_authorized_source_joins > 0);
 
     let mut peer = PeerState::for_author(author);
+    core.reset_query_engine_read_metrics();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let (adds, removes) = canonical_view_update_rows(&update);
     assert_eq!(
@@ -3370,6 +3375,9 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
         full_recompute_rows
     );
     assert!(removes.is_empty());
+    let maintained_metrics = core.query_engine_read_metrics();
+    assert!(maintained_metrics.policy_authorization_graphs > 0);
+    assert!(maintained_metrics.policy_authorized_source_joins > 0);
 }
 
 #[test]

@@ -2874,6 +2874,7 @@ where
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<GraphBuilder, Error> {
+        self.query_engine_read_metrics.policy_authorization_graphs += 1;
         let program = self.compile_query_program_request(request)?;
         lowered_terminal_graph(&program, "policy.authorized_rows")
     }
@@ -2893,6 +2894,8 @@ where
             None,
             BTreeMap::new(),
         )?;
+        self.query_engine_read_metrics
+            .policy_authorized_row_id_queries += 1;
         let graph = self.policy_authorization_row_id_graph(request)?;
         let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
         let row_idx =
@@ -4684,6 +4687,8 @@ where
         base: GraphBuilder,
         output_fields: &[String],
     ) -> Result<GraphBuilder, Error> {
+        self.query_engine_read_metrics
+            .policy_authorized_source_joins += 1;
         // TODO(query-engine): replace this physical bridge with a first-class
         // policy authorization graph node. The resolver now receives a
         // query-engine request directly, so public query composition is no
