@@ -68,9 +68,12 @@ Query evaluation starts from the same visibility model as current-row reads:
 lowering **begins from `visible_current_graph(table, tier)`**, so deletion
 visibility is applied before user filters, joins, or reachable traversal
 (`INV-LOWER-9`, ch. 6). Parameterized query shapes lower to groove prepared
-shapes named `jazz-query:<shape_id>`, are cached by `(ShapeId, DurabilityTier)`,
-and execute via `Database::bind_shape` with parameter types taken from the shape
-(`INV-LOWER-10`, groove spec ch. 5).
+shapes named `jazz-query:<shape_id>`, are cached by
+`(ShapeId, DurabilityTier, binding-param signature)`, and execute via
+`Database::bind_shape` with parameter types taken from the shape
+(`INV-LOWER-10`, groove spec ch. 5). The binding-param signature is part of the
+cache key because the same semantic shape can be prepared with different
+claim- or caller-supplied binding columns after policy augmentation.
 
 There is one intended lowered-query core. That core takes an explicit **base
 source expression graph** (for example visible current rows for a table/tier,
@@ -104,34 +107,52 @@ identity (`INV-LOWER-21`).
 Read policy composes before lowering. For non-system peers, the shape lowered by
 the core is the user query intersected with the table read policy under the
 server-derived peer claims; policy joins, reachability, and witness dependencies
-are part of the lowered graph, not an after-the-fact output filter. Destination
-policy checks MAY still evaluate directly under `INV-LOWER-20` until
-prepared-shape policy lowering is complete, but the design target is the same
-policy-composed core.
+are part of the lowered graph, not an after-the-fact output filter. The prepared
+program's policy sharing key records policy identity plus the claim paths read by
+that lowered graph, not claim values. Claim values are runtime binding
+parameters, while claim-path sets can vary by policy identity because different
+identities can select different policy branches, missing-policy modes,
+attribution contexts, or authorization subplans before lowering. This is why the
+prepared-plan cache key includes the binding-param signature as well as the
+shape and durability tier.
+
+The current implementation split is explicit. Read policy now lowers through the
+`node/query_engine` path described above. Write-time acceptance still evaluates
+policy predicates directly in `node/policy.rs`: the ingest/dry-run path enters
+`NodeState::write_policy_allows_version_record`, which dispatches insert,
+update, and delete checks through `policy_allows*` helpers before accepting a
+version. Moving read policy into the query engine therefore did not silently
+change write acceptance semantics; `INV-LOWER-20` names that remaining direct
+write-policy boundary.
 
 Identity and execution are separate concerns: aggregation and non-maintained
 `order_by` are part of a shape's _semantic identity_ (canonicalized into the
 `ShapeId`, ch. 6), but their ordinary read execution is node-level
 post-processing applied after row materialization, not pushed into groove
-lowering. Maintained finite ordered windows are the exception: they lower to
-groove `TopBy` so membership changes are maintained incrementally. ch. 14 owns
-that execution-placement statement; ch. 6 owns the identity.
+lowering. Maintained ordered windows are the exception: finite windows and
+unbounded ordered suffixes lower to groove `TopBy` so membership changes are
+maintained incrementally. ch. 14 owns that execution-placement statement; ch. 6
+owns the identity.
 
 There is one maintained-subscription exception for windowing: an unordered
 `limit(1)` with no explicit `order_by` and offset `0` lowers into groove as
 `ArgMinBy` over the visible result rows, with an empty group and `row_uuid` as
 the comparison key. This makes the chosen row deterministic without claiming an
-application-visible order. Ordered maintained queries with a finite `limit`
-lower into groove `TopBy`, preserving user order terms and appending `row_uuid`
-as the stable tie field; `offset` is part of the retained window. Unordered
-`limit > 1` and unordered nonzero `offset` remain unsupported until they either
-gain explicit order semantics or a separate maintained lowering.
+application-visible order. Ordered maintained queries lower into groove `TopBy`,
+preserving user order terms and appending `row_uuid` as the stable tie field;
+`offset` is part of the retained window. When the jazz query omits `limit`,
+lowering represents the unbounded ordered suffix with `usize::MAX`, matching ch.
+6's promise that maintained ordered subscriptions can omit a finite limit while
+still preserving ordered membership. Unordered `limit > 1` and unordered nonzero
+`offset` remain unsupported until they either gain explicit order semantics or a
+separate maintained lowering.
 
 _Further invariants._ `INV-LOWER-13` — aggregation, ordinary read ordering,
 general pagination, and projection are applied by the node _after_ row
 materialization (not required of groove), except maintained unordered `limit(1)`
-offset `0` which lowers through `ArgMinBy` and maintained finite ordered windows
-which lower through `TopBy`. For maintained subscriptions, ch. 16 tracks
+offset `0` which lowers through `ArgMinBy` and maintained ordered windows or
+ordered suffixes which lower through `TopBy`. For maintained subscriptions, ch.
+16 tracks
 aggregate/projection/predicate-policy lowering gaps separately from remaining
 window capability limits. `INV-LOWER-12` — a read crossing
 partitioned/schema-projected data bypasses the ordinary prepared current plan
@@ -169,11 +190,12 @@ role, or hole state in opaque revisions.
 
 ## Open questions
 
-- 🔶 **Policy lowering** (`INV-LOWER-20`). RLS policies are designed to lower to
-  groove prepared shapes; the implementation currently evaluates them directly
-  in `node/policy.rs` (prepared-shape policy lowering arrives with the edge
-  tier). Decide whether ch. 14 states the design invariant with an
-  implementation exception or only the implemented behavior.
+- ✅ **Policy lowering** (`INV-LOWER-20`). Read policy now lowers through
+  `node/query_engine` as part of the policy-composed query graph. Write-time
+  acceptance still evaluates directly in `node/policy.rs` via
+  `NodeState::write_policy_allows_version_record` and its `policy_allows*`
+  helpers, so the spec states the implemented split rather than leaving the
+  former prepared-shape policy question open.
 - 🔶 **Bytes primary keys.** The README lists bytes PKs as a "new" groove ask, but
   the implementation already uses `PrimaryKeyColumn::bytes` in several lowered
   tables — treat as satisfied rather than pending.
