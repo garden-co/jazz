@@ -53,7 +53,11 @@ records are shaped, or how compatible streams are combined.
 **Filter** emits exactly the input deltas whose records satisfy its
 `PredicateExpr`, preserving bytes and weights (`INV-QUERY-3`). The predicate
 surface is `Eq`/`Neq`/`Gt`/`GtEq`/`Lt`/`LtEq`/`IsNull`/`IsNotNull` combined with
-`And`.
+`And`/`Or`. Graph-level filters also support field-to-field equality and
+inequality (`EqField`/`NeqField`) plus array membership predicates
+(`Contains`/`ContainsField`). This names the runtime-supported predicate surface;
+SQL lowering remains narrower and must reject unsupported or ill-typed predicate
+forms rather than approximate them (`INV-QUERY-4`).
 
 **MapProject** emits one output delta for each input delta by copying the
 configured fields into the output descriptor. **UnwrapNullable** drops
@@ -146,17 +150,19 @@ A `TopBy` operator has:
   ordering.
 - `tie_cols`: stable fields appended after `order_cols` to make the total order
   deterministic.
-- `offset` and `limit`: the retained window bounds, where `limit` must be
-  finite for maintained subscriptions.
+- `offset` and `limit`: the retained window bounds. `limit` may be finite or may
+  represent an unbounded retained suffix; jazz lowering uses `usize::MAX` for an
+  omitted ordered-query limit.
 - `output`: the original input record, optionally with implementation-defined
   rank metadata only when the descriptor declares it.
 
 For each partition, `TopBy` maintains the weighted multiset of input records
 plus an ordered index over `(order_cols, tie_cols, full-record bytes)`. The
 operator's denotation is the records whose positive multiplicity falls in the
-half-open ordinal range `[offset, offset + limit)`. Duplicate equal records keep
-bag semantics: multiplicity affects how many copies occupy the ordered stream.
-If two distinct rows compare equal on `order_cols`, `tie_cols` MUST decide their
+half-open ordinal range `[offset, offset + limit)`, or all records at ordinals
+`>= offset` when the limit is unbounded. Duplicate equal records keep bag
+semantics: multiplicity affects how many copies occupy the ordered stream. If
+two distinct rows compare equal on `order_cols`, `tie_cols` MUST decide their
 relative order. If `tie_cols` are not enough to distinguish rows, the encoded
 full record bytes are the final deterministic tie-breaker. A planner should
 prefer a primary-key or otherwise stable identity field in `tie_cols`; relying
@@ -172,7 +178,10 @@ still cause deltas if they cross a boundary and displace retained rows.
 
 Hydration evaluates the same denotation from the current input snapshot. A
 commit/binding tick updates only partitions touched by input deltas; maintaining
-the ordered index is operator state, not a semantic rescan license.
+the ordered index is operator state, not a semantic rescan license. Unbounded
+retained suffixes are supported for consumers such as jazz maintained ordered
+subscriptions, but they can retain and diff a large portion of each partition.
+Use a finite limit when the consumer only needs a bounded window.
 
 ## 3.7 `Aggregate` (maintained grouped summaries)
 
