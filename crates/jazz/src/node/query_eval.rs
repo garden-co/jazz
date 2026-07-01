@@ -42,7 +42,7 @@ use crate::protocol::{
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
     Include, JoinTarget, JoinVia, Operand, OrderDirection, PolicyBranch, Predicate,
-    QUERY_NAMESPACE, Query as JazzQuery, ShapeId, ValidatedQuery,
+    Query as JazzQuery, ShapeId, ValidatedQuery,
 };
 
 const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
@@ -3673,19 +3673,6 @@ where
         Some(())
     }
 
-    fn finish_query_rows(
-        &self,
-        query: &crate::query::Query,
-        rows: &mut Vec<CurrentRow>,
-    ) -> Result<(), Error> {
-        if query.aggregate.is_some() {
-            *rows = self.aggregate_rows(query, rows)?;
-        }
-        self.apply_query_order(query, rows)?;
-        apply_pagination(query, rows);
-        self.apply_projection(query, rows)
-    }
-
     fn finish_engine_query_rows(
         &self,
         query: &crate::query::Query,
@@ -3695,53 +3682,6 @@ where
         // return a deterministic Vec. Re-apply ordering to the selected rows
         // without re-applying pagination.
         self.apply_query_order(query, rows)
-    }
-
-    fn aggregate_rows(
-        &self,
-        query: &crate::query::Query,
-        rows: &[CurrentRow],
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let aggregate = query
-            .aggregate
-            .as_ref()
-            .ok_or(Error::InvalidStoredValue("missing aggregate query"))?;
-        let table = self.table(&query.table)?.clone();
-        let mut groups = Vec::<(Option<Value>, Vec<&CurrentRow>)>::new();
-        if let Some(group_by) = &aggregate.group_by {
-            for row in rows {
-                let group = row.cell(&table, group_by);
-                if let Some((_, rows)) = groups.iter_mut().find(|(key, _)| key == &group) {
-                    rows.push(row);
-                } else {
-                    groups.push((group, vec![row]));
-                }
-            }
-        } else {
-            groups.push((None, rows.iter().collect()));
-        }
-
-        let descriptor = aggregate_row_descriptor(&table, aggregate)?;
-        let mut output = Vec::new();
-        for (group, rows) in groups {
-            let mut values = vec![Value::Uuid(aggregate_row_uuid(&group))];
-            if aggregate.group_by.is_some() {
-                values.push(Value::Nullable(group.map(Box::new)));
-            }
-            for aggregate in &aggregate.aggregates {
-                values.push(Value::Nullable(
-                    aggregate_value(&table, aggregate, &rows)?.map(Box::new),
-                ));
-            }
-            values.push(Value::U64(0));
-            values.push(Value::U64(0));
-            let raw = descriptor.create(&values)?;
-            output.push(CurrentRow::new(
-                format!("{}_aggregate", query.table),
-                OwnedRecord::new(raw, descriptor),
-            ));
-        }
-        Ok(output)
     }
 
     pub(crate) fn apply_query_order(
@@ -4016,7 +3956,7 @@ where
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
-        self.finish_query_rows(query, &mut rows)?;
+        self.finish_engine_query_rows(query, &mut rows)?;
         Ok(rows)
     }
 
@@ -5071,167 +5011,6 @@ fn local_maintained_view_content_witness<'a>(
         .filter(|version| version.deletion().is_none())
 }
 
-fn apply_pagination(query: &crate::query::Query, rows: &mut Vec<CurrentRow>) {
-    if query.offset == 0 && query.limit.is_none() {
-        return;
-    }
-    let start = query.offset.min(rows.len());
-    let end = query
-        .limit
-        .map(|limit| start.saturating_add(limit).min(rows.len()))
-        .unwrap_or(rows.len());
-    *rows = rows[start..end].to_vec();
-}
-
-fn aggregate_row_descriptor(
-    table: &TableSchema,
-    aggregate: &AggregateQuery,
-) -> Result<RecordDescriptor, Error> {
-    let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
-    if let Some(group_by) = &aggregate.group_by {
-        fields.push((
-            format!("user_{group_by}"),
-            ValueType::Nullable(Box::new(
-                table_column_type(table, group_by)?.clone().value_type(),
-            )),
-        ));
-    }
-    for aggregate in &aggregate.aggregates {
-        fields.push((
-            format!("user_{}", aggregate.alias),
-            ValueType::Nullable(Box::new(
-                aggregate_value_type(table, aggregate)?.value_type(),
-            )),
-        ));
-    }
-    fields.push(("tx_time".to_owned(), ValueType::U64));
-    fields.push(("tx_node_id".to_owned(), ValueType::U64));
-    Ok(RecordDescriptor::new(fields))
-}
-
-fn aggregate_value_type(
-    table: &TableSchema,
-    aggregate: &Aggregate,
-) -> Result<groove::schema::ColumnType, Error> {
-    Ok(match aggregate.function {
-        AggregateFunction::Count => groove::schema::ColumnType::U64,
-        AggregateFunction::Sum => match table_column_type(
-            table,
-            aggregate
-                .column
-                .as_deref()
-                .ok_or(Error::InvalidStoredValue("sum aggregate missing column"))?,
-        )? {
-            groove::schema::ColumnType::F64 => groove::schema::ColumnType::F64,
-            _ => groove::schema::ColumnType::U64,
-        },
-        AggregateFunction::Min | AggregateFunction::Max => table_column_type(
-            table,
-            aggregate
-                .column
-                .as_deref()
-                .ok_or(Error::InvalidStoredValue(
-                    "min/max aggregate missing column",
-                ))?,
-        )?
-        .clone(),
-    })
-}
-
-fn aggregate_value(
-    table: &TableSchema,
-    aggregate: &Aggregate,
-    rows: &[&CurrentRow],
-) -> Result<Option<Value>, Error> {
-    let Some(column) = aggregate.column.as_deref() else {
-        return Ok(Some(Value::U64(rows.len() as u64)));
-    };
-    match aggregate.function {
-        AggregateFunction::Count => Ok(Some(Value::U64(
-            rows.iter()
-                .filter(|row| row.cell(table, column).is_some())
-                .count() as u64,
-        ))),
-        AggregateFunction::Sum => sum_aggregate_value(table, column, rows),
-        AggregateFunction::Min => min_max_aggregate_value(table, column, rows, false),
-        AggregateFunction::Max => min_max_aggregate_value(table, column, rows, true),
-    }
-}
-
-fn sum_aggregate_value(
-    table: &TableSchema,
-    column: &str,
-    rows: &[&CurrentRow],
-) -> Result<Option<Value>, Error> {
-    let mut int_sum = 0_u64;
-    let mut float_sum = 0.0_f64;
-    let mut has_value = false;
-    let is_float = matches!(
-        table_column_type(table, column)?,
-        groove::schema::ColumnType::F64
-    );
-    for row in rows {
-        let Some(value) = row.cell(table, column) else {
-            continue;
-        };
-        has_value = true;
-        match value {
-            Value::U8(value) => int_sum = int_sum.saturating_add(value as u64),
-            Value::U16(value) => int_sum = int_sum.saturating_add(value as u64),
-            Value::U32(value) => int_sum = int_sum.saturating_add(value as u64),
-            Value::U64(value) => int_sum = int_sum.saturating_add(value),
-            Value::F64(value) => float_sum += value,
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "aggregate column was not numeric",
-                ));
-            }
-        }
-    }
-    if !has_value {
-        return Ok(None);
-    }
-    if is_float {
-        Ok(Some(Value::F64(float_sum)))
-    } else {
-        Ok(Some(Value::U64(int_sum)))
-    }
-}
-
-fn min_max_aggregate_value(
-    table: &TableSchema,
-    column: &str,
-    rows: &[&CurrentRow],
-    max: bool,
-) -> Result<Option<Value>, Error> {
-    let mut best = None::<Value>;
-    for row in rows {
-        let Some(value) = row.cell(table, column) else {
-            continue;
-        };
-        let replace = best.as_ref().is_none_or(|current| {
-            compare_values(&value, current).is_some_and(|ordering| {
-                if max {
-                    ordering.is_gt()
-                } else {
-                    ordering.is_lt()
-                }
-            })
-        });
-        if replace {
-            best = Some(value);
-        }
-    }
-    Ok(best)
-}
-
-fn aggregate_row_uuid(group: &Option<Value>) -> uuid::Uuid {
-    match group {
-        Some(value) => uuid::Uuid::new_v5(&QUERY_NAMESPACE, format!("{value:?}").as_bytes()),
-        None => uuid::Uuid::nil(),
-    }
-}
-
 fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Ordering {
     match (left, right) {
         (Some(left), Some(right)) => compare_order_values(&left, &right),
@@ -5294,24 +5073,6 @@ fn compare_order_value_slices(left: &[Value], right: &[Value]) -> Ordering {
     left.len().cmp(&right.len())
 }
 
-fn table_column_type<'a>(
-    table: &'a TableSchema,
-    column: &str,
-) -> Result<&'a groove::schema::ColumnType, Error> {
-    if column == "id" {
-        return Ok(&groove::schema::ColumnType::Uuid);
-    }
-    if let Some(column_type) = magic_current_column_type(column) {
-        return Ok(column_type);
-    }
-    table
-        .columns
-        .iter()
-        .find(|candidate| candidate.name == column)
-        .map(|column| &column.column_type)
-        .ok_or(Error::InvalidStoredValue("query column was not validated"))
-}
-
 fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::ColumnType> {
     match column {
         "$createdBy" | "$updatedBy" => Some(&groove::schema::ColumnType::Uuid),
@@ -5348,6 +5109,7 @@ fn predicate_params(predicates: &[Predicate]) -> BTreeSet<String> {
     params
 }
 
+#[cfg(test)]
 fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (Value::Nullable(None), _) | (_, Value::Nullable(None)) => None,
