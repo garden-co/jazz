@@ -621,6 +621,16 @@ where
             },
         );
     }
+    for requirement in &requirements.metadata {
+        if let SourceMetadataRequirement::Provenance(field) = requirement {
+            metadata.insert(
+                SourceMetadataRequirement::Provenance(*field),
+                SourceMetadataFields::Provenance {
+                    field: source_provenance_field(*field).to_owned(),
+                },
+            );
+        }
+    }
 
     let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
     let base = match policy {
@@ -688,6 +698,15 @@ fn canonical_current_source_fields(
         ]);
     }
     fields
+}
+
+fn source_provenance_field(field: ProvenanceField) -> &'static str {
+    match field {
+        ProvenanceField::CreatedAt => "$createdAt",
+        ProvenanceField::CreatedBy => "$createdBy",
+        ProvenanceField::UpdatedAt => "$updatedAt",
+        ProvenanceField::UpdatedBy => "$updatedBy",
+    }
 }
 
 fn storage_to_canonical_current_source_fields(

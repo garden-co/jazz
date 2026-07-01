@@ -151,7 +151,7 @@ where
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
     ) -> Result<SyncMessage, Error> {
-        self.view_update_for_query_binding_with_peer_payload_inventory_and_plan(
+        self.cold_maintained_view_update_for_query_binding_with_peer_payload_inventory(
             shape,
             binding,
             subscription,
@@ -159,14 +159,13 @@ where
             previous_result_set,
             previous_member_result_set,
             identity,
-            None,
         )
     }
 
-    /// Build a query-binding view update using the peer's payload inventory and an
-    /// already-resolved plan for the link-policy-composed query.
+    /// Build a cold maintained query-binding view update using the peer's
+    /// payload inventory.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn view_update_for_query_binding_with_peer_payload_inventory_and_plan(
+    pub(crate) fn cold_maintained_view_update_for_query_binding_with_peer_payload_inventory(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -175,9 +174,8 @@ where
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
-        prepared_plan: Option<(&ValidatedQuery, &Binding, &PreparedQueryPlan)>,
     ) -> Result<SyncMessage, Error> {
-        self.view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+        self.cold_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
             shape,
             binding,
             subscription,
@@ -185,12 +183,11 @@ where
             previous_result_set,
             previous_member_result_set,
             identity,
-            prepared_plan,
             DurabilityTier::Global,
         )
     }
 
-    pub(crate) fn view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+    pub(crate) fn cold_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -199,7 +196,6 @@ where
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
-        _prepared_plan: Option<(&ValidatedQuery, &Binding, &PreparedQueryPlan)>,
         tier: DurabilityTier,
     ) -> Result<SyncMessage, Error> {
         let peer_complete_tx_payloads = peer_complete_tx_payloads
