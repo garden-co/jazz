@@ -17,9 +17,9 @@ use groove::schema::ColumnType;
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
 use super::policy::ViewEvaluationContext;
 use super::query_engine::{
-    AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathSegment,
-    ComparisonOp as NormalizedComparisonOp, CorrelationRequirement, DataSource, FieldProjection,
-    FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
+    AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathKind,
+    ClosurePathSegment, ComparisonOp as NormalizedComparisonOp, CorrelationRequirement, DataSource,
+    FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
     NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
     OrderKey as NormalizedOrderKey, OutputTerminalSchema, PayloadProjection, PolicyContext,
     PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
@@ -846,6 +846,7 @@ where
             sources.insert(target.clone());
             paths.push(ClosurePath {
                 id: format!("reference:{column}"),
+                kind: ClosurePathKind::ImplicitRootReference,
                 segments: vec![ClosurePathSegment {
                     parent: root_source.clone(),
                     target,
@@ -879,6 +880,7 @@ where
         }
         paths.push(ClosurePath {
             id: format!("include:{include_index}:{}", include.path),
+            kind: ClosurePathKind::ExplicitInclude,
             segments,
             gates_root: include.require || include.join_mode == crate::query::JoinMode::Inner,
         });

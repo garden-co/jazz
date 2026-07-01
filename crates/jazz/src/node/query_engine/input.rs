@@ -75,11 +75,24 @@ pub(crate) struct NormalizedRowSetShape {
 pub(crate) struct ClosurePath {
     /// Stable path name for diagnostics/sinks.
     pub(crate) id: String,
+    /// Why this closure path exists in the normalized query.
+    pub(crate) kind: ClosurePathKind,
     /// Ordered reference hops.
     pub(crate) segments: Vec<ClosurePathSegment>,
     /// Whether this path must be readable/resolvable for the root row to stay
     /// in the result set.
     pub(crate) gates_root: bool,
+}
+
+/// Semantic origin of a maintained/sync closure path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClosurePathKind {
+    /// Default one-hop root reference payload included when the user did not
+    /// request explicit includes.
+    ImplicitRootReference,
+    /// User-requested include path. Its `gates_root` flag captures optional vs
+    /// required/inner include semantics.
+    ExplicitInclude,
 }
 
 /// One reference hop inside a closure path.
