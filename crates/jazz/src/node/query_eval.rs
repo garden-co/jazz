@@ -781,7 +781,9 @@ where
         {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         }
-        let _ = branch_data;
+        if branch_data.is_some() {
+            return Err(source_resolution_error(request, SourceGap::BranchOverlay));
+        }
         Ok(Some(DeletionRegisterSource {
             graph: deletion_register_current_source_graph(&table.name, tier),
             row_uuid_field: "row_uuid".to_owned(),
@@ -7145,6 +7147,58 @@ mod tests {
             Some(DurabilityTier::Global),
         )
         .expect("accept member");
+    }
+
+    #[test]
+    fn branch_program_maintained_view_requires_branch_deletion_witness_source() {
+        // Internal compiler-boundary coverage: the public DB tests assert the
+        // user-visible subscription rejection, while this pins which output
+        // profile needs branch deletion witness metadata.
+        let (_dir, mut node) = open_node();
+        let branch_id = BranchId::from_bytes([0x42; 16]);
+        node.create_branch(branch_id).unwrap();
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("issues", row(1), 1_000).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("branch issue".to_owned())),
+                ("state".to_owned(), Value::String("open".to_owned())),
+                ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                ("priority".to_owned(), Value::U64(1)),
+            ])),
+        )
+        .unwrap();
+
+        let shape = Query::from("issues")
+            .validate(&node.catalogue.schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let app_rows = node
+            .query_rows_on_branch_query_engine(branch_id, &shape, &binding, AuthorId::SYSTEM)
+            .unwrap();
+        assert_eq!(
+            app_rows
+                .iter()
+                .map(CurrentRow::row_uuid)
+                .collect::<Vec<_>>(),
+            vec![row(1)]
+        );
+
+        let error = node
+            .compile_branch_query_program(
+                branch_id,
+                &shape,
+                &binding,
+                AuthorId::SYSTEM,
+                CurrentQueryProgramOutput::MaintainedView,
+            )
+            .unwrap_err();
+        let Error::QueryCapability(report) = error else {
+            panic!("expected branch witness capability gap, got {error:?}");
+        };
+        assert!(
+            report.contains("BranchOverlay"),
+            "unexpected capability report: {report}"
+        );
     }
 
     fn recursive_shape(schema: &JazzSchema) -> ValidatedQuery {
