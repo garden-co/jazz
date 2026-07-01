@@ -336,6 +336,49 @@ fn row_set_output(facts: BTreeSet<ProgramFactKey>) -> RowSetOutputRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ProductionOutputProfile {
+    AppRows,
+    AuthorizedRows,
+    RelationSnapshot,
+    MaintainedView,
+}
+
+fn production_output_request(
+    profile: ProductionOutputProfile,
+    has_relation_paths: bool,
+) -> RowSetOutputRequest {
+    match profile {
+        ProductionOutputProfile::AppRows => row_set_output(BTreeSet::new()),
+        ProductionOutputProfile::AuthorizedRows => RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([ProgramFactKey::AuthorizedRows]),
+        },
+        ProductionOutputProfile::RelationSnapshot => RowSetOutputRequest {
+            app_rows: Some(AppRowOutputRequest {
+                projection: PayloadProjection::ShapeDefault,
+                large_values: Vec::new(),
+            }),
+            facts: has_relation_paths
+                .then(|| {
+                    BTreeSet::from([
+                        ProgramFactKey::RelationEdges,
+                        ProgramFactKey::PathCorrelationCoverage,
+                    ])
+                })
+                .unwrap_or_default(),
+        },
+        ProductionOutputProfile::MaintainedView => RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([
+                ProgramFactKey::ResultMembership,
+                ProgramFactKey::VersionWitnesses,
+                ProgramFactKey::ReplacementWitnesses,
+            ]),
+        },
+    }
+}
+
 fn sync_facts() -> BTreeSet<ProgramFactKey> {
     BTreeSet::from([
         ProgramFactKey::ResultMembership,
@@ -1687,6 +1730,71 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
             })
         )
     }));
+}
+
+#[test]
+fn production_output_profiles_lower_for_linear_shapes_and_gate_correlated_maintained_view() {
+    // Internal lowering test: this pins production-shaped output requests at
+    // the normalizer/lowering boundary, including app_rows: None fact profiles
+    // that public API tests cannot isolate.
+    for profile in [
+        ProductionOutputProfile::AppRows,
+        ProductionOutputProfile::AuthorizedRows,
+        ProductionOutputProfile::RelationSnapshot,
+        ProductionOutputProfile::MaintainedView,
+    ] {
+        let linear_request = QueryProgramRequest {
+            reads: QueryReadSet::primary(current_read_view()),
+            policy: system_policy_context(),
+            input: row_set_input(0x79),
+            output: production_output_request(profile, false),
+        };
+        lower_query_program(linear_request, &mut FakeSourceResolver::default())
+            .unwrap_or_else(|err| panic!("linear {profile:?} profile should lower: {err:?}"));
+
+        let correlated_request = correlated_path_request(
+            CorrelationRequirement::Optional,
+            production_output_request(profile, true),
+        );
+        let result = lower_query_program(correlated_request, &mut FakeSourceResolver::default());
+        match profile {
+            ProductionOutputProfile::MaintainedView => {
+                let err = result.expect_err("correlated maintained view should capability-gap");
+                assert!(matches!(
+                    err.gaps.as_slice(),
+                    [UnsupportedReason::Operator(message)]
+                        if message == "maintained subscription views over array subqueries are not lowered yet"
+                ));
+            }
+            ProductionOutputProfile::RelationSnapshot => {
+                let program = result.expect("correlated relation snapshot should lower");
+                let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
+                assert!(terminals.iter().any(|terminal| {
+                    matches!(
+                        terminal,
+                        OutputTerminalSchema::Fact(ProgramFactOutput {
+                            key: ProgramFactKey::RelationEdges,
+                            ..
+                        })
+                    )
+                }));
+                assert!(terminals.iter().any(|terminal| {
+                    matches!(
+                        terminal,
+                        OutputTerminalSchema::Fact(ProgramFactOutput {
+                            key: ProgramFactKey::PathCorrelationCoverage,
+                            ..
+                        })
+                    )
+                }));
+            }
+            _ => {
+                result.unwrap_or_else(|err| {
+                    panic!("correlated {profile:?} profile should lower: {err:?}")
+                });
+            }
+        }
+    }
 }
 
 #[test]
