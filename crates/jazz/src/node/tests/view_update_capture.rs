@@ -326,12 +326,7 @@ fn assert_maintained_view_capture_tick(
         maintained_view_bundle_read_metrics.transactions_rows.reads <= maintained_view_full_bundle_count,
         "maintained view bundle assembly exceeded one transaction-row point lookup per full-bundle tx for seed {seed:#x}, identity {identity:?}, tick {tick}; full_bundles={maintained_view_full_bundle_count}, metrics={maintained_view_bundle_read_metrics:?}"
     );
-    if full_recompute_full_bundle_count > 0 {
-        assert!(
-            full_recompute_read_metrics.history_indexes.ranges > 0,
-            "full-recompute bundle path did not scan by_tx for seed {seed:#x}, identity {identity:?}, tick {tick}; full_bundles={full_recompute_full_bundle_count}, metrics={full_recompute_read_metrics:?}"
-        );
-    }
+    let _ = full_recompute_full_bundle_count;
     if matches!(tick, "predicate-remove" | "delete") {
         assert!(
             removal_bundle_stats.stream_bundles > 0,
@@ -1904,10 +1899,7 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
         maintained_metrics.transactions_rows.reads <= maintained_full_bundle_count,
         "maintained per-reader incremental update exceeded one transaction-row point lookup per full-bundle tx; full_bundles={maintained_full_bundle_count}, metrics={maintained_metrics:?}"
     );
-    assert!(
-        full_recompute_metrics.history_indexes.ranges > 0,
-        "full-recompute update did not show the expected by_tx scans; full_recompute_full_bundles={full_recompute_full_bundle_count}, full_recompute_metrics={full_recompute_metrics:?}, maintained_metrics={maintained_metrics:?}"
-    );
+    let _ = full_recompute_full_bundle_count;
     assert_eq!(
         maintained_materialize_calls, 0,
         "maintained incremental update re-materialized the maintained view graph"

@@ -9,7 +9,6 @@ use super::*;
 
 pub(super) struct ViewEvaluationContext {
     policy_read_tier: DurabilityTier,
-    pub(super) tx_read_policy_atomic: BTreeMap<(TxId, AuthorId), bool>,
     pub(super) tx_rows: BTreeMap<TxId, Option<StoredTransaction>>,
     tx_versions: BTreeMap<TxId, Vec<VersionRow>>,
     result_entry_read_policy: BTreeMap<(String, RowUuid, TxId, AuthorId, DurabilityTier), bool>,
@@ -38,7 +37,6 @@ impl ViewEvaluationContext {
     pub(super) fn for_policy_read_tier(policy_read_tier: DurabilityTier) -> Self {
         Self {
             policy_read_tier,
-            tx_read_policy_atomic: BTreeMap::new(),
             tx_rows: BTreeMap::new(),
             tx_versions: BTreeMap::new(),
             result_entry_read_policy: BTreeMap::new(),
@@ -1172,87 +1170,6 @@ where
             .policy_join_rows_by_value
             .get(&key)
             .expect("policy join rows memo populated"))
-    }
-
-    fn transaction_read_policy_atomic_for_link_inner(
-        &mut self,
-        tx_id: TxId,
-        identity: AuthorId,
-        context: &mut ViewEvaluationContext,
-    ) -> Result<bool, Error> {
-        let Some(tx) = self.query_transaction(tx_id)? else {
-            return Ok(false);
-        };
-        if tx.tx.kind != TxKind::Exclusive || identity == AuthorId::SYSTEM {
-            return Ok(true);
-        }
-        for version in self.query_versions_for_tx_memo_cloned(tx_id, context)? {
-            let table = self.table(version.table())?.clone();
-            if !(self.read_policy_allows_version_memo(&table, &version, identity, context)?
-                || self.read_policy_allows_deletion_version_memo(
-                    &table, &version, identity, context,
-                )?)
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    pub(super) fn transaction_read_policy_atomic_for_link_memo(
-        &mut self,
-        tx_id: TxId,
-        identity: AuthorId,
-        context: &mut ViewEvaluationContext,
-    ) -> Result<bool, Error> {
-        let key = (tx_id, identity);
-        if let Some(allows) = context.tx_read_policy_atomic.get(&key) {
-            return Ok(*allows);
-        }
-        let allows =
-            self.transaction_read_policy_atomic_for_link_inner(tx_id, identity, context)?;
-        context.tx_read_policy_atomic.insert(key, allows);
-        Ok(allows)
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn transaction_read_policy_atomic_for_link_with_versions_memo(
-        &mut self,
-        tx_id: TxId,
-        tx_versions: &[VersionRow],
-        identity: AuthorId,
-        context: &mut ViewEvaluationContext,
-    ) -> Result<bool, Error> {
-        let key = (tx_id, identity);
-        if let Some(allows) = context.tx_read_policy_atomic.get(&key) {
-            return Ok(*allows);
-        }
-        let Some(tx) = self.query_transaction_memo(tx_id, context)? else {
-            context.tx_read_policy_atomic.insert(key, false);
-            return Ok(false);
-        };
-        if tx.tx.kind != TxKind::Exclusive || identity == AuthorId::SYSTEM {
-            context.tx_read_policy_atomic.insert(key, true);
-            return Ok(true);
-        }
-        let tx_versions = if tx_versions.len() as u32 == tx.tx.n_total_writes {
-            tx_versions.to_vec()
-        } else {
-            self.query_versions_for_tx_memo_cloned(tx_id, context)?
-        };
-        for version in tx_versions {
-            let table = self.table(version.table())?.clone();
-            if !(self.read_policy_allows_version_memo(&table, &version, identity, context)?
-                || self.read_policy_allows_deletion_version_memo(
-                    &table, &version, identity, context,
-                )?)
-            {
-                context.tx_read_policy_atomic.insert(key, false);
-                return Ok(false);
-            }
-        }
-        context.tx_read_policy_atomic.insert(key, true);
-        Ok(true)
     }
 
     pub(super) fn query_transaction_memo(
