@@ -194,13 +194,15 @@ where
         row_uuid: RowUuid,
         identity: AuthorId,
     ) -> Result<bool, Error> {
-        let table = self.table(table_name)?.clone();
-        let Some(version) =
-            self.query_local_layer_winner(table_name, row_uuid, VersionLayer::Content)?
-        else {
-            return Ok(false);
-        };
-        self.read_policy_allows_version(&table, &version, identity)
+        let shape = crate::query::Query::from(table_name)
+            .filter(crate::query::eq(
+                crate::query::col("id"),
+                crate::query::lit(Value::Uuid(row_uuid.0)),
+            ))
+            .validate(&self.catalogue.schema)?;
+        let binding = shape.bind(BTreeMap::new())?;
+        self.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
+            .map(|rows| !rows.is_empty())
     }
 
     pub(crate) fn dry_run_write_current_allows(

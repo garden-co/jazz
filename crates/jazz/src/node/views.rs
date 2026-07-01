@@ -318,14 +318,25 @@ where
                         .cloned()
                         .collect::<Vec<_>>()
                 };
-                version_bundles.push(
-                    self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
-                        &stored_tx,
-                        &filtered_tx_versions,
-                        identity,
-                        &mut context,
-                    )?,
-                );
+                let bundle =
+                    if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
+                        // TODO(query-engine policy): complete exclusive payloads intentionally pull
+                        // the whole tx outside the maintained witness set. Move this remaining
+                        // filter to an authorization-fact query before deleting the read-policy
+                        // evaluator.
+                        self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
+                            &stored_tx,
+                            &filtered_tx_versions,
+                            identity,
+                            &mut context,
+                        )?
+                    } else {
+                        self.version_bundle_for_maintained_view_versions_with_tx(
+                            &stored_tx,
+                            &filtered_tx_versions,
+                        )?
+                    };
+                version_bundles.push(bundle);
                 record_maintained_view_stream_b_add_bundle();
                 continue;
             }
@@ -355,11 +366,9 @@ where
                         .query_transaction_memo(tx_id, &mut context)?
                         .ok_or(Error::MissingTransaction(tx_id))?;
                     version_bundles.push(
-                        self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
+                        self.version_bundle_for_maintained_view_versions_with_tx(
                             &stored_tx,
                             tx_versions,
-                            identity,
-                            &mut context,
                         )?,
                     );
                     record_maintained_view_removal_stream_bundle();
@@ -405,14 +414,10 @@ where
                 let stored_tx = self
                     .query_transaction_memo(tx_id, &mut context)?
                     .ok_or(Error::MissingTransaction(tx_id))?;
-                version_bundles.push(
-                    self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
-                        &stored_tx,
-                        tx_versions,
-                        identity,
-                        &mut context,
-                    )?,
-                );
+                version_bundles.push(self.version_bundle_for_maintained_view_versions_with_tx(
+                    &stored_tx,
+                    tx_versions,
+                )?);
                 record_maintained_view_removal_stream_bundle();
             }
         }
@@ -714,6 +719,47 @@ where
         Ok(VersionBundle {
             tx: tx_payload,
             versions,
+            fate: stored_tx.fate.clone(),
+            global_seq: stored_tx.global_seq,
+            durability: stored_tx.durability,
+        })
+    }
+
+    fn version_bundle_for_maintained_view_versions_with_tx(
+        &mut self,
+        stored_tx: &StoredTransaction,
+        tx_versions: &[VersionRow],
+    ) -> Result<VersionBundle, Error> {
+        let Transaction {
+            tx_id,
+            kind,
+            n_total_writes,
+            made_by,
+            permission_subject,
+            base_snapshot,
+            user_metadata_json,
+            source_branch,
+            ..
+        } = stored_tx.tx.clone();
+        let tx_payload = Transaction {
+            tx_id,
+            kind,
+            n_total_writes,
+            made_by,
+            permission_subject,
+            base_snapshot,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json,
+            source_branch,
+        };
+        Ok(VersionBundle {
+            tx: tx_payload,
+            versions: tx_versions
+                .iter()
+                .map(|version| self.version_record_from_row(version))
+                .collect::<Result<Vec<_>, Error>>()?,
             fate: stored_tx.fate.clone(),
             global_seq: stored_tx.global_seq,
             durability: stored_tx.durability,
