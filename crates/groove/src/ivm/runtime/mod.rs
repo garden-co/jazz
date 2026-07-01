@@ -38,16 +38,16 @@ use recursion::{
     snapshot_table_deltas,
 };
 
+const DEFAULT_SINK: &str = "__default";
+
 /// Stateful executor for deduplicated IVM graphs and subscriptions.
 #[derive(Clone, Debug)]
 pub struct IvmRuntime {
     schema: DatabaseSchema,
     table_descriptors: HashMap<String, RecordDescriptor>,
     graph: IvmGraph,
-    subscriptions: HashMap<SubscriptionId, SubscriptionState>,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
-    prepared_shapes: HashMap<PreparedShapeId, PreparedShapeState>,
-    routed_multisink_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
+    prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
     binding_sources: HashMap<String, BindingSourceState>,
     /// Binding retractions discovered while routing notifications cannot tick
@@ -84,7 +84,6 @@ impl IvmRuntime {
             schema,
             table_descriptors,
             graph: IvmGraph::new(),
-            subscriptions: HashMap::new(),
             multisink_subscriptions: HashMap::new(),
             operator_states: HashMap::new(),
             arrangement_states: HashMap::new(),
@@ -96,7 +95,6 @@ impl IvmRuntime {
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
             prepared_shapes: HashMap::new(),
-            routed_multisink_shapes: HashMap::new(),
             auto_direct_families: HashMap::new(),
             binding_sources: HashMap::new(),
             pending_binding_retractions: Vec::new(),
@@ -235,28 +233,22 @@ impl IvmRuntime {
             metrics: &mut metrics,
         };
 
-        for (subscription_id, subscription) in self
-            .subscriptions
+        let retained_roots = self
+            .node_meta
             .iter()
-            .filter(|(_, subscription)| subscription.target.is_direct())
-        {
-            let SubscriptionTarget::Direct { output } = &subscription.target else {
-                unreachable!("filtered to direct subscriptions");
-            };
-            let records = evaluator.update_node(output.node)?;
-            if !records.deltas.is_empty() && records.descriptor != output.output {
-                return Err(IvmRuntimeError::GraphOutputMismatch);
-            }
-            if !records.is_empty() {
-                evaluator.metrics.notifications_sent += 1;
-                evaluator.metrics.notification_records += records.deltas.len();
-                evaluator.metrics.notification_encoded_bytes +=
-                    record_deltas_encoded_bytes(&records);
-            }
-            if !records.is_empty() && subscription.sender.send(records).is_err() {
-                dropped_subscriptions.push(*subscription_id);
-            }
+            .filter(|(node, meta)| {
+                !meta.retainers.is_empty()
+                    && evaluator
+                        .graph
+                        .node(**node)
+                        .is_some_and(|node| !node.is_durable())
+            })
+            .map(|(node, _)| *node)
+            .collect::<Vec<_>>();
+        for node in retained_roots {
+            evaluator.update_node(node)?;
         }
+
         for (subscription_id, subscription) in &self.multisink_subscriptions {
             let mut sinks = BTreeMap::new();
             for (sink, output) in &subscription.outputs {
@@ -279,44 +271,7 @@ impl IvmRuntime {
                 dropped_subscriptions.push(*subscription_id);
             }
         }
-        let shape_ids = self.prepared_shapes.keys().copied().collect::<Vec<_>>();
-        let mut shape_outputs = Vec::new();
-        for shape_id in shape_ids {
-            let Some(shape) = self.prepared_shapes.get(&shape_id) else {
-                continue;
-            };
-            if let Some(routing) = &shape.routing {
-                evaluator.update_node(shape.output.node)?;
-                let records = evaluator.update_node(routing.output.node)?;
-                shape_outputs.push((shape_id, records));
-                continue;
-            }
-            let records = evaluator.update_node(shape.output.node)?;
-            shape_outputs.push((shape_id, records));
-        }
         drop(evaluator);
-
-        for (shape_id, records) in shape_outputs {
-            let Some(shape) = self.prepared_shapes.get_mut(&shape_id) else {
-                continue;
-            };
-            let notifications = route_shape_records(shape, records)?;
-            for (subscription_id, records) in notifications {
-                if !records.is_empty() {
-                    metrics.notifications_sent += 1;
-                    metrics.notification_records += records.deltas.len();
-                    metrics.notification_encoded_bytes += record_deltas_encoded_bytes(&records);
-                }
-                if !records.is_empty()
-                    && self
-                        .subscriptions
-                        .get(&subscription_id)
-                        .is_some_and(|subscription| subscription.sender.send(records).is_err())
-                {
-                    dropped_subscriptions.push(subscription_id);
-                }
-            }
-        }
 
         for subscription_id in dropped_subscriptions {
             self.unsubscribe(subscription_id);
@@ -413,33 +368,6 @@ impl IvmRuntime {
         Ok(())
     }
 
-    fn hydrate_prepared_shape_routes<S>(
-        &mut self,
-        shape_id: PreparedShapeId,
-        storage: &S,
-    ) -> Result<(), IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
-        let output_node = {
-            let shape = self
-                .prepared_shapes
-                .get(&shape_id)
-                .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
-            shape
-                .routing
-                .as_ref()
-                .map(|routing| routing.output.node)
-                .unwrap_or(shape.output.node)
-        };
-        let records = self.hydration_snapshot(output_node, storage)?;
-        let Some(shape) = self.prepared_shapes.get_mut(&shape_id) else {
-            return Err(IvmRuntimeError::PreparedShapeNotFound(shape_id));
-        };
-        route_shape_records(shape, records)?;
-        Ok(())
-    }
-
     fn tick_durable_nodes<S>(
         &mut self,
         table_deltas: &[TableDelta],
@@ -501,57 +429,18 @@ impl IvmRuntime {
                 )?;
                 if let Some(state) = self.prepared_shapes.get_mut(&shape.id()) {
                     state.auto_family_key = Some(plan.key.clone());
+                    if let Some(terminal) = state.terminals.get_mut(DEFAULT_SINK) {
+                        terminal.terminal.public_fields = plan.public_fields.clone();
+                    }
                 }
                 self.auto_direct_families
                     .insert(plan.key.clone(), shape.id());
                 shape.id()
             };
-            return self.bind_shape_projected(
-                shape_id,
-                &[plan.binding_value],
-                Some(plan.notification_projection),
-                storage,
-            );
+            return self.bind_shape(shape_id, &[plan.binding_value], storage);
         }
-        self.logical_nodes_requested += count_builder_nodes(&graph) as u64;
-        let CompiledNode {
-            output,
-            node: output_node,
-        } = self.add_dedup_graph(&graph)?;
-        let subscription_id = self.next_subscription_id();
-        let (sender, receiver) = mpsc::channel();
-        let retained = self.retain_as_subscription(subscription_id, output_node);
-        debug_assert!(retained);
-        self.subscriptions.insert(
-            subscription_id,
-            SubscriptionState {
-                sender,
-                target: SubscriptionTarget::Direct {
-                    output: CompiledNode {
-                        output,
-                        node: output_node,
-                    },
-                },
-            },
-        );
-        let initial = match self.hydration_snapshot(output_node, storage) {
-            Ok(initial) => initial,
-            Err(error) => {
-                self.unsubscribe(subscription_id);
-                return Err(error);
-            }
-        };
-        let sent = self
-            .subscriptions
-            .get(&subscription_id)
-            .is_some_and(|subscription| subscription.sender.send(initial).is_ok());
-        if !sent {
-            self.unsubscribe(subscription_id);
-        }
-        Ok(Subscription {
-            id: subscription_id,
-            receiver,
-        })
+        let multisink = self.subscribe_multisink([(DEFAULT_SINK, graph)], storage)?;
+        self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
     pub fn subscribe_multisink<I, K, S>(
@@ -687,15 +576,16 @@ impl IvmRuntime {
             self.hydrate_shape_graph(output.node, storage)?;
             terminal_states.insert(
                 terminal.sink.clone(),
-                RoutedMultisinkTerminalState { terminal },
+                RoutedMultisinkTerminalState { terminal, output },
             );
         }
-        self.routed_multisink_shapes.insert(
+        self.prepared_shapes.insert(
             shape_id,
             RoutedMultisinkShapeState {
                 shape,
                 binding_descriptor,
                 terminals: terminal_states,
+                auto_family_key: None,
             },
         );
         Ok(PreparedShape { id: shape_id })
@@ -710,11 +600,29 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        self.bind_routed_multisink_shape_with_public_fields(
+            shape_id,
+            binding_values,
+            BTreeMap::new(),
+            storage,
+        )
+    }
+
+    fn bind_routed_multisink_shape_with_public_fields<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        public_fields: BTreeMap<String, Vec<String>>,
+        storage: &S,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
         if !self.pending_binding_retractions.is_empty() {
             self.tick_with_params(Vec::new(), Vec::new(), storage)?;
         }
         let shape = self
-            .routed_multisink_shapes
+            .prepared_shapes
             .get(&shape_id)
             .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?
             .clone();
@@ -727,7 +635,11 @@ impl IvmRuntime {
             .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
             .sum::<usize>() as u64;
         for (sink, terminal) in &shape.terminals {
-            let graph = bound_routed_multisink_graph(&terminal.terminal, binding_values);
+            let mut terminal = terminal.terminal.clone();
+            if let Some(fields) = public_fields.get(sink) {
+                terminal.public_fields = fields.clone();
+            }
+            let graph = bound_routed_multisink_graph(&terminal, binding_values);
             let output = self.add_dedup_graph(&graph)?;
             outputs.insert(sink.clone(), output);
         }
@@ -789,53 +701,29 @@ impl IvmRuntime {
         output_key_fields: impl IntoIterator<Item = impl Into<String>>,
         storage: &impl OrderedKvStorage,
     ) -> Result<PreparedShape, IvmRuntimeError> {
-        if !self.pending_binding_retractions.is_empty() {
-            self.tick_with_params(Vec::new(), Vec::new(), storage)?;
-        }
-        self.logical_nodes_requested += count_builder_nodes(&graph) as u64;
-        let CompiledNode {
-            output,
-            node: output_node,
-        } = self.add_dedup_graph(&graph)?;
-        let key_fields = output_key_fields
+        let output = self.infer_builder_output(&graph)?;
+        let route_fields = output_key_fields
             .into_iter()
             .map(|field| {
                 let field = field.into();
                 output
                     .field_index(&field)
-                    .ok_or(IvmRuntimeError::ShapeKeyFieldNotFound(field))
+                    .ok_or_else(|| IvmRuntimeError::ShapeKeyFieldNotFound(field.clone()))?;
+                Ok::<_, IvmRuntimeError>(field)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let shape = binding_source_shape.into();
-        let shape_id = self.next_shape_id();
-        self.binding_sources
-            .entry(shape.clone())
-            .or_insert_with(|| BindingSourceState {
-                descriptor: binding_descriptor,
-                refcounts: HashMap::new(),
-            });
-        let retained = self.add_retainer(
-            output_node,
-            Retainer::PreparedShape(shape_id.retainer_key()),
-        );
-        debug_assert!(retained);
-        self.prepared_shapes.insert(
-            shape_id,
-            PreparedShapeState {
-                shape: shape.clone(),
-                binding_descriptor,
-                output: CompiledNode {
-                    output,
-                    node: output_node,
-                },
-                output_key_fields: key_fields,
-                routing: None,
-                bindings: HashMap::new(),
-                auto_family_key: None,
-            },
-        );
-        self.hydrate_shape_graph(output_node, storage)?;
-        Ok(PreparedShape { id: shape_id })
+        let public_fields = descriptor_field_names(&output)?;
+        self.prepare_routed_multisink(
+            [RoutedMultisinkTerminal::new(
+                DEFAULT_SINK,
+                graph,
+                route_fields,
+                public_fields,
+            )],
+            binding_source_shape,
+            binding_descriptor,
+            storage,
+        )
     }
 
     pub fn prepare_with_routing(
@@ -847,62 +735,31 @@ impl IvmRuntime {
         routing_key_fields: impl IntoIterator<Item = impl Into<String>>,
         storage: &impl OrderedKvStorage,
     ) -> Result<PreparedShape, IvmRuntimeError> {
-        if !self.pending_binding_retractions.is_empty() {
-            self.tick_with_params(Vec::new(), Vec::new(), storage)?;
-        }
-        self.logical_nodes_requested +=
-            (count_builder_nodes(&output_graph) + count_builder_nodes(&routing_graph)) as u64;
-        let output = self.add_dedup_graph(&output_graph)?;
-        let routing_output = self.add_dedup_graph(&routing_graph)?;
-        let key_fields = routing_key_fields
+        let output = self.infer_builder_output(&output_graph)?;
+        let routing_output = self.infer_builder_output(&routing_graph)?;
+        validate_public_output_fields(&routing_output, &output)?;
+        let route_fields = routing_key_fields
             .into_iter()
             .map(|field| {
                 let field = field.into();
                 routing_output
-                    .output
                     .field_index(&field)
-                    .ok_or(IvmRuntimeError::ShapeKeyFieldNotFound(field))
+                    .ok_or_else(|| IvmRuntimeError::ShapeKeyFieldNotFound(field.clone()))?;
+                Ok::<_, IvmRuntimeError>(field)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let notification_projection =
-            notification_projection_from_output(&routing_output.output, output.output)?;
-        let shape = binding_source_shape.into();
-        let shape_id = self.next_shape_id();
-        self.binding_sources
-            .entry(shape.clone())
-            .or_insert_with(|| BindingSourceState {
-                descriptor: binding_descriptor,
-                refcounts: HashMap::new(),
-            });
-        let retained_output = self.add_retainer(
-            output.node,
-            Retainer::PreparedShape(shape_id.retainer_key()),
-        );
-        let retained_routing = self.add_retainer(
-            routing_output.node,
-            Retainer::PreparedShape(shape_id.retainer_key()),
-        );
-        debug_assert!(retained_output || retained_routing);
-        let output_node = output.node;
-        let routing_node = routing_output.node;
-        self.prepared_shapes.insert(
-            shape_id,
-            PreparedShapeState {
-                shape: shape.clone(),
-                binding_descriptor,
-                output,
-                output_key_fields: key_fields,
-                routing: Some(PreparedShapeRouting {
-                    output: routing_output,
-                    notification_projection,
-                }),
-                bindings: HashMap::new(),
-                auto_family_key: None,
-            },
-        );
-        self.hydrate_shape_graph(output_node, storage)?;
-        self.hydrate_shape_graph(routing_node, storage)?;
-        Ok(PreparedShape { id: shape_id })
+        let public_fields = descriptor_field_names(&output)?;
+        self.prepare_routed_multisink(
+            [RoutedMultisinkTerminal::new(
+                DEFAULT_SINK,
+                routing_graph,
+                route_fields,
+                public_fields,
+            )],
+            binding_source_shape,
+            binding_descriptor,
+            storage,
+        )
     }
 
     pub fn bind_shape<S>(
@@ -914,7 +771,8 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.bind_shape_projected(shape_id, binding_values, None, storage)
+        let multisink = self.bind_routed_multisink_shape(shape_id, binding_values, storage)?;
+        self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
     pub(crate) fn bind_shape_with_output<S>(
@@ -927,85 +785,21 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let projection = self.shape_notification_projection(shape_id, public_output)?;
-        self.bind_shape_projected(shape_id, binding_values, Some(projection), storage)
-    }
-
-    fn bind_shape_projected<S>(
-        &mut self,
-        shape_id: PreparedShapeId,
-        binding_values: &[Value],
-        projection: Option<ShapeNotificationProjection>,
-        storage: &S,
-    ) -> Result<Subscription, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
-        if !self.pending_binding_retractions.is_empty() {
-            self.tick_with_params(Vec::new(), Vec::new(), storage)?;
-        }
-        let shape = self
-            .prepared_shapes
-            .get(&shape_id)
-            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
-        let binding_record = shape.binding_descriptor.create(binding_values)?;
-        let binding_key = BindingKey(binding_record.clone());
-        let shape_binding_exists = shape.bindings.contains_key(&binding_key);
-        let subscription_id = self.next_subscription_id();
-        let (sender, receiver) = mpsc::channel();
-        let binding_delta = self.add_binding_ref(shape_id, binding_key.clone())?;
-        let is_new_binding = !binding_delta.deltas.is_empty();
-        if !is_new_binding && !shape_binding_exists {
-            self.hydrate_prepared_shape_routes(shape_id, storage)?;
-        }
-        if let Some(shape) = self.prepared_shapes.get_mut(&shape_id) {
-            shape
-                .bindings
-                .entry(binding_key.clone())
-                .or_default()
-                .senders
-                .insert(subscription_id, ShapeSender { projection });
-        }
-        self.subscriptions.insert(
-            subscription_id,
-            SubscriptionState {
-                sender,
-                target: SubscriptionTarget::Shape {
-                    shape_id,
-                    binding_key: binding_key.clone(),
-                },
-            },
-        );
-        if is_new_binding {
-            self.tick_with_params(vec![], vec![binding_delta], storage)?;
-            let snapshot = self.shape_materialized_snapshot_for_subscription(
-                shape_id,
-                &binding_key,
-                subscription_id,
-            )?;
-            if snapshot.is_empty()
-                && let Some(subscription) = self.subscriptions.get(&subscription_id)
-            {
-                let _ = subscription.sender.send(snapshot);
-            }
-        } else {
-            let snapshot = self.shape_materialized_snapshot_for_subscription(
-                shape_id,
-                &binding_key,
-                subscription_id,
-            )?;
-            if let Some(subscription) = self.subscriptions.get(&subscription_id) {
-                let _ = subscription.sender.send(snapshot);
-            }
-        }
-        let sent = self.subscriptions.contains_key(&subscription_id);
-        if !sent {
-            self.unsubscribe(subscription_id);
-        }
-        Ok(Subscription {
-            id: subscription_id,
-            receiver,
-        })
+        validate_public_output_for_shape(
+            self.prepared_shapes
+                .get(&shape_id)
+                .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?,
+            DEFAULT_SINK,
+            &public_output,
+        )?;
+        let public_fields = descriptor_field_names(&public_output)?;
+        let multisink = self.bind_routed_multisink_shape_with_public_fields(
+            shape_id,
+            binding_values,
+            [(DEFAULT_SINK.to_owned(), public_fields)].into(),
+            storage,
+        )?;
+        self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
@@ -1019,35 +813,12 @@ impl IvmRuntime {
                 && !param_delta.deltas.is_empty()
             {
                 self.pending_binding_retractions.push(param_delta);
+                self.remove_unreferenced_auto_family(shape_id);
             }
             return removed;
         }
 
-        let Some(subscription) = self.subscriptions.remove(&subscription_id) else {
-            return false;
-        };
-
-        if let SubscriptionTarget::Shape {
-            shape_id,
-            binding_key,
-        } = subscription.target
-        {
-            self.unsubscribe_shape_subscription(shape_id, &binding_key, subscription_id);
-            return true;
-        }
-
-        let SubscriptionTarget::Direct { output } = subscription.target else {
-            unreachable!("shape subscriptions returned above");
-        };
-        let removed = self.remove_retainer(
-            output.node,
-            &Retainer::Subscription(subscription_id.retainer_key()),
-        );
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
-        self.prune_unreferenced_arrangements();
-        removed
+        false
     }
 
     pub fn unsubscribe_with_storage<S>(
@@ -1068,36 +839,12 @@ impl IvmRuntime {
                 && !param_delta.deltas.is_empty()
             {
                 self.tick_with_params(Vec::new(), vec![param_delta], storage)?;
+                self.remove_unreferenced_auto_family(shape_id);
             }
             return Ok(removed);
         }
 
-        let Some(subscription) = self.subscriptions.remove(&subscription_id) else {
-            return Ok(false);
-        };
-
-        if let SubscriptionTarget::Shape {
-            shape_id,
-            binding_key,
-        } = subscription.target
-        {
-            self.unsubscribe_shape_subscription(shape_id, &binding_key, subscription_id);
-            self.tick_with_params(Vec::new(), Vec::new(), storage)?;
-            return Ok(true);
-        }
-
-        let SubscriptionTarget::Direct { output } = subscription.target else {
-            unreachable!("shape subscriptions returned above");
-        };
-        let removed = self.remove_retainer(
-            output.node,
-            &Retainer::Subscription(subscription_id.retainer_key()),
-        );
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
-        self.prune_unreferenced_arrangements();
-        Ok(removed)
+        Ok(false)
     }
 
     pub fn add_dedup_schema_indices(&mut self) -> Result<(), IvmRuntimeError> {
@@ -1110,52 +857,46 @@ impl IvmRuntime {
     }
 
     pub fn subscription_output_node(&self, subscription_id: SubscriptionId) -> Option<NodeId> {
-        if self.multisink_subscriptions.contains_key(&subscription_id) {
+        let subscription = self.multisink_subscriptions.get(&subscription_id)?;
+        if subscription.outputs.len() != 1 {
             return None;
         }
-        match &self.subscriptions.get(&subscription_id)?.target {
-            SubscriptionTarget::Direct { output } => Some(output.node),
-            SubscriptionTarget::Shape { shape_id, .. } => self
-                .prepared_shapes
-                .get(shape_id)
-                .map(|shape| shape.output.node),
-        }
+        subscription
+            .outputs
+            .values()
+            .next()
+            .map(|output| output.node)
     }
 
     pub fn subscription_output(
         &self,
         subscription_id: SubscriptionId,
     ) -> Option<&RecordDescriptor> {
-        if self.multisink_subscriptions.contains_key(&subscription_id) {
+        let subscription = self.multisink_subscriptions.get(&subscription_id)?;
+        if subscription.outputs.len() != 1 {
             return None;
         }
-        match &self.subscriptions.get(&subscription_id)?.target {
-            SubscriptionTarget::Direct { output } => Some(&output.output),
-            SubscriptionTarget::Shape {
-                shape_id,
-                binding_key,
-            } => self.prepared_shapes.get(shape_id).and_then(|shape| {
-                shape
-                    .bindings
-                    .get(binding_key)
-                    .and_then(|binding| binding.senders.get(&subscription_id))
-                    .and_then(|sender| sender.projection.as_ref())
-                    .map(|projection| &projection.descriptor)
-                    .or(Some(&shape.output.output))
-            }),
-        }
+        subscription
+            .outputs
+            .values()
+            .next()
+            .map(|output| &output.output)
     }
 
-    fn shape_notification_projection(
+    fn single_sink_subscription(
         &self,
-        shape_id: PreparedShapeId,
-        descriptor: RecordDescriptor,
-    ) -> Result<ShapeNotificationProjection, IvmRuntimeError> {
-        let shape = self
-            .prepared_shapes
-            .get(&shape_id)
-            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
-        notification_projection_from_output(&shape.output.output, descriptor)
+        inner: MultisinkSubscription,
+        sink: &str,
+    ) -> Result<Subscription, IvmRuntimeError> {
+        let output = self
+            .subscription_output(inner.id())
+            .copied()
+            .ok_or(IvmRuntimeError::GraphOutputMismatch)?;
+        Ok(Subscription {
+            inner,
+            sink: sink.to_owned(),
+            output,
+        })
     }
 
     fn plan_auto_direct_family(
@@ -1173,31 +914,8 @@ impl IvmRuntime {
         let shape_seed = "__auto_direct_shape".to_owned();
         let graph = replace_binding_shape(lifted.graph, &shape_seed);
         let shape_output = self.infer_builder_output(&graph)?;
-        let notification_mapping = original_output
-            .fields()
-            .iter()
-            .enumerate()
-            .map(|(index, _)| (0, index))
-            .collect::<Vec<_>>();
-        let notification_expressions = original_output
-            .fields()
-            .iter()
-            .map(|field| {
-                let name = field
-                    .name
-                    .clone()
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-                Ok(ProjectionExpr {
-                    expression: PlanExpr::field(name),
-                    output_name: field.name.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-        let projection = ShapeNotificationProjection {
-            descriptor: original_output,
-            expressions: notification_expressions,
-            mapping: notification_mapping,
-        };
+        validate_public_output_fields(&shape_output, &original_output)?;
+        let public_fields = descriptor_field_names(&original_output)?;
         let mut hasher = DefaultHasher::new();
         graph.hash(&mut hasher);
         let shape = format!("auto_direct_{:016x}", hasher.finish());
@@ -1216,7 +934,7 @@ impl IvmRuntime {
             graph: graph.clone(),
             binding_descriptor,
             binding_field: binding_field.clone(),
-            notification_projection: projection.clone(),
+            public_fields: public_fields.clone(),
         };
         Ok(Some(AutoDirectFamilyPlan {
             key,
@@ -1225,7 +943,7 @@ impl IvmRuntime {
             binding_descriptor,
             binding_field,
             binding_value: lifted.value.to_value(),
-            notification_projection: projection,
+            public_fields,
         }))
     }
 
@@ -1375,56 +1093,7 @@ impl IvmRuntime {
         if let Some(shape) = self.prepared_shapes.get(&shape_id) {
             return Ok(shape.shape.clone());
         }
-        if let Some(shape) = self.routed_multisink_shapes.get(&shape_id) {
-            return Ok(shape.shape.clone());
-        }
         Err(IvmRuntimeError::PreparedShapeNotFound(shape_id))
-    }
-
-    fn shape_materialized_snapshot(
-        &self,
-        shape_id: PreparedShapeId,
-        param: &BindingKey,
-    ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let shape = self
-            .prepared_shapes
-            .get(&shape_id)
-            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
-        let deltas = shape
-            .bindings
-            .get(param)
-            .into_iter()
-            .flat_map(|binding| binding.materialized.iter())
-            .map(|(record, weight)| RecordDelta {
-                record: record.clone(),
-                weight: *weight,
-            })
-            .collect();
-        Ok(RecordDeltas {
-            descriptor: shape.output.output,
-            deltas,
-        })
-    }
-
-    fn shape_materialized_snapshot_for_subscription(
-        &self,
-        shape_id: PreparedShapeId,
-        param: &BindingKey,
-        subscription_id: SubscriptionId,
-    ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let snapshot = self.shape_materialized_snapshot(shape_id, param)?;
-        let Some(shape) = self.prepared_shapes.get(&shape_id) else {
-            return Err(IvmRuntimeError::PreparedShapeNotFound(shape_id));
-        };
-        let projection = shape
-            .bindings
-            .get(param)
-            .and_then(|binding| binding.senders.get(&subscription_id))
-            .and_then(|sender| sender.projection.as_ref());
-        let Some(projection) = projection else {
-            return Ok(snapshot);
-        };
-        project_record_deltas(snapshot, projection)
     }
 
     fn binding_snapshot_deltas(&self) -> HashMap<String, RecordDeltas> {
@@ -1453,28 +1122,6 @@ impl IvmRuntime {
             .collect()
     }
 
-    fn unsubscribe_shape_subscription(
-        &mut self,
-        shape_id: PreparedShapeId,
-        param: &BindingKey,
-        subscription_id: SubscriptionId,
-    ) {
-        if let Some(shape) = self.prepared_shapes.get_mut(&shape_id)
-            && let Some(binding) = shape.bindings.get_mut(param)
-        {
-            binding.senders.remove(&subscription_id);
-            if binding.is_empty() {
-                shape.bindings.remove(param);
-            }
-        }
-        if let Some(param_delta) = self.remove_binding_ref(shape_id, param)
-            && !param_delta.deltas.is_empty()
-        {
-            self.pending_binding_retractions.push(param_delta);
-        }
-        self.remove_unreferenced_auto_family(shape_id);
-    }
-
     fn remove_unreferenced_auto_family(&mut self, shape_id: PreparedShapeId) {
         let Some(shape) = self.prepared_shapes.get(&shape_id) else {
             return;
@@ -1482,26 +1129,25 @@ impl IvmRuntime {
         let Some(key) = shape.auto_family_key.clone() else {
             return;
         };
-        if shape
-            .bindings
+        if self
+            .multisink_subscriptions
             .values()
-            .any(|binding| !binding.senders.is_empty())
+            .any(|subscription| matches!(subscription.target, MultisinkSubscriptionTarget::RoutedShape { shape_id: active, .. } if active == shape_id))
         {
             return;
         }
         let shape_name = shape.shape.clone();
-        let output_node = shape.output.node;
-        let routing_node = shape.routing.as_ref().map(|routing| routing.output.node);
+        let output_nodes = shape
+            .terminals
+            .values()
+            .map(|terminal| terminal.output.node)
+            .collect::<Vec<_>>();
         self.prepared_shapes.remove(&shape_id);
         self.binding_sources.remove(&shape_name);
         self.auto_direct_families.remove(&key);
-        self.remove_retainer(
-            output_node,
-            &Retainer::PreparedShape(shape_id.retainer_key()),
-        );
-        if let Some(routing_node) = routing_node {
+        for output_node in output_nodes {
             self.remove_retainer(
-                routing_node,
+                output_node,
                 &Retainer::PreparedShape(shape_id.retainer_key()),
             );
         }
@@ -1542,8 +1188,8 @@ impl IvmRuntime {
     pub fn stats(&self) -> RuntimeStats {
         let mut stats = RuntimeStats {
             graph_nodes: self.graph.nodes().len(),
-            active_subscriptions: self.subscriptions.len() + self.multisink_subscriptions.len(),
-            active_prepared_shapes: self.prepared_shapes.len() + self.routed_multisink_shapes.len(),
+            active_subscriptions: self.multisink_subscriptions.len(),
+            active_prepared_shapes: self.prepared_shapes.len(),
             active_shape_params: self
                 .binding_sources
                 .values()
@@ -2674,21 +2320,33 @@ impl RoutedMultisinkTerminal {
 /// Receiving end of a live query subscription.
 #[derive(Debug)]
 pub struct Subscription {
-    id: SubscriptionId,
-    receiver: Receiver<RecordDeltas>,
+    inner: MultisinkSubscription,
+    sink: String,
+    output: RecordDescriptor,
 }
 
 impl Subscription {
     pub fn id(&self) -> SubscriptionId {
-        self.id
+        self.inner.id()
     }
 
     pub fn recv(&self) -> Result<RecordDeltas, RecvError> {
-        self.receiver.recv()
+        self.inner
+            .recv()
+            .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
     pub fn try_recv(&self) -> Result<RecordDeltas, TryRecvError> {
-        self.receiver.try_recv()
+        self.inner
+            .try_recv()
+            .map(|deltas| self.extract_sink_deltas(deltas))
+    }
+
+    fn extract_sink_deltas(&self, mut deltas: MultisinkDeltas) -> RecordDeltas {
+        deltas
+            .sinks
+            .remove(&self.sink)
+            .unwrap_or_else(|| RecordDeltas::empty(self.output))
     }
 }
 
@@ -2800,14 +2458,6 @@ impl RecordDelta {
     }
 }
 
-/// Runtime bookkeeping for an active subscription.
-#[derive(Clone, Debug)]
-struct SubscriptionState {
-    /// Sending end for this subscription's notification stream.
-    sender: Sender<RecordDeltas>,
-    target: SubscriptionTarget,
-}
-
 #[derive(Clone, Debug)]
 struct MultisinkSubscriptionState {
     sender: Sender<MultisinkDeltas>,
@@ -2825,85 +2475,28 @@ enum MultisinkSubscriptionTarget {
 }
 
 #[derive(Clone, Debug)]
-enum SubscriptionTarget {
-    Direct {
-        /// The query result node evaluated on each tick to produce notifications.
-        output: CompiledNode,
-    },
-    Shape {
-        shape_id: PreparedShapeId,
-        binding_key: BindingKey,
-    },
-}
-
-impl SubscriptionTarget {
-    fn is_direct(&self) -> bool {
-        matches!(self, Self::Direct { .. })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PreparedShapeState {
-    shape: String,
-    binding_descriptor: RecordDescriptor,
-    output: CompiledNode,
-    output_key_fields: Vec<usize>,
-    routing: Option<PreparedShapeRouting>,
-    bindings: HashMap<BindingKey, PreparedBindingState>,
-    auto_family_key: Option<AutoDirectFamilyKey>,
-}
-
-#[derive(Clone, Debug)]
 struct RoutedMultisinkShapeState {
     shape: String,
     binding_descriptor: RecordDescriptor,
     terminals: BTreeMap<String, RoutedMultisinkTerminalState>,
+    auto_family_key: Option<AutoDirectFamilyKey>,
 }
 
 #[derive(Clone, Debug)]
 struct RoutedMultisinkTerminalState {
     terminal: RoutedMultisinkTerminal,
-}
-
-#[derive(Clone, Debug)]
-struct PreparedShapeRouting {
     output: CompiledNode,
-    notification_projection: ShapeNotificationProjection,
-}
-
-#[derive(Clone, Debug, Default)]
-struct PreparedBindingState {
-    senders: HashMap<SubscriptionId, ShapeSender>,
-    materialized: BTreeMap<Vec<u8>, i64>,
-}
-
-impl PreparedBindingState {
-    fn is_empty(&self) -> bool {
-        self.senders.is_empty() && self.materialized.is_empty()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct BindingKey(Vec<u8>);
-
-#[derive(Clone, Debug)]
-struct ShapeSender {
-    projection: Option<ShapeNotificationProjection>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ShapeNotificationProjection {
-    descriptor: RecordDescriptor,
-    expressions: Vec<ProjectionExpr>,
-    mapping: Vec<(usize, usize)>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct AutoDirectFamilyKey {
     graph: GraphBuilder,
     binding_descriptor: RecordDescriptor,
     binding_field: String,
-    notification_projection: ShapeNotificationProjection,
+    public_fields: Vec<String>,
 }
 
 struct AutoDirectFamilyPlan {
@@ -2913,7 +2506,7 @@ struct AutoDirectFamilyPlan {
     binding_descriptor: RecordDescriptor,
     binding_field: String,
     binding_value: Value,
-    notification_projection: ShapeNotificationProjection,
+    public_fields: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -2984,166 +2577,67 @@ fn multisink_deltas_encoded_bytes(deltas: &MultisinkDeltas) -> usize {
     deltas.sinks.values().map(record_deltas_encoded_bytes).sum()
 }
 
-fn project_record_deltas(
-    records: RecordDeltas,
-    projection: &ShapeNotificationProjection,
-) -> Result<RecordDeltas, IvmRuntimeError> {
-    let deltas = records
-        .deltas
-        .into_iter()
-        .map(|delta| {
-            Ok(RecordDelta {
-                record: project_record(
-                    &projection.expressions,
-                    &projection.mapping,
-                    projection.descriptor,
-                    &records.descriptor,
-                    delta.raw(),
-                )?,
-                weight: delta.weight,
-            })
+fn descriptor_field_names(descriptor: &RecordDescriptor) -> Result<Vec<String>, IvmRuntimeError> {
+    descriptor
+        .fields()
+        .iter()
+        .map(|field| {
+            field
+                .name
+                .clone()
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))
         })
-        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-    Ok(RecordDeltas {
-        descriptor: projection.descriptor,
-        deltas,
-    })
+        .collect()
 }
 
-fn notification_projection_from_output(
+fn validate_public_output_fields(
     source: &RecordDescriptor,
-    descriptor: RecordDescriptor,
-) -> Result<ShapeNotificationProjection, IvmRuntimeError> {
-    let mut expressions = Vec::with_capacity(descriptor.fields().len());
-    let mut mapping = Vec::with_capacity(descriptor.fields().len());
-    for field in descriptor.fields() {
+    public_output: &RecordDescriptor,
+) -> Result<(), IvmRuntimeError> {
+    for field in public_output.fields() {
         let name = field
             .name
-            .clone()
+            .as_ref()
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
         let index = source
-            .field_index(&name)
+            .field_index(name)
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone()))?;
-        expressions.push(ProjectionExpr {
-            expression: PlanExpr::field(name),
-            output_name: field.name.clone(),
-        });
-        mapping.push((0, index));
+        let source_field = source
+            .fields()
+            .get(index)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?;
+        if source_field.value_type != field.value_type {
+            return Err(IvmRuntimeError::GraphOutputMismatch);
+        }
     }
-    Ok(ShapeNotificationProjection {
-        descriptor,
-        expressions,
-        mapping,
-    })
+    Ok(())
 }
 
-fn route_shape_records(
-    shape: &mut PreparedShapeState,
-    records: RecordDeltas,
-) -> Result<Vec<(SubscriptionId, RecordDeltas)>, IvmRuntimeError> {
-    if records.is_empty() {
-        return Ok(Vec::new());
-    }
-    let route_output = shape
-        .routing
-        .as_ref()
-        .map(|routing| routing.output.output)
-        .unwrap_or(shape.output.output);
-    if records.descriptor != route_output {
-        return Err(IvmRuntimeError::GraphOutputMismatch);
-    }
-    let mapping = shape
-        .output_key_fields
-        .iter()
-        .map(|field| (0, *field))
-        .collect::<Vec<_>>();
-    let mut by_subscription =
-        HashMap::<SubscriptionId, (RecordDescriptor, Vec<RecordDelta>)>::new();
-    for delta in records.deltas {
-        let key = BindingKey(shape.binding_descriptor.project_record_raw(
-            std::slice::from_ref(&records.descriptor),
-            &[delta.raw()],
-            &mapping,
-        )?);
-        let visible_delta = if let Some(routing) = &shape.routing {
-            RecordDelta {
-                record: project_record(
-                    &routing.notification_projection.expressions,
-                    &routing.notification_projection.mapping,
-                    routing.notification_projection.descriptor,
-                    &routing.output.output,
-                    delta.raw(),
-                )?,
-                weight: delta.weight,
-            }
-        } else {
-            delta.clone()
-        };
-        let binding = shape.bindings.entry(key.clone()).or_default();
-        let next_weight = binding
-            .materialized
-            .get(&visible_delta.record)
-            .copied()
-            .unwrap_or_default()
-            + visible_delta.weight;
-        if next_weight == 0 {
-            binding.materialized.remove(&visible_delta.record);
-        } else {
-            binding
-                .materialized
-                .insert(visible_delta.record.clone(), next_weight);
-        }
-        for (subscription_id, sender) in &binding.senders {
-            let delta = if let Some(projection) = &sender.projection {
-                RecordDelta {
-                    record: project_record(
-                        &projection.expressions,
-                        &projection.mapping,
-                        projection.descriptor,
-                        &shape.output.output,
-                        visible_delta.raw(),
-                    )?,
-                    weight: visible_delta.weight,
-                }
-            } else {
-                visible_delta.clone()
-            };
-            by_subscription
-                .entry(*subscription_id)
-                .or_insert_with(|| {
-                    (
-                        sender
-                            .projection
-                            .as_ref()
-                            .map(|projection| projection.descriptor)
-                            .unwrap_or(shape.output.output),
-                        Vec::new(),
-                    )
-                })
-                .1
-                .push(delta);
-        }
-        if binding.is_empty() {
-            shape.bindings.remove(&key);
-        }
-    }
-    Ok(by_subscription
-        .into_iter()
-        .map(|(subscription_id, (descriptor, deltas))| {
-            (subscription_id, RecordDeltas { descriptor, deltas })
-        })
-        .collect())
+fn validate_public_output_for_shape(
+    shape: &RoutedMultisinkShapeState,
+    sink: &str,
+    public_output: &RecordDescriptor,
+) -> Result<(), IvmRuntimeError> {
+    let terminal = shape
+        .terminals
+        .get(sink)
+        .ok_or_else(|| IvmRuntimeError::DuplicateMultisinkSink(sink.to_owned()))?;
+    validate_public_output_fields(&terminal.output.output, public_output)
 }
 
 fn bound_routed_multisink_graph(
     terminal: &RoutedMultisinkTerminal,
     binding_values: &[Value],
 ) -> GraphBuilder {
+    // TODO: Replace this per-binding sink tail with a partitioned sink operator
+    // once routed multisink semantics have settled. The semantic model should
+    // stay "route-carrying graph -> binding partition -> public sink", but the
+    // executor can avoid evaluating B x S filter/project tails for hot shapes.
     let predicates = terminal
         .route_fields
         .iter()
         .zip(binding_values)
-        .map(|(field, value)| PredicateExpr::eq(field.clone(), value.clone()))
+        .map(|(field, value)| route_predicate(field, value))
         .collect::<Vec<_>>();
     let graph = match predicates.as_slice() {
         [] => terminal.graph.clone(),
@@ -3154,6 +2648,13 @@ fn bound_routed_multisink_graph(
             .filter(PredicateExpr::And(predicates).canonicalize()),
     };
     graph.project(terminal.public_fields.clone())
+}
+
+fn route_predicate(field: &str, value: &Value) -> PredicateExpr {
+    match value {
+        Value::Nullable(None) => PredicateExpr::is_null(field),
+        value => PredicateExpr::eq(field.to_owned(), value.clone()),
+    }
 }
 
 fn count_builder_nodes(graph: &GraphBuilder) -> usize {
@@ -6712,12 +6213,20 @@ mod tests {
         assert!(second.recv().unwrap().is_empty());
         assert!(runtime.prepared_shapes.is_empty());
         assert!(matches!(
-            runtime.subscriptions.get(&first.id()).unwrap().target,
-            SubscriptionTarget::Direct { .. }
+            runtime
+                .multisink_subscriptions
+                .get(&first.id())
+                .unwrap()
+                .target,
+            MultisinkSubscriptionTarget::Direct
         ));
         assert!(matches!(
-            runtime.subscriptions.get(&second.id()).unwrap().target,
-            SubscriptionTarget::Direct { .. }
+            runtime
+                .multisink_subscriptions
+                .get(&second.id())
+                .unwrap()
+                .target,
+            MultisinkSubscriptionTarget::Direct
         ));
     }
 
