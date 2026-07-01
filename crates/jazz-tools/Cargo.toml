@@ -188,6 +188,10 @@ name = "large_blob_permissions"
 required-features = ["test"]
 
 [[test]]
+name = "branch_claims_integration"
+required-features = ["test"]
+
+[[test]]
 name = "transactions"
 required-features = ["test-utils"]
 
