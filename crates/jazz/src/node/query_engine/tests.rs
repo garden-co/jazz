@@ -1088,10 +1088,9 @@ fn correlated_path_cardinality_app_rows_report_operator_gap() {
 }
 
 #[test]
-fn correlated_path_app_rows_reject_relation_fact_terminals() {
-    // Internal lowering test: app-row correlated paths currently produce parent
-    // rows, so advertising path-fact schemas from the same graph would be a
-    // dishonest output contract.
+fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
+    // Internal lowering test: app rows use the parent-result graph while
+    // relation facts use a sibling parent-child path graph.
     let request = correlated_path_request(
         CorrelationRequirement::Optional,
         row_set_output(BTreeSet::from([
@@ -1101,15 +1100,54 @@ fn correlated_path_app_rows_reject_relation_fact_terminals() {
     );
 
     let mut resolver = FakeSourceResolver::default();
-    let report =
-        lower_query_program(request, &mut resolver).expect_err("mixed path outputs should fail");
+    let program =
+        lower_query_program(request, &mut resolver).expect("mixed path outputs should lower");
 
-    assert!(resolver.requests.is_empty());
-    assert!(report.gaps.contains(&UnsupportedReason::Output(Box::new(
-        ProgramFactKey::RelationEdges
-    ))));
-    assert!(report.explain.capabilities.iter().any(|capability| {
-        capability.contains("correlated path app rows lower to parent rows")
+    assert_eq!(resolver.requests.len(), 2);
+    let app_rows = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app row terminal");
+    assert!(matches!(
+        app_rows.graph,
+        GraphBuilder::Table { ref table } if table == "resolved_todos"
+    ));
+    let relation_edges = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.relation_edges")
+        .expect("relation edge terminal");
+    assert!(matches!(
+        relation_edges.graph,
+        GraphBuilder::Join {
+            ref left_on,
+            ref right_on,
+            ..
+        } if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+            && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+    ));
+    let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
+    assert_eq!(terminals.len(), 3);
+    assert!(terminals.iter().any(|terminal| {
+        matches!(
+            terminal,
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::RelationEdges,
+                schema: ProgramFactSchema::RelationEdges(_),
+            })
+        )
+    }));
+    assert!(terminals.iter().any(|terminal| {
+        matches!(
+            terminal,
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::PathCorrelationCoverage,
+                schema: ProgramFactSchema::PathCorrelationCoverage(_),
+            })
+        )
     }));
 }
 
