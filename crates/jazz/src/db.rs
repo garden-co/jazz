@@ -679,7 +679,7 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<QueryAttachment, Error> {
-        ensure_default_read_view(&opts)?;
+        ensure_supported_read_view(&opts)?;
         ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
@@ -699,7 +699,7 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<QueryAttachment, Error> {
-        ensure_default_read_view(&opts)?;
+        ensure_supported_read_view(&opts)?;
         ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
@@ -784,7 +784,6 @@ where
         ensure_supported_subscription_shape(&prepared.shape)?;
         let read_tier = effective_read_tier(&opts);
         if opts.propagation == Propagation::Full {
-            ensure_default_read_view(&opts)?;
             ensure_supported_propagated_subscription_tier(read_tier)?;
         }
         let (subscription, rows) = self
@@ -3885,13 +3884,7 @@ fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
     ))
 }
 
-fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.include_deleted {
-        return Err(Error::new(
-            ErrorCode::Query,
-            "live subscriptions do not support include_deleted yet",
-        ));
-    }
+fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
     match &opts.read_view.source {
         ReadViewSourceSpec::Current => Ok(()),
         ReadViewSourceSpec::Branch { .. }
@@ -3902,6 +3895,16 @@ fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error>
         }
         _ => ensure_default_read_view(opts),
     }
+}
+
+fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
+    if opts.include_deleted {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "live subscriptions do not support include_deleted yet",
+        ));
+    }
+    ensure_supported_read_view(opts)
 }
 
 fn ensure_supported_subscription_shape(shape: &ValidatedQuery) -> Result<(), Error> {
@@ -3928,18 +3931,16 @@ fn ensure_supported_propagated_subscription_tier(tier: DurabilityTier) -> Result
     ))
 }
 
-fn ensure_default_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
-    if opts.has_default_read_view() {
-        return Ok(());
-    }
-    Err(Error::new(
-        ErrorCode::Query,
-        "non-default read_view is not supported yet; sync subscription serving currently executes against the current/default view",
-    ))
+fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
+    let read_opts = ReadOpts {
+        read_view: opts.read_view.clone(),
+        ..ReadOpts::default()
+    };
+    ensure_supported_read_view(&read_opts)
 }
 
 fn ensure_supported_register_shape_options(opts: &RegisterShapeOptions) -> Result<(), Error> {
-    ensure_default_register_shape_read_view(opts)?;
+    ensure_supported_register_shape_read_view(opts)?;
     if opts.tier != DurabilityTier::Global {
         return Err(Error::new(
             ErrorCode::Query,
