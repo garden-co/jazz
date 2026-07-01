@@ -3005,9 +3005,8 @@ where
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         if include_deleted {
-            let mut rows = self.query_rows_including_deleted_with_lowered_clauses(
-                shape, binding, tier, identity,
-            )?;
+            let mut rows = self
+                .query_rows_including_deleted_with_query_engine(shape, binding, tier, identity)?;
             let query = shape.query();
             self.finish_query_rows(query, &mut rows)?;
             return Ok(rows);
@@ -3090,12 +3089,12 @@ where
         binding: &Binding,
         position: GlobalSeq,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let mut rows = self.query_rows_at_with_lowered_clauses(shape, binding, position)?;
+        let mut rows = self.query_rows_at_with_query_engine(shape, binding, position)?;
         self.finish_query_rows(shape.query(), &mut rows)?;
         Ok(rows)
     }
 
-    fn query_rows_at_with_lowered_clauses(
+    fn query_rows_at_with_query_engine(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -3126,7 +3125,7 @@ where
         self.materialize_historical_query_rows(table, deltas)
     }
 
-    fn query_rows_including_deleted_with_lowered_clauses(
+    fn query_rows_including_deleted_with_query_engine(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -4296,11 +4295,9 @@ where
 
     fn ensure_maintained_view_query_slice(&self, query: &crate::query::Query) -> Result<(), Error> {
         if !maintained_view_query_slice_supported(query) {
-            // TODO(query-engine): remove this pre-lowering guard once maintained
-            // output support is expressed entirely as typed query-engine
-            // capabilities and mapped to the same public error at the peer
-            // boundary.
-            return Err(crate::peer::unsupported_maintained_subscription_shape_error());
+            return Err(Error::QueryCapability(
+                "maintained subscription view window shape is not lowered yet".to_owned(),
+            ));
         }
         Ok(())
     }
