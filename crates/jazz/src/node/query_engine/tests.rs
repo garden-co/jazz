@@ -842,6 +842,164 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
 }
 
 #[test]
+fn current_join_via_can_use_union_relation_input() {
+    let root = RowSetNodeId("root".to_owned());
+    let direct_source_node = RowSetNodeId("direct-source".to_owned());
+    let direct_project = RowSetNodeId("direct-project".to_owned());
+    let inherited_source_node = RowSetNodeId("inherited-source".to_owned());
+    let inherited_project = RowSetNodeId("inherited-project".to_owned());
+    let union_node = RowSetNodeId("authorized-union".to_owned());
+    let join_node = RowSetNodeId("join".to_owned());
+    let root_source = source("todos", SourceRole::Root);
+    let direct_source = source("todo_tags", SourceRole::Policy("direct".to_owned()));
+    let inherited_source = source("todo_tags", SourceRole::Policy("inherited".to_owned()));
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(ReadView {
+            read_schema: schema(0x10),
+            policy_schema: schema(0x11),
+            sources: BTreeMap::from([
+                (
+                    root_source.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    direct_source.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    inherited_source.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+            ]),
+        }),
+        policy: system_policy_context(),
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x7a),
+                    canonical: vec![0x7a],
+                },
+                root: join_node.clone(),
+                result: ResultId::RealRow {
+                    table: "todos".to_owned(),
+                    row: ResultRowRef::Source(root_source.clone()),
+                },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
+                nodes: BTreeMap::from([
+                    (
+                        root.clone(),
+                        RowSetExpr::Source {
+                            source: root_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        direct_source_node.clone(),
+                        RowSetExpr::Source {
+                            source: direct_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        direct_project.clone(),
+                        RowSetExpr::Project {
+                            input: direct_source_node,
+                            columns: vec![RowProjection {
+                                output: TypedOutputField {
+                                    name: "todo".to_owned(),
+                                    ty: ColumnType::Uuid,
+                                },
+                                value: NormalizedValueRef::SourceField {
+                                    source: direct_source,
+                                    field: "todo".to_owned(),
+                                },
+                            }],
+                        },
+                    ),
+                    (
+                        inherited_source_node.clone(),
+                        RowSetExpr::Source {
+                            source: inherited_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        inherited_project.clone(),
+                        RowSetExpr::Project {
+                            input: inherited_source_node,
+                            columns: vec![RowProjection {
+                                output: TypedOutputField {
+                                    name: "todo".to_owned(),
+                                    ty: ColumnType::Uuid,
+                                },
+                                value: NormalizedValueRef::SourceField {
+                                    source: inherited_source,
+                                    field: "todo".to_owned(),
+                                },
+                            }],
+                        },
+                    ),
+                    (
+                        union_node.clone(),
+                        RowSetExpr::Union {
+                            inputs: vec![
+                                UnionInput {
+                                    node: direct_project,
+                                    label: "direct".to_owned(),
+                                },
+                                UnionInput {
+                                    node: inherited_project,
+                                    label: "inherited".to_owned(),
+                                },
+                            ],
+                        },
+                    ),
+                    (
+                        join_node,
+                        RowSetExpr::Join {
+                            left: root,
+                            right: union_node,
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    root_source.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: root_source.clone(),
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x7a; 16])),
+                values: BTreeMap::new(),
+            },
+        },
+        output: row_set_output(BTreeSet::new()),
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("union relation input should lower");
+    assert!(matches!(
+        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
+        GraphBuilder::Project { input, .. }
+            if matches!(
+                input.as_ref(),
+                GraphBuilder::Join { right, right_on, .. }
+                    if matches!(right.as_ref(), GraphBuilder::Union { inputs } if inputs.len() == 2)
+                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "todo")
+            )
+    ));
+}
+
+#[test]
 fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
     let root = RowSetNodeId("root".to_owned());
     let join_source_node = RowSetNodeId("join-source".to_owned());

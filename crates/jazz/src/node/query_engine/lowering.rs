@@ -207,6 +207,7 @@ impl LinearRoot {
 #[derive(Clone, Debug)]
 enum AnalyzedQueryPlan {
     Linear(LinearCurrentRoot),
+    Union(UnionPlan),
     CorrelatedPath(CorrelatedPathPlan),
     RecursiveRelation(RecursiveRelationPlan),
 }
@@ -215,6 +216,7 @@ impl AnalyzedQueryPlan {
     fn root_source(&self) -> &SourceId {
         match self {
             AnalyzedQueryPlan::Linear(plan) => plan.root.source().expect("linear root source"),
+            AnalyzedQueryPlan::Union(plan) => plan.root_source().expect("union root source"),
             AnalyzedQueryPlan::CorrelatedPath(plan) => {
                 plan.parent.root.source().expect("path parent source")
             }
@@ -231,6 +233,7 @@ impl AnalyzedQueryPlan {
     fn capability_label(&self) -> &'static str {
         match self {
             AnalyzedQueryPlan::Linear(_) => "table-rooted current lowering",
+            AnalyzedQueryPlan::Union(_) => "union current lowering",
             AnalyzedQueryPlan::CorrelatedPath(_) => "correlated path projection analysis",
             AnalyzedQueryPlan::RecursiveRelation(_) => "recursive relation analysis",
         }
@@ -268,6 +271,31 @@ struct RecursiveRelationPlan {
     bound: RecursionBound,
 }
 
+#[derive(Clone, Debug)]
+struct UnionPlan {
+    branches: Vec<UnionBranchPlan>,
+}
+
+impl UnionPlan {
+    fn root_source(&self) -> Option<&SourceId> {
+        let mut sources = self
+            .branches
+            .iter()
+            .filter_map(|branch| branch.plan.root_source());
+        let first = sources.next()?;
+        if sources.all(|source| source == first) {
+            Some(first)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct UnionBranchPlan {
+    plan: RelationInputPlan,
+}
+
 impl RecursiveRelationPlan {
     fn root_source(&self) -> Option<&SourceId> {
         self.seed
@@ -288,6 +316,7 @@ impl RecursiveRelationPlan {
 #[derive(Clone, Debug)]
 enum RelationInputPlan {
     Linear(LinearCurrentRoot),
+    Union(UnionPlan),
     Recursive(RecursiveRelationPlan),
 }
 
@@ -295,6 +324,7 @@ impl RelationInputPlan {
     fn root_source(&self) -> Option<&SourceId> {
         match self {
             RelationInputPlan::Linear(linear) => linear.root.source(),
+            RelationInputPlan::Union(union) => union.root_source(),
             RelationInputPlan::Recursive(relation) => relation.root_source(),
         }
     }
@@ -431,6 +461,19 @@ fn analyze_root_node(
                 dedupe_keys: dedupe_keys.clone(),
                 bound: *bound,
             })
+        }
+        RowSetExpr::Union { inputs } => {
+            visited.insert(request.input.shape.root.clone());
+            let union = analyze_union(inputs, &request.input.shape.nodes, &mut visited)?;
+            validate_result_source(
+                request,
+                union.root_source().ok_or_else(|| {
+                    UnsupportedReason::Operator(
+                        "union result branches must share one root source".to_owned(),
+                    )
+                })?,
+            )?;
+            AnalyzedQueryPlan::Union(union)
         }
         _ => {
             let mut path_visited = visited.clone();
@@ -636,6 +679,7 @@ fn validate_result_source(
 fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
     match plan {
         AnalyzedQueryPlan::Linear(linear) => linear_plan_sources(linear),
+        AnalyzedQueryPlan::Union(union) => union_plan_sources(union),
         AnalyzedQueryPlan::CorrelatedPath(path) => {
             let mut sources = linear_plan_sources(&path.parent);
             collect_correlated_path_sources(path, &mut sources);
@@ -676,6 +720,9 @@ fn collect_plan_source_visibilities(
     match plan {
         AnalyzedQueryPlan::Linear(linear) => {
             collect_linear_source_visibilities(linear, visibilities);
+        }
+        AnalyzedQueryPlan::Union(union) => {
+            collect_union_source_visibilities(union, visibilities);
         }
         AnalyzedQueryPlan::CorrelatedPath(path) => {
             collect_linear_source_visibilities(&path.parent, visibilities);
@@ -726,10 +773,22 @@ fn collect_relation_source_visibilities(
         RelationInputPlan::Linear(linear) => {
             collect_linear_source_visibilities(linear, visibilities);
         }
+        RelationInputPlan::Union(union) => {
+            collect_union_source_visibilities(union, visibilities);
+        }
         RelationInputPlan::Recursive(relation) => {
             collect_linear_source_visibilities(&relation.seed, visibilities);
             collect_linear_source_visibilities(&relation.step, visibilities);
         }
+    }
+}
+
+fn collect_union_source_visibilities(
+    plan: &UnionPlan,
+    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
+) {
+    for branch in &plan.branches {
+        collect_relation_source_visibilities(&branch.plan, visibilities);
     }
 }
 
@@ -747,12 +806,21 @@ fn linear_plan_sources(plan: &LinearCurrentRoot) -> BTreeSet<SourceId> {
 fn relation_plan_sources(plan: &RelationInputPlan) -> BTreeSet<SourceId> {
     match plan {
         RelationInputPlan::Linear(linear) => linear_plan_sources(linear),
+        RelationInputPlan::Union(union) => union_plan_sources(union),
         RelationInputPlan::Recursive(relation) => {
             let mut sources = linear_plan_sources(&relation.seed);
             sources.extend(linear_plan_sources(&relation.step));
             sources
         }
     }
+}
+
+fn union_plan_sources(plan: &UnionPlan) -> BTreeSet<SourceId> {
+    let mut sources = BTreeSet::new();
+    for branch in &plan.branches {
+        sources.extend(relation_plan_sources(&branch.plan));
+    }
+    sources
 }
 
 fn step_sources(steps: &[LinearStep]) -> BTreeSet<SourceId> {
@@ -928,6 +996,15 @@ fn analyze_relation_input_node(
     };
 
     match node {
+        RowSetExpr::Union { inputs } => {
+            if !visited.insert(node_id.clone()) {
+                return Err(UnsupportedReason::Operator(format!(
+                    "row-set node {:?} participates in a cycle",
+                    node_id
+                )));
+            }
+            analyze_union(inputs, nodes, visited).map(RelationInputPlan::Union)
+        }
         RowSetExpr::RecursiveRelation {
             seed,
             step,
@@ -959,6 +1036,25 @@ fn analyze_relation_input_node(
             Ok(RelationInputPlan::Linear(linear))
         }
     }
+}
+
+fn analyze_union(
+    inputs: &[UnionInput],
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    visited: &mut BTreeSet<RowSetNodeId>,
+) -> Result<UnionPlan, UnsupportedReason> {
+    if inputs.is_empty() {
+        return Err(UnsupportedReason::Operator(
+            "union row-set nodes require at least one input".to_owned(),
+        ));
+    }
+
+    let mut branches = Vec::new();
+    for input in inputs {
+        let plan = analyze_relation_input_node(&input.node, nodes, visited)?;
+        branches.push(UnionBranchPlan { plan });
+    }
+    Ok(UnionPlan { branches })
 }
 
 fn validate_join_relation(plan: &LinearCurrentRoot) -> Result<(), UnsupportedReason> {
@@ -1142,6 +1238,7 @@ fn collect_plan_requirements(
 ) -> CapabilityResult<()> {
     match plan {
         AnalyzedQueryPlan::Linear(linear) => collect_linear_requirements(linear, requirements),
+        AnalyzedQueryPlan::Union(union) => collect_union_requirements(union, requirements),
         AnalyzedQueryPlan::CorrelatedPath(path) => {
             collect_linear_requirements(&path.parent, requirements)?;
             collect_correlated_path_requirements(path, requirements)?;
@@ -1178,6 +1275,16 @@ fn collect_plan_requirements(
             Ok(())
         }
     }
+}
+
+fn collect_union_requirements(
+    union: &UnionPlan,
+    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
+) -> CapabilityResult<()> {
+    for branch in &union.branches {
+        collect_relation_requirements(&branch.plan, requirements)?;
+    }
+    Ok(())
 }
 
 fn collect_correlated_path_requirements(
@@ -1309,6 +1416,7 @@ fn collect_relation_requirements(
 ) -> CapabilityResult<()> {
     match plan {
         RelationInputPlan::Linear(linear) => collect_linear_requirements(linear, requirements),
+        RelationInputPlan::Union(union) => collect_union_requirements(union, requirements),
         RelationInputPlan::Recursive(relation) => {
             collect_linear_requirements(&relation.seed, requirements)?;
             collect_linear_requirements(&relation.step, requirements)
@@ -1417,6 +1525,9 @@ fn lower_plan_steps(
     match plan {
         AnalyzedQueryPlan::Linear(linear) => {
             lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)
+        }
+        AnalyzedQueryPlan::Union(union) => {
+            lower_union_plan(union, Some(graph), root_source, resolved_sources, request)
         }
         AnalyzedQueryPlan::CorrelatedPath(path) => {
             lower_correlated_path_plan(graph, path, root_source, resolved_sources, request)
@@ -1682,6 +1793,9 @@ fn lower_relation_input(
                 root_source: Some(source),
             })
         }
+        RelationInputPlan::Union(union) => {
+            lower_union_relation_input(union, resolved_sources, request)
+        }
         RelationInputPlan::Recursive(relation) => {
             let source_id = relation.root_source().ok_or_else(|| {
                 UnsupportedReason::Operator(
@@ -1704,6 +1818,102 @@ fn lower_relation_input(
             })
         }
     }
+}
+
+fn lower_union_relation_input(
+    union: &UnionPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    let mut lowered = Vec::new();
+    for branch in &union.branches {
+        lowered.push(lower_relation_input(
+            &branch.plan,
+            resolved_sources,
+            request,
+        )?);
+    }
+    lower_union_inputs(lowered)
+}
+
+fn lower_union_plan(
+    union: &UnionPlan,
+    root_graph: Option<GraphBuilder>,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<GraphBuilder, UnsupportedReason> {
+    let mut graphs = Vec::new();
+    for branch in &union.branches {
+        let graph = match &branch.plan {
+            RelationInputPlan::Linear(linear) => {
+                let source_id = linear.root.source().ok_or_else(|| {
+                    UnsupportedReason::Operator("union branch must have a source".to_owned())
+                })?;
+                if source_id != &root_source.row_shape.source {
+                    return Err(UnsupportedReason::Operator(
+                        "root union branches must share the query result source".to_owned(),
+                    ));
+                }
+                let graph = if let Some(root_graph) = &root_graph {
+                    root_graph.clone()
+                } else {
+                    resolved_sources
+                        .get(source_id)
+                        .ok_or_else(|| {
+                            UnsupportedReason::Runtime(format!(
+                                "union branch source {:?} was not resolved",
+                                source_id
+                            ))
+                        })?
+                        .graph
+                        .clone()
+                };
+                lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)?
+            }
+            RelationInputPlan::Union(_) | RelationInputPlan::Recursive(_) => {
+                lower_relation_input(&branch.plan, resolved_sources, request)?.graph
+            }
+        };
+        graphs.push(graph);
+    }
+    Ok(GraphBuilder::union(graphs))
+}
+
+fn lower_union_inputs(
+    lowered: Vec<LoweredRelationInput>,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    let mut lowered = lowered.into_iter();
+    let first = lowered.next().ok_or_else(|| {
+        UnsupportedReason::Operator("union row-set nodes require at least one input".to_owned())
+    })?;
+    let mut graphs = vec![first.graph];
+    let mut root_source = first.root_source;
+    let fields = first.fields;
+    let mut nullable_fields = first.nullable_fields;
+    for branch in lowered {
+        if branch.fields != fields {
+            return Err(UnsupportedReason::Operator(
+                "union branches must output the same fields".to_owned(),
+            ));
+        }
+        nullable_fields.extend(branch.nullable_fields);
+        if root_source.as_ref().map(|source| &source.row_shape.source)
+            != branch
+                .root_source
+                .as_ref()
+                .map(|source| &source.row_shape.source)
+        {
+            root_source = None;
+        }
+        graphs.push(branch.graph);
+    }
+    Ok(LoweredRelationInput {
+        graph: GraphBuilder::union(graphs),
+        root_source,
+        fields,
+        nullable_fields,
+    })
 }
 
 fn linear_output_fields(
@@ -1778,6 +1988,7 @@ fn relation_output_fields_for_routing(
 ) -> BTreeSet<String> {
     match plan {
         RelationInputPlan::Recursive(relation) => recursive_output_fields(relation),
+        RelationInputPlan::Union(union) => union_output_fields_for_routing(union, request),
         RelationInputPlan::Linear(linear) => {
             if let Some(LinearStep::Project(columns)) = linear.steps.last() {
                 return columns
@@ -1803,6 +2014,23 @@ fn relation_output_fields_for_routing(
             fields
         }
     }
+}
+
+fn union_output_fields_for_routing(
+    union: &UnionPlan,
+    request: &QueryProgramRequest,
+) -> BTreeSet<String> {
+    let mut branches = union
+        .branches
+        .iter()
+        .map(|branch| relation_output_fields_for_routing(&branch.plan, request));
+    let Some(mut fields) = branches.next() else {
+        return BTreeSet::new();
+    };
+    for branch_fields in branches {
+        fields = fields.intersection(&branch_fields).cloned().collect();
+    }
+    fields
 }
 
 fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
@@ -2480,6 +2708,7 @@ fn lower_relation_key_ref(
             }
             lower_named_relation_field(value, &output.fields)
         }
+        RelationInputPlan::Union(_) => lower_named_relation_field(value, &output.fields),
         RelationInputPlan::Recursive(_) => lower_named_relation_field(value, &output.fields),
     }
 }
@@ -2684,6 +2913,15 @@ fn lower_relation_projection_ref(
             | NormalizedValueRef::RowId(_)
             | NormalizedValueRef::Provenance { .. }
             | NormalizedValueRef::FrontierColumn { .. } => Ok(None),
+        },
+        RelationInputPlan::Union(_) => match value {
+            NormalizedValueRef::Param(param)
+            | NormalizedValueRef::FrontierColumn { field: param, .. }
+            | NormalizedValueRef::SourceField { field: param, .. } => Ok(Some(param.clone())),
+            NormalizedValueRef::RowId(_) => Ok(Some("row_uuid".to_owned())),
+            NormalizedValueRef::Literal(_)
+            | NormalizedValueRef::Claim(_)
+            | NormalizedValueRef::Provenance { .. } => Ok(None),
         },
     }
 }
@@ -4026,15 +4264,17 @@ fn relation_edge_graph(
             }
         }
         AnalyzedQueryPlan::RecursiveRelation(_) => Ok(graph),
-        AnalyzedQueryPlan::Linear(_) => Err(Box::new(CapabilityReport {
-            gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
-            explain: ExplainPlan {
-                capabilities: vec![
-                    "relation edge facts require a path or recursive relation node".to_owned(),
-                ],
-                ..ExplainPlan::default()
-            },
-        })),
+        AnalyzedQueryPlan::Linear(_) | AnalyzedQueryPlan::Union(_) => {
+            Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
+                explain: ExplainPlan {
+                    capabilities: vec![
+                        "relation edge facts require a path or recursive relation node".to_owned(),
+                    ],
+                    ..ExplainPlan::default()
+                },
+            }))
+        }
     }
 }
 
@@ -4422,7 +4662,7 @@ fn relation_edge_schema(
             })?;
             (root_source, step, Some("depth".to_owned()))
         }
-        AnalyzedQueryPlan::Linear(_) => {
+        AnalyzedQueryPlan::Linear(_) | AnalyzedQueryPlan::Union(_) => {
             return Err(Box::new(CapabilityReport {
                 gaps: vec![UnsupportedReason::Output(Box::new(
                     ProgramFactKey::RelationEdges,
@@ -4481,18 +4721,20 @@ fn path_correlation_coverage_schema(
             readable_count_field: "readable_count".to_owned(),
             coverage_state_field: "coverage_state".to_owned(),
         }),
-        AnalyzedQueryPlan::Linear(_) => Err(Box::new(CapabilityReport {
-            gaps: vec![UnsupportedReason::Output(Box::new(
-                ProgramFactKey::PathCorrelationCoverage,
-            ))],
-            explain: ExplainPlan {
-                capabilities: vec![
-                    "path correlation coverage facts require a path or recursive relation node"
-                        .to_owned(),
-                ],
-                ..ExplainPlan::default()
-            },
-        })),
+        AnalyzedQueryPlan::Linear(_) | AnalyzedQueryPlan::Union(_) => {
+            Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Output(Box::new(
+                    ProgramFactKey::PathCorrelationCoverage,
+                ))],
+                explain: ExplainPlan {
+                    capabilities: vec![
+                        "path correlation coverage facts require a path or recursive relation node"
+                            .to_owned(),
+                    ],
+                    ..ExplainPlan::default()
+                },
+            }))
+        }
     }
 }
 
