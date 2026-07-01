@@ -444,7 +444,9 @@ where
                 SourceGap::SchemaProjection,
             ));
         }
-        if self.read_view.read_schema != self.node.catalogue.current_schema_version_id {
+        if history_position.is_none()
+            && self.read_view.read_schema != self.node.catalogue.current_schema_version_id
+        {
             return Err(source_resolution_error(
                 request,
                 SourceGap::SchemaProjection,
@@ -461,18 +463,39 @@ where
                     SourceGap::HistoricalStorageCut,
                 ));
             }
-            let rows = self
-                .node
-                .current_rows_for_schema_at(
-                    &request.source.table,
-                    self.read_view.read_schema,
-                    position,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-            let graph = inline_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             let descriptor = current_row_descriptor(&table);
-            (graph, descriptor, BTreeMap::new())
+            if self.read_view.read_schema != self.node.catalogue.current_schema_version_id
+                || self
+                    .node
+                    .catalogue
+                    .partitions
+                    .iter()
+                    .any(|(logical, version)| {
+                        logical == &request.source.table
+                            && *version != self.node.catalogue.current_schema_version_id
+                    })
+            {
+                let rows = self
+                    .node
+                    .projected_historical_current_rows(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        position,
+                    )
+                    .map_err(|_| {
+                        source_resolution_error(request, SourceGap::HistoricalStorageCut)
+                    })?;
+                let graph = inline_current_graph(&table, rows).map_err(|_| {
+                    source_resolution_error(request, SourceGap::HistoricalStorageCut)
+                })?;
+                (graph, descriptor, BTreeMap::new())
+            } else {
+                (
+                    historical_current_graph(&table, position),
+                    descriptor,
+                    BTreeMap::new(),
+                )
+            }
         } else if let Some(branch_id) = branch_data {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
@@ -3576,19 +3599,14 @@ where
         Ok(rows)
     }
 
-    fn current_rows_for_schema_at(
+    fn projected_historical_current_rows(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
         position: GlobalSeq,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if read_schema_version == self.catalogue.current_schema_version_id
-            && !self.catalogue.partitions.iter().any(|(logical, version)| {
-                logical == table && *version != self.catalogue.current_schema_version_id
-            })
-        {
-            return self.current_rows_at(table, position);
-        }
+        // TODO(query-engine): replace this inline projected source once schema
+        // lenses/projections are first-class source graph nodes.
         let read_table = self.table_in_schema(table, read_schema_version)?.clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
@@ -8080,6 +8098,107 @@ pub(super) fn inline_current_graph(
         .map(|row| inline_current_record(table, &descriptor, row))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(GraphBuilder::inline_records(descriptor, records))
+}
+
+fn historical_current_graph(table: &TableSchema, position: GlobalSeq) -> GraphBuilder {
+    let cut_predicate = PredicateExpr::And(vec![
+        PredicateExpr::eq("table_name", Value::Bytes(table.name.as_bytes().to_vec())),
+        PredicateExpr::LtEq {
+            field: "global_seq".to_owned(),
+            value: Value::U64(position.0).into(),
+        },
+    ])
+    .canonicalize();
+    let changes_for_layer = |layer: &'static str| {
+        GraphBuilder::table("jazz_global_changes").filter(
+            PredicateExpr::And(vec![
+                cut_predicate.clone(),
+                PredicateExpr::eq("layer", Value::Bytes(layer.as_bytes().to_vec())),
+            ])
+            .canonicalize(),
+        )
+    };
+    let nullable_deletion_type = ValueType::Nullable(Box::new(ValueType::Enum(
+        EnumSchema::new("jazz_deletion", ["deleted", "restored"]).expect("valid deletion enum"),
+    )));
+    let content_events = changes_for_layer("content").project_fields([
+        ProjectField::named("row_uuid"),
+        ProjectField::named("tx_time"),
+        ProjectField::named("tx_node_id"),
+        ProjectField::literal("event_layer", Value::String("content".to_owned())),
+        ProjectField::null_typed("deletion", nullable_deletion_type.clone()),
+    ]);
+    let register_events = changes_for_layer("deletion").project_fields([
+        ProjectField::named("row_uuid"),
+        ProjectField::named("tx_time"),
+        ProjectField::named("tx_node_id"),
+        ProjectField::literal("event_layer", Value::String("deletion".to_owned())),
+        ProjectField::renamed("_deletion", "deletion"),
+    ]);
+    let latest_event = GraphBuilder::arg_max_by(
+        GraphBuilder::union([content_events.clone(), register_events]),
+        ["row_uuid"],
+        ["tx_time", "tx_node_id"],
+    );
+    let content_winners =
+        GraphBuilder::arg_max_by(content_events, ["row_uuid"], ["tx_time", "tx_node_id"]);
+    let history_rows = GraphBuilder::table(history_table_name(&table.name))
+        .project(maintained_view_history_storage_field_names(table));
+    let content_current = GraphBuilder::join(
+        history_rows,
+        content_winners,
+        ["row_uuid", "tx_time", "tx_node_id"],
+        ["row_uuid", "tx_time", "tx_node_id"],
+    )
+    .project_fields(
+        ["row_uuid".to_owned()]
+            .into_iter()
+            .chain(
+                table
+                    .columns
+                    .iter()
+                    .map(|column| format!("user_{}", column.name)),
+            )
+            .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+            .chain([
+                ProjectField::renamed("left.created_by", "$createdBy"),
+                ProjectField::renamed("left.created_at", "$createdAt"),
+                ProjectField::renamed("left.updated_by", "$updatedBy"),
+                ProjectField::renamed("left.updated_at", "$updatedAt"),
+                ProjectField::renamed("left.tx_time", "tx_time"),
+                ProjectField::renamed("left.tx_node_id", "tx_node_id"),
+            ]),
+    );
+    let latest_content = latest_event.clone().filter(PredicateExpr::eq(
+        "event_layer",
+        Value::String("content".to_owned()),
+    ));
+    let content_is_latest = GraphBuilder::join(
+        content_current.clone(),
+        latest_content,
+        ["row_uuid", "tx_time", "tx_node_id"],
+        ["row_uuid", "tx_time", "tx_node_id"],
+    )
+    .project_fields(
+        current_row_fields(table)
+            .into_iter()
+            .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+    );
+    let latest_restore = latest_event.filter(
+        PredicateExpr::And(vec![
+            PredicateExpr::eq("event_layer", Value::String("deletion".to_owned())),
+            PredicateExpr::eq("deletion", Value::Nullable(Some(Box::new(Value::Enum(1))))),
+        ])
+        .canonicalize(),
+    );
+    let restored_content =
+        GraphBuilder::join(content_current, latest_restore, ["row_uuid"], ["row_uuid"])
+            .project_fields(
+                current_row_fields(table)
+                    .into_iter()
+                    .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+            );
+    GraphBuilder::union([content_is_latest, restored_content])
 }
 
 fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
