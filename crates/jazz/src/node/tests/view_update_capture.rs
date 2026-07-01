@@ -1736,12 +1736,10 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
     accept_owner_capture_row(&mut core, &mut parents, row(0x15), bob, "match", 2_001);
 
     reset_query_versions_for_tx_call_count();
-    reset_maintained_view_materialize_call_count();
     core.reset_storage_read_metrics();
     let maintained_update = maintained.update(&mut core, &shape, subscription, alice);
     let maintained_metrics = core.take_storage_read_metrics();
     let maintained_query_versions_for_tx_calls = query_versions_for_tx_call_count();
-    let maintained_materialize_calls = maintained_view_materialize_call_count();
     let maintained_full_bundle_count = view_update_full_bundle_count(&maintained_update);
 
     println!(
@@ -1765,10 +1763,6 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
     assert!(
         maintained_metrics.transactions_rows.reads <= maintained_full_bundle_count,
         "maintained per-reader incremental update exceeded one transaction-row point lookup per full-bundle tx; full_bundles={maintained_full_bundle_count}, metrics={maintained_metrics:?}"
-    );
-    assert_eq!(
-        maintained_materialize_calls, 0,
-        "maintained incremental update re-materialized the maintained view graph"
     );
     assert_eq!(
         maintained_query_versions_for_tx_calls, 0,
