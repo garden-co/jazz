@@ -559,11 +559,10 @@ fn current_query_output_request(
 ) -> RowSetOutputRequest {
     let facts = match output {
         CurrentQueryProgramOutput::AppRows => BTreeSet::new(),
-        // Relation snapshots currently use query-engine app-row membership for
-        // root gating and retain manual edge materialization. Relation edge and
-        // path coverage facts need multi-output correlated-path lowering before
-        // they can share this one-shot program.
-        CurrentQueryProgramOutput::RelationSnapshot => BTreeSet::new(),
+        CurrentQueryProgramOutput::RelationSnapshot => BTreeSet::from([
+            ProgramFactKey::RelationEdges,
+            ProgramFactKey::PathCorrelationCoverage,
+        ]),
         CurrentQueryProgramOutput::MaintainedView => BTreeSet::from([
             ProgramFactKey::ResultMembership,
             ProgramFactKey::VersionWitnesses,

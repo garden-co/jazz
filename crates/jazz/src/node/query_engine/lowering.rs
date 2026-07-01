@@ -823,25 +823,6 @@ fn source_requirements(
                 },
             }));
         }
-        if let Some(relation_fact) = output.facts.iter().find(|fact| {
-            matches!(
-                (plan, fact),
-                (
-                    AnalyzedQueryPlan::CorrelatedPath(_),
-                    ProgramFactKey::RelationEdges | ProgramFactKey::PathCorrelationCoverage
-                )
-            )
-        }) {
-            return Err(Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Output(Box::new(relation_fact.clone()))],
-                explain: ExplainPlan {
-                    capabilities: vec![
-                        "correlated path app rows lower to parent rows; relation fact terminals require child path rows and cannot share that graph yet".to_owned(),
-                    ],
-                    ..ExplainPlan::default()
-                },
-            }));
-        }
         let root_requirements = requirements
             .get_mut(plan.root_source())
             .expect("root source requirements were initialized");
@@ -1237,6 +1218,50 @@ fn lower_correlated_path_plan(
             "match-correlation-cardinality app rows need cardinality coverage lowering".to_owned(),
         )),
     }
+}
+
+fn lower_correlated_path_relation_graph(
+    path: &CorrelatedPathPlan,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<GraphBuilder, UnsupportedReason> {
+    let parent = lower_linear_plan_steps(
+        root_source.graph.clone(),
+        &path.parent,
+        root_source,
+        resolved_sources,
+        request,
+    )?;
+    let child_root = path
+        .child
+        .root
+        .source()
+        .ok_or_else(|| UnsupportedReason::Operator("path child must be a source".to_owned()))?;
+    let child_source = resolved_sources.get(child_root).ok_or_else(|| {
+        UnsupportedReason::Runtime(format!(
+            "path child source {:?} was not resolved",
+            child_root
+        ))
+    })?;
+    let child = lower_linear_plan_steps(
+        child_source.graph.clone(),
+        &path.child,
+        child_source,
+        resolved_sources,
+        request,
+    )?;
+    let (parent_key, child_key) = lower_path_key_pair(
+        &path.correlation,
+        path.parent.root.source().ok_or_else(|| {
+            UnsupportedReason::Operator("path parent must be a source".to_owned())
+        })?,
+        root_source,
+        child_root,
+        child_source,
+        request,
+    )?;
+    Ok(GraphBuilder::join(parent, child, [parent_key], [child_key]))
 }
 
 #[derive(Clone, Debug)]
@@ -2595,7 +2620,9 @@ fn lowered_terminals(
             continue;
         }
         let output = fact_output(fact, plan, source, resolved_sources)?;
-        let graph = fact_terminal_graph(fact, graph.clone(), plan, source, resolved_sources)?;
+        let terminal_graph =
+            fact_input_graph(fact, graph.clone(), plan, source, resolved_sources, request)?;
+        let graph = fact_terminal_graph(fact, terminal_graph, plan, source, resolved_sources)?;
         terminals.push(LoweredTerminal {
             sink: fact_sink_name(fact),
             graph,
@@ -2604,6 +2631,40 @@ fn lowered_terminals(
     }
 
     Ok(terminals)
+}
+
+fn fact_input_graph(
+    key: &ProgramFactKey,
+    graph: GraphBuilder,
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<GraphBuilder> {
+    if matches!(
+        (plan, key),
+        (
+            AnalyzedQueryPlan::CorrelatedPath(_),
+            ProgramFactKey::RelationEdges | ProgramFactKey::PathCorrelationCoverage
+        )
+    ) {
+        if let AnalyzedQueryPlan::CorrelatedPath(path) = plan {
+            return lower_correlated_path_relation_graph(path, source, resolved_sources, request)
+                .map_err(|gap| {
+                    Box::new(CapabilityReport {
+                        gaps: vec![gap],
+                        explain: ExplainPlan {
+                            capabilities: vec![
+                                "correlated path relation facts lower from the parent-child path graph"
+                                    .to_owned(),
+                            ],
+                            ..ExplainPlan::default()
+                        },
+                    })
+                });
+        }
+    }
+    Ok(graph)
 }
 
 #[derive(Clone, Debug)]
