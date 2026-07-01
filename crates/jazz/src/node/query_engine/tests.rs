@@ -93,6 +93,7 @@ fn row_set_input(byte: u8) -> RowSetProgramInput {
         shape: normalized_shape(byte),
         binding: ProgramBinding {
             id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            source_shape: None,
             values: BTreeMap::new(),
         },
     }
@@ -169,6 +170,7 @@ fn chained_row_set_input(byte: u8, binding_values: BTreeMap<String, Value>) -> R
         },
         binding: ProgramBinding {
             id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            source_shape: None,
             values: binding_values,
         },
     }
@@ -219,6 +221,7 @@ fn claim_filtered_row_set_input(byte: u8, claim: &str) -> RowSetProgramInput {
         },
         binding: ProgramBinding {
             id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            source_shape: None,
             values: BTreeMap::new(),
         },
     }
@@ -682,6 +685,7 @@ fn current_source_select_projection_and_unordered_slice_lower() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x74; 16])),
+                source_shape: None,
                 values: BTreeMap::new(),
             },
         },
@@ -803,6 +807,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x73; 16])),
+                source_shape: None,
                 values: BTreeMap::new(),
             },
         },
@@ -995,6 +1000,7 @@ fn current_join_via_can_use_union_relation_input() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x7a; 16])),
+                source_shape: None,
                 values: BTreeMap::new(),
             },
         },
@@ -1115,6 +1121,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x74; 16])),
+                source_shape: None,
                 values: BTreeMap::new(),
             },
         },
@@ -1263,6 +1270,7 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x76; 16])),
+                source_shape: None,
                 values: BTreeMap::new(),
             },
         },
@@ -1353,6 +1361,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x75; 16])),
+                source_shape: None,
                 values: BTreeMap::new(),
             },
         },
@@ -1492,6 +1501,7 @@ fn correlated_path_request(
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x78; 16])),
+                source_shape: None,
                 values: BTreeMap::new(),
             },
         },
@@ -1826,6 +1836,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x76; 16])),
+                source_shape: None,
                 values: BTreeMap::from([("route".to_owned(), Value::String("sync".to_owned()))]),
             },
         },
@@ -2072,6 +2083,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x77; 16])),
+                source_shape: None,
                 values: BTreeMap::new(),
             },
         },
@@ -2129,6 +2141,32 @@ fn unbound_filter_param_reports_operator_gap() {
         [UnsupportedReason::Operator(message)]
             if message.contains("binding parameter 'title' is not bound")
     ));
+}
+
+#[test]
+fn equality_filter_param_lowers_to_prepared_binding_join() {
+    let mut input = chained_row_set_input(
+        0x79,
+        BTreeMap::from([("title".to_owned(), Value::String("mine".to_owned()))]),
+    );
+    input.binding.source_shape = Some("query-binding".to_owned());
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: system_policy_context(),
+        input,
+        output: row_set_output(BTreeSet::new()),
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("equality param should lower");
+    assert_eq!(
+        program.lowered.parameters.user_params.get("title"),
+        Some(&ColumnType::String)
+    );
+    let graph = format!("{:?}", program.lowered.terminals[0].graph);
+    assert!(graph.contains("BindingSource"), "{graph}");
+    assert!(graph.contains("query-binding"), "{graph}");
+    assert!(graph.contains("title"), "{graph}");
 }
 
 #[test]

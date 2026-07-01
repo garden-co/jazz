@@ -111,7 +111,22 @@ pub(crate) fn lower_query_program(
         })
     })?;
 
-    let terminals = lowered_terminals(graph, &request, &plan, &resolved_root, &resolved_sources)?;
+    let mut parameters = parameter_domain(&request.input.shape);
+    collect_binding_source_params(&graph, &mut parameters);
+    parameters.routing_params.retain(|field| {
+        field
+            .strip_prefix(ROUTE_PARAM_PREFIX)
+            .is_some_and(|param| parameters.user_params.contains_key(param))
+    });
+
+    let terminals = lowered_terminals(
+        graph,
+        &request,
+        &plan,
+        &resolved_root,
+        &resolved_sources,
+        &parameters.routing_params,
+    )?;
     let output = ProgramOutputSchemas::RowSet(
         terminals
             .iter()
@@ -119,10 +134,14 @@ pub(crate) fn lower_query_program(
             .collect(),
     );
 
-    let mut parameters = parameter_domain(&request.input.shape);
     for terminal in &terminals {
-        collect_claim_binding_source_params(&terminal.graph, &mut parameters);
+        collect_binding_source_params(&terminal.graph, &mut parameters);
     }
+    parameters.routing_params.retain(|field| {
+        field
+            .strip_prefix(ROUTE_PARAM_PREFIX)
+            .is_some_and(|param| parameters.user_params.contains_key(param))
+    });
 
     Ok(QueryProgram {
         lowered: LoweredGraph {
@@ -188,10 +207,12 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
                     }
                 }
             }
+            RowSetExpr::Filter { predicate, .. } => {
+                collect_equality_filter_route_params(predicate, &mut domain.routing_params);
+            }
             RowSetExpr::ValueSource { .. }
             | RowSetExpr::FrontierSource { .. }
             | RowSetExpr::Source { .. }
-            | RowSetExpr::Filter { .. }
             | RowSetExpr::Join { .. }
             | RowSetExpr::RecursiveRelation { .. }
             | RowSetExpr::Union { .. }
@@ -210,6 +231,48 @@ fn route_param_field(param: &str) -> String {
     format!("{ROUTE_PARAM_PREFIX}{param}")
 }
 
+fn collect_equality_filter_route_params(predicate: &PredicateExpr, routing: &mut BTreeSet<String>) {
+    match predicate {
+        PredicateExpr::And(predicates) => {
+            for predicate in predicates {
+                collect_equality_filter_route_params(predicate, routing);
+            }
+        }
+        PredicateExpr::Compare {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+        } => {
+            if source_value_ref(left)
+                && let NormalizedValueRef::Param(param) = right
+            {
+                routing.insert(route_param_field(param));
+            } else if source_value_ref(right)
+                && let NormalizedValueRef::Param(param) = left
+            {
+                routing.insert(route_param_field(param));
+            }
+        }
+        PredicateExpr::True
+        | PredicateExpr::False
+        | PredicateExpr::Compare { .. }
+        | PredicateExpr::In { .. }
+        | PredicateExpr::ArrayContains { .. }
+        | PredicateExpr::TextContains { .. }
+        | PredicateExpr::IsNull(_)
+        | PredicateExpr::IsNotNull(_)
+        | PredicateExpr::Or(_)
+        | PredicateExpr::Not(_) => {}
+    }
+}
+
+fn source_value_ref(value: &NormalizedValueRef) -> bool {
+    matches!(
+        value,
+        NormalizedValueRef::SourceField { .. } | NormalizedValueRef::RowId(RowIdRef::Source(_))
+    )
+}
+
 fn claim_param_field(path: &ClaimPath) -> String {
     format!("__jazz_claim_{}", path.0.join("_"))
 }
@@ -220,28 +283,33 @@ fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
         .map(|path| ClaimPath(path.split('_').map(str::to_owned).collect()))
 }
 
-fn collect_claim_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDomain) {
+fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDomain) {
     match graph {
         GraphBuilder::BindingSource { output, .. } => {
             for field in output.fields() {
                 let Some(name) = field.name.as_deref() else {
                     continue;
                 };
-                let Some(path) = claim_path_from_param_field(name) else {
-                    continue;
-                };
-                domain
-                    .claim_params
-                    .entry(name.to_owned())
-                    .or_insert_with(|| ClaimParameter {
-                        path,
-                        ty: column_type_from_value_type(&field.value_type),
-                    });
+                if let Some(path) = claim_path_from_param_field(name) {
+                    domain
+                        .claim_params
+                        .entry(name.to_owned())
+                        .or_insert_with(|| ClaimParameter {
+                            path,
+                            ty: column_type_from_value_type(&field.value_type),
+                        });
+                } else {
+                    domain
+                        .user_params
+                        .entry(name.to_owned())
+                        .or_insert_with(|| column_type_from_value_type(&field.value_type));
+                    domain.routing_params.insert(route_param_field(name));
+                }
             }
         }
         GraphBuilder::Recursive { seed, step, .. } => {
-            collect_claim_binding_source_params(seed, domain);
-            collect_claim_binding_source_params(step, domain);
+            collect_binding_source_params(seed, domain);
+            collect_binding_source_params(step, domain);
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
@@ -249,15 +317,15 @@ fn collect_claim_binding_source_params(graph: &GraphBuilder, domain: &mut Parame
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. } => collect_claim_binding_source_params(input, domain),
+        | GraphBuilder::TopBy { input, .. } => collect_binding_source_params(input, domain),
         GraphBuilder::Union { inputs } => {
             for input in inputs {
-                collect_claim_binding_source_params(input, domain);
+                collect_binding_source_params(input, domain);
             }
         }
         GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
-            collect_claim_binding_source_params(left, domain);
-            collect_claim_binding_source_params(right, domain);
+            collect_binding_source_params(left, domain);
+            collect_binding_source_params(right, domain);
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
@@ -2334,8 +2402,18 @@ fn lower_linear_plan_steps(
                         "filters on value/frontier sources are not lowered yet".to_owned(),
                     )
                 })?;
-                let predicate = lower_predicate(predicate, source, root_source, request)?;
-                graph = graph.filter(predicate);
+                let (joined, residual) = lower_equality_param_filter_joins(
+                    graph,
+                    predicate,
+                    source,
+                    root_source,
+                    request,
+                )?;
+                graph = joined;
+                if !matches!(residual, PredicateExpr::True) {
+                    let predicate = lower_predicate(&residual, source, root_source, request)?;
+                    graph = graph.filter(predicate);
+                }
             }
             LinearStep::Join { right, mode, on } => {
                 if *mode != JoinMode::Inner {
@@ -3147,6 +3225,121 @@ fn lower_relation_projection_ref(
     }
 }
 
+fn lower_equality_param_filter_joins(
+    mut graph: GraphBuilder,
+    predicate: &PredicateExpr,
+    source_id: &SourceId,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<(GraphBuilder, PredicateExpr), UnsupportedReason> {
+    let predicates = match predicate {
+        PredicateExpr::And(predicates) => predicates.as_slice(),
+        _ => std::slice::from_ref(predicate),
+    };
+    let mut residual = Vec::new();
+    let mut retained_route_fields = BTreeSet::<String>::new();
+    for predicate in predicates {
+        let Some(join) = equality_param_join(predicate, source_id, source)? else {
+            residual.push(predicate.clone());
+            continue;
+        };
+        let Some(binding_source_shape) = &request.input.binding.source_shape else {
+            residual.push(predicate.clone());
+            continue;
+        };
+        let binding = GraphBuilder::binding_source(
+            binding_source_shape.clone(),
+            RecordDescriptor::new([(join.param.clone(), join.value_type.clone())]),
+        );
+        let route_field = route_param_field(&join.param);
+        let mut projection = project_source_fields_from_prefix(source, "left.");
+        projection.extend(
+            retained_route_fields
+                .iter()
+                .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone())),
+        );
+        projection.push(ProjectField::renamed(
+            format!("right.{}", join.param),
+            route_field.clone(),
+        ));
+        graph = GraphBuilder::join(graph, binding, [join.field], [join.param])
+            .project_fields(projection);
+        retained_route_fields.insert(route_field);
+    }
+    let residual = match residual.len() {
+        0 => PredicateExpr::True,
+        1 => residual.pop().expect("one residual predicate"),
+        _ => PredicateExpr::And(residual),
+    };
+    Ok((graph, residual))
+}
+
+struct EqualityParamJoin {
+    field: String,
+    param: String,
+    value_type: ValueType,
+}
+
+fn equality_param_join(
+    predicate: &PredicateExpr,
+    source_id: &SourceId,
+    source: &ResolvedSource,
+) -> Result<Option<EqualityParamJoin>, UnsupportedReason> {
+    let PredicateExpr::Compare {
+        left,
+        op: ComparisonOp::Eq,
+        right,
+    } = predicate
+    else {
+        return Ok(None);
+    };
+    if let (Some((field, value_type)), NormalizedValueRef::Param(param)) =
+        (source_join_field(left, source_id, source)?, right)
+    {
+        return Ok(Some(EqualityParamJoin {
+            field,
+            param: param.clone(),
+            value_type,
+        }));
+    }
+    match (left, source_join_field(right, source_id, source)?) {
+        (NormalizedValueRef::Param(param), Some((field, value_type))) => {
+            Ok(Some(EqualityParamJoin {
+                field,
+                param: param.clone(),
+                value_type,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn source_join_field(
+    value: &NormalizedValueRef,
+    source_id: &SourceId,
+    source: &ResolvedSource,
+) -> Result<Option<(String, ValueType)>, UnsupportedReason> {
+    let field = match value {
+        NormalizedValueRef::SourceField {
+            source: value_source,
+            field,
+        } if value_source == source_id => require_source_field(source, &format!("user_{field}"))?,
+        NormalizedValueRef::RowId(RowIdRef::Source(value_source)) if value_source == source_id => {
+            require_source_field(source, &source.row_shape.row_uuid_field)?
+        }
+        _ => return Ok(None),
+    };
+    let Some(value_type) = source_field_type(source, &field).cloned() else {
+        return Err(UnsupportedReason::Runtime(format!(
+            "source field {field:?} is missing from resolved descriptor"
+        )));
+    };
+    if matches!(value_type, ValueType::Nullable(_)) {
+        return Ok(None);
+    }
+    Ok(Some((field, value_type)))
+}
+
 fn lower_literal_projection_value(
     value: &NormalizedValueRef,
     request: &QueryProgramRequest,
@@ -3713,9 +3906,16 @@ fn lowered_terminals(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Vec<LoweredTerminal>> {
     let mut terminals = Vec::new();
-    let closure = lower_closure_membership(graph.clone(), request, source, resolved_sources)?;
+    let closure = lower_closure_membership(
+        graph.clone(),
+        request,
+        source,
+        resolved_sources,
+        routing_param_fields,
+    )?;
     if request.output.app_rows.is_some() {
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
@@ -3729,8 +3929,13 @@ fn lowered_terminals(
 
     for fact in &request.output.facts {
         if matches!(fact, ProgramFactKey::ResultMembership) {
-            let routing = parameter_domain(&request.input.shape).routing_params;
-            let output = fact_output(fact, plan, source, resolved_sources, routing)?;
+            let output = fact_output(
+                fact,
+                plan,
+                source,
+                resolved_sources,
+                routing_param_fields.clone(),
+            )?;
             let result_graph = fact_terminal_graph(
                 fact,
                 closure.visible_root.clone(),
@@ -3930,6 +4135,7 @@ fn lower_closure_membership(
     request: &QueryProgramRequest,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<ClosureLowering> {
     let mut visible_root = root_graph;
     for path in &request.input.shape.closure_paths {
@@ -3945,6 +4151,7 @@ fn lower_closure_membership(
                 *root_gate,
                 root_source,
                 resolved_sources,
+                route_fields,
             )?;
         }
     }
@@ -4082,6 +4289,7 @@ fn required_closure_parent_graph(
     root_gate: ClosureRootGate,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     required_closure_parent_graph_from_segment(
         parent_graph,
@@ -4090,6 +4298,7 @@ fn required_closure_parent_graph(
         root_gate,
         root_source,
         resolved_sources,
+        route_fields,
     )
 }
 
@@ -4100,6 +4309,7 @@ fn required_closure_parent_graph_from_segment(
     root_gate: ClosureRootGate,
     parent_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let Some(segment) = segments.get(index) else {
         return Ok(parent_graph);
@@ -4113,6 +4323,7 @@ fn required_closure_parent_graph_from_segment(
             explain: ExplainPlan::default(),
         })
     })?;
+    let no_route_fields = BTreeSet::new();
     let target_valid = required_closure_parent_graph_from_segment(
         target.graph.clone(),
         segments,
@@ -4120,6 +4331,7 @@ fn required_closure_parent_graph_from_segment(
         root_gate,
         target,
         resolved_sources,
+        &no_route_fields,
     )?;
     let source_key = format!("user_{}", segment.source_field);
     let Some(source_key_type) = source_field_type(parent_source, &source_key) else {
@@ -4144,7 +4356,8 @@ fn required_closure_parent_graph_from_segment(
         ValueType::Array(_) => "__closure_required_element".to_owned(),
         _ => source_key.clone(),
     };
-    let mut covered_fields = project_source_fields_from_prefix(parent_source, "left.");
+    let mut covered_fields =
+        project_source_fields_with_routes_from_prefix(parent_source, "left.", route_fields);
     if left_key == "__closure_required_element" {
         covered_fields.push(ProjectField::renamed(
             "left.__closure_required_element",
@@ -4176,7 +4389,10 @@ fn required_closure_parent_graph_from_segment(
             [source_key_for_required(required_key_type, &source_key)],
         )
     }
-    .project_fields(project_source_fields(parent_source));
+    .project_fields(project_source_fields_with_routes(
+        parent_source,
+        route_fields,
+    ));
     let all_required_refs_resolve = GraphBuilder::anti_join(
         parent_graph,
         missing,
@@ -4196,7 +4412,11 @@ fn required_closure_parent_graph_from_segment(
         [parent_row_uuid.clone()],
         [parent_row_uuid],
     )
-    .project_fields(project_source_fields_from_prefix(parent_source, "left.")))
+    .project_fields(project_source_fields_with_routes_from_prefix(
+        parent_source,
+        "left.",
+        route_fields,
+    )))
 }
 
 fn source_key_for_required(source_key_type: &ValueType, source_key: &str) -> String {
@@ -4284,6 +4504,27 @@ fn project_source_fields_from_prefix(source: &ResolvedSource, prefix: &str) -> V
         .filter_map(|field| field.name.as_ref())
         .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field.clone()))
         .collect()
+}
+
+fn project_source_fields_with_routes(
+    source: &ResolvedSource,
+    route_fields: &BTreeSet<String>,
+) -> Vec<ProjectField> {
+    project_source_fields_with_routes_from_prefix(source, "", route_fields)
+}
+
+fn project_source_fields_with_routes_from_prefix(
+    source: &ResolvedSource,
+    prefix: &str,
+    route_fields: &BTreeSet<String>,
+) -> Vec<ProjectField> {
+    let mut fields = project_source_fields_from_prefix(source, prefix);
+    fields.extend(
+        route_fields
+            .iter()
+            .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field.clone())),
+    );
+    fields
 }
 
 fn output_terminals(
