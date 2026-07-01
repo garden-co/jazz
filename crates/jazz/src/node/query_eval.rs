@@ -2167,12 +2167,8 @@ where
                     &program.expect("program is compiled when no prepared plan is supplied"),
                 )?)
                 .map_err(Error::Groove),
-            Some(PreparedQueryPlan::Prepared {
-                shape,
-                param_names,
-                param_types,
-            }) => {
-                let values = binding_values_for_plan(binding, &param_names, &param_types)?;
+            Some(PreparedQueryPlan::Prepared { shape, params }) => {
+                let values = binding_values_for_plan(binding, &params)?;
                 self.database
                     .bind_shape(shape, &values)
                     .map_err(Error::Groove)
@@ -2404,12 +2400,8 @@ where
                 .database
                 .subscribe([(JAZZ_APP_ROWS_SINK, graph)])
                 .map_err(Error::Groove)?,
-            PreparedQueryPlan::Prepared {
-                shape,
-                param_names,
-                param_types,
-            } => {
-                let values = binding_values_for_plan(binding, &param_names, &param_types)?;
+            PreparedQueryPlan::Prepared { shape, params } => {
+                let values = binding_values_for_plan(binding, &params)?;
                 self.database
                     .bind_shape(shape, &values)
                     .map_err(Error::Groove)?
@@ -3827,25 +3819,26 @@ where
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_app_rows_graph(&program)?;
         let parameters = program.lowered.parameters;
-        let param_names = parameters.user_params.keys().cloned().collect::<Vec<_>>();
-        let param_types = param_names
+        let params = parameters
+            .user_params
             .iter()
-            .map(|name| {
-                parameters
-                    .user_params
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| QueryError::MissingParam(name.clone()).into())
+            .map(|(name, ty)| PreparedQueryParam {
+                name: name.clone(),
+                ty: ty.clone(),
+                source: PreparedQueryParamSource::User,
             })
-            .collect::<Result<Vec<_>, Error>>()?;
+            .collect::<Vec<_>>();
+        let param_names = params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<Vec<_>>();
         let binding_descriptor = RecordDescriptor::new(
-            param_names.iter().cloned().zip(
-                param_types
-                    .iter()
-                    .map(|column_type| column_type.value_type()),
-            ),
+            param_names
+                .iter()
+                .cloned()
+                .zip(params.iter().map(|param| param.ty.value_type())),
         );
-        let plan = if param_names.is_empty() {
+        let plan = if params.is_empty() {
             PreparedQueryPlan::Graph(graph)
         } else {
             let prepared = self.database.prepare(
@@ -3860,8 +3853,7 @@ where
             )?;
             PreparedQueryPlan::Prepared {
                 shape: prepared.id(),
-                param_names,
-                param_types,
+                params,
             }
         };
         self.query.query_shape_cache.insert(key, plan.clone());
@@ -8505,33 +8497,30 @@ fn collect_nullable_param_types(
 
 fn binding_values_for_plan(
     binding: &Binding,
-    param_names: &[String],
-    param_types: &[groove::schema::ColumnType],
+    params: &[PreparedQueryParam],
 ) -> Result<Vec<Value>, Error> {
-    binding_values_for_param_names(binding.values(), param_names, param_types)
-}
-
-fn binding_values_for_param_names(
-    values: &BTreeMap<String, Value>,
-    param_names: &[String],
-    param_types: &[groove::schema::ColumnType],
-) -> Result<Vec<Value>, Error> {
-    param_names
+    params
         .iter()
-        .zip(param_types)
-        .map(|(name, column_type)| {
-            let value = values
-                .get(name)
-                .cloned()
-                .ok_or_else(|| QueryError::MissingParam(name.clone()))?;
-            Ok(match column_type {
-                groove::schema::ColumnType::Nullable(_) if !matches!(value, Value::Nullable(_)) => {
-                    Value::Nullable(Some(Box::new(value)))
-                }
-                _ => value,
-            })
+        .map(|param| match param.source {
+            PreparedQueryParamSource::User => {
+                let value = binding
+                    .values()
+                    .get(&param.name)
+                    .cloned()
+                    .ok_or_else(|| QueryError::MissingParam(param.name.clone()))?;
+                Ok(coerce_prepared_binding_value(value, &param.ty))
+            }
         })
         .collect()
+}
+
+fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::ColumnType) -> Value {
+    match column_type {
+        groove::schema::ColumnType::Nullable(_) if !matches!(value, Value::Nullable(_)) => {
+            Value::Nullable(Some(Box::new(value)))
+        }
+        _ => value,
+    }
 }
 
 fn local_maintained_view_content_witness<'a>(
