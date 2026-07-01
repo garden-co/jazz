@@ -1547,45 +1547,6 @@ pub(super) fn decode_current_row(
     ))
 }
 
-pub(super) fn current_row_from_global_current_record(
-    table: &TableSchema,
-    record: BorrowedRecord<'_>,
-) -> Result<CurrentRow, Error> {
-    let descriptor = records::RecordDescriptor::new(
-        std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
-            .chain(table.columns.iter().map(|column| {
-                (
-                    format!("user_{}", column.name),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
-                )
-            }))
-            .chain([
-                ("$createdBy".to_owned(), records::ValueType::Uuid),
-                ("$createdAt".to_owned(), records::ValueType::U64),
-                ("$updatedBy".to_owned(), records::ValueType::Uuid),
-                ("$updatedAt".to_owned(), records::ValueType::U64),
-                ("tx_time".to_owned(), records::ValueType::U64),
-                ("tx_node_id".to_owned(), records::ValueType::U64),
-            ]),
-    );
-    let mut values = Vec::with_capacity(table.columns.len() + 3);
-    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?);
-    for idx in 0..table.columns.len() {
-        values.push(record.get_idx(GlobalCurrentRowRecord::USER_CELLS + idx)?);
-    }
-    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_CREATED_BY_IDX)?);
-    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX)?);
-    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_UPDATED_BY_IDX)?);
-    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX)?);
-    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-    values.push(record.get_idx(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
-    let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new(
-        table.name.clone(),
-        OwnedRecord::new(raw, descriptor),
-    ))
-}
-
 pub(super) fn sort_current_rows(rows: &mut [CurrentRow]) {
     rows.sort_by(|left, right| {
         left.row_uuid()
