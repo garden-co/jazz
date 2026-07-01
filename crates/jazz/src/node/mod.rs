@@ -2233,6 +2233,10 @@ where
         self.database.unsubscribe(subscription_id)
     }
 
+    pub(crate) fn flush_query_runtime(&mut self) -> Result<(), Error> {
+        self.database.flush().map_err(Error::Groove)
+    }
+
     pub(crate) fn groove_runtime_token(&self) -> u64 {
         self.groove_runtime_token
     }

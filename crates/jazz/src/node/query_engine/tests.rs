@@ -77,6 +77,7 @@ fn normalized_shape(byte: u8) -> NormalizedRowSetShape {
         auxiliary_sources: BTreeSet::new(),
         closure_paths: Vec::new(),
         join_contributions: Vec::new(),
+        reachable_contributions: Vec::new(),
         nodes: BTreeMap::from([(
             root,
             RowSetExpr::Source {
@@ -117,6 +118,7 @@ fn chained_row_set_input(byte: u8, binding_values: BTreeMap<String, Value>) -> R
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
             join_contributions: Vec::new(),
+            reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
                 (
                     root.clone(),
@@ -190,6 +192,7 @@ fn claim_filtered_row_set_input(byte: u8, claim: &str) -> RowSetProgramInput {
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
             join_contributions: Vec::new(),
+            reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
                 (
                     root.clone(),
@@ -637,6 +640,7 @@ fn current_source_select_projection_and_unordered_slice_lower() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         root.clone(),
@@ -728,6 +732,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         root.clone(),
@@ -864,6 +869,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         parent_node.clone(),
@@ -1000,6 +1006,7 @@ fn correlated_path_request(
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         parent_node.clone(),
@@ -1262,6 +1269,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         seed_node.clone(),
@@ -1454,7 +1462,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     );
     assert_eq!(
         program.lowered.parameters.routing_params,
-        BTreeSet::from(["route".to_owned()])
+        BTreeSet::from(["__jazz_route_route".to_owned()])
     );
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert!(terminals.iter().any(|terminal| {
@@ -1481,7 +1489,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
 }
 
 #[test]
-fn recursive_relation_seed_claim_lowers_as_inline_value_source() {
+fn recursive_relation_seed_claim_lowers_as_hidden_binding_value_source() {
     let seed_node = RowSetNodeId("seed".to_owned());
     let frontier_node = RowSetNodeId("frontier".to_owned());
     let step_node = RowSetNodeId("step".to_owned());
@@ -1494,12 +1502,12 @@ fn recursive_relation_seed_claim_lowers_as_inline_value_source() {
     let frontier_columns = vec![
         ValueSourceColumn {
             name: "team".to_owned(),
-            value: NormalizedValueRef::Claim(ClaimPath(vec!["sub".to_owned()])),
+            value: NormalizedValueRef::Param("__jazz_claim_sub".to_owned()),
             ty: ColumnType::Uuid,
         },
         ValueSourceColumn {
             name: "reachable_team".to_owned(),
-            value: NormalizedValueRef::Claim(ClaimPath(vec!["sub".to_owned()])),
+            value: NormalizedValueRef::Param("__jazz_claim_sub".to_owned()),
             ty: ColumnType::Uuid,
         },
     ];
@@ -1531,13 +1539,14 @@ fn recursive_relation_seed_claim_lowers_as_inline_value_source() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         seed_node.clone(),
                         RowSetExpr::ValueSource {
                             shape: "reachable-claim".to_owned(),
                             columns: frontier_columns.clone(),
-                            mode: ValueSourceMode::Inline,
+                            mode: ValueSourceMode::Binding,
                         },
                     ),
                     (
@@ -1633,16 +1642,25 @@ fn recursive_relation_seed_claim_lowers_as_inline_value_source() {
 
     let program = lower_query_program(request, &mut FakeSourceResolver::default())
         .expect("recursive claim seed should lower");
-    assert!(matches!(
-        program.lowered.terminals[0].graph,
-        GraphBuilder::Recursive { ref seed, .. }
-            if matches!(seed.as_ref(), GraphBuilder::InlineRecords { output, records }
-                if output.field_index("team").is_some()
-                    && output.field_index("reachable_team").is_some()
-                    && records.len() == 1)
-    ));
+    let GraphBuilder::Recursive { seed, .. } = &program.lowered.terminals[0].graph else {
+        panic!("expected recursive graph");
+    };
+    let GraphBuilder::Project { input, fields } = seed.as_ref() else {
+        panic!("expected projected seed");
+    };
+    assert!(matches!(input.as_ref(), GraphBuilder::BindingSource { .. }));
+    assert!(fields.iter().any(|field| field.output_name == "team"));
+    assert!(
+        fields
+            .iter()
+            .any(|field| field.output_name == "reachable_team")
+    );
     assert!(program.lowered.parameters.user_params.is_empty());
-    assert!(program.lowered.parameters.hidden_params.is_empty());
+    assert_eq!(
+        program.lowered.parameters.hidden_params,
+        BTreeMap::from([("__jazz_claim_sub".to_owned(), ColumnType::Uuid)])
+    );
+    assert!(program.lowered.parameters.routing_params.is_empty());
 }
 
 #[test]
