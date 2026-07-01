@@ -377,9 +377,14 @@ where
             .map_err(Error::IvmRuntime)
     }
 
-    /// Prepare a graph-level shape directly. Most callers should prefer
-    /// [`Database::prepare_query`]; this lower-level API is useful when a caller
-    /// already has a [`GraphBuilder`].
+    /// Prepare a one-sink parameterized graph shape directly.
+    ///
+    /// Most callers should prefer [`Database::prepare_query`]. This lower-level
+    /// API is useful when a caller already has a [`GraphBuilder`]. Internally it
+    /// is just sugar over [`Database::prepare_routed_multisink`]: the graph is
+    /// registered as the single route-carrying terminal, `output_key_fields`
+    /// name the hidden route fields, and [`Database::bind_shape`] adapts the
+    /// one sink back to a [`Subscription`].
     pub fn prepare(
         &mut self,
         graph: GraphBuilder,
@@ -399,8 +404,14 @@ where
             .map_err(Error::IvmRuntime)
     }
 
-    /// Prepare a graph-level shape whose subscriber output and routing key are
-    /// evaluated from separate graph outputs.
+    /// Prepare a one-sink shape with separate public-output and route-carrying
+    /// graph descriptions.
+    ///
+    /// This is convenience sugar over [`Database::prepare_routed_multisink`],
+    /// not a separate prepared-subscription implementation. `routing_graph` is
+    /// the graph Groove maintains and routes by; `output_graph` only supplies
+    /// the subscriber-visible field names and types that are projected from the
+    /// routed terminal.
     pub fn prepare_with_routing(
         &mut self,
         output_graph: GraphBuilder,
@@ -422,9 +433,12 @@ where
             .map_err(Error::IvmRuntime)
     }
 
-    /// Prepare a graph-level multisink shape whose terminal graphs carry
-    /// hidden route columns. Binding appends ordinary filter/project graph
-    /// nodes for each sink.
+    /// Prepare the canonical parameterized multisink shape.
+    ///
+    /// Each terminal graph carries hidden route columns plus public output
+    /// columns. Binding appends ordinary filter/project graph nodes for each
+    /// sink, so callers with one-sink needs should treat [`Database::prepare`]
+    /// and [`Database::prepare_with_routing`] as thin convenience wrappers.
     pub fn prepare_routed_multisink(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
@@ -442,7 +456,7 @@ where
             .map_err(Error::IvmRuntime)
     }
 
-    /// Bind a prepared graph shape by positional values.
+    /// Bind a prepared one-sink graph shape by positional values.
     ///
     /// ```rust
     /// # use groove::db::{Database, GraphBuilder};
@@ -490,11 +504,13 @@ where
             .map_err(Error::IvmRuntime)
     }
 
-    /// Bind a prepared graph shape while projecting subscriber-visible rows.
+    /// Bind a prepared one-sink graph shape while projecting subscriber-visible
+    /// rows.
     ///
-    /// The prepared graph's internal output may contain hidden routing fields
-    /// named by `output_key_fields`; `public_output` selects the descriptor that
-    /// bound subscribers receive.
+    /// This adapts the one routed multisink terminal back to [`Subscription`].
+    /// The prepared terminal may contain hidden routing fields from
+    /// `output_key_fields` or `routing_key_fields`; `public_output` selects the
+    /// descriptor that bound subscribers receive.
     pub fn bind_shape_with_output(
         &mut self,
         shape: PreparedShapeId,
