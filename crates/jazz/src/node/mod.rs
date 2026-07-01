@@ -182,6 +182,8 @@ pub struct NodeState<S> {
     large_value_materialization_cache: BTreeMap<LargeValueCacheKey, Vec<u8>>,
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
+    /// Runtime counters for query-engine read authorization paths.
+    query_engine_read_metrics: QueryEngineReadMetrics,
     /// Process-local claims attached to authenticated subscriber sessions.
     session_claims: BTreeMap<AuthorId, BTreeMap<String, Value>>,
 }
@@ -489,6 +491,7 @@ where
             large_value_metrics: LargeValueMetrics::default(),
             large_value_materialization_cache: BTreeMap::new(),
             sync_metrics: SyncMetrics::default(),
+            query_engine_read_metrics: QueryEngineReadMetrics::default(),
             session_claims: BTreeMap::new(),
         };
         node.recover_from_storage()?;
@@ -1675,6 +1678,16 @@ where
         &self.sync_metrics
     }
 
+    /// Deterministic counters for query-engine read authorization paths.
+    pub fn query_engine_read_metrics(&self) -> &QueryEngineReadMetrics {
+        &self.query_engine_read_metrics
+    }
+
+    /// Reset query-engine read authorization counters.
+    pub fn reset_query_engine_read_metrics(&mut self) {
+        self.query_engine_read_metrics = QueryEngineReadMetrics::default();
+    }
+
     /// Published schema-version payloads known to this node.
     pub fn catalogue_schemas(&self) -> &BTreeMap<SchemaVersionId, SchemaVersion> {
         &self.catalogue.catalogue_schemas
@@ -2799,6 +2812,17 @@ pub struct SyncMetrics {
     pub parked_catalogue_shapes: u64,
     /// Parked shape registrations later resolved by catalogue arrival.
     pub parked_catalogue_shapes_resolved: u64,
+}
+
+/// Deterministic counters for query-engine read authorization.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryEngineReadMetrics {
+    /// Query-engine authorization terminal graphs constructed for read visibility.
+    pub policy_authorization_graphs: u64,
+    /// One-shot materializations of authorized row-id sets.
+    pub policy_authorized_row_id_queries: u64,
+    /// Source graphs filtered by query-engine authorization terminals.
+    pub policy_authorized_source_joins: u64,
 }
 
 /// Deterministic counters for large-value materialization and checkpoint use.
