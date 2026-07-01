@@ -1645,11 +1645,7 @@ fn reachable_frontier_columns(
     let ty = match seed {
         Operand::Param(param) => param_types.get(param).cloned().unwrap_or(ColumnType::Uuid),
         Operand::Literal(Value::Uuid(_)) => ColumnType::Uuid,
-        Operand::Claim(_) => {
-            return Err(normalization_gap(
-                "query claims must be rewritten to params before lowering",
-            ));
-        }
+        Operand::Claim(_) => ColumnType::Uuid,
         Operand::Column(_) | Operand::Literal(_) => {
             return Err(normalization_gap(
                 "reachable_via currently supports uuid parameter/claim/literal seeds only",
@@ -1686,9 +1682,9 @@ fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error>
     match seed {
         Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
         Operand::Literal(Value::Uuid(uuid)) => literal_value_ref(&Value::Uuid(*uuid)),
-        Operand::Claim(_) => Err(normalization_gap(
-            "query claims must be rewritten to params before lowering",
-        )),
+        Operand::Claim(claim) => Ok(NormalizedValueRef::Claim(ClaimPath(
+            claim.split('.').map(str::to_owned).collect(),
+        ))),
         Operand::Column(_) | Operand::Literal(_) => Err(normalization_gap(
             "reachable_via currently supports uuid parameter/claim/literal seeds only",
         )),
@@ -1698,10 +1694,7 @@ fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error>
 fn reachable_seed_value_source_mode(seed: &Operand) -> Result<ValueSourceMode, Error> {
     match seed {
         Operand::Param(_) => Ok(ValueSourceMode::Binding),
-        Operand::Literal(Value::Uuid(_)) => Ok(ValueSourceMode::Inline),
-        Operand::Claim(_) => Err(normalization_gap(
-            "query claims must be rewritten to params before lowering",
-        )),
+        Operand::Literal(Value::Uuid(_)) | Operand::Claim(_) => Ok(ValueSourceMode::Inline),
         Operand::Column(_) | Operand::Literal(_) => Err(normalization_gap(
             "reachable_via currently supports uuid parameter/claim/literal seeds only",
         )),
@@ -2605,17 +2598,6 @@ where
             self.finish_query_rows(query, &mut rows)?;
             return Ok(rows);
         }
-        let inlined_shape;
-        let shape = if prepared_plan.is_none()
-            && matches!(tier, DurabilityTier::Local)
-            && !shape.query().reachable.is_empty()
-        {
-            inlined_shape =
-                inline_snapshot_bind_filter_literals(shape, binding, &self.catalogue.schema)?;
-            &inlined_shape
-        } else {
-            shape
-        };
         let program = if prepared_plan.is_some() {
             None
         } else {
@@ -2629,7 +2611,7 @@ where
         };
         let plan = match prepared_plan {
             Some(plan) => Some(plan.clone()),
-            None if matches!(tier, DurabilityTier::Edge | DurabilityTier::Global) && {
+            None if {
                 let parameters = &program
                     .as_ref()
                     .expect("program is compiled when no prepared plan is supplied")
@@ -6347,7 +6329,9 @@ where
         } else {
             match &reachable.from {
                 Operand::Param(param) => {
-                    seed_params.insert(param.clone());
+                    if param != "team" && param != "reachable_team" {
+                        seed_params.insert(param.clone());
+                    }
                     let mut seed =
                         GraphBuilder::binding_source(
                             binding_source_shape.to_owned(),
@@ -6367,12 +6351,17 @@ where
                         ValueType::Nullable(inner) => (*inner).clone(),
                         value_type => value_type,
                     };
-                    seed_param_value_types.insert(param.clone(), value_type);
-                    seed.project_fields([
+                    if param != "team" && param != "reachable_team" {
+                        seed_param_value_types.insert(param.clone(), value_type);
+                    }
+                    let mut fields = vec![
                         ProjectField::renamed(param.clone(), "team"),
                         ProjectField::renamed(param.clone(), "reachable_team"),
-                        ProjectField::named(param.clone()),
-                    ])
+                    ];
+                    if param != "team" && param != "reachable_team" {
+                        fields.push(ProjectField::named(param.clone()));
+                    }
+                    seed.project_fields(fields)
                 }
                 Operand::Literal(Value::Uuid(seed)) => GraphBuilder::values(
                     reachable_frontier_descriptor(&seed_param_value_types),
@@ -6390,7 +6379,9 @@ where
                 }
             }
         };
-        let seed_param_available = seed_params.contains(&seed_param);
+        let seed_param_available = seed_param == "team"
+            || seed_param == "reachable_team"
+            || seed_params.contains(&seed_param);
         let frontier = GraphBuilder::frontier_source(
             "reachable_frontier",
             reachable_frontier_descriptor(&seed_param_value_types),

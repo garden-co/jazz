@@ -380,7 +380,8 @@ pub(crate) struct ValueSourceColumn {
     /// Output column name.
     pub(crate) name: String,
     /// Value expression for seed rows. Binding-source columns should use
-    /// `NormalizedValueRef::Param` and inline values should use literals.
+    /// `NormalizedValueRef::Param`; inline values may use literals or trusted
+    /// policy-context claims.
     pub(crate) value: NormalizedValueRef,
     /// Groove column type.
     pub(crate) ty: ColumnType,
