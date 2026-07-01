@@ -2879,42 +2879,6 @@ where
         lowered_terminal_graph(&program, "policy.authorized_rows")
     }
 
-    pub(super) fn read_policy_authorized_row_ids_for_table(
-        &mut self,
-        table: &TableSchema,
-        identity: AuthorId,
-        tier: DurabilityTier,
-    ) -> Result<BTreeSet<RowUuid>, Error> {
-        let request = self.table_read_policy_authorization_request(
-            self.catalogue.current_schema_version_id,
-            &table.name,
-            identity,
-            ParamBindingMode::InlineAllReachableSeeds,
-            tier,
-            None,
-            BTreeMap::new(),
-        )?;
-        self.query_engine_read_metrics
-            .policy_authorized_row_id_queries += 1;
-        let graph = self.policy_authorization_row_id_graph(request)?;
-        let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
-        let row_idx =
-            deltas
-                .descriptor
-                .field_index("row_uuid")
-                .ok_or(Error::InvalidStoredValue(
-                    "policy authorization terminal is missing row_uuid",
-                ))?;
-        let mut rows = BTreeSet::new();
-        for (record, weight) in deltas.iter() {
-            if weight <= 0 {
-                continue;
-            }
-            rows.insert(RowUuid(record.get_uuid(row_idx)?));
-        }
-        Ok(rows)
-    }
-
     pub(super) fn branch_read_policy_authorized_branch_ids(
         &mut self,
         branch_id: BranchId,
