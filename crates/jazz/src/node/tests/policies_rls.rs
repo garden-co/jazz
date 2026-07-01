@@ -3050,7 +3050,7 @@ fn maintained_view_graph_streams_match_policy_result_and_filter_bundle_members()
 }
 
 #[test]
-fn maintained_view_tagged_terminal_matches_one_shot_streams_and_reconstructs_versions() {
+fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
     let schema = JazzSchema::new([TableSchema::new(
         "todos",
         [
@@ -3082,7 +3082,7 @@ fn maintained_view_tagged_terminal_matches_one_shot_streams_and_reconstructs_ver
         &mut core,
         MergeableCommit::new("todos", row(0x93), 20).cells(owner_cells(author_a, "delete me")),
     );
-    accept_global(
+    let deleted_readable_delete = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x93), 21)
             .parents(vec![deleted_readable_content])
@@ -3092,7 +3092,7 @@ fn maintained_view_tagged_terminal_matches_one_shot_streams_and_reconstructs_ver
         &mut core,
         MergeableCommit::new("todos", row(0x94), 22).cells(owner_cells(author_b, "hidden delete")),
     );
-    accept_global(
+    let deleted_unreadable_delete = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x94), 23)
             .parents(vec![deleted_unreadable_content])
@@ -3105,19 +3105,44 @@ fn maintained_view_tagged_terminal_matches_one_shot_streams_and_reconstructs_ver
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    assert_maintained_view_tagged_terminal_matches_one_shot_streams(
+    assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
         &mut core,
         &shape,
         &binding,
         AuthorId::SYSTEM,
+        [
+            (sibling_tx, row(0x90), VersionLayer::Content),
+            (sibling_tx, row(0x91), VersionLayer::Content),
+            (deleted_readable_delete, row(0x93), VersionLayer::Deletion),
+            (deleted_unreadable_delete, row(0x94), VersionLayer::Deletion),
+        ],
+        [
+            (row(0x93), VersionLayer::Content, false),
+            (row(0x93), VersionLayer::Deletion, true),
+            (row(0x94), VersionLayer::Content, false),
+            (row(0x94), VersionLayer::Deletion, true),
+        ],
     );
-    assert_maintained_view_tagged_terminal_matches_one_shot_streams(
-        &mut core, &shape, &binding, author_a,
+    assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
+        &mut core,
+        &shape,
+        &binding,
+        author_a,
+        [
+            (sibling_tx, row(0x90), VersionLayer::Content),
+            (deleted_readable_delete, row(0x93), VersionLayer::Deletion),
+        ],
+        [
+            (row(0x93), VersionLayer::Content, false),
+            (row(0x93), VersionLayer::Deletion, true),
+            (row(0x94), VersionLayer::Content, false),
+            (row(0x94), VersionLayer::Deletion, true),
+        ],
     );
 }
 
 #[test]
-fn maintained_view_tagged_terminal_clean_owner_policy_claim_params_match_one_shot() {
+fn maintained_view_query_engine_seed_clean_owner_policy_claim_params_match_one_shot() {
     let schema = JazzSchema::new([TableSchema::new(
         "todos",
         [
@@ -3157,7 +3182,7 @@ fn maintained_view_tagged_terminal_clean_owner_policy_claim_params_match_one_sho
             .map(|(_table, row_uuid, _tx_id)| row_uuid)
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0xa0)]),
-        "clean tagged terminal rows should route by retained query and policy claim params"
+        "query-engine maintained rows should route by retained query and policy claim params"
     );
     assert!(removes.is_empty());
 }
@@ -4047,64 +4072,63 @@ fn maintained_view_version_keys(
         .collect()
 }
 
-fn assert_maintained_view_tagged_terminal_matches_one_shot_streams(
+fn assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
     core: &mut NodeState<RocksDbStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     identity: AuthorId,
+    expected_witnesses: impl IntoIterator<Item = (TxId, RowUuid, VersionLayer)>,
+    expected_replacements: impl IntoIterator<Item = (RowUuid, VersionLayer, bool)>,
 ) {
-    // TODO(query-engine): this is a raw terminal-fact oracle for result,
-    // version, and replacement streams. Delete it once those maintained facts
-    // are asserted through query-engine output metadata instead of the legacy
-    // tagged terminal builder.
-    let table = core.table("todos").unwrap().clone();
-    let tagged = core
-        .maintained_view_tagged_terminal(shape, binding, identity)
+    let expected_rows = core
+        .query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
         .unwrap();
-    assert_eq!(
-        tagged_event_kinds(&tagged),
-        BTreeSet::from([
-            "replacement_content".to_owned(),
-            "replacement_deletion".to_owned(),
-            "result_current".to_owned(),
-            "version_content".to_owned(),
-            "version_deletion".to_owned(),
-        ])
-    );
-
-    let result_current = core
-        .maintained_view_result_current(shape, binding, identity)
-        .unwrap();
-    assert_eq!(
-        tagged_result_current_rows(&tagged, &table),
-        result_current_rows(
-            &result_current,
-            &table,
-            "version_tx_time",
-            "version_tx_node_id"
+    let (receiver, maintained, _terminal_schemas, transitions, _tables) = core
+        .open_seeded_maintained_subscription_view(
+            shape,
+            binding,
+            identity,
+            DurabilityTier::Global,
         )
-    );
-
-    let expected_versions = core
-        .maintained_view_policy_readable_version_rows_by_tx(shape, identity)
         .unwrap();
-    assert_eq!(
-        tagged_versions_by_tx(
-            core,
-            &tagged,
-            &table,
-            ["version_content", "version_deletion"]
-        ),
-        version_rows_by_tx_key(expected_versions)
-    );
+    core.unsubscribe_groove_subscription(receiver.id());
 
-    let expected_replacements = core
-        .maintained_view_replacement_for_remove_by_row(shape, identity)
-        .unwrap();
     assert_eq!(
-        tagged_replacements_by_row(&tagged, &table),
-        replacement_for_remove_key(expected_replacements)
+        transitions
+            .adds
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .map(|(table, row_uuid, _tx_id)| (table.to_string(), row_uuid))
+            .collect::<BTreeSet<_>>(),
+        expected_rows
+            .iter()
+            .map(|row| (row.table().to_owned(), row.row_uuid()))
+            .collect::<BTreeSet<_>>(),
+        "seeded query-engine maintained membership must match public rows"
     );
+    assert!(transitions.removes.is_empty());
+
+    for (tx_id, row_uuid, layer) in expected_witnesses {
+        assert!(
+            maintained
+                .versions_by_tx(tx_id)
+                .iter()
+                .any(|version| version.row_uuid() == row_uuid && version.layer() == layer),
+            "seeded query-engine maintained view must include expected {layer:?} witness for {row_uuid:?} in {tx_id:?}"
+        );
+    }
+    for (row_uuid, layer, should_exist) in expected_replacements {
+        let (content, deletion) = maintained.replacement_for("todos", row_uuid);
+        let actual = match layer {
+            VersionLayer::Content => content,
+            VersionLayer::Deletion => deletion,
+        };
+        assert_eq!(
+            actual.is_some(),
+            should_exist,
+            "seeded query-engine maintained replacement witness presence for {row_uuid:?}/{layer:?}"
+        );
+    }
 }
 
 fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
@@ -4137,258 +4161,6 @@ fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
     assert!(removes.is_empty());
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.hits_out, 1);
-}
-
-fn tagged_event_kinds(rows: &groove::ivm::RecordDeltas) -> BTreeSet<String> {
-    let kind_idx = rows.descriptor.field_index("event_kind").unwrap();
-    rows.to_values()
-        .unwrap()
-        .into_iter()
-        .filter(|(_, weight)| *weight > 0)
-        .map(|(values, _)| {
-            let Value::String(kind) = &values[kind_idx] else {
-                panic!("event_kind must be string");
-            };
-            kind.clone()
-        })
-        .collect()
-}
-
-fn tagged_result_current_rows(
-    rows: &groove::ivm::RecordDeltas,
-    table: &TableSchema,
-) -> BTreeSet<Vec<String>> {
-    result_rows_matching(rows, table, "result_current", "tx_time", "tx_node_id")
-}
-
-fn result_current_rows(
-    rows: &groove::ivm::RecordDeltas,
-    table: &TableSchema,
-    version_time_field: &str,
-    version_node_field: &str,
-) -> BTreeSet<Vec<String>> {
-    result_rows_matching(
-        rows,
-        table,
-        "result_content",
-        version_time_field,
-        version_node_field,
-    )
-}
-
-fn result_rows_matching(
-    rows: &groove::ivm::RecordDeltas,
-    table: &TableSchema,
-    event_kind: &str,
-    version_time_field: &str,
-    version_node_field: &str,
-) -> BTreeSet<Vec<String>> {
-    let kind_idx = rows.descriptor.field_index("event_kind").unwrap();
-    let field_indices = [
-        "row_uuid",
-        "content_tx_time",
-        "content_tx_node_id",
-        version_time_field,
-        version_node_field,
-        "schema_version",
-        "parents",
-        "_deletion",
-    ]
-    .into_iter()
-    .map(|field| rows.descriptor.field_index(field).unwrap())
-    .chain(table.columns.iter().map(|column| {
-        regular_or_tagged_field_index(&rows.descriptor, table, &format!("user_{}", column.name))
-            .unwrap()
-    }))
-    .collect::<Vec<_>>();
-    rows.to_values()
-        .unwrap()
-        .into_iter()
-        .filter(|(values, weight)| {
-            *weight > 0 && values[kind_idx] == Value::String(event_kind.to_owned())
-        })
-        .map(|(values, _)| {
-            field_indices
-                .iter()
-                .map(|idx| format!("{:?}", values[*idx]))
-                .collect()
-        })
-        .collect()
-}
-
-fn tagged_versions_by_tx(
-    core: &NodeState<RocksDbStorage>,
-    rows: &groove::ivm::RecordDeltas,
-    table: &TableSchema,
-    event_kinds: impl IntoIterator<Item = &'static str>,
-) -> BTreeMap<TxId, Vec<VersionRowKey>> {
-    let selected = event_kinds
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-    let kind_idx = rows.descriptor.field_index("event_kind").unwrap();
-    let mut by_tx = BTreeMap::<TxId, Vec<VersionRowKey>>::new();
-    for (values, weight) in rows.to_values().unwrap() {
-        if weight <= 0 {
-            continue;
-        }
-        let Value::String(kind) = &values[kind_idx] else {
-            panic!("event_kind must be string");
-        };
-        if !selected.contains(kind) {
-            continue;
-        }
-        let version = reconstruct_version_row_from_tagged_values(table, &rows.descriptor, &values);
-        let tx_id = core.version_tx_id(&version).unwrap();
-        by_tx
-            .entry(tx_id)
-            .or_default()
-            .push(version_row_key(version));
-    }
-    for versions in by_tx.values_mut() {
-        versions.sort();
-    }
-    by_tx
-}
-
-fn tagged_replacements_by_row(
-    rows: &groove::ivm::RecordDeltas,
-    table: &TableSchema,
-) -> BTreeMap<RowUuid, ReplacementKey> {
-    let kind_idx = rows.descriptor.field_index("event_kind").unwrap();
-    let mut replacements = BTreeMap::<RowUuid, ReplacementKey>::new();
-    for (values, weight) in rows.to_values().unwrap() {
-        if weight <= 0 {
-            continue;
-        }
-        let Value::String(kind) = &values[kind_idx] else {
-            panic!("event_kind must be string");
-        };
-        if kind != "replacement_content" && kind != "replacement_deletion" {
-            continue;
-        }
-        let version = reconstruct_version_row_from_tagged_values(table, &rows.descriptor, &values);
-        let row_uuid = version.row_uuid();
-        let key = version_row_key(version);
-        let replacement = replacements.entry(row_uuid).or_default();
-        if kind == "replacement_content" {
-            replacement.content_winner = Some(key);
-        } else {
-            replacement.deletion_winner = Some(key);
-        }
-    }
-    replacements
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct VersionRowKey {
-    table: String,
-    row_uuid: RowUuid,
-    layer: VersionLayer,
-    raw_record: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ReplacementKey {
-    content_winner: Option<VersionRowKey>,
-    deletion_winner: Option<VersionRowKey>,
-}
-
-fn version_rows_by_tx_key(
-    versions_by_tx: BTreeMap<TxId, Vec<VersionRow>>,
-) -> BTreeMap<TxId, Vec<VersionRowKey>> {
-    versions_by_tx
-        .into_iter()
-        .map(|(tx_id, versions)| {
-            let mut versions = versions
-                .into_iter()
-                .map(version_row_key)
-                .collect::<Vec<_>>();
-            versions.sort();
-            (tx_id, versions)
-        })
-        .collect()
-}
-
-fn replacement_for_remove_key(
-    replacements: BTreeMap<RowUuid, MaintainedViewReplacementForRemove>,
-) -> BTreeMap<RowUuid, ReplacementKey> {
-    replacements
-        .into_iter()
-        .map(|(row_uuid, replacement)| {
-            (
-                row_uuid,
-                ReplacementKey {
-                    content_winner: replacement.content_winner.map(version_row_key),
-                    deletion_winner: replacement.deletion_winner.map(version_row_key),
-                },
-            )
-        })
-        .collect()
-}
-
-fn version_row_key(version: VersionRow) -> VersionRowKey {
-    VersionRowKey {
-        table: version.table().to_owned(),
-        row_uuid: version.row_uuid(),
-        layer: version.layer(),
-        raw_record: version.record.raw().to_vec(),
-    }
-}
-
-fn reconstruct_version_row_from_tagged_values(
-    table: &TableSchema,
-    tagged_descriptor: &groove::records::RecordDescriptor,
-    tagged_values: &[Value],
-) -> VersionRow {
-    let deletion_idx = tagged_descriptor.field_index("_deletion").unwrap();
-    let is_deletion = !matches!(tagged_values[deletion_idx], Value::Nullable(None));
-    let storage_descriptor = if is_deletion {
-        table.register_storage_table().record_schema()
-    } else {
-        table.history_storage_table().record_schema()
-    };
-    let storage_values = storage_descriptor
-        .fields()
-        .iter()
-        .map(|field| {
-            let field_name = field.name.as_ref().unwrap();
-            let idx = regular_or_tagged_field_index(tagged_descriptor, table, field_name).unwrap();
-            if is_deletion && field_name == "_deletion" {
-                match &tagged_values[idx] {
-                    Value::Nullable(Some(value)) => match value.as_ref() {
-                        Value::U8(discriminant) | Value::Enum(discriminant) => {
-                            Value::Enum(*discriminant)
-                        }
-                        value => panic!("unexpected deletion discriminant value: {value:?}"),
-                    },
-                    value => panic!("deletion row must carry deletion discriminant: {value:?}"),
-                }
-            } else {
-                tagged_values[idx].clone()
-            }
-        })
-        .collect::<Vec<_>>();
-    let raw = storage_descriptor.create(&storage_values).unwrap();
-    VersionRow {
-        table: groove::Intern::new(table.name.clone()),
-        record: OwnedRecord::new(raw, storage_descriptor),
-    }
-}
-
-fn regular_or_tagged_field_index(
-    descriptor: &groove::records::RecordDescriptor,
-    table: &TableSchema,
-    field_name: &str,
-) -> Option<usize> {
-    descriptor.field_index(field_name).or_else(|| {
-        field_name.strip_prefix("user_").and_then(|column| {
-            descriptor.field_index(&crate::node::query_eval::maintained_view_tagged_user_field(
-                &table.name,
-                column,
-            ))
-        })
-    })
 }
 
 #[test]
