@@ -22,11 +22,12 @@ use super::query_engine::{
     ClosurePathSegment, ComparisonOp as NormalizedComparisonOp, CorrelationRequirement, DataSource,
     FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
     NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
-    OrderKey as NormalizedOrderKey, OutputTerminalSchema, PayloadProjection, PolicyContext,
-    PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
-    ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField, QueryProgram,
-    QueryProgramRequest, QueryReadSet, ReadView, RequestedReadSet, RequestedSourceStage,
-    ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
+    PayloadProjection, PolicyContext, PolicyEnforcementMode,
+    PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProgramOutputSchemas,
+    ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet, ReadView,
+    RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
+    ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
@@ -388,17 +389,44 @@ where
         let Some(source) = self.read_view.sources.get(&request.source) else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
-        let (projection, graph_tier, history_position) = match source {
+        let (projection, graph_tier, history_position, open_tx_overlay) = match source {
             SourceExpr::VisibleCurrent {
                 projection,
                 data: DataSource::Current,
                 tier,
-            } => (projection, Some(*tier), None),
+            } => (projection, Some(*tier), None, None),
             SourceExpr::HistoryCut {
                 projection,
                 data: DataSource::Current,
                 position,
-            } => (projection, None, Some(*position)),
+            } => (projection, None, Some(*position), None),
+            SourceExpr::WithOverlays { input, overlays } => {
+                let (projection, tier) = match input.as_ref() {
+                    SourceExpr::VisibleCurrent {
+                        projection,
+                        data: DataSource::Current,
+                        tier,
+                    } => (projection, Some(*tier)),
+                    SourceExpr::SnapshotRef {
+                        projection,
+                        data: DataSource::Current,
+                        snapshot: _,
+                    } => (projection, None),
+                    _ => {
+                        return Err(source_resolution_error(
+                            request,
+                            SourceGap::TransactionReadOverlay,
+                        ));
+                    }
+                };
+                let [OverlayRef::OpenTransaction(tx_id)] = overlays.entries.as_slice() else {
+                    return Err(source_resolution_error(
+                        request,
+                        SourceGap::TransactionReadOverlay,
+                    ));
+                };
+                (projection, tier, None, Some(*tx_id))
+            }
             _ => {
                 return Err(source_resolution_error(
                     request,
@@ -442,6 +470,21 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             let graph = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+            let descriptor = current_row_descriptor(&table);
+            (graph, descriptor, BTreeMap::new())
+        } else if let Some(tx_id) = open_tx_overlay {
+            if request.visibility != RowVisibility::Visible {
+                return Err(source_resolution_error(
+                    request,
+                    SourceGap::TransactionReadOverlay,
+                ));
+            }
+            let rows = self
+                .node
+                .tx_current_rows(tx_id, &request.source.table)
+                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
+            let graph = inline_current_graph(&table, rows)
+                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
             let descriptor = current_row_descriptor(&table);
             (graph, descriptor, BTreeMap::new())
         } else if request.visibility == RowVisibility::IncludeDeleted {
@@ -776,6 +819,59 @@ fn historical_query_read_set(
             _ => None,
         })
         .collect();
+    QueryReadSet::primary(ReadView {
+        read_schema: schema_version,
+        policy_schema: schema_version,
+        sources,
+    })
+}
+
+fn tx_query_read_set(
+    shape: &NormalizedRowSetShape,
+    schema_version: SchemaVersionId,
+    tx_id: OpenTxId,
+    snapshot: Snapshot,
+) -> RequestedReadSet {
+    let projection = SchemaProjection {
+        schema_family: SchemaFamilySelection::Current,
+        storage: StorageSchemaSelection::Single(schema_version),
+        lens: LensSelection::Canonical,
+    };
+    let mut sources = shape
+        .nodes
+        .values()
+        .filter_map(|node| match node {
+            RowSetExpr::Source { source, .. } => Some((
+                source.clone(),
+                SourceExpr::WithOverlays {
+                    input: Box::new(SourceExpr::SnapshotRef {
+                        projection: projection.clone(),
+                        data: DataSource::Current,
+                        snapshot: snapshot.clone(),
+                    }),
+                    overlays: OverlayStack {
+                        entries: vec![OverlayRef::OpenTransaction(tx_id)],
+                    },
+                },
+            )),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for source in &shape.auxiliary_sources {
+        sources.insert(
+            source.clone(),
+            SourceExpr::WithOverlays {
+                input: Box::new(SourceExpr::SnapshotRef {
+                    projection: projection.clone(),
+                    data: DataSource::Current,
+                    snapshot: snapshot.clone(),
+                }),
+                overlays: OverlayStack {
+                    entries: vec![OverlayRef::OpenTransaction(tx_id)],
+                },
+            },
+        );
+    }
     QueryReadSet::primary(ReadView {
         read_schema: schema_version,
         policy_schema: schema_version,
@@ -1986,6 +2082,44 @@ where
             policy: self.query_program_policy_context(identity),
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
+        };
+        self.compile_query_program_request(request)
+    }
+
+    fn compile_open_tx_query_program(
+        &mut self,
+        tx_id: OpenTxId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+    ) -> Result<QueryProgram, Error> {
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let read_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let lowered_shape =
+            inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
+        let binding = lowered_shape.bind(BTreeMap::new())?;
+        let input = RowSetProgramInput {
+            shape: self.normalized_row_set_shape(&lowered_shape, &binding)?,
+            binding: ProgramBinding {
+                id: binding.binding_id(),
+                values: binding.values().clone(),
+            },
+        };
+        let request = QueryProgramRequest {
+            reads: tx_query_read_set(
+                &input.shape,
+                lowered_shape.schema_version(),
+                tx_id,
+                snapshot,
+            ),
+            policy: self.query_program_policy_context(identity),
+            input,
+            output: current_query_output_request(output, lowered_shape.query()),
         };
         self.compile_query_program_request(request)
     }
@@ -3925,17 +4059,18 @@ where
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table(&query.table)?.clone();
-        let source_rows = self.tx_current_rows(tx_id, &query.table)?;
-        let source_overrides = self.inline_current_source_overrides_for_tx(tx_id, shape)?;
-        let mut rows = self.query_rows_from_inline_current_source(
+        let program = self.compile_open_tx_query_program(
+            tx_id,
             shape,
             binding,
-            &table,
-            source_rows,
-            DurabilityTier::Local,
-            source_overrides,
-            BTreeMap::new(),
+            AuthorId::SYSTEM,
+            CurrentQueryProgramOutput::AppRows,
         )?;
+        let deltas = self
+            .database
+            .query_graph(lowered_app_rows_graph(&program)?)
+            .map_err(Error::Groove)?;
+        let mut rows = self.materialize_inline_current_query_rows(&table, deltas)?;
         let predicate_read = PredicateRead {
             table: query.table.clone(),
             shape_id: shape.shape_id(),
@@ -3988,30 +4123,6 @@ where
         }
         let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
         self.materialize_inline_current_query_rows(table, deltas)
-    }
-
-    fn inline_current_source_overrides_for_tx(
-        &mut self,
-        tx_id: OpenTxId,
-        shape: &ValidatedQuery,
-    ) -> Result<BTreeMap<String, GraphBuilder>, Error> {
-        let mut sources = BTreeMap::new();
-        for table_name in collect_join_source_tables(shape.query()) {
-            let table = self.table(&table_name)?.clone();
-            let rows = self.tx_current_rows(tx_id, &table_name)?;
-            sources.insert(table_name, inline_current_graph(&table, rows)?);
-        }
-        for reachable in &shape.query().reachable {
-            for table_name in [&reachable.access_table, &reachable.edge_table] {
-                if sources.contains_key(table_name) {
-                    continue;
-                }
-                let table = self.table(table_name)?.clone();
-                let rows = self.tx_current_rows(tx_id, table_name)?;
-                sources.insert(table_name.clone(), inline_current_graph(&table, rows)?);
-            }
-        }
-        Ok(sources)
     }
 
     pub(crate) fn prepared_query_plan(
@@ -8378,28 +8489,6 @@ fn bind_reachable_seed_filters(
             .collect::<Result<Vec<_>, _>>()?;
     }
     Ok(())
-}
-
-fn collect_join_source_tables(query: &crate::query::Query) -> BTreeSet<String> {
-    let mut tables = BTreeSet::new();
-    for join in &query.joins {
-        collect_join_source_tables_for_join(join, &mut tables);
-    }
-    for branch in &query.policy_branches {
-        let branch_query = branch.as_query(&query.table);
-        tables.extend(collect_join_source_tables(&branch_query));
-    }
-    tables
-}
-
-fn collect_join_source_tables_for_join(join: &JoinVia, tables: &mut BTreeSet<String>) {
-    tables.insert(join.table.clone());
-    if let Some(lookup) = &join.source_lookup {
-        tables.insert(lookup.table.clone());
-    }
-    for nested in &join.nested_joins {
-        collect_join_source_tables_for_join(nested, tables);
-    }
 }
 
 fn bind_join_filter_literals(

@@ -330,19 +330,7 @@ fn analyze_query_plan(
 
     for plan_source in analyzed_plan_sources(&plan) {
         let read_source = request.reads.primary.sources.get(&plan_source);
-        let Some(projection) = (match read_source {
-            Some(SourceExpr::VisibleCurrent {
-                projection,
-                data: DataSource::Current,
-                tier: _,
-            })
-            | Some(SourceExpr::HistoryCut {
-                projection,
-                data: DataSource::Current,
-                position: _,
-            }) => Some(projection),
-            _ => None,
-        }) else {
+        let Some(projection) = supported_current_storage_projection(read_source) else {
             gaps.push(UnsupportedReason::Source(SourceGap::HistoricalStorageCut));
             continue;
         };
@@ -773,12 +761,39 @@ fn step_sources(steps: &[LinearStep]) -> BTreeSet<SourceId> {
 }
 
 fn source_current_tier(request: &QueryProgramRequest, source: &SourceId) -> Option<DurabilityTier> {
-    match request.reads.primary.sources.get(source) {
-        Some(SourceExpr::VisibleCurrent {
+    request.reads.primary.sources.get(source)?.current_tier()
+}
+
+fn supported_current_storage_projection(
+    source: Option<&RequestedSourceExpr>,
+) -> Option<&SchemaProjection<RequestedSourceStage>> {
+    match source? {
+        SourceExpr::VisibleCurrent {
+            projection,
             data: DataSource::Current,
-            tier,
-            ..
-        }) => Some(*tier),
+            tier: _,
+        }
+        | SourceExpr::HistoryCut {
+            projection,
+            data: DataSource::Current,
+            position: _,
+        }
+        | SourceExpr::SnapshotRef {
+            projection,
+            data: DataSource::Current,
+            snapshot: _,
+        } => Some(projection),
+        SourceExpr::WithOverlays { input, overlays } => {
+            if overlays
+                .entries
+                .iter()
+                .all(|overlay| matches!(overlay, OverlayRef::OpenTransaction(_)))
+            {
+                supported_current_storage_projection(Some(input.as_ref()))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
