@@ -4011,7 +4011,7 @@ fn unsupported_policy_predicates_deny_instead_of_allowing() {
     )]);
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     core.catalogue.schema.tables[0].read_policy =
-        Some(Query::from("todos").filter(gt(col("title"), lit("a"))));
+        Some(Query::from("todos").filter(not(contains(col("title"), lit("a")))));
     let tx = core
         .commit_mergeable(
             MergeableCommit::new("todos", row(0x83), 10).cells(owner_cells(user(0xa1), "z")),
