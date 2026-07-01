@@ -44,6 +44,9 @@ pub(crate) struct ProgramBinding {
     pub(crate) id: BindingId,
     /// Groove binding-source shape name used by prepared query graphs.
     pub(crate) source_shape: Option<String>,
+    /// User params that must be present in the prepared binding descriptor even
+    /// when this subplan does not read them directly.
+    pub(crate) extra_user_params: BTreeMap<String, ColumnType>,
     /// Values by parameter name.
     pub(crate) values: BTreeMap<String, Value>,
 }

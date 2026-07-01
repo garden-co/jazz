@@ -64,7 +64,7 @@ pub(crate) fn lower_query_program(
         let source_request = SourceRequest {
             source: source.clone(),
             visibility,
-            authorization: source_authorization_for_source(&request.policy, &source),
+            authorization: source_authorization_for_source(&request, &source),
             requirements,
         };
         let resolved_source = source_resolver
@@ -164,10 +164,10 @@ pub(crate) fn lower_query_program(
 }
 
 fn source_authorization_for_source(
-    policy: &PolicyContext,
+    request: &QueryProgramRequest,
     source: &SourceId,
 ) -> SourceAuthorizationRequest {
-    match policy {
+    match &request.policy {
         PolicyContext::System => SourceAuthorizationRequest::System,
         PolicyContext::AuthorizationSubplan { .. } => SourceAuthorizationRequest::System,
         PolicyContext::Identity {
@@ -178,8 +178,44 @@ fn source_authorization_for_source(
                 protected_source: source.clone(),
                 role: PolicyDecisionRole::Read,
                 protected_row_field: "row_uuid".to_owned(),
+                binding_source_shape: request.input.binding.source_shape.clone(),
+                binding_user_params: request
+                    .input
+                    .binding
+                    .values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), column_type_from_value(value)))
+                    .collect(),
             },
         },
+    }
+}
+
+fn column_type_from_value(value: &Value) -> ColumnType {
+    match value {
+        Value::U8(_) => ColumnType::U8,
+        Value::U16(_) => ColumnType::U16,
+        Value::U32(_) => ColumnType::U32,
+        Value::U64(_) => ColumnType::U64,
+        Value::F64(_) => ColumnType::F64,
+        Value::Bool(_) => ColumnType::Bool,
+        Value::String(_) => ColumnType::String,
+        Value::Bytes(_) => ColumnType::Bytes,
+        Value::Uuid(_) => ColumnType::Uuid,
+        Value::Array(values) => ColumnType::Array(Box::new(
+            values
+                .first()
+                .map(column_type_from_value)
+                .unwrap_or(ColumnType::Bytes),
+        )),
+        Value::Tuple(values) => {
+            ColumnType::Tuple(values.iter().map(column_type_from_value).collect())
+        }
+        Value::Nullable(Some(value)) => {
+            ColumnType::Nullable(Box::new(column_type_from_value(value)))
+        }
+        Value::Nullable(None) => ColumnType::Nullable(Box::new(ColumnType::Bytes)),
+        Value::Enum(_) => ColumnType::U8,
     }
 }
 
@@ -2559,6 +2595,40 @@ fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
     )
 }
 
+fn binding_descriptor_params_with_user_params(
+    request: &QueryProgramRequest,
+    additional_user_params: impl IntoIterator<Item = (String, ColumnType)>,
+) -> Vec<(String, ColumnType)> {
+    let domain = parameter_domain(&request.input.shape);
+    let mut user_params = request.input.binding.extra_user_params.clone();
+    user_params.extend(domain.user_params);
+    user_params.extend(additional_user_params);
+    user_params
+        .into_iter()
+        .chain(
+            domain
+                .claim_params
+                .into_iter()
+                .map(|(name, param)| (name, param.ty)),
+        )
+        .collect()
+}
+
+fn binding_descriptor_params(request: &QueryProgramRequest) -> Vec<(String, ColumnType)> {
+    binding_descriptor_params_with_user_params(request, [])
+}
+
+fn binding_source_descriptor_with_user_params(
+    request: &QueryProgramRequest,
+    additional_user_params: impl IntoIterator<Item = (String, ColumnType)>,
+) -> RecordDescriptor {
+    RecordDescriptor::new(
+        binding_descriptor_params_with_user_params(request, additional_user_params)
+            .into_iter()
+            .map(|(name, column_type)| (name, column_type.value_type())),
+    )
+}
+
 fn lower_value_source(
     shape: &str,
     columns: &[ValueSourceColumn],
@@ -2569,17 +2639,7 @@ fn lower_value_source(
     match mode {
         ValueSourceMode::Binding => {
             let domain = parameter_domain(&request.input.shape);
-            let params = domain
-                .user_params
-                .iter()
-                .map(|(name, ty)| (name.clone(), ty.clone()))
-                .chain(
-                    domain
-                        .claim_params
-                        .iter()
-                        .map(|(name, param)| (name.clone(), param.ty.clone())),
-                )
-                .collect::<Vec<_>>();
+            let params = binding_descriptor_params(request);
             for column in columns {
                 match &column.value {
                     NormalizedValueRef::Param(param) => {
@@ -3257,7 +3317,13 @@ fn lower_equality_param_filter_joins(
         };
         let binding = GraphBuilder::binding_source(
             binding_source_shape.clone(),
-            RecordDescriptor::new([(join.param.clone(), join.value_type.clone())]),
+            binding_source_descriptor_with_user_params(
+                request,
+                [(
+                    join.param.clone(),
+                    column_type_from_value_type(&join.value_type),
+                )],
+            ),
         );
         let route_field = route_param_field(&join.param);
         let mut projection = project_source_fields_from_prefix(source, "left.");
