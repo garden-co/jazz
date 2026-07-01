@@ -398,6 +398,41 @@ impl SourceResolver for FakeSourceResolver {
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {
         self.requests.push(request.clone());
+        let deletion_register = request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::DeletionMarkers)
+            .then(|| DeletionRegisterSource {
+                graph: GraphBuilder::table(format!("resolved_{}_deletions", request.source.table)),
+                row_uuid_field: "row_uuid".to_owned(),
+            });
+        let mut metadata = BTreeMap::from([
+            (
+                SourceMetadataRequirement::VersionWitnesses,
+                SourceMetadataFields::VersionWitnesses {
+                    schema_version_field: "schema_version".to_owned(),
+                    tx_time_field: "tx_time".to_owned(),
+                    tx_node_field: "tx_node_id".to_owned(),
+                    branch_or_prefix_field: None,
+                },
+            ),
+            (
+                SourceMetadataRequirement::Coverage,
+                SourceMetadataFields::Coverage {
+                    coverage_field: "coverage".to_owned(),
+                },
+            ),
+        ]);
+        if deletion_register.is_some() {
+            metadata.insert(
+                SourceMetadataRequirement::DeletionMarkers,
+                SourceMetadataFields::DeletionMarkers {
+                    deletion_state_field: "_deletion".to_owned(),
+                    deletion_tx_time_field: Some("tx_time".to_owned()),
+                    deletion_tx_node_field: Some("tx_node_id".to_owned()),
+                },
+            );
+        }
         Ok(ResolvedSource {
             table_schema: TableSchema::new(
                 request.source.table.clone(),
@@ -419,24 +454,9 @@ impl SourceResolver for FakeSourceResolver {
                     ("layer", ValueType::String),
                 ]),
                 row_uuid_field: "row_uuid".to_owned(),
-                metadata: BTreeMap::from([
-                    (
-                        SourceMetadataRequirement::VersionWitnesses,
-                        SourceMetadataFields::VersionWitnesses {
-                            schema_version_field: "schema_version".to_owned(),
-                            tx_time_field: "tx_time".to_owned(),
-                            tx_node_field: "tx_node_id".to_owned(),
-                            branch_or_prefix_field: None,
-                        },
-                    ),
-                    (
-                        SourceMetadataRequirement::Coverage,
-                        SourceMetadataFields::Coverage {
-                            coverage_field: "coverage".to_owned(),
-                        },
-                    ),
-                ]),
+                metadata,
             },
+            deletion_register,
         })
     }
 }
