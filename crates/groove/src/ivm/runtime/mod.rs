@@ -701,6 +701,8 @@ impl IvmRuntime {
         output_key_fields: impl IntoIterator<Item = impl Into<String>>,
         storage: &impl OrderedKvStorage,
     ) -> Result<PreparedShape, IvmRuntimeError> {
+        // One-sink sugar: the ordinary prepared-shape API is represented as a
+        // routed multisink shape with a single default terminal.
         let output = self.infer_builder_output(&graph)?;
         let route_fields = output_key_fields
             .into_iter()
@@ -735,6 +737,8 @@ impl IvmRuntime {
         routing_key_fields: impl IntoIterator<Item = impl Into<String>>,
         storage: &impl OrderedKvStorage,
     ) -> Result<PreparedShape, IvmRuntimeError> {
+        // One-sink sugar for callers that want to describe a clean public
+        // output separately from the route-carrying terminal graph.
         let output = self.infer_builder_output(&output_graph)?;
         let routing_output = self.infer_builder_output(&routing_graph)?;
         validate_public_output_fields(&routing_output, &output)?;
@@ -2291,8 +2295,11 @@ impl PreparedShape {
     }
 }
 
-/// One prepared multisink terminal whose template graph still carries hidden
-/// route fields. Binding appends a route filter and public projection.
+/// One prepared multisink terminal.
+///
+/// The terminal graph is the route-carrying graph Groove maintains: it includes
+/// hidden route fields plus any columns that a sink may expose publicly. Binding
+/// appends a route filter and public projection for each sink.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RoutedMultisinkTerminal {
     pub sink: String,
@@ -2317,7 +2324,10 @@ impl RoutedMultisinkTerminal {
     }
 }
 
-/// Receiving end of a live query subscription.
+/// Receiving end of a one-sink live query subscription.
+///
+/// This is a convenience wrapper around [`MultisinkSubscription`] for callers
+/// that only asked for one output. The runtime delivery path is still multisink.
 #[derive(Debug)]
 pub struct Subscription {
     inner: MultisinkSubscription,

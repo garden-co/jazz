@@ -1,7 +1,7 @@
-//! Integration tests for multisink graph subscriptions.
+//! Integration tests for canonical multisink graph subscriptions.
 //!
-//! This is a lower-level Groove test because multisink delivery is executor
-//! behavior that is not yet exposed through the Jazz public API.
+//! This is a lower-level Groove test because multisink delivery is the
+//! executor primitive that Jazz one-sink subscriptions wrap.
 
 use std::sync::mpsc::TryRecvError;
 
@@ -187,7 +187,7 @@ fn insert_comment(
 }
 
 #[test]
-fn routed_multisink_combines_binding_sets_with_user_output_routings() {
+fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
     let mut db = project_database();
     let mut batch = db.open_batch();
     insert_doc(&mut batch, 1, 10, 20, "Spec");
