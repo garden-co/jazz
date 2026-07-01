@@ -5,13 +5,13 @@
 import type { ColumnType as WasmColumnType, WasmSchema } from "../drivers/types.js";
 import type { DefinedMigration } from "../migrations.js";
 import { schemaDefinitionToAst } from "../migrations.js";
-import { loadWasmModule } from "../runtime/client.js";
 import { toValue } from "../runtime/value-converter.js";
 import type { Lens, SqlType } from "../schema.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { collectMissingExplicitPolicyDiagnostics } from "../schema-permissions.js";
 import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
+import { computeSchemaHash } from "../schema-hash.js";
 import {
   encodePublishedMigrationValue,
   fetchPermissionsHead,
@@ -31,7 +31,7 @@ import {
   wasmSchemasEqual,
 } from "./schema-utils.js";
 
-export { shortSchemaHash };
+export { computeSchemaHash, shortSchemaHash };
 export type { SchemaSourceInput };
 
 export interface CatalogueServerOptions {
@@ -160,35 +160,6 @@ function collectWarning(warnings: string[], message: string): void {
 
 function resolveMigrationDefinitionWasmSchema(input: unknown): WasmSchema {
   return schemaToWasm(schemaDefinitionToAst(input as any));
-}
-
-let wasmModulePromise: Promise<any> | null = null;
-
-async function loadCatalogueWasmModule(): Promise<any> {
-  if (!wasmModulePromise) {
-    wasmModulePromise = loadWasmModule();
-  }
-  return wasmModulePromise;
-}
-
-export async function computeSchemaHash(schema: WasmSchema): Promise<string> {
-  const wasmModule = await loadCatalogueWasmModule();
-  const runtime = new wasmModule.WasmRuntime(
-    JSON.stringify(schema),
-    "jazz-tools-cli",
-    "dev",
-    "main",
-    null,
-    null,
-  );
-
-  try {
-    return runtime.getSchemaHash();
-  } finally {
-    if (typeof runtime.free === "function") {
-      runtime.free();
-    }
-  }
 }
 
 function hashMatchesFullSchema(hash: string, fullHash: string): boolean {

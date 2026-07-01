@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
+import { computeSchemaHash } from "../../src/schema-hash.js";
 import type { Query, Table } from "../../src/typed-app.js";
 
 interface ProjectRecord {
@@ -168,6 +169,14 @@ describe("typed app prototype", () => {
   it("emits indexOnly metadata into the runtime schema", () => {
     expect(app.wasmSchema.todos?.indexed_columns).toEqual(["done"]);
     expect(app.wasmSchema.users?.indexed_columns).toBeUndefined();
+  });
+
+  it("exposes a cached non-enumerable schema hash", async () => {
+    const schemaHash = app.schemaHash;
+
+    expect(app.schemaHash).toBe(schemaHash);
+    expect(await schemaHash).toBe(await computeSchemaHash(app.wasmSchema));
+    expect(Object.keys(app)).not.toContain("schemaHash");
   });
 
   it("serializes gather seeded from the current relation", () => {

@@ -9,6 +9,7 @@ import type {
 } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
+import { computeSchemaHash } from "./schema-hash.js";
 import {
   PERMISSION_INTROSPECTION_COLUMNS,
   PROVENANCE_MAGIC_COLUMNS,
@@ -1165,6 +1166,7 @@ export type App<TSchema extends SchemaLike> = Simplify<
     union<TTable extends string>(
       relations: readonly RelationSeedQuery<TTable>[],
     ): TypedTableQueryBuilder<any, any, any, any>;
+    readonly schemaHash: Promise<string>;
     wasmSchema: WasmSchema;
   }
 >;
@@ -1177,6 +1179,7 @@ type SchemaSlice<
 > = Schema<Pick<NormalizedSchema<TSchema>, TTables[number]>>;
 
 export interface SliceableApp<TSchema extends SchemaLike> {
+  readonly schemaHash: Promise<string>;
   readonly wasmSchema: WasmSchema;
   slice<const TTables extends readonly [TableName<TSchema>, ...TableName<TSchema>[]]>(
     ...tables: TTables
@@ -1339,22 +1342,42 @@ export function defineSliceableApp(
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
 
-  return {
-    wasmSchema,
-    slice(...tableNames: string[]) {
-      if (tableNames.length === 0) {
-        throw new Error("slice(...) requires at least one table name.");
-      }
-
-      for (const tableName of tableNames) {
-        if (!(tableName in normalizedDefinition)) {
-          throw new Error(`slice(...) references unknown table "${tableName}".`);
+  return attachSchemaHashGetter(
+    {
+      wasmSchema,
+      slice(...tableNames: string[]) {
+        if (tableNames.length === 0) {
+          throw new Error("slice(...) requires at least one table name.");
         }
-      }
 
-      return createAppForTables(tableNames, wasmSchema, normalizedDefinition);
+        for (const tableName of tableNames) {
+          if (!(tableName in normalizedDefinition)) {
+            throw new Error(`slice(...) references unknown table "${tableName}".`);
+          }
+        }
+
+        return createAppForTables(tableNames, wasmSchema, normalizedDefinition);
+      },
     },
-  } as SliceableApp<Schema<SchemaDefinition>>;
+    wasmSchema,
+  ) as SliceableApp<Schema<SchemaDefinition>>;
+}
+
+function attachSchemaHashGetter<T extends { readonly wasmSchema: WasmSchema }>(
+  target: T,
+  wasmSchema: WasmSchema,
+): T & { readonly schemaHash: Promise<string> } {
+  let schemaHashPromise: Promise<string> | undefined;
+
+  Object.defineProperty(target, "schemaHash", {
+    enumerable: false,
+    get() {
+      schemaHashPromise ??= computeSchemaHash(wasmSchema);
+      return schemaHashPromise;
+    },
+  });
+
+  return target as T & { readonly schemaHash: Promise<string> };
 }
 
 function createAppForTables(
@@ -1372,24 +1395,27 @@ function createAppForTables(
     );
   }
 
-  return {
-    ...tables,
-    union<TTable extends string>(relations: readonly RelationSeedQuery<TTable>[]) {
-      if (relations.length === 0) {
-        throw new Error("union(...) requires at least one relation.");
-      }
+  return attachSchemaHashGetter(
+    {
+      ...tables,
+      union<TTable extends string>(relations: readonly RelationSeedQuery<TTable>[]) {
+        if (relations.length === 0) {
+          throw new Error("union(...) requires at least one relation.");
+        }
 
-      const first = relations[0]!;
-      const builder = new TypedTableQueryBuilder(first._table, wasmSchema);
-      (builder as any)._unionVal = {
-        union: {
-          inputs: relations.map((relation) => relation._serializeRelation() as BuiltRelation),
-        },
-      };
-      return builder;
+        const first = relations[0]!;
+        const builder = new TypedTableQueryBuilder(first._table, wasmSchema);
+        (builder as any)._unionVal = {
+          union: {
+            inputs: relations.map((relation) => relation._serializeRelation() as BuiltRelation),
+          },
+        };
+        return builder;
+      },
+      wasmSchema,
     },
     wasmSchema,
-  } as App<Schema<SchemaDefinition>>;
+  ) as App<Schema<SchemaDefinition>>;
 }
 
 export const permissionIntrospectionColumns = [...PERMISSION_INTROSPECTION_COLUMNS];
