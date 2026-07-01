@@ -252,3 +252,18 @@ The Rust `WatchHandle` can remain conflated for simple callers, but the binding
 ABI must expose enough structured deltas for UI stores to maintain identity,
 loading state, and optimistic/settled transitions without cloning entire result
 sets on every tick.
+
+## 16.8 Open questions
+
+- 🔶 **Per-subscription capability rejection.** Capability-gapped live
+  subscriptions currently fail at the serving tick boundary in some paths rather
+  than producing a targeted rejection for the offending subscription. Examples
+  include branch read-view subscriptions that require deletion witnesses and
+  array-subquery maintained views. Public DB/subscriber paths also normalize
+  `QueryCapability` gaps into the generic "maintained subscription view
+  subscription does not support this query shape" protocol error, losing the
+  precise `CapabilityReport`/`UnsupportedReason`/`SourceGap`. Desired shape: a
+  capability-gapped subscription receives a per-subscription rejection carrying
+  the specific typed gap, while the connection keeps serving other
+  subscriptions. This is a serving/protocol-boundary issue, not a lowering
+  workaround; lowering failures must stay loud capability errors.
