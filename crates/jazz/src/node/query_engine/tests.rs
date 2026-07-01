@@ -878,12 +878,19 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
     }));
     assert!(matches!(
         program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
-        GraphBuilder::Join {
-            ref left_on,
-            ref right_on,
-            ..
-        } if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-            && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+        GraphBuilder::Project { input, fields }
+            if fields.iter().any(|field| field.output_name == "source_row")
+                && fields.iter().any(|field| field.output_name == "target_row")
+                && fields.iter().any(|field| field.output_name == "path")
+                && matches!(
+                    input.as_ref(),
+                    GraphBuilder::Join {
+                        left_on,
+                        right_on,
+                        ..
+                    } if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+                )
     ));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert_eq!(terminals.len(), 2);
@@ -1122,12 +1129,21 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
         .expect("relation edge terminal");
     assert!(matches!(
         relation_edges.graph,
-        GraphBuilder::Join {
-            ref left_on,
-            ref right_on,
-            ..
-        } if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-            && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+        GraphBuilder::Project {
+            ref input,
+            ref fields,
+        } if fields.iter().any(|field| field.output_name == "source_row")
+            && fields.iter().any(|field| field.output_name == "target_row")
+            && fields.iter().any(|field| field.output_name == "path")
+            && matches!(
+                input.as_ref(),
+                GraphBuilder::Join {
+                    left_on,
+                    right_on,
+                    ..
+                } if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+                    && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+            )
     ));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert_eq!(terminals.len(), 3);
