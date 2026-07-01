@@ -19,10 +19,10 @@ use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
     AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathSegment,
     ClosureRootGate, ComparisonOp as NormalizedComparisonOp, CorrelationRequirement, DataSource,
-    FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
-    NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
-    OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
-    PayloadProjection, PolicyContext, PolicyDecisionRole, PolicyEnforcementMode,
+    DeletionRegisterSource, FieldProjection, FrontierId, JoinContribution,
+    JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
+    NormalizedValueRef, OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef,
+    OverlayStack, PayloadProjection, PolicyContext, PolicyDecisionRole, PolicyEnforcementMode,
     PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProgramOutputSchemas,
     ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet,
     ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
@@ -402,6 +402,7 @@ where
                         row_uuid_field: "row_uuid".to_owned(),
                         metadata: BTreeMap::new(),
                     },
+                    deletion_register: None,
                 });
             }
             SourceExpr::WithOverlays { input, overlays } => {
@@ -470,6 +471,7 @@ where
                     row_uuid_field: "row_uuid".to_owned(),
                     metadata: BTreeMap::new(),
                 },
+                deletion_register: None,
             });
         }
         let (graph, descriptor, metadata) = if table.name == "jazz_branches"
@@ -727,6 +729,14 @@ where
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
         };
+        let deletion_register = self.deletion_register_source_for_request(
+            request,
+            &table,
+            graph_tier,
+            history_position,
+            open_tx_overlay,
+            branch_data,
+        )?;
         Ok(ResolvedSource {
             table_schema: table,
             graph,
@@ -736,6 +746,7 @@ where
                 row_uuid_field: "row_uuid".to_owned(),
                 metadata,
             },
+            deletion_register,
         })
     }
 }
@@ -744,6 +755,39 @@ impl<S> CurrentQuerySourceResolver<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn deletion_register_source_for_request(
+        &self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        graph_tier: Option<DurabilityTier>,
+        history_position: Option<GlobalSeq>,
+        open_tx_overlay: Option<OpenTxId>,
+        branch_data: Option<BranchId>,
+    ) -> Result<Option<DeletionRegisterSource>, SourceResolutionError> {
+        if !request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::DeletionMarkers)
+        {
+            return Ok(None);
+        }
+        let Some(tier) = graph_tier else {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        };
+        if request.visibility != RowVisibility::Visible
+            || history_position.is_some()
+            || open_tx_overlay.is_some()
+            || table.name == "jazz_branches"
+        {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        }
+        let _ = branch_data;
+        Ok(Some(DeletionRegisterSource {
+            graph: deletion_register_current_source_graph(&table.name, tier),
+            row_uuid_field: "row_uuid".to_owned(),
+        }))
+    }
+
     fn projected_historical_source_graph(
         &mut self,
         request: &SourceRequest,
@@ -795,6 +839,74 @@ where
                     logical == table && *version != self.node.catalogue.current_schema_version_id
                 })
     }
+}
+
+fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
+    let current_keys = deletion_register_current_keys_graph(table, tier);
+    GraphBuilder::join(
+        GraphBuilder::table(register_table_name(table)),
+        current_keys,
+        ["row_uuid", "tx_time", "tx_node_id"],
+        ["row_uuid", "tx_time", "tx_node_id"],
+    )
+    .project_fields(register_storage_fields_for_query_engine("left."))
+}
+
+fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
+    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
+    if tier == DurabilityTier::Global {
+        return GraphBuilder::table(register_global_current_table_name(table)).project(key_fields);
+    }
+    let ahead = if tier == DurabilityTier::Edge {
+        GraphBuilder::join(
+            GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields),
+            GraphBuilder::table("jazz_transactions")
+                .filter(
+                    PredicateExpr::Or(vec![
+                        PredicateExpr::eq("durability", Value::Enum(2)),
+                        PredicateExpr::eq("durability", Value::Enum(3)),
+                    ])
+                    .canonicalize(),
+                )
+                .project(["time", "node_id"]),
+            ["tx_time", "tx_node_id"],
+            ["time", "node_id"],
+        )
+        .project_fields(
+            key_fields
+                .into_iter()
+                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+        )
+    } else {
+        GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields)
+    };
+    GraphBuilder::arg_max_by(
+        GraphBuilder::union([
+            GraphBuilder::table(register_global_current_table_name(table)).project(key_fields),
+            ahead,
+        ]),
+        ["row_uuid"],
+        ["tx_time", "tx_node_id"],
+    )
+    .project(key_fields)
+}
+
+fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<ProjectField> {
+    [
+        "row_uuid",
+        "tx_time",
+        "tx_node_id",
+        "schema_version",
+        "parents",
+        "created_by",
+        "created_at",
+        "updated_by",
+        "updated_at",
+        "_deletion",
+    ]
+    .into_iter()
+    .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
+    .collect()
 }
 
 fn source_resolution_error(request: &SourceRequest, gap: SourceGap) -> SourceResolutionError {
