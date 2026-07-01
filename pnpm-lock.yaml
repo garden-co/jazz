@@ -1467,6 +1467,9 @@ importers:
 
   packages/jazz-tools:
     dependencies:
+      '@noble/hashes':
+        specifier: ^2.0.1
+        version: 2.0.1
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1

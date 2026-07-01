@@ -175,7 +175,7 @@ describe("typed app prototype", () => {
     const schemaHash = app.schemaHash;
 
     expect(app.schemaHash).toBe(schemaHash);
-    expect(await schemaHash).toBe(await computeSchemaHash(app.wasmSchema));
+    expect(schemaHash).toBe(computeSchemaHash(app.wasmSchema));
     expect(Object.keys(app)).not.toContain("schemaHash");
   });
 

@@ -9,6 +9,7 @@ use super::*;
 // ============================================================================
 // Schema Hashing - Content-addressed schema identification
 // ============================================================================
+// Keep this byte-for-byte in sync with packages/jazz-tools/src/schema-hash.ts.
 
 /// Content-addressed hash of a schema's structural elements.
 /// Uses BLAKE3 over deterministic table ordering while preserving each table's

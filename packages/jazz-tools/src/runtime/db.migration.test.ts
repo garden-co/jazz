@@ -41,8 +41,8 @@ const newPermissions = s.definePermissions(newApp, ({ policy }) => [
 ]);
 
 const migration = s.defineMigration({
-  fromHash: await oldApp.schemaHash,
-  toHash: await newApp.schemaHash,
+  fromHash: oldApp.schemaHash,
+  toHash: newApp.schemaHash,
   from: oldSchema,
   to: newSchema,
   migrate: {

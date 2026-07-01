@@ -1166,7 +1166,7 @@ export type App<TSchema extends SchemaLike> = Simplify<
     union<TTable extends string>(
       relations: readonly RelationSeedQuery<TTable>[],
     ): TypedTableQueryBuilder<any, any, any, any>;
-    readonly schemaHash: Promise<string>;
+    readonly schemaHash: string;
     wasmSchema: WasmSchema;
   }
 >;
@@ -1179,7 +1179,7 @@ type SchemaSlice<
 > = Schema<Pick<NormalizedSchema<TSchema>, TTables[number]>>;
 
 export interface SliceableApp<TSchema extends SchemaLike> {
-  readonly schemaHash: Promise<string>;
+  readonly schemaHash: string;
   readonly wasmSchema: WasmSchema;
   slice<const TTables extends readonly [TableName<TSchema>, ...TableName<TSchema>[]]>(
     ...tables: TTables
@@ -1366,18 +1366,18 @@ export function defineSliceableApp(
 function attachSchemaHashGetter<T extends { readonly wasmSchema: WasmSchema }>(
   target: T,
   wasmSchema: WasmSchema,
-): T & { readonly schemaHash: Promise<string> } {
-  let schemaHashPromise: Promise<string> | undefined;
+): T & { readonly schemaHash: string } {
+  let schemaHash: string | undefined;
 
   Object.defineProperty(target, "schemaHash", {
     enumerable: false,
     get() {
-      schemaHashPromise ??= computeSchemaHash(wasmSchema);
-      return schemaHashPromise;
+      schemaHash ??= computeSchemaHash(wasmSchema);
+      return schemaHash;
     },
   });
 
-  return target as T & { readonly schemaHash: Promise<string> };
+  return target as T & { readonly schemaHash: string };
 }
 
 function createAppForTables(
