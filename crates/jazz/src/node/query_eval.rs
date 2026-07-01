@@ -37,7 +37,7 @@ use super::query_engine::{
     VersionIdentityFields, VersionedRowRefSchema, lower_query_program,
 };
 use crate::protocol::{
-    BindingViewKey, ResultMemberEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
+    BindingViewKey, ReadViewKey, ResultMemberEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
 };
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
@@ -3035,6 +3035,14 @@ where
             self.apply_projection(query, &mut rows)?;
             return Ok(rows);
         }
+        if tier == DurabilityTier::Global
+            && let Some(mut rows) = self.settled_binding_view_query_rows(shape, binding)?
+        {
+            let query = shape.query();
+            self.finish_engine_query_rows(query, &mut rows)?;
+            self.apply_projection(query, &mut rows)?;
+            return Ok(rows);
+        }
         let program = if prepared_plan.is_some() {
             None
         } else {
@@ -3100,6 +3108,57 @@ where
         self.finish_engine_query_rows(query, &mut rows)?;
         self.apply_projection(query, &mut rows)?;
         Ok(rows)
+    }
+
+    fn settled_binding_view_query_rows(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<Option<Vec<CurrentRow>>, Error> {
+        // TODO(query-engine): model settled binding-view result sets as a
+        // first-class source/read expression. Partial exclusive payloads can be
+        // view-complete without being transaction-complete, so global
+        // registered one-shot reads need this scope until lowering owns it.
+        let binding_view_key = BindingViewKey::new(
+            shape.shape_id(),
+            binding.binding_id(),
+            ReadViewKey::default(),
+        );
+        let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view_key) else {
+            return Ok(None);
+        };
+        let query_table = shape.query().table.clone();
+        let table_schema = self.table(&query_table)?.clone();
+        let content_descriptor = table_schema.history_storage_table().record_schema();
+        let row_entries = row_result_set
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .filter(|(entry_table, _, _)| entry_table.as_str() == query_table)
+            .collect::<Vec<_>>();
+        let mut rows = Vec::with_capacity(row_entries.len());
+        for (_, row_uuid, tx_id) in row_entries {
+            let tx_node_alias = self
+                .node_aliases
+                .get(&tx_id.node)
+                .copied()
+                .ok_or(Error::MissingTransaction(tx_id))?;
+            let version = self
+                .query_version_by_alias_with_descriptor(
+                    &query_table,
+                    row_uuid,
+                    VersionLayer::Content,
+                    tx_id.time,
+                    tx_node_alias,
+                    &content_descriptor,
+                )?
+                .ok_or(Error::MissingTransaction(tx_id))?;
+            rows.push(current_row_from_cells(
+                &table_schema,
+                version.row_uuid(),
+                &version.cells(&table_schema)?,
+            )?);
+        }
+        Ok(Some(rows))
     }
 
     /// Evaluate a validated query against the globally settled state at
