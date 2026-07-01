@@ -119,7 +119,7 @@ where
         let Some(policy) = table.write_policies.update_using.clone() else {
             return Ok(false);
         };
-        self.policy_allows_current_row(&table, &policy, &row, author)
+        self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
     }
 
     pub(crate) fn dry_run_delete_current_allows(
@@ -142,7 +142,7 @@ where
         let Some(policy) = table.write_policies.delete_using.clone() else {
             return Ok(true);
         };
-        self.policy_allows_current_row(&table, &policy, &row, author)
+        self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
     }
 
     fn policy_projection_for_version_row(

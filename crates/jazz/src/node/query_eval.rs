@@ -3437,6 +3437,86 @@ where
         }
     }
 
+    pub(super) fn write_policy_query_allows_current_row(
+        &mut self,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        let mut query = policy.clone();
+        query.filters.push(crate::query::eq(
+            crate::query::col("id"),
+            crate::query::lit(Value::Uuid(row_uuid.0)),
+        ));
+        let policy_shape = query.validate(&self.catalogue.schema)?;
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        let policy_shape = bind_query_params_with_mode(
+            &policy_shape,
+            &policy_binding,
+            &self.catalogue.schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let input = RowSetProgramInput {
+            shape: input_shape,
+            binding: ProgramBinding {
+                id: binding.binding_id(),
+                source_shape: Some(
+                    self.query_binding_source_shape_for_binding(&policy_shape, &binding),
+                ),
+                extra_user_params: BTreeMap::new(),
+                values: binding.values().clone(),
+            },
+        };
+        let policy = match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        };
+        let request = QueryProgramRequest {
+            reads: current_query_read_set(
+                &input.shape,
+                policy_shape.schema_version(),
+                policy_shape.schema_version(),
+                DurabilityTier::Local,
+                None,
+            ),
+            policy,
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                policy_shape.query(),
+            ),
+        };
+        let program = self.compile_query_program_request(request)?;
+        let deltas =
+            match self.prepared_query_plan_from_program(&program, &policy_shape, &binding)? {
+                PreparedQueryPlan::Graph(graph) => {
+                    self.database.query_graph(graph).map_err(Error::Groove)?
+                }
+                PreparedQueryPlan::Prepared { shape, params } => {
+                    let values =
+                        binding_values_for_plan(&binding, &params, &program.request.policy)?;
+                    let subscription = self.database.bind_shape(shape, &values)?;
+                    take_required_sink_deltas(
+                        subscription.recv().map_err(|_| Error::SubscriptionClosed)?,
+                        JAZZ_APP_ROWS_SINK,
+                    )?
+                }
+            };
+        Ok(deltas.iter().any(|(_, weight)| weight > 0))
+    }
+
     /// Evaluate a validated query shape against this node's local knowledge.
     ///
     /// Phase B step 2 returns output-relation rows only. Provenance-closure
@@ -5051,6 +5131,11 @@ where
             return Ok(None);
         };
         let claims = self.session_claims.get(&writer);
+        let mut claim_values = default_permission_scope_claim_values(writer);
+        if let Some(claims) = claims {
+            claim_values.extend(claims.clone());
+        }
+        let mut binding_values = BTreeMap::new();
         let mut query = policy;
         query.filters = query
             .filters
@@ -5085,8 +5170,9 @@ where
                 reachable
             })
             .collect();
+        bind_scope_claim_operands(&mut query, &claim_values, &mut binding_values);
         let shape = query.validate(&self.catalogue.schema)?;
-        let binding = shape.bind(BTreeMap::new())?;
+        let binding = shape.bind(binding_values)?;
         Ok(Some((shape, binding)))
     }
 }
@@ -5202,6 +5288,105 @@ fn rewrite_claim_predicate_for_binding(
         Predicate::Contains(left, right) => Predicate::Contains(left, right),
         Predicate::IsNull(_) => false_predicate(),
     }
+}
+
+fn default_permission_scope_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("sub".to_owned(), Value::Uuid(writer.0)),
+        ("user_id".to_owned(), Value::String(writer.0.to_string())),
+        ("isAdmin".to_owned(), Value::Bool(false)),
+    ])
+}
+
+fn bind_scope_claim_operands(
+    query: &mut JazzQuery,
+    claim_values: &BTreeMap<String, Value>,
+    binding_values: &mut BTreeMap<String, Value>,
+) {
+    for predicate in &mut query.filters {
+        bind_scope_claim_predicate(predicate, claim_values, binding_values);
+    }
+    for join in &mut query.joins {
+        bind_scope_claim_join(join, claim_values, binding_values);
+    }
+    for reachable in &mut query.reachable {
+        for predicate in &mut reachable.access_filters {
+            bind_scope_claim_predicate(predicate, claim_values, binding_values);
+        }
+        for predicate in &mut reachable.edge_filters {
+            bind_scope_claim_predicate(predicate, claim_values, binding_values);
+        }
+        if let Some(seed) = &mut reachable.seed {
+            for predicate in &mut seed.filters {
+                bind_scope_claim_predicate(predicate, claim_values, binding_values);
+            }
+        }
+    }
+}
+
+fn bind_scope_claim_join(
+    join: &mut JoinVia,
+    claim_values: &BTreeMap<String, Value>,
+    binding_values: &mut BTreeMap<String, Value>,
+) {
+    for predicate in &mut join.filters {
+        bind_scope_claim_predicate(predicate, claim_values, binding_values);
+    }
+    for join in &mut join.nested_joins {
+        bind_scope_claim_join(join, claim_values, binding_values);
+    }
+}
+
+fn bind_scope_claim_predicate(
+    predicate: &mut Predicate,
+    claim_values: &BTreeMap<String, Value>,
+    binding_values: &mut BTreeMap<String, Value>,
+) {
+    match predicate {
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            for predicate in predicates {
+                bind_scope_claim_predicate(predicate, claim_values, binding_values);
+            }
+        }
+        Predicate::Not(predicate) => {
+            bind_scope_claim_predicate(predicate, claim_values, binding_values);
+        }
+        Predicate::Eq(left, right)
+        | Predicate::Ne(left, right)
+        | Predicate::Gt(left, right)
+        | Predicate::Gte(left, right)
+        | Predicate::Lt(left, right)
+        | Predicate::Lte(left, right)
+        | Predicate::Contains(left, right) => {
+            bind_scope_claim_operand(left, claim_values, binding_values);
+            bind_scope_claim_operand(right, claim_values, binding_values);
+        }
+        Predicate::In(left, values) => {
+            bind_scope_claim_operand(left, claim_values, binding_values);
+            for value in values {
+                bind_scope_claim_operand(value, claim_values, binding_values);
+            }
+        }
+        Predicate::IsNull(operand) => {
+            bind_scope_claim_operand(operand, claim_values, binding_values);
+        }
+    }
+}
+
+fn bind_scope_claim_operand(
+    operand: &mut Operand,
+    claim_values: &BTreeMap<String, Value>,
+    binding_values: &mut BTreeMap<String, Value>,
+) {
+    let Operand::Claim(name) = operand else {
+        return;
+    };
+    let Some(value) = claim_values.get(name).cloned() else {
+        return;
+    };
+    let param = format!("__jazz_claim_{name}");
+    binding_values.insert(param.clone(), value);
+    *operand = Operand::Param(param);
 }
 
 fn false_predicate() -> Predicate {
