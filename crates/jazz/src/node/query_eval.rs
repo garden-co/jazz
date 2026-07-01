@@ -33,7 +33,8 @@ use super::query_engine::{
     SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest,
     SourceRequirements, SourceResolutionError, SourceResolver, SourceRole, SourceRowShape,
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
-    VersionIdentityFields, VersionedRowRefSchema, lower_query_program,
+    VersionIdentityFields, VersionedRowRefSchema, claim_param_field, left_field,
+    lower_query_program, right_field, route_param_field, user_column_field,
 };
 use crate::protocol::{
     BindingViewKey, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, ResultMemberEntry, ShapeAst,
@@ -46,7 +47,6 @@ use crate::query::{
 };
 use crate::schema::{ColumnSchema, branch_metadata_table_schema};
 
-const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 
 pub(crate) struct LocalMaintainedViewSubscription {
@@ -875,7 +875,7 @@ fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> Gr
         .project_fields(
             key_fields
                 .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                .map(|field| ProjectField::renamed(left_field(&field), field)),
         )
     } else {
         GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields)
@@ -1057,7 +1057,7 @@ fn canonical_current_source_fields(
             table
                 .columns
                 .iter()
-                .map(|column| ProjectField::named(format!("user_{}", column.name))),
+                .map(|column| ProjectField::named(user_column_field(&column.name))),
         )
         .chain([
             ProjectField::named("$createdBy"),
@@ -1095,7 +1095,7 @@ fn storage_to_canonical_current_source_fields(
             table
                 .columns
                 .iter()
-                .map(|column| ProjectField::named(format!("user_{}", column.name))),
+                .map(|column| ProjectField::named(user_column_field(&column.name))),
         )
         .chain([
             ProjectField::renamed("created_by", "$createdBy"),
@@ -1155,7 +1155,7 @@ fn current_row_descriptor_fields(table: &TableSchema) -> Vec<(String, ValueType)
     std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
             (
-                format!("user_{}", column.name),
+                user_column_field(&column.name),
                 ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
             )
         }))
@@ -1654,7 +1654,7 @@ fn normalized_aggregate_outputs(
         .map(|aggregate| {
             Ok(NormalizedAggregateExpr {
                 output: typed_output_field(
-                    format!("user_{}", aggregate.alias),
+                    user_column_field(&aggregate.alias),
                     normalized_aggregate_output_type(aggregate),
                 ),
                 function: normalized_aggregate_function(aggregate.function),
@@ -2402,10 +2402,6 @@ fn reachable_seed_value_source_mode(seed: &Operand) -> Result<ValueSourceMode, E
             "reachable_via currently supports uuid parameter/claim/literal seeds only",
         )),
     }
-}
-
-fn route_param_field(param: &str) -> String {
-    format!("{ROUTE_PARAM_PREFIX}{param}")
 }
 
 fn literal_value_ref(value: &Value) -> Result<NormalizedValueRef, Error> {
@@ -5009,7 +5005,7 @@ where
             GraphBuilder::join(base, authorized, ["row_uuid"], ["row_uuid"]).project_fields(
                 output_fields
                     .iter()
-                    .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone())),
+                    .map(|field| ProjectField::renamed(left_field(&field), field.clone())),
             ),
         )
     }
@@ -5330,8 +5326,8 @@ where
         .project_fields(
             std::iter::once(ProjectField::renamed("left.row_uuid", "row_uuid"))
                 .chain(table.columns.iter().map(|column| {
-                    let field = format!("user_{}", column.name);
-                    ProjectField::renamed(format!("left.{field}"), field)
+                    let field = user_column_field(&column.name);
+                    ProjectField::renamed(left_field(&field), field)
                 }))
                 .chain([
                     ProjectField::renamed("left.$createdBy", "created_by"),
@@ -5627,7 +5623,7 @@ fn bind_scope_claim_operand(
     let Some(value) = claim_values.get(name).cloned() else {
         return;
     };
-    let param = format!("__jazz_claim_{name}");
+    let param = claim_param_field(&ClaimPath(vec![name.clone()]));
     binding_values.insert(param.clone(), value);
     *operand = Operand::Param(param);
 }
@@ -6094,7 +6090,7 @@ fn sort_query_default_rows(rows: &mut [CurrentRow]) {
 }
 
 fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Option<Value> {
-    let user_name = format!("user_{column}");
+    let user_name = user_column_field(column);
     let idx = row.record.descriptor().fields().iter().position(|field| {
         field.name.as_deref() == Some(user_name.as_str()) || field.name.as_deref() == Some(column)
     })?;
@@ -6328,7 +6324,7 @@ fn current_row_fields(table: &TableSchema) -> Vec<String> {
         table
             .columns
             .iter()
-            .map(|column| format!("user_{}", column.name)),
+            .map(|column| user_column_field(&column.name)),
     );
     fields.push("$createdBy".to_owned());
     fields.push("$createdAt".to_owned());
@@ -6345,7 +6341,7 @@ fn global_current_storage_fields(table: &TableSchema) -> Vec<String> {
         table
             .columns
             .iter()
-            .map(|column| format!("user_{}", column.name)),
+            .map(|column| user_column_field(&column.name)),
     );
     fields.push("created_by".to_owned());
     fields.push("created_at".to_owned());
@@ -6361,7 +6357,7 @@ fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
                 (
-                    format!("user_{}", column.name),
+                    user_column_field(&column.name),
                     ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
                 )
             }))
@@ -6594,9 +6590,9 @@ fn historical_current_graph(table: &TableSchema, position: GlobalSeq) -> GraphBu
                 table
                     .columns
                     .iter()
-                    .map(|column| format!("user_{}", column.name)),
+                    .map(|column| user_column_field(&column.name)),
             )
-            .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+            .map(|field| ProjectField::renamed(left_field(&field), field))
             .chain([
                 ProjectField::renamed("left.created_by", "$createdBy"),
                 ProjectField::renamed("left.created_at", "$createdAt"),
@@ -6619,7 +6615,7 @@ fn historical_current_graph(table: &TableSchema, position: GlobalSeq) -> GraphBu
     .project_fields(
         current_row_fields(table)
             .into_iter()
-            .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+            .map(|field| ProjectField::renamed(left_field(&field), field)),
     );
     let latest_restore = latest_event.filter(
         PredicateExpr::And(vec![
@@ -6633,7 +6629,7 @@ fn historical_current_graph(table: &TableSchema, position: GlobalSeq) -> GraphBu
             .project_fields(
                 current_row_fields(table)
                     .into_iter()
-                    .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                    .map(|field| ProjectField::renamed(left_field(&field), field)),
             );
     GraphBuilder::union([content_is_latest, restored_content])
 }
@@ -6643,7 +6639,7 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
                 (
-                    format!("user_{}", column.name),
+                    user_column_field(&column.name),
                     ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
                 )
             }))
@@ -6663,7 +6659,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     let user_fields = table
         .columns
         .iter()
-        .map(|column| format!("user_{}", column.name))
+        .map(|column| user_column_field(&column.name))
         .collect::<Vec<_>>();
     let mut content_storage_fields = vec!["row_uuid".to_owned()];
     content_storage_fields.extend(user_fields.iter().cloned());
@@ -6707,7 +6703,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         .project_fields(
             fields
                 .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                .map(|field| ProjectField::renamed(left_field(&field), field)),
         )
     };
     let (content_current, deletion_current) = if tier == DurabilityTier::Global {
@@ -6799,9 +6795,9 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
                 .map(|field| {
                     let source = match field.as_str() {
                         "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
-                            format!("right.{field}")
+                            right_field(&field)
                         }
-                        _ => format!("left.{field}"),
+                        _ => left_field(&field),
                     };
                     ProjectField::renamed(source, field)
                 })
@@ -6826,7 +6822,7 @@ fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<Strin
         table
             .columns
             .iter()
-            .map(|column| format!("user_{}", column.name)),
+            .map(|column| user_column_field(&column.name)),
     );
     fields
 }
