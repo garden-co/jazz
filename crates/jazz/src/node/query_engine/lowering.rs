@@ -11,8 +11,6 @@ const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 pub(crate) struct ParameterDomain {
     /// User-supplied binding parameters.
     pub(crate) user_params: BTreeMap<String, ColumnType>,
-    /// Server-derived hidden parameters such as claims.
-    pub(crate) hidden_params: BTreeMap<String, ColumnType>,
     /// Parameters retained in terminal rows for usage-site routing.
     pub(crate) routing_params: BTreeSet<String>,
 }

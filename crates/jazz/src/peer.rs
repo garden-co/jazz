@@ -1486,9 +1486,7 @@ fn previous_tx_ids<'a>(rows: impl IntoIterator<Item = &'a ResultRowEntry>) -> BT
 
 fn normalize_maintained_subscription_unsupported_error(error: Error) -> Error {
     match error {
-        Error::QueryLowering(message) if message.starts_with("CapabilityReport") => {
-            unsupported_maintained_subscription_shape_error()
-        }
+        Error::QueryCapability(_) => unsupported_maintained_subscription_shape_error(),
         other => other,
     }
 }
