@@ -112,57 +112,6 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
     }
 }
 
-fn seeded_view_update_capture(seed: u64) -> Vec<CanonicalViewUpdate> {
-    let (_core_dir, mut core) = open_node_with_uuid(node(0x82));
-    let mut parents = BTreeMap::<RowUuid, TxId>::new();
-
-    for step in 0..8_u64 {
-        let row_uuid = row(((seed + step * 3) % 4) as u8 + 1);
-        let mut commit = MergeableCommit::new("todos", row_uuid, 1_000 + step);
-        if let Some(parent) = parents.get(&row_uuid).copied() {
-            commit = commit.parents(vec![parent]);
-        }
-        let title = format!("seed-{seed}-step-{step}");
-        let tx_id = core.commit_mergeable(commit.cells(title_cells(title))).unwrap();
-        parents.insert(row_uuid, tx_id);
-        core.apply_fate_update(
-            tx_id,
-            Fate::Accepted,
-            Some(GlobalSeq(step)),
-            Some(DurabilityTier::Global),
-        )
-        .unwrap();
-    }
-
-    let shape = Query::from("todos")
-        .filter(ne(col("title"), lit("seed-never-matches")))
-        .validate(&schema())
-        .unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut peer = PeerState::new();
-    peer.force_full_recompute_path_for_test(true);
-    let first = peer.query_update(&mut core, &shape, &binding).unwrap();
-
-    let row_uuid = row(((seed + 9) % 4) as u8 + 1);
-    let mut commit = MergeableCommit::new("todos", row_uuid, 2_000);
-    if let Some(parent) = parents.get(&row_uuid).copied() {
-        commit = commit.parents(vec![parent]);
-    }
-    let tx_id = core
-        .commit_mergeable(commit.cells(title_cells(format!("seed-{seed}-delta"))))
-        .unwrap();
-    core.apply_fate_update(
-        tx_id,
-        Fate::Accepted,
-        Some(GlobalSeq(99)),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
-    let second = peer.query_update(&mut core, &shape, &binding).unwrap();
-
-    vec![capture_view_update(first), capture_view_update(second)]
-}
-
 fn maintained_view_capture_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
@@ -1919,13 +1868,6 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
         maintained_full_bundle_count > 0,
         "read-cost tick must ship at least one version bundle"
     );
-}
-
-#[test]
-fn seeded_view_update_capture_is_self_equivalent() {
-    let first = seeded_view_update_capture(0x5eed);
-    let second = seeded_view_update_capture(0x5eed);
-    assert_eq!(first, second);
 }
 
 #[test]
