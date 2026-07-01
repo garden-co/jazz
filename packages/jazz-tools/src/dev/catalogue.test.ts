@@ -51,7 +51,7 @@ export default s.definePermissions(app, ({ policy, session }) => [
 }
 
 describe("dev catalogue API exports", () => {
-  it("exports project-level catalogue operations from jazz-tools/dev", async () => {
+  it("exports catalogue operations from jazz-tools/dev", async () => {
     const dev = await import("./index.js");
 
     expect(typeof dev.pushSchema).toBe("function");
@@ -111,7 +111,7 @@ describe("dev catalogue push behavior", () => {
     );
 
     const events: unknown[] = [];
-    const { deploy } = await import("./index.js");
+    const { deploy } = await import("./catalogue-project.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -196,7 +196,7 @@ describe("dev catalogue push behavior", () => {
     );
 
     const events: unknown[] = [];
-    const { deploy } = await import("./index.js");
+    const { deploy } = await import("./catalogue-project.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -289,7 +289,7 @@ describe("dev catalogue push behavior", () => {
     );
 
     const events: unknown[] = [];
-    const { deploy } = await import("./index.js");
+    const { deploy } = await import("./catalogue-project.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -360,7 +360,7 @@ describe("dev catalogue push behavior", () => {
     );
 
     const events: unknown[] = [];
-    const { pushMigration } = await import("./index.js");
+    const { pushMigration } = await import("./catalogue-project.js");
     const result = await pushMigration({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -437,7 +437,7 @@ export default s.defineMigration({
       }),
     );
 
-    const { pushMigration } = await import("./index.js");
+    const { pushMigration } = await import("./catalogue-project.js");
     const result = await pushMigration({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -487,7 +487,7 @@ export default s.defineMigration({
     );
 
     const events: unknown[] = [];
-    const { pushSchema } = await import("./index.js");
+    const { pushSchema } = await import("./catalogue-project.js");
     const result = await pushSchema({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -545,7 +545,7 @@ export default s.defineMigration({
       }),
     );
 
-    const { pushPermissions } = await import("./index.js");
+    const { pushPermissions } = await import("./catalogue-project.js");
     const result = await pushPermissions({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -594,7 +594,7 @@ export default s.defineMigration({
     );
 
     const events: unknown[] = [];
-    const { deploy } = await import("./index.js");
+    const { deploy } = await import("./catalogue-project.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -682,7 +682,7 @@ export default s.defineMigration({
       }),
     );
 
-    const { deploy } = await import("./index.js");
+    const { deploy } = await import("./catalogue-project.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
