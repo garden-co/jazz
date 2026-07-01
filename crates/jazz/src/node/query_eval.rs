@@ -4349,7 +4349,6 @@ where
         query
             .reachable
             .extend(policy.reachable.into_iter().map(|mut reachable| {
-                reachable.from = retain_claim_operand(reachable.from);
                 reachable.access_filters = reachable
                     .access_filters
                     .into_iter()
@@ -4403,7 +4402,6 @@ where
             .reachable
             .into_iter()
             .map(|mut reachable| {
-                reachable.from = retain_claim_operand(reachable.from);
                 reachable.access_filters = reachable
                     .access_filters
                     .into_iter()
@@ -4513,7 +4511,6 @@ fn rewrite_claim_reachable_for_binding(
     mut reachable: crate::query::ReachableVia,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> crate::query::ReachableVia {
-    reachable.from = retain_claim_operand(reachable.from);
     reachable.access_filters = reachable
         .access_filters
         .into_iter()
@@ -4559,15 +4556,11 @@ fn rewrite_claim_predicate_for_binding(
         Predicate::Eq(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Eq(left, right) => {
-            Predicate::Eq(retain_claim_operand(left), retain_claim_operand(right))
-        }
+        Predicate::Eq(left, right) => Predicate::Eq(left, right),
         Predicate::Ne(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Ne(left, right) => {
-            Predicate::Ne(retain_claim_operand(left), retain_claim_operand(right))
-        }
+        Predicate::Ne(left, right) => Predicate::Ne(left, right),
         Predicate::In(left, values)
             if operands_contain_unbound_claim(
                 std::iter::once(&left)
@@ -4578,51 +4571,34 @@ fn rewrite_claim_predicate_for_binding(
         {
             false_predicate()
         }
-        Predicate::In(left, values) => Predicate::In(
-            retain_claim_operand(left),
-            values.into_iter().map(retain_claim_operand).collect(),
-        ),
+        Predicate::In(left, values) => Predicate::In(left, values),
         Predicate::Gt(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Gt(left, right) => {
-            Predicate::Gt(retain_claim_operand(left), retain_claim_operand(right))
-        }
+        Predicate::Gt(left, right) => Predicate::Gt(left, right),
         Predicate::Gte(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Gte(left, right) => {
-            Predicate::Gte(retain_claim_operand(left), retain_claim_operand(right))
-        }
+        Predicate::Gte(left, right) => Predicate::Gte(left, right),
         Predicate::Lt(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Lt(left, right) => {
-            Predicate::Lt(retain_claim_operand(left), retain_claim_operand(right))
-        }
+        Predicate::Lt(left, right) => Predicate::Lt(left, right),
         Predicate::Lte(left, right) if operands_contain_unbound_claim([&left, &right], claims) => {
             false_predicate()
         }
-        Predicate::Lte(left, right) => {
-            Predicate::Lte(retain_claim_operand(left), retain_claim_operand(right))
-        }
+        Predicate::Lte(left, right) => Predicate::Lte(left, right),
         Predicate::Contains(left, right)
             if operands_contain_unbound_claim([&left, &right], claims) =>
         {
             false_predicate()
         }
-        Predicate::Contains(left, right) => {
-            Predicate::Contains(retain_claim_operand(left), retain_claim_operand(right))
-        }
+        Predicate::Contains(left, right) => Predicate::Contains(left, right),
         Predicate::IsNull(operand) if operand_contains_unbound_claim(&operand, claims) => {
             false_predicate()
         }
-        Predicate::IsNull(operand) => Predicate::IsNull(retain_claim_operand(operand)),
+        Predicate::IsNull(operand) => Predicate::IsNull(operand),
     }
-}
-
-fn retain_claim_operand(operand: Operand) -> Operand {
-    operand
 }
 
 fn false_predicate() -> Predicate {
