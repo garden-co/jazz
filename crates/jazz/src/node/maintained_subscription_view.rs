@@ -8,8 +8,8 @@ use super::codec::{
     tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
-    OutputTerminalSchema, ProgramFactSchema, QueryProgram, ResultMembershipSchema,
-    VersionWitnessSchema,
+    OutputTerminalSchema, ProgramFactKey, ProgramFactSchema, ProgramFactTerminal, QueryProgram,
+    ResultMembershipSchema, VersionWitnessSchema,
 };
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::ResultMemberEntry;
@@ -258,31 +258,41 @@ impl MaintainedTerminalSchemas {
             let OutputTerminalSchema::Fact(fact) = &terminal.output else {
                 continue;
             };
-            let kind = match &fact.schema {
-                ProgramFactSchema::ResultMembership(schema) => {
-                    Some(MaintainedTerminalKind::ResultCurrent(schema.clone()))
-                }
-                ProgramFactSchema::VersionWitnesses(schema)
-                    if terminal.sink.starts_with("maintained.version_deletion") =>
-                {
-                    schema
-                        .deletion
-                        .clone()
-                        .map(MaintainedTerminalKind::VersionDeletion)
-                }
-                ProgramFactSchema::VersionWitnesses(schema) => schema
+            let kind = match (&fact.key, fact.terminal, &fact.schema) {
+                (
+                    ProgramFactKey::ResultMembership,
+                    ProgramFactTerminal::Primary,
+                    ProgramFactSchema::ResultMembership(schema),
+                ) => Some(MaintainedTerminalKind::ResultCurrent(schema.clone())),
+                (
+                    ProgramFactKey::VersionWitnesses,
+                    ProgramFactTerminal::VersionWitnessDeletion,
+                    ProgramFactSchema::VersionWitnesses(schema),
+                ) => schema
+                    .deletion
+                    .clone()
+                    .map(MaintainedTerminalKind::VersionDeletion),
+                (
+                    ProgramFactKey::VersionWitnesses,
+                    ProgramFactTerminal::VersionWitnessContent,
+                    ProgramFactSchema::VersionWitnesses(schema),
+                ) => schema
                     .content
                     .clone()
                     .map(MaintainedTerminalKind::VersionContent),
-                ProgramFactSchema::ReplacementWitnesses(schema)
-                    if terminal.sink.starts_with("maintained.replacement_deletion") =>
-                {
-                    schema
-                        .deletion
-                        .clone()
-                        .map(MaintainedTerminalKind::ReplacementDeletion)
-                }
-                ProgramFactSchema::ReplacementWitnesses(schema) => schema
+                (
+                    ProgramFactKey::ReplacementWitnesses,
+                    ProgramFactTerminal::ReplacementWitnessDeletion,
+                    ProgramFactSchema::ReplacementWitnesses(schema),
+                ) => schema
+                    .deletion
+                    .clone()
+                    .map(MaintainedTerminalKind::ReplacementDeletion),
+                (
+                    ProgramFactKey::ReplacementWitnesses,
+                    ProgramFactTerminal::ReplacementWitnessContent,
+                    ProgramFactSchema::ReplacementWitnesses(schema),
+                ) => schema
                     .content
                     .clone()
                     .map(MaintainedTerminalKind::ReplacementContent),

@@ -3616,8 +3616,9 @@ fn lowered_terminals(
                 let Some(resolved_source) = resolved_sources.get(&source_id) else {
                     continue;
                 };
-                let output = fact_output(
+                let output = fact_output_with_terminal(
                     fact,
+                    ProgramFactTerminal::Primary,
                     plan,
                     resolved_source,
                     resolved_sources,
@@ -3642,8 +3643,9 @@ fn lowered_terminals(
         }
         if matches!(fact, ProgramFactKey::VersionWitnesses) {
             for (source_id, resolved_source) in resolved_sources {
-                let output = fact_output(
+                let content_output = fact_output_with_terminal(
                     fact,
+                    ProgramFactTerminal::VersionWitnessContent,
                     plan,
                     resolved_source,
                     resolved_sources,
@@ -3654,8 +3656,16 @@ fn lowered_terminals(
                     graph: resolved_source.graph.clone().project_fields(
                         version_witness_fields_for_tagged_rows(resolved_source, "version_content")?,
                     ),
-                    output: OutputTerminalSchema::Fact(output.clone()),
+                    output: OutputTerminalSchema::Fact(content_output),
                 });
+                let deletion_output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::VersionWitnessDeletion,
+                    plan,
+                    resolved_source,
+                    resolved_sources,
+                    BTreeSet::new(),
+                )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
                     graph: deletion_witness_graph_for_current_register(
@@ -3663,15 +3673,16 @@ fn lowered_terminals(
                         request,
                         "version_deletion",
                     )?,
-                    output: OutputTerminalSchema::Fact(output),
+                    output: OutputTerminalSchema::Fact(deletion_output),
                 });
             }
             continue;
         }
         if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
             for (source_id, resolved_source) in resolved_sources {
-                let output = fact_output(
+                let content_output = fact_output_with_terminal(
                     fact,
+                    ProgramFactTerminal::ReplacementWitnessContent,
                     plan,
                     resolved_source,
                     resolved_sources,
@@ -3685,8 +3696,16 @@ fn lowered_terminals(
                             "replacement_content",
                         )?,
                     ),
-                    output: OutputTerminalSchema::Fact(output.clone()),
+                    output: OutputTerminalSchema::Fact(content_output),
                 });
+                let deletion_output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::ReplacementWitnessDeletion,
+                    plan,
+                    resolved_source,
+                    resolved_sources,
+                    BTreeSet::new(),
+                )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
                     graph: deletion_witness_graph_for_current_register(
@@ -3694,7 +3713,7 @@ fn lowered_terminals(
                         request,
                         "replacement_deletion",
                     )?,
-                    output: OutputTerminalSchema::Fact(output),
+                    output: OutputTerminalSchema::Fact(deletion_output),
                 });
             }
             continue;
@@ -4156,6 +4175,24 @@ fn fact_output(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<ProgramFactOutput> {
+    fact_output_with_terminal(
+        key,
+        ProgramFactTerminal::Primary,
+        plan,
+        source,
+        resolved_sources,
+        routing_param_fields,
+    )
+}
+
+fn fact_output_with_terminal(
+    key: &ProgramFactKey,
+    terminal: ProgramFactTerminal,
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    routing_param_fields: BTreeSet<String>,
+) -> CapabilityResult<ProgramFactOutput> {
     let schema = match key {
         ProgramFactKey::ResultMembership => {
             let version = version_witness_fields(&source.row_shape)?;
@@ -4217,6 +4254,7 @@ fn fact_output(
 
     Ok(ProgramFactOutput {
         key: key.clone(),
+        terminal,
         schema,
     })
 }

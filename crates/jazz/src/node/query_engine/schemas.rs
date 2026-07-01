@@ -30,6 +30,8 @@ pub(crate) struct AppRowSchema {
 pub(crate) struct ProgramFactOutput {
     /// Requested fact identity.
     pub(crate) key: ProgramFactKey,
+    /// Concrete terminal role emitted for this fact.
+    pub(crate) terminal: ProgramFactTerminal,
     /// Emitted row schema.
     pub(crate) schema: ProgramFactSchema,
 }
@@ -39,6 +41,22 @@ impl ProgramFactOutput {
     pub(crate) fn key(&self) -> ProgramFactKey {
         self.key.clone()
     }
+}
+
+/// Concrete terminal role emitted for a fact key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ProgramFactTerminal {
+    /// Primary terminal for facts with a single output stream.
+    #[default]
+    Primary,
+    /// Content-register version witnesses.
+    VersionWitnessContent,
+    /// Deletion-register version witnesses.
+    VersionWitnessDeletion,
+    /// Content-register replacement witnesses.
+    ReplacementWitnessContent,
+    /// Deletion-register replacement witnesses.
+    ReplacementWitnessDeletion,
 }
 
 /// Schema-only fact output variants.
