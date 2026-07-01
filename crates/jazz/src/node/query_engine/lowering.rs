@@ -1498,6 +1498,7 @@ fn source_requirements(
 
     for fact in &output.facts {
         match fact {
+            ProgramFactKey::AuthorizedRows => {}
             ProgramFactKey::ResultMembership => {
                 let root_requirements = requirements
                     .get_mut(plan.root_source())
@@ -4654,6 +4655,9 @@ fn fact_output_with_terminal(
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<ProgramFactOutput> {
     let schema = match key {
+        ProgramFactKey::AuthorizedRows => ProgramFactSchema::AuthorizedRows(AuthorizedRowsSchema {
+            row_field: source.row_shape.row_uuid_field.clone(),
+        }),
         ProgramFactKey::ResultMembership => {
             let version = version_witness_fields(&source.row_shape)?;
             ProgramFactSchema::ResultMembership(ResultMembershipSchema {
@@ -4730,6 +4734,7 @@ fn output_routing_fields(output: &ProgramFactOutput) -> BTreeSet<String> {
 
 fn fact_sink_name(key: &ProgramFactKey) -> String {
     match key {
+        ProgramFactKey::AuthorizedRows => "policy.authorized_rows".to_owned(),
         ProgramFactKey::ResultMembership => "maintained.result_current".to_owned(),
         ProgramFactKey::VersionWitnesses => "maintained.version_content".to_owned(),
         ProgramFactKey::ReplacementWitnesses => "maintained.replacement_content".to_owned(),
@@ -4800,6 +4805,9 @@ fn fact_terminal_graph(
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     match key {
+        ProgramFactKey::AuthorizedRows => {
+            Ok(graph.project([source.row_shape.row_uuid_field.clone()]))
+        }
         ProgramFactKey::ResultMembership => {
             Ok(graph.project_fields(result_membership_fields(source, routing_param_fields)?))
         }

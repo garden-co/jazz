@@ -158,6 +158,8 @@ pub(crate) struct ProgramOutputKey {
 /// Stable fact-output identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum ProgramFactKey {
+    /// Row ids authorized by a policy proof subplan.
+    AuthorizedRows,
     /// Root result-set membership rows.
     ResultMembership,
     /// Relation edge rows.
