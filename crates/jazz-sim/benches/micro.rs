@@ -233,6 +233,7 @@ fn run_commit_unit(config: &Config) {
                 source_branch: None,
                 n_total_writes: rows_per_unit.try_into().expect("rows per unit fits u32"),
                 made_by: AuthorId::SYSTEM,
+                permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
                 absent_read_set: None,

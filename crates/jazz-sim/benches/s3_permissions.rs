@@ -973,8 +973,9 @@ fn revoke_phase(
     let query_update_us = query_start.elapsed().as_micros() as u64;
     let removed = match &update {
         SyncMessage::ViewUpdate {
-            result_row_removes, ..
-        } => result_row_removes.len(),
+            result_member_removes,
+            ..
+        } => result_member_removes.len(),
         _ => 0,
     };
     assert!(
@@ -1851,7 +1852,7 @@ fn drain_db_subscription(client: &mut DbClient) {
 fn apply_db_subscription_event(visible_rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
     match event {
         SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            *visible_rows = current.into_iter().map(|row| row.row_uuid()).collect();
+            *visible_rows = current.rows.into_iter().map(|row| row.row_uuid()).collect();
         }
         SubscriptionEvent::Delta {
             added,
@@ -1967,19 +1968,23 @@ fn deliver_update(
 fn apply_client_update(client: &mut Client, message: SyncMessage) {
     if let SyncMessage::ViewUpdate {
         reset_result_set,
-        result_row_adds,
-        result_row_removes,
+        result_member_adds,
+        result_member_removes,
         ..
     } = &message
     {
         if *reset_result_set {
             client.visible_rows.clear();
         }
-        for row in result_row_adds {
-            client.visible_rows.insert(row.1);
+        for row in result_member_adds {
+            if let Some((_, row_uuid, _)) = row.as_row() {
+                client.visible_rows.insert(row_uuid);
+            }
         }
-        for row in result_row_removes {
-            client.visible_rows.remove(&row.1);
+        for row in result_member_removes {
+            if let Some((_, row_uuid, _)) = row.as_row() {
+                client.visible_rows.remove(&row_uuid);
+            }
         }
     }
     client.node.apply_sync_message(message).unwrap();
@@ -2793,13 +2798,13 @@ fn visible_rows_db_client(client: &DbClient) -> BTreeSet<RowUuid> {
 fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
     match update {
         SyncMessage::ViewUpdate {
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
             ..
-        } => result_row_adds
+        } => result_member_adds
             .iter()
-            .chain(result_row_removes.iter())
-            .cloned()
+            .chain(result_member_removes.iter())
+            .filter_map(|entry| entry.as_row())
             .collect(),
         _ => Vec::new(),
     }
@@ -2809,8 +2814,8 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate {
             version_bundles,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
             ..
         } => {
             let bundles = version_bundles
@@ -2823,7 +2828,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                         .sum::<usize>()
                 })
                 .sum::<usize>();
-            (bundles + (result_row_adds.len() + result_row_removes.len()) * 48) as u64
+            (bundles + (result_member_adds.len() + result_member_removes.len()) * 48) as u64
         }
         _ => 0,
     }
