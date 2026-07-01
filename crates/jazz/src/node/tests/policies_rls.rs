@@ -3732,6 +3732,54 @@ fn retained_user_param_filter_graph_matches_literal_filter() {
 }
 
 #[test]
+fn session_sub_claim_cannot_override_authenticated_subject() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "docs",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("docs", "owner"))
+    .with_write_policy(Policy::public())]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner = user(0xa1);
+    let other = user(0xb2);
+    let owned_doc = row(0xd1);
+    let other_doc = row(0xd2);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("docs", owned_doc, 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("owned")),
+            ("owner".to_owned(), Value::Uuid(owner.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("docs", other_doc, 11).cells(BTreeMap::from([
+            ("title".to_owned(), v("other")),
+            ("owner".to_owned(), Value::Uuid(other.0)),
+        ])),
+    );
+    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(other.0))]));
+
+    let shape = Query::from("docs")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, owner)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([owned_doc])
+    );
+}
+
+#[test]
 fn retained_param_used_as_filter_and_reachable_seed_matches_literal_query() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
     seed_recursive_reachable_fixture(&mut core);
