@@ -65,6 +65,9 @@ pub(crate) struct NormalizedRowSetShape {
     /// Join-side rows that are part of the materialized maintained/sync
     /// payload when they contribute to a visible root result.
     pub(crate) join_contributions: Vec<JoinContribution>,
+    /// Reachable access rows that contribute to a visible root result through
+    /// a recursive closure.
+    pub(crate) reachable_contributions: Vec<ReachableContribution>,
     /// Normalized expression DAG. Public query and relation surfaces both
     /// normalize here before lowering.
     pub(crate) nodes: BTreeMap<RowSetNodeId, RowSetExpr>,
@@ -127,6 +130,19 @@ pub(crate) struct JoinContribution {
     /// Normalized node for the contributing join rows, including join filters.
     pub(crate) input: RowSetNodeId,
     /// Public join-row column that references the root result row id.
+    pub(crate) root_ref_field: String,
+}
+
+/// One reachable-via access contribution rooted at the app result rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReachableContribution {
+    /// Stable contribution name for diagnostics/sinks.
+    pub(crate) id: String,
+    /// Access source occurrence for the contributing access rows.
+    pub(crate) access_source: SourceId,
+    /// Normalized access rows already joined against the recursive closure.
+    pub(crate) access_input: RowSetNodeId,
+    /// Public access-row column that references the root result row id.
     pub(crate) root_ref_field: String,
 }
 

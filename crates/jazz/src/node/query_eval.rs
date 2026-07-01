@@ -25,9 +25,9 @@ use super::query_engine::{
     NormalizedValueRef, OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef,
     OverlayStack, PayloadProjection, PolicyContext, PolicyEnforcementMode,
     PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProgramOutputSchemas,
-    ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet, ReadView,
-    RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
-    ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet,
+    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
+    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
@@ -48,6 +48,7 @@ use crate::query::{
 };
 
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
+const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 
 pub(crate) struct ReachableGraphs {
@@ -184,6 +185,15 @@ fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain)
     parameters.routing_params.iter().cloned().collect()
 }
 
+fn terminal_route_fields(route_params: &[String], public_fields: &[String]) -> Vec<String> {
+    let public_fields = public_fields.iter().collect::<BTreeSet<_>>();
+    route_params
+        .iter()
+        .filter(|param| public_fields.contains(param))
+        .cloned()
+        .collect()
+}
+
 fn terminal_public_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>, Error> {
     match terminal {
         OutputTerminalSchema::AppRows(rows) => descriptor_field_names(&rows.descriptor),
@@ -220,15 +230,10 @@ fn fact_public_fields(
         }
         ProgramFactSchema::VersionWitnesses(schema)
         | ProgramFactSchema::ReplacementWitnesses(schema) => {
-            let descriptor = schema
-                .content
-                .as_ref()
-                .map(|schema| &schema.descriptor)
-                .or_else(|| schema.deletion.as_ref().map(|schema| &schema.descriptor))
-                .ok_or(Error::InvalidStoredValue(
-                    "version witness fact schema has no terminal descriptor",
-                ))?;
-            descriptor_field_names(descriptor)
+            let witness = schema.content.as_ref().or(schema.deletion.as_ref()).ok_or(
+                Error::InvalidStoredValue("version witness fact schema has no terminal schema"),
+            )?;
+            Ok(version_witness_public_fields(&schema.role_field, witness))
         }
         unsupported => Err(Error::InvalidStoredValue(match unsupported {
             ProgramFactSchema::PathCorrelationCoverage(_) => {
@@ -261,6 +266,30 @@ fn fact_public_fields(
             | ProgramFactSchema::ReplacementWitnesses(_) => unreachable!(),
         })),
     }
+}
+
+fn version_witness_public_fields(
+    role_field: &str,
+    schema: &super::query_engine::VersionWitnessSchema,
+) -> Vec<String> {
+    let mut fields = vec![
+        role_field.to_owned(),
+        schema.identity.table_field.clone(),
+        schema.identity.row_field.clone(),
+        "content_tx_time".to_owned(),
+        "content_tx_node_id".to_owned(),
+        schema.identity.tx_time_field.clone(),
+        schema.identity.tx_node_field.clone(),
+        schema.identity.schema_field.clone(),
+        schema.parents_field.clone(),
+        schema.created_by_field.clone(),
+        schema.created_at_field.clone(),
+        schema.updated_by_field.clone(),
+        schema.updated_at_field.clone(),
+        schema.deletion_field.clone(),
+    ];
+    fields.extend(schema.user_fields.values().cloned());
+    fields
 }
 
 fn descriptor_field_names(descriptor: &RecordDescriptor) -> Result<Vec<String>, Error> {
@@ -1366,7 +1395,7 @@ fn normalize_reachable(
     index: usize,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
-) -> Result<RowSetNodeId, Error> {
+) -> Result<(RowSetNodeId, ReachableContribution), Error> {
     let frontier = FrontierId(format!("reachable:{index}:frontier"));
     let (seed_node, columns) =
         normalize_reachable_seed(nodes, reachable, index, binding_source_shape, param_types)?;
@@ -1470,10 +1499,7 @@ fn normalize_reachable(
                 frontier: frontier.clone(),
                 field: "reachable_team".to_owned(),
             },
-            dedupe_keys: vec![NormalizedValueRef::FrontierColumn {
-                frontier: frontier.clone(),
-                field: "reachable_team".to_owned(),
-            }],
+            dedupe_keys: reachable_dedupe_keys(&frontier, &columns),
             bound: reachable.bound,
         },
     );
@@ -1526,19 +1552,45 @@ fn normalize_reachable(
         root_join_node.clone(),
         RowSetExpr::Join {
             left: current,
-            right: access_join_node,
+            right: access_join_node.clone(),
             mode: NormalizedJoinMode::Inner,
             on: NormalizedPredicateExpr::Compare {
                 left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
                 op: NormalizedComparisonOp::Eq,
                 right: NormalizedValueRef::SourceField {
-                    source: access_source,
+                    source: access_source.clone(),
                     field: reachable.access_row_column.clone(),
                 },
             },
         },
     );
-    Ok(root_join_node)
+    Ok((
+        root_join_node,
+        ReachableContribution {
+            id: format!("reachable:{index}"),
+            access_source,
+            access_input: access_join_node,
+            root_ref_field: reachable.access_row_column.clone(),
+        },
+    ))
+}
+
+fn reachable_dedupe_keys(
+    frontier: &FrontierId,
+    columns: &[ValueSourceColumn],
+) -> Vec<NormalizedValueRef> {
+    std::iter::once("reachable_team")
+        .chain(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .filter(|name| *name != "team" && *name != "reachable_team"),
+        )
+        .map(|field| NormalizedValueRef::FrontierColumn {
+            frontier: frontier.clone(),
+            field: field.to_owned(),
+        })
+        .collect()
 }
 
 fn normalize_reachable_seed(
@@ -1665,6 +1717,15 @@ fn reachable_frontier_columns(
         },
     ];
     if let Operand::Param(param) = seed
+        && !param.starts_with(CLAIM_PARAM_PREFIX)
+    {
+        columns.push(ValueSourceColumn {
+            name: route_param_field(param),
+            value: NormalizedValueRef::Param(param.clone()),
+            ty: param_types.get(param).cloned().unwrap_or(ColumnType::Uuid),
+        });
+    }
+    if let Operand::Param(param) = seed
         && param != "team"
         && param != "reachable_team"
         && !param.starts_with(CLAIM_PARAM_PREFIX)
@@ -1682,9 +1743,7 @@ fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error>
     match seed {
         Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
         Operand::Literal(Value::Uuid(uuid)) => literal_value_ref(&Value::Uuid(*uuid)),
-        Operand::Claim(claim) => Ok(NormalizedValueRef::Claim(ClaimPath(
-            claim.split('.').map(str::to_owned).collect(),
-        ))),
+        Operand::Claim(claim) => Ok(NormalizedValueRef::Param(claim_param_name(claim))),
         Operand::Column(_) | Operand::Literal(_) => Err(normalization_gap(
             "reachable_via currently supports uuid parameter/claim/literal seeds only",
         )),
@@ -1693,12 +1752,16 @@ fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error>
 
 fn reachable_seed_value_source_mode(seed: &Operand) -> Result<ValueSourceMode, Error> {
     match seed {
-        Operand::Param(_) => Ok(ValueSourceMode::Binding),
-        Operand::Literal(Value::Uuid(_)) | Operand::Claim(_) => Ok(ValueSourceMode::Inline),
+        Operand::Param(_) | Operand::Claim(_) => Ok(ValueSourceMode::Binding),
+        Operand::Literal(Value::Uuid(_)) => Ok(ValueSourceMode::Inline),
         Operand::Column(_) | Operand::Literal(_) => Err(normalization_gap(
             "reachable_via currently supports uuid parameter/claim/literal seeds only",
         )),
     }
+}
+
+fn route_param_field(param: &str) -> String {
+    format!("{ROUTE_PARAM_PREFIX}{param}")
 }
 
 fn literal_value_ref(value: &Value) -> Result<NormalizedValueRef, Error> {
@@ -2269,6 +2332,7 @@ where
         )]);
         let mut current = source_node;
         let mut join_contributions = Vec::new();
+        let mut reachable_contributions = Vec::new();
 
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
         if unsupported_policy_branch.is_none() && !query.policy_branches.is_empty() {
@@ -2364,9 +2428,9 @@ where
             current = join_node;
         }
 
-        let binding_source_shape = query_binding_source_shape_for_binding(shape, binding);
+        let binding_source_shape = self.query_binding_source_shape_for_binding(shape, binding);
         for (index, reachable) in query.reachable.iter().enumerate() {
-            current = normalize_reachable(
+            let (next, contribution) = normalize_reachable(
                 &mut nodes,
                 current,
                 &root_source,
@@ -2375,6 +2439,8 @@ where
                 &binding_source_shape,
                 shape.params(),
             )?;
+            current = next;
+            reachable_contributions.push(contribution);
         }
 
         for (index, subquery) in query.array_subqueries.iter().enumerate() {
@@ -2452,6 +2518,7 @@ where
             auxiliary_sources,
             closure_paths,
             join_contributions,
+            reachable_contributions,
             nodes,
         })
     }
@@ -3658,6 +3725,7 @@ where
         let plan = if params.is_empty() {
             PreparedQueryPlan::Graph(graph)
         } else {
+            let binding_source_shape = self.query_binding_source_shape_for_binding(shape, binding);
             let prepared = self.database.prepare(
                 [groove::ivm::RoutedMultisinkTerminal::new(
                     JAZZ_APP_ROWS_SINK,
@@ -3665,7 +3733,7 @@ where
                     route_params.iter().cloned(),
                     app_row_fields,
                 )],
-                query_binding_source_shape_for_binding(shape, binding),
+                binding_source_shape,
                 binding_descriptor,
             )?;
             PreparedQueryPlan::Prepared {
@@ -4529,7 +4597,7 @@ where
             &composed_shape,
             &composed_binding,
             &self.catalogue.schema,
-            ParamBindingMode::InlineAllReachableSeeds,
+            ParamBindingMode::RetainAllParams,
         )?;
         self.ensure_maintained_view_query_slice(shape.query())?;
         let tables = self.maintained_view_terminal_tables(&shape)?;
@@ -4546,7 +4614,7 @@ where
             &program,
             &composed_binding,
             identity,
-            query_binding_source_shape_for_binding(&shape, &composed_binding),
+            self.query_binding_source_shape_for_binding(&shape, &composed_binding),
         )?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
@@ -4621,10 +4689,11 @@ where
             .iter()
             .map(|terminal| {
                 let public_fields = terminal_public_fields(&terminal.output)?;
+                let route_fields = terminal_route_fields(&route_params, &public_fields);
                 Ok(RoutedMultisinkTerminal::new(
                     terminal.sink.clone(),
                     terminal.graph.clone(),
-                    route_params.iter().cloned(),
+                    route_fields,
                     public_fields,
                 ))
             })
@@ -7577,14 +7646,6 @@ fn collect_join_nullable_param_types_from_schema(
     Ok(())
 }
 
-fn query_binding_source_shape_for_binding(shape: &ValidatedQuery, binding: &Binding) -> String {
-    format!(
-        "jazz-query:{}:{}",
-        shape.shape_id().0,
-        query_binding_value_signature(binding)
-    )
-}
-
 fn query_binding_value_signature(binding: &Binding) -> String {
     binding
         .values()
@@ -7592,6 +7653,21 @@ fn query_binding_value_signature(binding: &Binding) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(",")
+}
+
+impl<S: OrderedKvStorage> NodeState<S> {
+    fn query_binding_source_shape_for_binding(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> String {
+        format!(
+            "jazz-query:{}:{}:{}",
+            self.groove_runtime_token(),
+            shape.shape_id().0,
+            query_binding_value_signature(binding)
+        )
+    }
 }
 
 fn maintained_view_binding_source_shape(shape: &ValidatedQuery) -> String {
