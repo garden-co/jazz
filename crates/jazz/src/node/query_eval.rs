@@ -1280,10 +1280,15 @@ fn current_query_output_request(
         CurrentQueryProgramOutput::AuthorizedRows => {
             BTreeSet::from([ProgramFactKey::AuthorizedRows])
         }
-        CurrentQueryProgramOutput::RelationSnapshot => BTreeSet::from([
-            ProgramFactKey::RelationEdges,
-            ProgramFactKey::PathCorrelationCoverage,
-        ]),
+        CurrentQueryProgramOutput::RelationSnapshot
+            if !query.array_subqueries.is_empty() || !query.reachable.is_empty() =>
+        {
+            BTreeSet::from([
+                ProgramFactKey::RelationEdges,
+                ProgramFactKey::PathCorrelationCoverage,
+            ])
+        }
+        CurrentQueryProgramOutput::RelationSnapshot => BTreeSet::new(),
         CurrentQueryProgramOutput::MaintainedView => BTreeSet::from([
             ProgramFactKey::ResultMembership,
             ProgramFactKey::VersionWitnesses,
@@ -4032,23 +4037,42 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
-        let program = self.compile_current_query_program(
+        self.query_relation_snapshot_for_link_in_read_view(
+            shape,
+            binding,
+            tier,
+            identity,
+            &ReadViewSpec::default(),
+        )
+    }
+
+    pub(crate) fn query_relation_snapshot_for_link_in_read_view(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<RelationSnapshot, Error> {
+        let program = self.compile_current_query_program_for_read_view(
             shape,
             binding,
             tier,
             identity,
             CurrentQueryProgramOutput::RelationSnapshot,
+            read_view,
         )?;
         let snapshots = self
             .database
             .query_graphs(lowered_program_sinks(&program))
             .map_err(Error::Groove)?;
-        self.materialize_relation_snapshot_from_query_engine(shape, &snapshots)
+        self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots)
     }
 
     fn materialize_relation_snapshot_from_query_engine(
         &mut self,
         shape: &ValidatedQuery,
+        read_view: &ReadViewSpec,
         snapshots: &MultisinkDeltas,
     ) -> Result<RelationSnapshot, Error> {
         let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots)?;
@@ -4096,23 +4120,58 @@ where
                 let target_table = self
                     .table_in_schema(&target_table_name, shape.schema_version())?
                     .clone();
-                let version = self
-                    .query_version_by_alias_with_descriptor(
-                        &target_table_name,
-                        target_row,
-                        VersionLayer::Content,
-                        target_tx_time,
-                        target_tx_node,
-                        &target_table.history_storage_table().record_schema(),
-                    )?
-                    .ok_or(Error::InvalidStoredValue(
-                        "relation edge target version is missing",
-                    ))?;
-                let row = self.current_row_from_materialized_version(&target_table, &version)?;
+                let row = self.materialize_relation_edge_target_row(
+                    read_view,
+                    &target_table,
+                    &target_table_name,
+                    target_row,
+                    target_tx_time,
+                    target_tx_node,
+                )?;
                 snapshot.rows.push(row);
             }
         }
         Ok(snapshot)
+    }
+
+    fn materialize_relation_edge_target_row(
+        &mut self,
+        read_view: &ReadViewSpec,
+        target_table: &TableSchema,
+        target_table_name: &str,
+        target_row: RowUuid,
+        target_tx_time: TxTime,
+        target_tx_node: NodeAlias,
+    ) -> Result<CurrentRow, Error> {
+        if let Some(version) = self.query_version_by_alias_with_descriptor(
+            target_table_name,
+            target_row,
+            VersionLayer::Content,
+            target_tx_time,
+            target_tx_node,
+            &target_table.history_storage_table().record_schema(),
+        )? {
+            return self.current_row_from_materialized_version(target_table, &version);
+        }
+        let ReadViewSourceSpec::Branch { branch } = read_view.source else {
+            return Err(Error::InvalidStoredValue(
+                "relation edge target version is missing",
+            ));
+        };
+        let branch = self
+            .branches
+            .branches
+            .get(&BranchId(branch))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge target branch is missing",
+            ))?;
+        self.branch_current_rows(target_table_name, &branch)?
+            .into_iter()
+            .find(|row| row.row_uuid() == target_row)
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge target branch row is missing",
+            ))
     }
 
     fn materialize_relation_snapshot_root_rows(
