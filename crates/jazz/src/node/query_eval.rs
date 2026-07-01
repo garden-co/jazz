@@ -5591,68 +5591,6 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
     )
 }
 
-#[allow(dead_code)]
-fn maintained_view_content_current_keys(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {
-    maintained_view_current_keys(
-        global_current_table_name(&table.name),
-        ahead_current_table_name(&table.name),
-        tier,
-    )
-}
-
-#[allow(dead_code)]
-fn maintained_view_register_current_keys(
-    table: &TableSchema,
-    tier: DurabilityTier,
-) -> GraphBuilder {
-    maintained_view_current_keys(
-        register_global_current_table_name(&table.name),
-        register_ahead_current_table_name(&table.name),
-        tier,
-    )
-}
-
-#[allow(dead_code)]
-fn maintained_view_current_keys(
-    global_table: String,
-    ahead_table: String,
-    tier: DurabilityTier,
-) -> GraphBuilder {
-    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
-    if tier == DurabilityTier::Global {
-        return GraphBuilder::table(global_table).project(key_fields);
-    }
-    let ahead = if tier == DurabilityTier::Edge {
-        GraphBuilder::join(
-            GraphBuilder::table(ahead_table).project(key_fields),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::Enum(2)),
-                        PredicateExpr::eq("durability", Value::Enum(3)),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields([
-            ProjectField::renamed("left.row_uuid", "row_uuid"),
-            ProjectField::renamed("left.tx_time", "tx_time"),
-            ProjectField::renamed("left.tx_node_id", "tx_node_id"),
-        ])
-    } else {
-        GraphBuilder::table(ahead_table).project(key_fields)
-    };
-    GraphBuilder::arg_max_by(
-        GraphBuilder::union([GraphBuilder::table(global_table).project(key_fields), ahead]),
-        ["row_uuid"],
-        ["tx_time", "tx_node_id"],
-    )
-    .project(key_fields)
-}
-
 fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {
     let user_fields = table
         .columns
@@ -5804,7 +5742,6 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     GraphBuilder::union([undeleted, deleted])
 }
 
-#[allow(dead_code)]
 fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<String> {
     let mut fields = vec![
         "row_uuid".to_owned(),
@@ -5824,47 +5761,6 @@ fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<Strin
             .map(|column| format!("user_{}", column.name)),
     );
     fields
-}
-
-#[allow(dead_code)]
-fn maintained_view_history_storage_fields(table: &TableSchema, prefix: &str) -> Vec<ProjectField> {
-    maintained_view_history_storage_field_names(table)
-        .into_iter()
-        .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
-        .collect()
-}
-
-#[allow(dead_code)]
-fn maintained_view_register_storage_fields(prefix: &str) -> Vec<ProjectField> {
-    [
-        "row_uuid",
-        "tx_time",
-        "tx_node_id",
-        "schema_version",
-        "parents",
-        "created_by",
-        "created_at",
-        "updated_by",
-        "updated_at",
-        "_deletion",
-    ]
-    .into_iter()
-    .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
-    .collect()
-}
-
-#[allow(dead_code)]
-fn maintained_view_version_fields(table: &TableSchema) -> Vec<String> {
-    let mut fields = global_current_storage_fields(table);
-    fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
-    fields
-}
-
-#[allow(dead_code)]
-fn maintained_view_nullable_deletion_type() -> ValueType {
-    ValueType::Nullable(Box::new(ValueType::Enum(
-        EnumSchema::new("jazz_deletion", ["deleted", "restored"]).expect("valid deletion enum"),
-    )))
 }
 
 #[cfg(test)]
