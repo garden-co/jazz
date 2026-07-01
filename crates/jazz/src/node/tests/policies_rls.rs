@@ -1736,7 +1736,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         core.query
             .query_shape_cache
             .keys()
-            .filter(|(_, tier)| *tier == DurabilityTier::Global)
+            .filter(|(_, tier, _)| *tier == DurabilityTier::Global)
             .count(),
         1,
         "identities with the same shape and policy should share one prepared graph"

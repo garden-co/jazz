@@ -9,6 +9,7 @@ use super::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use groove::ivm::RoutedMultisinkTerminal;
 use groove::ivm::TopByOrder;
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
 use groove::records::{EnumSchema, RecordDescriptor, ValueType};
@@ -25,12 +26,14 @@ use super::query_engine::{
     PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
     ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField, QueryProgram,
     QueryProgramRequest, QueryReadSet, ReadView, RequestedReadSet, RequestedSourceStage,
-    ResolvedSource, ResultId, ResultRowRef, RowIdRef, RowProjection, RowSetExpr, RowSetNodeId,
-    RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
-    SchemaProjection, SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
+    ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
+    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
+    SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
     SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
     SourceResolutionError, SourceResolver, SourceRole, SourceRowShape, StorageSchemaSelection,
-    TypedOutputField, ValueSourceColumn, ValueSourceMode, lower_query_program,
+    TypedOutputField, ValueSourceColumn, ValueSourceMode, VersionIdentityFields,
+    VersionedRowRefSchema, lower_query_program,
 };
 #[cfg(test)]
 use crate::protocol::ResultRowEntry;
@@ -149,6 +152,178 @@ fn lowered_program_sinks(program: &QueryProgram) -> Vec<(String, GraphBuilder)> 
         .iter()
         .map(|terminal| (terminal.sink.clone(), terminal.graph.clone()))
         .collect()
+}
+
+fn prepared_params_from_domain(
+    parameters: &super::query_engine::ParameterDomain,
+) -> Vec<PreparedQueryParam> {
+    parameters
+        .user_params
+        .iter()
+        .map(|(name, ty)| PreparedQueryParam {
+            name: name.clone(),
+            ty: ty.clone(),
+            source: PreparedQueryParamSource::User,
+        })
+        .chain(
+            parameters
+                .hidden_params
+                .iter()
+                .map(|(name, ty)| PreparedQueryParam {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    source: PreparedQueryParamSource::Claim {
+                        name: claim_name_from_param(name).to_owned(),
+                    },
+                }),
+        )
+        .collect()
+}
+
+fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain) -> Vec<String> {
+    parameters.routing_params.iter().cloned().collect()
+}
+
+fn terminal_public_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>, Error> {
+    match terminal {
+        OutputTerminalSchema::AppRows(rows) => descriptor_field_names(&rows.descriptor),
+        OutputTerminalSchema::Fact(fact) => fact_public_fields(&fact.schema),
+    }
+}
+
+fn fact_public_fields(
+    schema: &super::query_engine::ProgramFactSchema,
+) -> Result<Vec<String>, Error> {
+    use super::query_engine::ProgramFactSchema;
+
+    match schema {
+        ProgramFactSchema::ResultMembership(schema) => {
+            let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
+            fields.extend(schema.branch_or_prefix_field.clone());
+            fields.extend(result_membership_version_fields(&schema.version));
+            fields.extend(schema.routing_param_fields.iter().cloned());
+            Ok(fields)
+        }
+        ProgramFactSchema::RelationEdges(schema) => {
+            let mut fields = Vec::new();
+            fields.extend(versioned_row_ref_fields(&schema.source));
+            fields.push(schema.path_field.clone());
+            fields.extend(versioned_row_ref_fields(&schema.target));
+            fields.push(schema.kind_field.clone());
+            fields.extend(schema.depth_field.clone());
+            fields.extend(schema.edge_id_field.clone());
+            fields.extend(schema.branch_field.clone());
+            fields.extend(schema.role_field.clone());
+            fields.extend(schema.order_field.clone());
+            fields.extend(schema.hole_state_field.clone());
+            Ok(fields)
+        }
+        ProgramFactSchema::VersionWitnesses(schema)
+        | ProgramFactSchema::ReplacementWitnesses(schema) => {
+            let descriptor = schema
+                .content
+                .as_ref()
+                .map(|schema| &schema.descriptor)
+                .or_else(|| schema.deletion.as_ref().map(|schema| &schema.descriptor))
+                .ok_or(Error::InvalidStoredValue(
+                    "version witness fact schema has no terminal descriptor",
+                ))?;
+            descriptor_field_names(descriptor)
+        }
+        unsupported => Err(Error::InvalidStoredValue(match unsupported {
+            ProgramFactSchema::PathCorrelationCoverage(_) => {
+                "path correlation coverage facts are not prepared yet"
+            }
+            ProgramFactSchema::SourceCoverage(_) => "source coverage facts are not prepared yet",
+            ProgramFactSchema::ReadFrontierSettled(_) => "read frontier facts are not prepared yet",
+            ProgramFactSchema::CompleteTxPayloadCoverage(_) => {
+                "complete transaction coverage facts are not prepared yet"
+            }
+            ProgramFactSchema::ViewCompleteExclusiveCoverage(_) => {
+                "view-complete coverage facts are not prepared yet"
+            }
+            ProgramFactSchema::PolicyDecision(_) => "policy decision facts are not prepared yet",
+            ProgramFactSchema::PolicyWitnesses(_) => "policy witness facts are not prepared yet",
+            ProgramFactSchema::ContributingMembers(_) => {
+                "contributing member facts are not prepared yet"
+            }
+            ProgramFactSchema::PredicateReads(_) => "predicate-read facts are not prepared yet",
+            ProgramFactSchema::PredicateOutputSet(_) => {
+                "predicate output set facts are not prepared yet"
+            }
+            ProgramFactSchema::PointReads(_) => "point-read facts are not prepared yet",
+            ProgramFactSchema::LargeValueExtents(_) => {
+                "large-value extent facts are not prepared yet"
+            }
+            ProgramFactSchema::ResultMembership(_)
+            | ProgramFactSchema::RelationEdges(_)
+            | ProgramFactSchema::VersionWitnesses(_)
+            | ProgramFactSchema::ReplacementWitnesses(_) => unreachable!(),
+        })),
+    }
+}
+
+fn descriptor_field_names(descriptor: &RecordDescriptor) -> Result<Vec<String>, Error> {
+    descriptor
+        .fields()
+        .iter()
+        .map(|field| {
+            field.name.clone().ok_or(Error::InvalidStoredValue(
+                "query-engine terminal field must be named",
+            ))
+        })
+        .collect()
+}
+
+fn row_ref_fields(schema: &QueryEngineRowRefSchema) -> Vec<String> {
+    vec![
+        schema.source_field.clone(),
+        schema.table_field.clone(),
+        schema.row_field.clone(),
+    ]
+}
+
+fn versioned_row_ref_fields(schema: &VersionedRowRefSchema) -> Vec<String> {
+    let mut fields = row_ref_fields(&schema.row);
+    if let Some(version) = &schema.version {
+        fields.extend(result_membership_version_fields(version));
+    }
+    fields
+}
+
+fn result_membership_version_fields(schema: &ResultMembershipVersionSchema) -> Vec<String> {
+    match schema {
+        ResultMembershipVersionSchema::Content(content) => content_version_fields(content),
+        ResultMembershipVersionSchema::ContentOrDeletion {
+            content,
+            deletion,
+            deletion_state_field,
+        } => {
+            let mut fields = content_version_fields(content);
+            fields.extend(version_identity_fields(deletion));
+            fields.push(deletion_state_field.clone());
+            fields
+        }
+    }
+}
+
+fn content_version_fields(schema: &super::query_engine::ContentVersionFields) -> Vec<String> {
+    vec![schema.tx_time_field.clone(), schema.tx_node_field.clone()]
+}
+
+fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
+    let mut fields = vec![
+        schema.table_field.clone(),
+        schema.row_field.clone(),
+        schema.tx_time_field.clone(),
+        schema.tx_node_field.clone(),
+        schema.schema_field.clone(),
+        schema.layer_field.clone(),
+    ];
+    fields.extend(schema.batch_id_field.clone());
+    fields.extend(schema.branch_or_prefix_field.clone());
+    fields.extend(schema.row_digest_field.clone());
+    fields
 }
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
@@ -1317,6 +1492,7 @@ fn reachable_frontier_columns(
     if let Operand::Param(param) = seed
         && param != "team"
         && param != "reachable_team"
+        && !param.starts_with(CLAIM_PARAM_PREFIX)
     {
         columns.push(ValueSourceColumn {
             name: param.clone(),
@@ -1737,7 +1913,7 @@ where
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgramRequest, Error> {
         let input = RowSetProgramInput {
-            shape: self.normalized_row_set_shape(shape)?,
+            shape: self.normalized_row_set_shape(shape, binding)?,
             binding: ProgramBinding {
                 id: binding.binding_id(),
                 values: binding.values().clone(),
@@ -1754,6 +1930,7 @@ where
     fn normalized_row_set_shape(
         &self,
         shape: &ValidatedQuery,
+        binding: &Binding,
     ) -> Result<NormalizedRowSetShape, Error> {
         let query = shape.query();
         let root_source = root_source_id(&query.table);
@@ -1864,7 +2041,7 @@ where
             current = join_node;
         }
 
-        let binding_source_shape = query_binding_source_shape(shape);
+        let binding_source_shape = query_binding_source_shape_for_binding(shape, binding);
         for (index, reachable) in query.reachable.iter().enumerate() {
             current = normalize_reachable(
                 &mut nodes,
@@ -2146,14 +2323,14 @@ where
         }
         let plan = match prepared_plan {
             Some(plan) => Some(plan.clone()),
-            None if matches!(tier, DurabilityTier::Edge | DurabilityTier::Global)
-                && !program
+            None if matches!(tier, DurabilityTier::Edge | DurabilityTier::Global) && {
+                let parameters = &program
                     .as_ref()
                     .expect("program is compiled when no prepared plan is supplied")
                     .lowered
-                    .parameters
-                    .user_params
-                    .is_empty() =>
+                    .parameters;
+                !parameters.user_params.is_empty() || !parameters.hidden_params.is_empty()
+            } =>
             {
                 Some(self.prepared_query_plan(shape, binding, tier, identity)?)
             }
@@ -2168,7 +2345,12 @@ where
                 )?)
                 .map_err(Error::Groove),
             Some(PreparedQueryPlan::Prepared { shape, params }) => {
-                let values = binding_values_for_plan(binding, &params)?;
+                let values = binding_values_for_plan(
+                    binding,
+                    &params,
+                    identity,
+                    self.session_claims.get(&identity),
+                )?;
                 self.database
                     .bind_shape(shape, &values)
                     .map_err(Error::Groove)
@@ -2394,6 +2576,7 @@ where
         &mut self,
         binding: &Binding,
         plan: &PreparedQueryPlan,
+        identity: AuthorId,
     ) -> Result<Option<MultisinkSubscription>, Error> {
         let subscription = match plan.clone() {
             PreparedQueryPlan::Graph(graph) => self
@@ -2401,7 +2584,12 @@ where
                 .subscribe([(JAZZ_APP_ROWS_SINK, graph)])
                 .map_err(Error::Groove)?,
             PreparedQueryPlan::Prepared { shape, params } => {
-                let values = binding_values_for_plan(binding, &params)?;
+                let values = binding_values_for_plan(
+                    binding,
+                    &params,
+                    identity,
+                    self.session_claims.get(&identity),
+                )?;
                 self.database
                     .bind_shape(shape, &values)
                     .map_err(Error::Groove)?
@@ -3805,7 +3993,11 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<PreparedQueryPlan, Error> {
-        let key = (shape.shape_id(), tier);
+        let key = (
+            shape.shape_id(),
+            tier,
+            query_binding_value_signature(binding),
+        );
         if let Some(plan) = self.query.query_shape_cache.get(&key) {
             return Ok(plan.clone());
         }
@@ -3818,16 +4010,8 @@ where
         )?;
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_app_rows_graph(&program)?;
-        let parameters = program.lowered.parameters;
-        let params = parameters
-            .user_params
-            .iter()
-            .map(|(name, ty)| PreparedQueryParam {
-                name: name.clone(),
-                ty: ty.clone(),
-                source: PreparedQueryParamSource::User,
-            })
-            .collect::<Vec<_>>();
+        let params = prepared_params_from_domain(&program.lowered.parameters);
+        let route_params = prepared_route_param_names(&program.lowered.parameters);
         let param_names = params
             .iter()
             .map(|param| param.name.clone())
@@ -3845,10 +4029,10 @@ where
                 [groove::ivm::RoutedMultisinkTerminal::new(
                     JAZZ_APP_ROWS_SINK,
                     graph,
-                    param_names.iter().cloned(),
+                    route_params.iter().cloned(),
                     app_row_fields,
                 )],
-                query_binding_source_shape(shape),
+                query_binding_source_shape_for_binding(shape, binding),
                 binding_descriptor,
             )?;
             PreparedQueryPlan::Prepared {
@@ -5018,9 +5202,13 @@ where
             CurrentQueryProgramOutput::MaintainedView,
         )?;
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
-        let sinks = lowered_program_sinks(&program);
         self.database.flush().map_err(Error::Groove)?;
-        let subscription = self.database.subscribe(sinks).map_err(Error::Groove)?;
+        let subscription = self.subscribe_lowered_program(
+            &program,
+            &composed_binding,
+            identity,
+            query_binding_source_shape_for_binding(&shape, &composed_binding),
+        )?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
         let snapshot = subscription
@@ -5063,6 +5251,57 @@ where
             transitions,
             tables,
         ))
+    }
+
+    fn subscribe_lowered_program(
+        &mut self,
+        program: &QueryProgram,
+        binding: &Binding,
+        identity: AuthorId,
+        binding_source_shape: String,
+    ) -> Result<MultisinkSubscription, Error> {
+        let params = prepared_params_from_domain(&program.lowered.parameters);
+        let route_params = prepared_route_param_names(&program.lowered.parameters);
+        if params.is_empty() {
+            let sinks = lowered_program_sinks(program);
+            return self.database.subscribe(sinks).map_err(Error::Groove);
+        }
+        let param_names = params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<Vec<_>>();
+        let binding_descriptor = RecordDescriptor::new(
+            param_names
+                .iter()
+                .cloned()
+                .zip(params.iter().map(|param| param.ty.value_type())),
+        );
+        let terminals = program
+            .lowered
+            .terminals
+            .iter()
+            .map(|terminal| {
+                let public_fields = terminal_public_fields(&terminal.output)?;
+                Ok(RoutedMultisinkTerminal::new(
+                    terminal.sink.clone(),
+                    terminal.graph.clone(),
+                    route_params.iter().cloned(),
+                    public_fields,
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let prepared =
+            self.database
+                .prepare(terminals, binding_source_shape, binding_descriptor)?;
+        let values = binding_values_for_plan(
+            binding,
+            &params,
+            identity,
+            self.session_claims.get(&identity),
+        )?;
+        self.database
+            .bind_shape(prepared.id(), &values)
+            .map_err(Error::Groove)
     }
 
     // TODO(query-engine): this old maintained graph builder is retained only as
@@ -7241,6 +7480,12 @@ fn claim_param_name(name: &str) -> String {
     format!("{CLAIM_PARAM_PREFIX}{name}")
 }
 
+fn claim_name_from_param(param: &str) -> &str {
+    param
+        .strip_prefix(CLAIM_PARAM_PREFIX)
+        .expect("hidden claim params must use the claim param prefix")
+}
+
 fn false_predicate() -> Predicate {
     Predicate::Eq(
         Operand::Literal(Value::Bool(true)),
@@ -7357,6 +7602,22 @@ fn insert_claim_bindings(
             }
         }
     }
+}
+
+fn claim_value_for_binding(
+    name: &str,
+    identity: AuthorId,
+    claims: Option<&BTreeMap<String, Value>>,
+) -> Value {
+    claims
+        .and_then(|claims| claims.get(name))
+        .cloned()
+        .unwrap_or_else(|| match name {
+            "sub" => Value::Uuid(identity.0),
+            "user_id" => Value::String(identity.0.to_string()),
+            "isAdmin" => Value::Bool(false),
+            _ => Value::Nullable(None),
+        })
 }
 
 fn claim_binding_value(column_type: Option<&ColumnType>, value: Value) -> Value {
@@ -8436,11 +8697,28 @@ fn collect_join_nullable_param_types_from_schema(
 }
 
 fn query_binding_source_shape(shape: &ValidatedQuery) -> String {
-    format!("jazz-query:{}", shape.shape_id().0)
+    format!(
+        "jazz-query:{}:{}",
+        shape.shape_id().0,
+        query_binding_param_signature(shape)
+    )
+}
+
+fn query_binding_source_shape_for_binding(shape: &ValidatedQuery, binding: &Binding) -> String {
+    format!(
+        "jazz-query:{}:{}",
+        shape.shape_id().0,
+        query_binding_value_signature(binding)
+    )
 }
 
 fn historical_query_binding_source_shape(shape: &ValidatedQuery, position: GlobalSeq) -> String {
-    format!("jazz-query-at:{}:{}", shape.shape_id().0, position.0)
+    format!(
+        "jazz-query-at:{}:{}:{}",
+        shape.shape_id().0,
+        position.0,
+        query_binding_param_signature(shape)
+    )
 }
 
 fn include_deleted_query_binding_source_shape(
@@ -8448,10 +8726,29 @@ fn include_deleted_query_binding_source_shape(
     tier: DurabilityTier,
 ) -> String {
     format!(
-        "jazz-query-include-deleted:{}:{}",
+        "jazz-query-include-deleted:{}:{}:{}",
         shape.shape_id().0,
-        tier as u8
+        tier as u8,
+        query_binding_param_signature(shape)
     )
+}
+
+fn query_binding_param_signature(shape: &ValidatedQuery) -> String {
+    shape
+        .params()
+        .iter()
+        .map(|(name, ty)| format!("{name}={ty:?}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn query_binding_value_signature(binding: &Binding) -> String {
+    binding
+        .values()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn maintained_view_binding_source_shape(shape: &ValidatedQuery) -> String {
@@ -8498,6 +8795,8 @@ fn collect_nullable_param_types(
 fn binding_values_for_plan(
     binding: &Binding,
     params: &[PreparedQueryParam],
+    identity: AuthorId,
+    claims: Option<&BTreeMap<String, Value>>,
 ) -> Result<Vec<Value>, Error> {
     params
         .iter()
@@ -8510,6 +8809,10 @@ fn binding_values_for_plan(
                     .ok_or_else(|| QueryError::MissingParam(param.name.clone()))?;
                 Ok(coerce_prepared_binding_value(value, &param.ty))
             }
+            PreparedQueryParamSource::Claim { ref name } => Ok(claim_binding_value(
+                Some(&param.ty),
+                claim_value_for_binding(name, identity, claims),
+            )),
         })
         .collect()
 }
@@ -10131,7 +10434,10 @@ mod tests {
             !node
                 .query
                 .query_shape_cache
-                .contains_key(&(shape.shape_id(), DurabilityTier::Global))
+                .keys()
+                .any(|(shape_id, tier, _)| {
+                    *shape_id == shape.shape_id() && *tier == DurabilityTier::Global
+                })
         );
 
         let rows = node
@@ -10145,7 +10451,11 @@ mod tests {
         assert!(matches!(
             node.query
                 .query_shape_cache
-                .get(&(shape.shape_id(), DurabilityTier::Global)),
+                .iter()
+                .find(|((shape_id, tier, _), _)| {
+                    *shape_id == shape.shape_id() && *tier == DurabilityTier::Global
+                })
+                .map(|(_, plan)| plan),
             Some(PreparedQueryPlan::Prepared { .. })
         ));
     }
