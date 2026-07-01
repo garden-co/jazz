@@ -47,6 +47,8 @@ pub(crate) struct ProgramBinding {
     /// User params that must be present in the prepared binding descriptor even
     /// when this subplan does not read them directly.
     pub(crate) extra_user_params: BTreeMap<String, ColumnType>,
+    /// Validated user parameter types for this program instance.
+    pub(crate) param_types: BTreeMap<String, ColumnType>,
     /// Values by parameter name.
     pub(crate) values: BTreeMap<String, Value>,
 }
