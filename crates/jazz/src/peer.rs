@@ -540,7 +540,7 @@ impl PeerState {
                     "maintained subscription view subscription missing",
                 ))?
                 .maintained;
-            node.view_update_for_query_result_delta_maintained_view_add_bundles(
+            node.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
                     subscription,
                     peer_complete_tx_payloads,
@@ -689,7 +689,7 @@ impl PeerState {
             .cloned()
             .collect::<Vec<_>>();
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
-        let update = node.view_update_for_query_result_delta_maintained_view_add_bundles(
+        let update = node.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
                 subscription,
                 peer_complete_tx_payloads,
@@ -878,7 +878,7 @@ impl PeerState {
                     "coverage group subscription is missing maintained state",
                 ))?
                 .maintained;
-            node.view_update_for_query_result_delta_maintained_view_add_bundles(
+            node.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
                     subscription: target_subscription,
                     peer_complete_tx_payloads,
@@ -1617,8 +1617,6 @@ pub struct PeerMetrics {
     pub result_adds_out: u64,
     /// Result-set removals emitted.
     pub result_removes_out: u64,
-    /// Full query diffs used to repair gated exclusive transaction siblings.
-    pub full_diff_recomputes_out: u64,
     /// Maintained subscription view counters and latest index footprint.
     pub maintained_subscription_view: Box<MaintainedSubscriptionViewMetrics>,
 }
@@ -1641,8 +1639,6 @@ pub struct MaintainedSubscriptionViewMetricsFootprint {
 pub struct MaintainedSubscriptionViewMetrics {
     /// Maintained subscription view updates served by the incremental path.
     pub hits_out: u64,
-    /// Maintained subscription view attempts served by the full-recompute path.
-    pub full_recomputes_out: u64,
     /// Maintained subscription view skips for query shapes rejected by capability checks.
     pub unsupported_skips_out: u64,
     /// Non-empty Groove delta batches drained by maintained subscription views.
@@ -2176,11 +2172,6 @@ mod tests {
                 .unsupported_skips_out,
             0
         );
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         let SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
@@ -2525,11 +2516,6 @@ mod tests {
             result_member_adds,
             vec![("todos".to_owned().into(), new_first_row, new_first_tx)]
         );
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 3);
     }
 
@@ -2579,7 +2565,6 @@ mod tests {
         );
         let metrics = peer.maintained_subscription_view_metrics();
         assert_eq!(metrics.unsupported_skips_out, 0);
-        assert_eq!(metrics.full_recomputes_out, 0);
     }
 
     #[test]
@@ -2641,11 +2626,6 @@ mod tests {
             update,
             vec![("todos", bravo, bravo_tx)],
             vec![("todos", alpha, alpha_tx)],
-        );
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
         );
     }
 
@@ -2794,11 +2774,6 @@ mod tests {
             vec![("todos", row_from_u64(10), first_tx)],
             vec![("todos", row_from_u64(20), second_tx)],
         );
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
     }
 
     #[test]
@@ -2855,11 +2830,6 @@ mod tests {
             ],
             vec![],
         );
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
     }
 
     #[test]
@@ -2912,11 +2882,6 @@ mod tests {
                 ("todos", row_from_u64(30), third_tx),
             ],
             vec![],
-        );
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
         );
     }
 
@@ -3007,7 +2972,6 @@ mod tests {
 
         let metrics = peer.maintained_subscription_view_metrics();
         assert_eq!(metrics.unsupported_skips_out, 0);
-        assert_eq!(metrics.full_recomputes_out, 0);
     }
 
     #[test]
@@ -3038,7 +3002,6 @@ mod tests {
 
         let metrics = peer.maintained_subscription_view_metrics();
         assert_eq!(metrics.unsupported_skips_out, 0);
-        assert_eq!(metrics.full_recomputes_out, 0);
         assert!(maintained_subscription_id(&peer, aggregate_subscription).is_none());
     }
 
@@ -3133,7 +3096,6 @@ mod tests {
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
         let metrics = peer.maintained_subscription_view_metrics();
         assert_eq!(metrics.hits_out, 1);
-        assert_eq!(metrics.full_recomputes_out, 0);
         assert_eq!(metrics.footprint.result_rows, 1);
         assert!(metrics.footprint.version_identities >= 1);
         assert!(metrics.footprint.version_tx_entries >= 1);
@@ -3160,11 +3122,6 @@ mod tests {
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
         assert!(maintained_subscription_id(&peer, subscription).is_some());
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
 
         let added = core
             .commit_mergeable(
@@ -3187,11 +3144,6 @@ mod tests {
             vec![("todos".to_owned().into(), row(0x5c), added)]
         );
         assert!(result_member_removes.is_empty());
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
     }
 
@@ -3216,11 +3168,6 @@ mod tests {
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
         assert!(maintained_subscription_id(&peer, subscription).is_some());
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
 
         let added = core
             .commit_mergeable(
@@ -3243,11 +3190,6 @@ mod tests {
             vec![("todos".to_owned().into(), row(0x6c), added)]
         );
         assert!(result_member_removes.is_empty());
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
     }
 
@@ -3272,11 +3214,6 @@ mod tests {
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
         assert!(maintained_subscription_id(&peer, subscription).is_some());
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
 
         let added = core
             .commit_mergeable(
@@ -3305,11 +3242,6 @@ mod tests {
             vec![("todos".to_owned().into(), row(0x7c), added)]
         );
         assert!(result_member_removes.is_empty());
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
     }
 
@@ -3334,11 +3266,6 @@ mod tests {
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
         assert!(maintained_subscription_id(&peer, subscription).is_some());
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
 
         let added = core
             .commit_mergeable(
@@ -3355,11 +3282,6 @@ mod tests {
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
         assert_eq!(view_update_added_rows(update), BTreeSet::from([row(0x83)]));
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
     }
 
@@ -3400,11 +3322,6 @@ mod tests {
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
         assert_eq!(view_update_added_rows(update), BTreeSet::from([row(0x87)]));
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
     }
 
@@ -3433,11 +3350,6 @@ mod tests {
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
         assert_eq!(view_update_added_rows(update), BTreeSet::from([row(0x8a)]));
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
     }
 
@@ -3466,11 +3378,6 @@ mod tests {
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
         assert_eq!(view_update_added_rows(update), BTreeSet::from([row(0x8c)]));
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
     }
 
@@ -3540,11 +3447,6 @@ mod tests {
             view_update_added_rows(update),
             BTreeSet::from([matched_row])
         );
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
     }
 
     #[test]
@@ -3590,11 +3492,6 @@ mod tests {
 
             let update = peer.query_update(&mut core, &shape, &binding).unwrap();
             assert_eq!(view_update_added_rows(update), BTreeSet::from([added_row]));
-            assert_eq!(
-                peer.maintained_subscription_view_metrics()
-                    .full_recomputes_out,
-                0
-            );
             assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
         }
     }
@@ -3630,11 +3527,6 @@ mod tests {
         assert_eq!(version_bundles.len(), 1);
         assert_eq!(version_bundles[0].tx.tx_id, tx_id);
         assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
     }
 
@@ -3680,12 +3572,6 @@ mod tests {
         assert_eq!(version_bundles[0].versions.len(), 1);
         assert_eq!(version_bundles[0].versions[0].row_uuid(), row(0x71));
         assert!(peer.shipped_complete_tx_payloads().is_empty());
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
-        assert_eq!(peer.metrics.full_diff_recomputes_out, 0);
     }
 
     #[test]
@@ -3876,12 +3762,6 @@ mod tests {
         assert_eq!(version_bundles[0].versions.len(), 1);
         assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_a);
         assert!(peer.shipped_complete_tx_payloads().is_empty());
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
-        assert_eq!(peer.metrics.full_diff_recomputes_out, 0);
     }
 
     #[test]
@@ -4197,7 +4077,6 @@ mod tests {
         assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
         assert_eq!(version_bundles[0].versions.len(), 1);
         assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_two);
-        assert_eq!(peer.metrics.full_diff_recomputes_out, 0);
 
         reader.apply_sync_message(grant_update).unwrap();
         assert_eq!(
@@ -4265,7 +4144,6 @@ mod tests {
         assert_eq!(version_bundles.len(), 1);
         assert!(complete_tx_payload_refs.is_empty());
         assert!(result_member_removes.is_empty());
-        assert_eq!(peer.metrics.full_diff_recomputes_out, 0);
     }
 
     #[test]

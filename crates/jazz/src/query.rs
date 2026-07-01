@@ -1068,7 +1068,7 @@ impl RecursionBound {
     }
 
     /// Conservative loop cap for old evaluator paths that are not true fixpoint.
-    pub(crate) fn legacy_iteration_cap(self) -> usize {
+    pub(crate) fn iteration_cap(self) -> usize {
         match self {
             Self::Fixpoint => 128,
             Self::MaxDepth(max_depth) => max_depth.max(1),

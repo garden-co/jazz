@@ -208,27 +208,23 @@ where
             .difference(&current_member_result_set)
             .cloned()
             .collect::<Vec<_>>();
-        let update = self.view_update_for_query_result_delta_maintained_view_add_bundles(
-            MaintainedViewBundleInputs {
-                subscription,
-                result_member_adds,
-                result_member_removes,
-                peer_complete_tx_payloads,
-                complete_exclusive_payloads: false,
-                previous_result_set,
-                identity,
-                tier,
-                versions_by_tx: |tx_id| maintained.versions_by_tx(tx_id),
-                replacement_for: |table: String, row_uuid| {
-                    maintained.replacement_for(&table, row_uuid)
-                },
-            },
-        );
+        let update = self.view_update_for_maintained_result_members(MaintainedViewBundleInputs {
+            subscription,
+            result_member_adds,
+            result_member_removes,
+            peer_complete_tx_payloads,
+            complete_exclusive_payloads: false,
+            previous_result_set,
+            identity,
+            tier,
+            versions_by_tx: |tx_id| maintained.versions_by_tx(tx_id),
+            replacement_for: |table: String, row_uuid| maintained.replacement_for(&table, row_uuid),
+        });
         self.unsubscribe_groove_subscription(receiver.id());
         update
     }
 
-    pub(crate) fn view_update_for_query_result_delta_maintained_view_add_bundles<V, R>(
+    pub(crate) fn view_update_for_maintained_result_members<V, R>(
         &mut self,
         inputs: MaintainedViewBundleInputs<V, R>,
     ) -> Result<SyncMessage, Error>
