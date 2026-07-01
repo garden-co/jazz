@@ -5114,6 +5114,62 @@ fn join_subscriptions_match_array_key_elements() {
 }
 
 #[test]
+fn unnest_subscription_emits_one_row_per_array_element() {
+    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let mut database = Database::new(files_parts_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(
+            GraphBuilder::table("files")
+                .unnest("part_ids", "part_id")
+                .project(["id", "part_id"]),
+        )
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+    let part_c = uuid(0xc);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![Value::Uuid(part_a), Value::Uuid(part_b)]),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (vec![Value::U64(1), Value::Uuid(part_a)], 1),
+            (vec![Value::U64(1), Value::Uuid(part_b)], 1),
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("files", PrimaryKeyValue::U64(1));
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![Value::Uuid(part_b), Value::Uuid(part_c)]),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (vec![Value::U64(1), Value::Uuid(part_a)], -1),
+            (vec![Value::U64(1), Value::Uuid(part_b)], -1),
+            (vec![Value::U64(1), Value::Uuid(part_b)], 1),
+            (vec![Value::U64(1), Value::Uuid(part_c)], 1),
+        ]
+    );
+}
+
+#[test]
 fn join_subscriptions_match_persisted_array_key_elements() {
     let storage = MemoryStorage::new(&["files", "file_parts"]);
     let mut database = Database::new(files_parts_schema(), storage).unwrap();

@@ -165,6 +165,11 @@ pub enum GraphBuilder {
         input: Box<GraphBuilder>,
         field: FieldRef,
     },
+    Unnest {
+        input: Box<GraphBuilder>,
+        array_field: FieldRef,
+        element_field: String,
+    },
     Project {
         input: Box<GraphBuilder>,
         fields: Vec<ProjectField>,
@@ -381,6 +386,14 @@ impl GraphBuilder {
         Self::UnwrapNullable {
             input: Box::new(self),
             field: FieldRef::name(field),
+        }
+    }
+
+    pub fn unnest(self, array_field: impl Into<String>, element_field: impl Into<String>) -> Self {
+        Self::Unnest {
+            input: Box::new(self),
+            array_field: FieldRef::name(array_field),
+            element_field: element_field.into(),
         }
     }
 
@@ -727,6 +740,16 @@ impl NodeDescriptor {
                 }
                 Ok(())
             }
+            OpType::Unnest(unnest) => {
+                expect_arity(&self.inputs, 1)?;
+                if unnest.array_field_idx >= input_outputs[0].fields().len() {
+                    return Err(GraphValidationError::FieldIndexOutOfBounds {
+                        index: unnest.array_field_idx,
+                        len: input_outputs[0].fields().len(),
+                    });
+                }
+                Ok(())
+            }
             OpType::MapProject(project) => {
                 expect_arity(&self.inputs, 1)?;
                 for &(_, field_idx) in &project.mapping {
@@ -867,6 +890,7 @@ pub enum OpType {
     Filter(FilterOp),
     MapProject(MapProjectOp),
     UnwrapNullable(UnwrapNullableOp),
+    Unnest(UnnestOp),
     IndexBy(IndexByOp),
     Join(JoinOp),
     SemiJoin(JoinOp),
