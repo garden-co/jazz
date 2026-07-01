@@ -3729,11 +3729,16 @@ fn lower_compare(
 
     match (left, right) {
         (LoweredValueRef::Field(field), LoweredValueRef::Literal(value)) => {
+            let value = coerce_literal_for_source_field(value, source, &field);
             Ok(GroovePredicateExpr::from_field_literal(kind, field, value))
         }
-        (LoweredValueRef::Literal(value), LoweredValueRef::Field(field)) => Ok(
-            GroovePredicateExpr::from_field_literal(kind.reversed(), field, value),
-        ),
+        (LoweredValueRef::Literal(value), LoweredValueRef::Field(field)) => {
+            Ok(GroovePredicateExpr::from_field_literal(
+                kind.reversed(),
+                field.clone(),
+                coerce_literal_for_source_field(value, source, &field),
+            ))
+        }
         (LoweredValueRef::Field(field), LoweredValueRef::Field(value_field)) => match op {
             ComparisonOp::Eq => Ok(GroovePredicateExpr::EqField { field, value_field }),
             ComparisonOp::Ne => Ok(GroovePredicateExpr::NeqField { field, value_field }),
@@ -3759,6 +3764,7 @@ fn lower_contains(
     let needle = lower_value_ref(needle, source_id, source, request)?;
     match (value, needle) {
         (LoweredValueRef::Field(field), LoweredValueRef::Literal(value)) => {
+            let value = coerce_literal_for_source_field(value, source, &field);
             Ok(GroovePredicateExpr::Contains { field, value })
         }
         (LoweredValueRef::Field(field), LoweredValueRef::Field(needle_field)) => {
@@ -3776,7 +3782,7 @@ fn lower_contains(
                     .into_iter()
                     .map(|value| GroovePredicateExpr::Eq {
                         field: field.clone(),
-                        value,
+                        value: coerce_literal_for_source_field(value, source, &field),
                     })
                     .collect(),
             ))
@@ -3784,6 +3790,56 @@ fn lower_contains(
         _ => Err(UnsupportedReason::Operator(
             "array contains requires a source field haystack".to_owned(),
         )),
+    }
+}
+
+fn coerce_literal_for_source_field(
+    value: LiteralValue,
+    source: &ResolvedSource,
+    field: &str,
+) -> LiteralValue {
+    if field == source.row_shape.row_uuid_field {
+        return coerce_literal_for_value_type(value, &ValueType::Uuid);
+    }
+    let logical_field = field.strip_prefix("user_").unwrap_or(field);
+    let Some(column) = source
+        .table_schema
+        .columns
+        .iter()
+        .find(|column| column.name == logical_field)
+    else {
+        return value;
+    };
+    coerce_literal_for_value_type(value, &column.column_type.value_type())
+}
+
+fn coerce_literal_for_value_type(value: LiteralValue, value_type: &ValueType) -> LiteralValue {
+    match (value, value_type) {
+        (LiteralValue::String(value), ValueType::Uuid) => uuid::Uuid::parse_str(&value)
+            .map(LiteralValue::Uuid)
+            .unwrap_or(LiteralValue::String(value)),
+        (LiteralValue::Nullable(Some(value)), value_type) => LiteralValue::Nullable(Some(
+            Box::new(coerce_literal_for_value_type(*value, value_type)),
+        )),
+        (value, ValueType::Nullable(inner)) => {
+            LiteralValue::Nullable(Some(Box::new(coerce_literal_for_value_type(value, inner))))
+        }
+        (LiteralValue::Array(values), ValueType::Array(inner)) => LiteralValue::Array(
+            values
+                .into_iter()
+                .map(|value| coerce_literal_for_value_type(value, inner))
+                .collect(),
+        ),
+        (LiteralValue::Tuple(values), ValueType::Tuple(types)) if values.len() == types.len() => {
+            LiteralValue::Tuple(
+                values
+                    .into_iter()
+                    .zip(types)
+                    .map(|(value, value_type)| coerce_literal_for_value_type(value, value_type))
+                    .collect(),
+            )
+        }
+        (value, _) => value,
     }
 }
 
@@ -4450,6 +4506,12 @@ fn required_closure_parent_graph_from_segment(
         [target_row_uuid.clone()],
     )
     .project_fields(covered_fields);
+    if root_gate == ClosureRootGate::Inner && !matches!(required_key_type, ValueType::Array(_)) {
+        return Ok(covered.project_fields(project_source_fields_with_routes(
+            parent_source,
+            route_fields,
+        )));
+    }
     let missing = if left_key == "__closure_required_element" {
         GraphBuilder::anti_join(
             required.clone(),
