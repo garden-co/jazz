@@ -2979,7 +2979,7 @@ where
         tier: DurabilityTier,
     ) -> Result<(LocalMaintainedViewSubscription, Vec<CurrentRow>), Error> {
         let (subscription, maintained, terminal_schemas, transitions, tables) =
-            self.maintained_subscription_view_from_cold_snapshot(shape, binding, identity, tier)?;
+            self.open_seeded_maintained_subscription_view(shape, binding, identity, tier)?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             maintained,
@@ -4474,7 +4474,7 @@ where
         self.materialize_maintained_view_graph(graph, &shape)
     }
 
-    pub(crate) fn maintained_subscription_view_from_cold_snapshot(
+    pub(crate) fn open_seeded_maintained_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -4517,9 +4517,9 @@ where
         )?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
-        let snapshot = subscription
-            .recv()
-            .map_err(|_| Error::InvalidStoredValue("cold snapshot subscription disconnected"))?;
+        let snapshot = subscription.recv().map_err(|_| {
+            Error::InvalidStoredValue("seeded maintained subscription disconnected")
+        })?;
         let snapshot_transitions = apply_maintained_multisink_deltas(
             &mut maintained,
             snapshot,
@@ -4545,7 +4545,7 @@ where
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     return Err(Error::InvalidStoredValue(
-                        "cold snapshot subscription disconnected",
+                        "seeded maintained subscription disconnected",
                     ));
                 }
             }
