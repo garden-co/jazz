@@ -2064,13 +2064,13 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
             .lowered
             .parameters
             .claim_params
-            .get("__jazz_claim_sub")
+            .get(claim_param_field(&ClaimPath(vec!["sub".to_owned()])).as_str())
             .map(|param| (&param.path, &param.ty)),
         Some((&ClaimPath(vec!["sub".to_owned()]), &ColumnType::Uuid))
     );
     assert_eq!(
         program.lowered.parameters.routing_params,
-        BTreeSet::from(["__jazz_route_route".to_owned()])
+        BTreeSet::from([route_param_field("route")])
     );
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert!(terminals.iter().any(|terminal| {
@@ -2267,7 +2267,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
                     input.as_ref(),
                     GraphBuilder::BindingSource { shape, output }
                         if shape == "reachable-claim"
-                            && output.field_index("__jazz_claim_sub").is_some()
+                            && output.field_index(claim_param_field(&ClaimPath(vec!["sub".to_owned()])).as_str()).is_some()
                 )
     ));
     assert!(program.lowered.parameters.user_params.is_empty());
@@ -2276,7 +2276,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
             .lowered
             .parameters
             .claim_params
-            .get("__jazz_claim_sub")
+            .get(claim_param_field(&ClaimPath(vec!["sub".to_owned()])).as_str())
             .map(|param| (&param.path, &param.ty)),
         Some((&ClaimPath(vec!["sub".to_owned()]), &ColumnType::Uuid))
     );

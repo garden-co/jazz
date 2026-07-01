@@ -4,7 +4,6 @@ use groove::ivm::{
 };
 use groove::records::ValueType;
 
-const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 // Groove returns RecursiveIterationLimit instead of silently truncating when
 // this bound is reached before convergence.
 const FIXPOINT_MAX_ITERS: usize = 128;
@@ -113,8 +112,7 @@ pub(crate) fn lower_query_program(
     let mut parameters = parameter_domain(&request.input.shape);
     collect_binding_source_params(&graph, &mut parameters);
     parameters.routing_params.retain(|field| {
-        field
-            .strip_prefix(ROUTE_PARAM_PREFIX)
+        route_param_from_field(field)
             .is_some_and(|param| parameters.user_params.contains_key(param))
     });
 
@@ -137,8 +135,7 @@ pub(crate) fn lower_query_program(
         collect_binding_source_params(&terminal.graph, &mut parameters);
     }
     parameters.routing_params.retain(|field| {
-        field
-            .strip_prefix(ROUTE_PARAM_PREFIX)
+        route_param_from_field(field)
             .is_some_and(|param| parameters.user_params.contains_key(param))
     });
 
@@ -261,10 +258,6 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
     domain
 }
 
-fn route_param_field(param: &str) -> String {
-    format!("{ROUTE_PARAM_PREFIX}{param}")
-}
-
 fn collect_equality_filter_route_params(predicate: &PredicateExpr, routing: &mut BTreeSet<String>) {
     match predicate {
         PredicateExpr::And(predicates) => {
@@ -305,16 +298,6 @@ fn source_value_ref(value: &NormalizedValueRef) -> bool {
         value,
         NormalizedValueRef::SourceField { .. } | NormalizedValueRef::RowId(RowIdRef::Source(_))
     )
-}
-
-fn claim_param_field(path: &ClaimPath) -> String {
-    format!("__jazz_claim_{}", path.0.join("_"))
-}
-
-fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
-    field
-        .strip_prefix("__jazz_claim_")
-        .map(|path| ClaimPath(path.split('_').map(str::to_owned).collect()))
 }
 
 fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDomain) {
@@ -1950,8 +1933,10 @@ fn lower_correlated_path_plan(
     match path.requirement {
         CorrelationRequirement::Optional => Ok(parent),
         CorrelationRequirement::AtLeastOne => {
-            let joined = GraphBuilder::join(parent, child, [parent_key], [child_key])
-                .project_fields(project_left_source_fields(root_source));
+            let joined =
+                GraphBuilder::join(parent, child, [parent_key], [child_key]).project_fields(
+                    project_source_fields_from_prefix(root_source, LEFT_JOIN_PREFIX),
+                );
             Ok(GraphBuilder::arg_min_by(
                 joined,
                 [root_source.row_shape.row_uuid_field.clone()],
@@ -1999,8 +1984,9 @@ fn lower_cardinality_complete_parent_graph(
         _ => false,
     };
     if !is_array_key {
-        let joined = GraphBuilder::join(parent, child, [parent_key], [child_key])
-            .project_fields(project_left_source_fields(root_source));
+        let joined = GraphBuilder::join(parent, child, [parent_key], [child_key]).project_fields(
+            project_source_fields_from_prefix(root_source, LEFT_JOIN_PREFIX),
+        );
         return Ok(GraphBuilder::arg_min_by(
             joined,
             [root_source.row_shape.row_uuid_field.clone()],
@@ -2012,9 +1998,9 @@ fn lower_cardinality_complete_parent_graph(
     let required = parent
         .clone()
         .unnest(parent_key.clone(), required_element_field);
-    let mut covered_fields = project_left_source_fields(root_source);
+    let mut covered_fields = project_source_fields_from_prefix(root_source, LEFT_JOIN_PREFIX);
     covered_fields.push(ProjectField::renamed(
-        format!("left.{required_element_field}"),
+        left_field(required_element_field),
         required_element_field,
     ));
     let covered = GraphBuilder::join(
@@ -2036,7 +2022,7 @@ fn lower_cardinality_complete_parent_graph(
             required_element_field.to_owned(),
         ],
     )
-    .project_fields(project_source_fields(root_source));
+    .project_fields(project_source_fields_from_prefix(root_source, ""));
     Ok(GraphBuilder::anti_join(
         parent,
         missing,
@@ -2841,33 +2827,13 @@ fn lower_path_key_pair(
     child_source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<(String, String), UnsupportedReason> {
-    let PredicateExpr::Compare {
-        left,
-        op: ComparisonOp::Eq,
-        right,
-    } = predicate
-    else {
-        return Err(UnsupportedReason::Operator(
-            "correlated path projection only lowers equality correlations".to_owned(),
-        ));
-    };
-
-    match (
-        lower_join_key_ref(left, parent_source_id, parent_source, request),
-        lower_join_key_ref(right, child_source_id, child_source, request),
-    ) {
-        (Ok(parent_key), Ok(child_key)) => Ok((parent_key, child_key)),
-        _ => match (
-            lower_join_key_ref(right, parent_source_id, parent_source, request),
-            lower_join_key_ref(left, child_source_id, child_source, request),
-        ) {
-            (Ok(parent_key), Ok(child_key)) => Ok((parent_key, child_key)),
-            _ => Err(UnsupportedReason::Operator(
-                "correlated path projection correlation must compare parent and child fields"
-                    .to_owned(),
-            )),
-        },
-    }
+    lower_bidirectional_key_pair(
+        predicate,
+        "correlated path projection only lowers equality correlations",
+        "correlated path projection correlation must compare parent and child fields",
+        |value| lower_join_key_ref(value, parent_source_id, parent_source, request),
+        |value| lower_join_key_ref(value, child_source_id, child_source, request),
+    )
 }
 
 fn lower_join_key_pair(
@@ -2878,33 +2844,13 @@ fn lower_join_key_pair(
     right_source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<(String, String), UnsupportedReason> {
-    let PredicateExpr::Compare {
-        left,
-        op: ComparisonOp::Eq,
-        right,
-    } = predicate
-    else {
-        return Err(UnsupportedReason::Operator(
-            "join_via only lowers equality join predicates".to_owned(),
-        ));
-    };
-
-    match (
-        lower_join_key_ref(left, left_source_id, left_source, request),
-        lower_join_key_ref(right, right_source_id, right_source, request),
-    ) {
-        (Ok(left_key), Ok(right_key)) => Ok((left_key, right_key)),
-        _ => match (
-            lower_join_key_ref(right, left_source_id, left_source, request),
-            lower_join_key_ref(left, right_source_id, right_source, request),
-        ) {
-            (Ok(left_key), Ok(right_key)) => Ok((left_key, right_key)),
-            _ => Err(UnsupportedReason::Operator(
-                "join_via join predicate must compare the root row id to one join source field"
-                    .to_owned(),
-            )),
-        },
-    }
+    lower_bidirectional_key_pair(
+        predicate,
+        "join_via only lowers equality join predicates",
+        "join_via join predicate must compare the root row id to one join source field",
+        |value| lower_join_key_ref(value, left_source_id, left_source, request),
+        |value| lower_join_key_ref(value, right_source_id, right_source, request),
+    )
 }
 
 fn lower_join_key_pairs(
@@ -2954,33 +2900,13 @@ fn lower_linear_join_key_pair(
     right_output: &LoweredRelationInput,
     request: &QueryProgramRequest,
 ) -> Result<(String, String), UnsupportedReason> {
-    let PredicateExpr::Compare {
-        left,
-        op: ComparisonOp::Eq,
-        right: right_value,
-    } = predicate
-    else {
-        return Err(UnsupportedReason::Operator(
-            "join_via only lowers equality join predicates".to_owned(),
-        ));
-    };
-
-    match (
-        lower_linear_root_key_ref(left, left_root, left_source, request),
-        lower_relation_key_ref(right_value, right_plan, right_output, request),
-    ) {
-        (Ok(left_key), Ok(right_key)) => Ok((left_key, right_key)),
-        _ => match (
-            lower_linear_root_key_ref(right_value, left_root, left_source, request),
-            lower_relation_key_ref(left, right_plan, right_output, request),
-        ) {
-            (Ok(left_key), Ok(right_key)) => Ok((left_key, right_key)),
-            _ => Err(UnsupportedReason::Operator(
-                "join_via join predicate must compare left root and right relation fields"
-                    .to_owned(),
-            )),
-        },
-    }
+    lower_bidirectional_key_pair(
+        predicate,
+        "join_via only lowers equality join predicates",
+        "join_via join predicate must compare left root and right relation fields",
+        |value| lower_linear_root_key_ref(value, left_root, left_source, request),
+        |value| lower_relation_key_ref(value, right_plan, right_output, request),
+    )
 }
 
 fn lower_linear_join_key_pairs(
@@ -3029,38 +2955,13 @@ fn lower_root_to_relation_key_pair(
     right_output: &LoweredRelationInput,
     request: &QueryProgramRequest,
 ) -> Result<(String, String), UnsupportedReason> {
-    let PredicateExpr::Compare {
-        left,
-        op: ComparisonOp::Eq,
-        right: right_value,
-    } = predicate
-    else {
-        return Err(UnsupportedReason::Operator(
-            "join contribution membership only lowers equality predicates".to_owned(),
-        ));
-    };
-
-    match (
-        lower_join_key_ref(left, &root_source.row_shape.source, root_source, request),
-        lower_relation_key_ref(right_value, right_plan, right_output, request),
-    ) {
-        (Ok(root_key), Ok(relation_key)) => Ok((root_key, relation_key)),
-        _ => match (
-            lower_join_key_ref(
-                right_value,
-                &root_source.row_shape.source,
-                root_source,
-                request,
-            ),
-            lower_relation_key_ref(left, right_plan, right_output, request),
-        ) {
-            (Ok(root_key), Ok(relation_key)) => Ok((root_key, relation_key)),
-            _ => Err(UnsupportedReason::Operator(
-                "join contribution membership must compare root fields to relation output fields"
-                    .to_owned(),
-            )),
-        },
-    }
+    lower_bidirectional_key_pair(
+        predicate,
+        "join contribution membership only lowers equality predicates",
+        "join contribution membership must compare root fields to relation output fields",
+        |value| lower_join_key_ref(value, &root_source.row_shape.source, root_source, request),
+        |value| lower_relation_key_ref(value, right_plan, right_output, request),
+    )
 }
 
 fn lower_root_to_relation_key_pairs(
@@ -3097,6 +2998,44 @@ fn lower_root_to_relation_key_pairs(
         ));
     }
     Ok(pairs.into_iter().unzip())
+}
+
+fn lower_bidirectional_key_pair(
+    predicate: &PredicateExpr,
+    non_equality_message: &str,
+    mismatch_message: &str,
+    left_resolver: impl Fn(&NormalizedValueRef) -> Result<String, UnsupportedReason>,
+    right_resolver: impl Fn(&NormalizedValueRef) -> Result<String, UnsupportedReason>,
+) -> Result<(String, String), UnsupportedReason> {
+    let PredicateExpr::Compare {
+        left,
+        op: ComparisonOp::Eq,
+        right,
+    } = predicate
+    else {
+        return Err(UnsupportedReason::Operator(non_equality_message.to_owned()));
+    };
+
+    match (left_resolver(left), right_resolver(right)) {
+        (Ok(left_key), Ok(right_key)) => Ok((left_key, right_key)),
+        (direct_left, direct_right) => match (left_resolver(right), right_resolver(left)) {
+            (Ok(left_key), Ok(right_key)) => Ok((left_key, right_key)),
+            (swapped_left, swapped_right) => Err(UnsupportedReason::Operator(format!(
+                "{mismatch_message}; direct errors: {}, {}; swapped errors: {}, {}",
+                key_pair_error(direct_left),
+                key_pair_error(direct_right),
+                key_pair_error(swapped_left),
+                key_pair_error(swapped_right),
+            ))),
+        },
+    }
+}
+
+fn key_pair_error(result: Result<String, UnsupportedReason>) -> String {
+    match result {
+        Ok(field) => format!("accepted {field:?}"),
+        Err(reason) => format!("{reason:?}"),
+    }
 }
 
 fn lower_relation_key_ref(
@@ -3250,7 +3189,7 @@ fn lower_projection_source(
             && source_field_is_nullable(source, &field);
         return Ok(ProjectionSource::Field {
             field: match last_join_right {
-                Some(_) => format!("left.{field}"),
+                Some(_) => left_field(&field),
                 None => field,
             },
             nullable,
@@ -3261,7 +3200,7 @@ fn lower_projection_source(
         if let Some(field) = lower_relation_projection_ref(value, right, request)? {
             let nullable = nullable_fields.contains(&field);
             return Ok(ProjectionSource::Field {
-                field: format!("right.{field}"),
+                field: right_field(&field),
                 nullable,
             });
         }
@@ -3290,7 +3229,7 @@ fn lower_relation_projection_ref(
                             source: value_source,
                             field,
                         } if value_source == source_id => {
-                            return Ok(Some(format!("user_{field}")));
+                            return Ok(Some(user_column_field(field)));
                         }
                         NormalizedValueRef::RowId(RowIdRef::Source(value_source))
                             if value_source == source_id =>
@@ -3372,14 +3311,14 @@ fn lower_equality_param_filter_joins(
             ),
         );
         let route_field = route_param_field(&join.param);
-        let mut projection = project_source_fields_from_prefix(source, "left.");
+        let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
         projection.extend(
             retained_route_fields
                 .iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone())),
+                .map(|field| ProjectField::renamed(left_field(&field), field.clone())),
         );
         projection.push(ProjectField::renamed(
-            format!("right.{}", join.param),
+            right_field(&join.param),
             route_field.clone(),
         ));
         graph = GraphBuilder::join(graph, binding, [join.field], [join.param])
@@ -3443,7 +3382,7 @@ fn source_join_field(
         NormalizedValueRef::SourceField {
             source: value_source,
             field,
-        } if value_source == source_id => require_source_field(source, &format!("user_{field}"))?,
+        } if value_source == source_id => require_source_field(source, &user_column_field(field))?,
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) if value_source == source_id => {
             require_source_field(source, &source.row_shape.row_uuid_field)?
         }
@@ -3518,54 +3457,21 @@ fn source_field_type<'a>(source: &'a ResolvedSource, field: &str) -> Option<&'a 
         .map(|field| &field.value_type)
 }
 
-fn project_left_source_fields(source: &ResolvedSource) -> Vec<ProjectField> {
-    source
-        .row_shape
-        .descriptor
-        .fields()
-        .iter()
-        .filter_map(|field| field.name.as_ref())
-        .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone()))
-        .collect()
-}
-
-fn project_source_fields(source: &ResolvedSource) -> Vec<ProjectField> {
-    source
-        .row_shape
-        .descriptor
-        .fields()
-        .iter()
-        .filter_map(|field| field.name.as_ref())
-        .map(|field| ProjectField::renamed(field.clone(), field.clone()))
-        .collect()
-}
-
-fn project_right_source_fields(source: &ResolvedSource) -> Vec<ProjectField> {
-    source
-        .row_shape
-        .descriptor
-        .fields()
-        .iter()
-        .filter_map(|field| field.name.as_ref())
-        .map(|field| ProjectField::renamed(format!("right.{field}"), field.clone()))
-        .collect()
-}
-
 fn project_left_source_fields_with_join_routes(
     source: &ResolvedSource,
     existing_route_fields: &BTreeSet<String>,
     introduced_route_fields: &BTreeSet<String>,
 ) -> Vec<ProjectField> {
-    let mut fields = project_left_source_fields(source);
+    let mut fields = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
     fields.extend(
         existing_route_fields
             .iter()
-            .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone())),
+            .map(|field| ProjectField::renamed(left_field(&field), field.clone())),
     );
     fields.extend(
         introduced_route_fields
             .iter()
-            .map(|field| ProjectField::renamed(format!("right.{field}"), field.clone())),
+            .map(|field| ProjectField::renamed(right_field(&field), field.clone())),
     );
     fields
 }
@@ -3866,7 +3772,7 @@ fn coerce_literal_for_source_field(
     if field == source.row_shape.row_uuid_field {
         return coerce_literal_for_value_type(value, &ValueType::Uuid);
     }
-    let logical_field = field.strip_prefix("user_").unwrap_or(field);
+    let logical_field = logical_user_column(field);
     let Some(column) = source
         .table_schema
         .columns
@@ -3989,7 +3895,7 @@ fn lower_value_ref(
             field,
         } if value_source == source_id => Ok(LoweredValueRef::Field(require_source_field(
             source,
-            &format!("user_{field}"),
+            &user_column_field(field),
         )?)),
         NormalizedValueRef::SourceField { source, .. } => Err(UnsupportedReason::Operator(
             format!("predicate references unsupported source {:?}", source),
@@ -4101,21 +4007,10 @@ fn provenance_source_field(field: ProvenanceField) -> &'static str {
 }
 
 fn has_explicit_closure_path(shape: &NormalizedRowSetShape) -> bool {
-    shape.closure_paths.iter().any(|path| {
-        matches!(
-            path,
-            ClosurePath::ExplicitInclude { segments, .. } if segments.iter().any(|segment| {
-                segment.target.path.components.iter().any(|role| {
-                    matches!(
-                        role,
-                        SourceRole::Alias(alias)
-                            if alias.starts_with("include:")
-                                && !alias.starts_with("include:18446744073709551615:")
-                    )
-                })
-            })
-        )
-    })
+    shape
+        .closure_paths
+        .iter()
+        .any(|path| matches!(path, ClosurePath::ExplicitInclude { .. }))
 }
 
 fn lowered_terminals(
@@ -4460,7 +4355,7 @@ fn reachable_contribution_membership_graph(
         .map_err(single_gap_report)?;
     let lowered =
         lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
-    let join_field = format!("user_{}", contribution.root_ref_field);
+    let join_field = user_column_field(&contribution.root_ref_field);
     if !lowered.fields.contains(&join_field) {
         return Err(Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Operator(format!(
@@ -4487,7 +4382,7 @@ fn reachable_contribution_membership_graph(
     )
     .project_fields(project_source_fields_from_prefix(
         contribution_source,
-        "right.",
+        RIGHT_JOIN_PREFIX,
     )))
 }
 
@@ -4541,7 +4436,7 @@ fn join_contribution_membership_graph(
     }
     Ok(
         GraphBuilder::join(visible_root, contribution_graph, root_keys, join_keys).project_fields(
-            project_source_fields_from_prefix(contribution_source, "right."),
+            project_source_fields_from_prefix(contribution_source, RIGHT_JOIN_PREFIX),
         ),
     )
 }
@@ -4596,7 +4491,7 @@ fn required_closure_parent_graph_from_segment(
         resolved_sources,
         &no_route_fields,
     )?;
-    let source_key = format!("user_{}", segment.source_field);
+    let source_key = user_column_field(&segment.source_field);
     let Some(source_key_type) = source_field_type(parent_source, &source_key) else {
         return Err(Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Operator(format!(
@@ -4610,21 +4505,22 @@ fn required_closure_parent_graph_from_segment(
     let (required_base, required_key_type) =
         unwrap_nullable_layers(parent_graph.clone(), source_key.clone(), source_key_type);
     let required = match required_key_type {
-        ValueType::Array(_) => {
-            required_base.unnest(source_key.clone(), "__closure_required_element")
-        }
+        ValueType::Array(_) => required_base.unnest(source_key.clone(), CLOSURE_REQUIRED_ELEMENT),
         _ => required_base,
     };
     let left_key = match required_key_type {
-        ValueType::Array(_) => "__closure_required_element".to_owned(),
+        ValueType::Array(_) => CLOSURE_REQUIRED_ELEMENT.to_owned(),
         _ => source_key.clone(),
     };
-    let mut covered_fields =
-        project_source_fields_with_routes_from_prefix(parent_source, "left.", route_fields);
-    if left_key == "__closure_required_element" {
+    let mut covered_fields = project_source_fields_with_routes_from_prefix(
+        parent_source,
+        LEFT_JOIN_PREFIX,
+        route_fields,
+    );
+    if left_key == CLOSURE_REQUIRED_ELEMENT {
         covered_fields.push(ProjectField::renamed(
             "left.__closure_required_element",
-            "__closure_required_element",
+            CLOSURE_REQUIRED_ELEMENT,
         ));
     }
     let covered = GraphBuilder::join(
@@ -4640,7 +4536,7 @@ fn required_closure_parent_graph_from_segment(
             route_fields,
         )));
     }
-    let missing = if left_key == "__closure_required_element" {
+    let missing = if left_key == CLOSURE_REQUIRED_ELEMENT {
         GraphBuilder::anti_join(
             required.clone(),
             covered.clone(),
@@ -4683,14 +4579,14 @@ fn required_closure_parent_graph_from_segment(
     )
     .project_fields(project_source_fields_with_routes_from_prefix(
         parent_source,
-        "left.",
+        LEFT_JOIN_PREFIX,
         route_fields,
     )))
 }
 
 fn source_key_for_required(source_key_type: &ValueType, source_key: &str) -> String {
     match source_key_type {
-        ValueType::Array(_) => "__closure_required_element".to_owned(),
+        ValueType::Array(_) => CLOSURE_REQUIRED_ELEMENT.to_owned(),
         _ => source_key.to_owned(),
     }
 }
@@ -4734,7 +4630,7 @@ fn closure_membership_graph_for_path(
                 explain: ExplainPlan::default(),
             })
         })?;
-        let source_key = format!("user_{}", segment.source_field);
+        let source_key = user_column_field(&segment.source_field);
         let joined = GraphBuilder::join(
             current_graph.unwrap_nullable(source_key.clone()),
             target.graph.clone(),
@@ -4742,7 +4638,7 @@ fn closure_membership_graph_for_path(
             [target.row_shape.row_uuid_field.clone()],
         )
         .project_fields(
-            project_source_fields_from_prefix(target, "right.")
+            project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX)
                 .into_iter()
                 .chain([ProjectField::renamed(
                     "left.__closure_root_row_uuid",
@@ -5097,7 +4993,7 @@ fn correlated_relation_edge_graphs(
     for nested in &path.nested {
         let nested_parent = graph
             .clone()
-            .project_fields(project_right_source_fields(target));
+            .project_fields(project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX));
         let nested_graph = lower_correlated_path_relation_graph_from_parent(
             nested,
             nested_parent,
@@ -5144,16 +5040,10 @@ fn correlated_relation_edge_fields(
             "source_table",
             Value::String(source.table_schema.name.clone()),
         ),
+        ProjectField::renamed(left_field(&source.row_shape.row_uuid_field), "source_row"),
+        ProjectField::renamed(left_field(&source_version.tx_time_field), "source_tx_time"),
         ProjectField::renamed(
-            format!("left.{}", source.row_shape.row_uuid_field),
-            "source_row",
-        ),
-        ProjectField::renamed(
-            format!("left.{}", source_version.tx_time_field),
-            "source_tx_time",
-        ),
-        ProjectField::renamed(
-            format!("left.{}", source_version.tx_node_field),
+            left_field(&source_version.tx_node_field),
             "source_tx_node_id",
         ),
         ProjectField::literal("path", Value::String(correlated_relation_name(path))),
@@ -5167,16 +5057,10 @@ fn correlated_relation_edge_fields(
             "target_table",
             Value::String(target.table_schema.name.clone()),
         ),
+        ProjectField::renamed(right_field(&target.row_shape.row_uuid_field), "target_row"),
+        ProjectField::renamed(right_field(&target_version.tx_time_field), "target_tx_time"),
         ProjectField::renamed(
-            format!("right.{}", target.row_shape.row_uuid_field),
-            "target_row",
-        ),
-        ProjectField::renamed(
-            format!("right.{}", target_version.tx_time_field),
-            "target_tx_time",
-        ),
-        ProjectField::renamed(
-            format!("right.{}", target_version.tx_node_field),
+            right_field(&target_version.tx_node_field),
             "target_tx_node_id",
         ),
     ])
@@ -5263,8 +5147,8 @@ fn version_witness_fields_for_tagged_rows(
     ];
     fields.extend(source.table_schema.columns.iter().map(|column| {
         ProjectField::renamed(
-            format!("user_{}", column.name),
-            format!("user__{}__{}", source.table_schema.name, column.name),
+            user_column_field(&column.name),
+            table_user_column_field(&source.table_schema.name, &column.name),
         )
     }));
     Ok(fields)
@@ -5295,7 +5179,7 @@ fn deletion_witness_fields_for_tagged_rows(
     ];
     fields.extend(source.table_schema.columns.iter().map(|column| {
         ProjectField::null_typed(
-            format!("user__{}__{}", source.table_schema.name, column.name),
+            table_user_column_field(&source.table_schema.name, &column.name),
             ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
         )
     }));
@@ -5501,7 +5385,7 @@ fn version_witness_schema(
             .map(|column| {
                 (
                     column.name.clone(),
-                    format!("user__{}__{}", source.table_schema.name, column.name),
+                    table_user_column_field(&source.table_schema.name, &column.name),
                 )
             })
             .collect(),
