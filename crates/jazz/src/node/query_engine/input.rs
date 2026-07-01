@@ -75,15 +75,24 @@ pub(crate) struct NormalizedRowSetShape {
 
 /// One maintained/sync closure path rooted at the app result rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ClosurePath {
-    /// Stable path name for diagnostics/sinks.
-    pub(crate) id: String,
-    /// Why this closure path exists in the normalized query.
-    pub(crate) kind: ClosurePathKind,
-    /// Ordered reference hops.
-    pub(crate) segments: Vec<ClosurePathSegment>,
-    /// Whether and how this path gates root membership.
-    pub(crate) root_gate: Option<ClosureRootGate>,
+pub(crate) enum ClosurePath {
+    /// Default one-hop root reference payload included when the user did not
+    /// request an explicit include for the same root reference.
+    ImplicitRootReference {
+        /// Stable path name for diagnostics/sinks.
+        id: String,
+        /// The single root-reference hop.
+        segment: ClosurePathSegment,
+    },
+    /// User-requested include path.
+    ExplicitInclude {
+        /// Stable path name for diagnostics/sinks.
+        id: String,
+        /// Ordered reference hops.
+        segments: Vec<ClosurePathSegment>,
+        /// Whether and how this path gates root membership.
+        root_gate: Option<ClosureRootGate>,
+    },
 }
 
 /// Root-membership gate semantics for explicit include paths.
@@ -96,17 +105,6 @@ pub(crate) enum ClosureRootGate {
     /// Inner includes additionally require at least one reference value at each
     /// path hop to resolve.
     Inner,
-}
-
-/// Semantic origin of a maintained/sync closure path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ClosurePathKind {
-    /// Default one-hop root reference payload included when the user did not
-    /// request explicit includes.
-    ImplicitRootReference,
-    /// User-requested include path. Its `gates_root` flag captures optional vs
-    /// required/inner include semantics.
-    ExplicitInclude,
 }
 
 /// One reference hop inside a closure path.
