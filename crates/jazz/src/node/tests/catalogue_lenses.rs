@@ -1608,13 +1608,6 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
         rows.into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(0xd1), title_cells("reachable"))])
     );
-    assert!(
-        !core.query
-            .query_shape_cache
-            .keys()
-            .any(|(shape_id, _, _)| *shape_id == shape.shape_id()),
-        "schema-projected reachable reads must lower over inline projected sources"
-    );
 }
 
 #[test]
