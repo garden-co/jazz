@@ -2682,7 +2682,7 @@ where
         )
     }
 
-    pub(crate) fn query_rows_prefer_settled_result_set(
+    pub(crate) fn query_rows_local_preview(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
