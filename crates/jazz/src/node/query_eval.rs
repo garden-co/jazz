@@ -47,9 +47,9 @@ use crate::query::{
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 
-#[allow(dead_code)]
 pub(crate) struct ReachableGraphs {
     pub(crate) closure: GraphBuilder,
+    #[allow(dead_code)] // Test-oracle reachable constituent helpers still inspect edge rows.
     pub(crate) edge_current: GraphBuilder,
     pub(crate) access_current: GraphBuilder,
     pub(crate) seed_param: String,
@@ -1394,7 +1394,6 @@ fn unsupported_join_via_reason(join: &JoinVia) -> Option<String> {
     (!reasons.is_empty()).then(|| format!("unsupported join_via features: {}", reasons.join(", ")))
 }
 
-#[allow(dead_code)]
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -4847,6 +4846,9 @@ where
         Ok((subscription, maintained, transitions, tables))
     }
 
+    // TODO(query-engine): this old maintained graph builder is retained only as
+    // a test oracle while query-engine witness/coverage parity tests are moved
+    // to public maintained subscription behavior.
     #[cfg(test)]
     fn maintained_view_tagged_terminal_graph_for_shape(
         &self,
@@ -4883,6 +4885,7 @@ where
         Ok(GraphBuilder::union(graphs))
     }
 
+    #[cfg(test)]
     fn maintained_view_tagged_fact_sinks_for_shape(
         &self,
         shape: &ValidatedQuery,
@@ -5106,6 +5109,8 @@ where
         Ok(policy_shape)
     }
 
+    #[cfg(test)]
+
     fn maintained_view_hidden_param_types_for_shape(
         &self,
         shape: &ValidatedQuery,
@@ -5134,6 +5139,8 @@ where
         }
         Ok(param_types)
     }
+
+    #[cfg(test)]
 
     fn maintained_view_policy_readable_version_tagged_graphs<'a>(
         &self,
@@ -5198,6 +5205,8 @@ where
 
         Ok((content, deletion))
     }
+
+    #[cfg(test)]
 
     fn maintained_view_result_closure_graph(
         &self,
@@ -5332,6 +5341,8 @@ where
         Ok(GraphBuilder::union(graphs))
     }
 
+    #[cfg(test)]
+
     fn maintained_view_filter_result_current_by_include_modes(
         &self,
         root: GraphBuilder,
@@ -5355,6 +5366,8 @@ where
             tier,
         )
     }
+
+    #[cfg(test)]
 
     fn filter_root_current_by_required_include_modes(
         &self,
@@ -5385,6 +5398,8 @@ where
         }
         Ok(graph)
     }
+
+    #[cfg(test)]
 
     fn filter_root_current_by_required_include_path(
         &self,
@@ -5465,6 +5480,8 @@ where
         )
     }
 
+    #[cfg(test)]
+
     fn maintained_view_bound_query_current_graph(
         &self,
         shape: &ValidatedQuery,
@@ -5480,6 +5497,8 @@ where
             tier,
         )
     }
+
+    #[cfg(test)]
 
     fn maintained_view_policy_readable_current_graph(
         &self,
@@ -5499,6 +5518,8 @@ where
             tier,
         )
     }
+
+    #[cfg(test)]
 
     fn include_policy_hidden_param_types(
         &self,
@@ -5538,6 +5559,8 @@ where
         }
         Ok(param_types)
     }
+
+    #[cfg(test)]
 
     fn maintained_view_reference_result_graph(
         &self,
@@ -5601,6 +5624,8 @@ where
             "",
         )))
     }
+
+    #[cfg(test)]
 
     fn maintained_view_include_result_graphs(
         &self,
@@ -5674,6 +5699,8 @@ where
         }
         Ok(graphs)
     }
+
+    #[cfg(test)]
 
     fn maintained_view_join_closure_current_graph(
         &self,
@@ -5816,6 +5843,8 @@ where
         Ok(joined)
     }
 
+    #[cfg(test)]
+
     fn maintained_view_bind_filter_literals_for_empty_binding_with_mode(
         &self,
         shape: &ValidatedQuery,
@@ -5837,6 +5866,8 @@ where
             mode,
         )
     }
+
+    #[cfg(test)]
 
     fn apply_maintained_view_policy_to_current_graph(
         &self,
@@ -5866,6 +5897,8 @@ where
         )?;
         self.apply_maintained_view_filters(graph, &policy_shape, table, output_fields, tier)
     }
+
+    #[cfg(test)]
 
     fn maintained_view_replacement_tagged_graphs<'a>(
         &self,
@@ -5938,7 +5971,7 @@ where
 
         Ok((content, deletion))
     }
-
+    #[cfg(test)]
     pub(crate) fn reachable_edge_constituent_current_graph(
         &self,
         shape: &ValidatedQuery,
@@ -6020,7 +6053,7 @@ where
                 .chain(param_types.keys().cloned().map(ProjectField::named)),
         ))
     }
-
+    #[cfg(test)]
     pub(crate) fn reachable_access_constituent_current_graph(
         &self,
         shape: &ValidatedQuery,
@@ -6100,7 +6133,7 @@ where
                 .chain(param_types.keys().cloned().map(ProjectField::named)),
         ))
     }
-
+    #[cfg(test)]
     pub(crate) fn reachable_policy_readable_version_tagged_graphs<'a>(
         &self,
         shape: &ValidatedQuery,
@@ -6167,7 +6200,7 @@ where
             ));
         Ok((content, deletion))
     }
-
+    #[cfg(test)]
     pub(crate) fn reachable_replacement_tagged_graphs<'a>(
         &self,
         shape: &ValidatedQuery,
@@ -6225,6 +6258,8 @@ where
             ));
         Ok((content, deletion))
     }
+
+    #[cfg(test)]
 
     fn ensure_reachable_constituent_table(
         &self,
@@ -6300,8 +6335,6 @@ where
 
         Ok(GraphBuilder::union([content, deletion]))
     }
-
-    #[allow(dead_code)]
     fn maintained_view_content_current_with_version(
         &self,
         table: &TableSchema,
@@ -6445,7 +6478,7 @@ where
             Ok(graph)
         }
     }
-
+    #[cfg(test)]
     pub(crate) fn lower_reachable_graph_parts(
         &self,
         shape: &ValidatedQuery,
