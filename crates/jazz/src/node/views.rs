@@ -193,8 +193,14 @@ where
         let previous_member_result_set = previous_member_result_set
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let (receiver, maintained, _terminal_schemas, transitions, tables) =
-            self.open_seeded_maintained_subscription_view(shape, binding, identity, tier)?;
+        let (receiver, maintained, _terminal_schemas, transitions, tables) = self
+            .open_seeded_maintained_subscription_view(
+                shape,
+                binding,
+                identity,
+                tier,
+                &Default::default(),
+            )?;
         debug_assert!(
             transitions.removes.is_empty(),
             "cold maintained snapshot emitted result removes"

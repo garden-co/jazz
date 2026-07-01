@@ -298,6 +298,7 @@ impl MaintainedSubscriptionViewSubscription {
                 binding,
                 identity,
                 DurabilityTier::Global,
+                &Default::default(),
             )
             .unwrap();
         assert!(
