@@ -23,7 +23,7 @@ use super::query_engine::{
     FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
     NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
     OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
-    PayloadProjection, PolicyContext, PolicyEnforcementMode,
+    PayloadProjection, PolicyContext, PolicyDecisionRole, PolicyEnforcementMode,
     PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProgramOutputSchemas,
     ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet,
     ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
@@ -611,7 +611,18 @@ where
                     .project_fields(canonical_current_source_fields(table, false))
             }
         }
-        SourceAuthorizationRequest::PolicyFiltered { permission_subject } => {
+        SourceAuthorizationRequest::PolicyFiltered {
+            permission_subject,
+            plan,
+        } => {
+            if plan.protected_source.table != table.name
+                || plan.role != PolicyDecisionRole::Read
+                || plan.protected_row_field != "row_uuid"
+            {
+                return Err(Error::QueryCapability(
+                    "policy authorization plan does not match resolved source".to_owned(),
+                ));
+            }
             let policy_shape = node.maintained_view_table_policy_shape_with_mode(
                 table,
                 *permission_subject,
