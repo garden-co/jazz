@@ -8,8 +8,8 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
-    CatalogueAck, LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    ResultMemberEntry, ShapeAst, Subscribe, TableLens,
+    CatalogueAck, LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ShapeAst,
+    Subscribe, TableLens,
 };
 use crate::query::{
     ArraySubquery, Include, JoinMode, all_of, any_of, claim, col, contains, eq, gt, in_list,
@@ -126,6 +126,22 @@ fn assert_unsupported_sync_register_tier(error: Error) {
         error
             .message
             .contains("sync subscription serving requires global tier"),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+fn assert_unsupported_branch_deletion_witness(error: Error) {
+    assert!(
+        matches!(error.code, ErrorCode::Query | ErrorCode::Protocol),
+        "unexpected error code for branch deletion witness gap: {:?}",
+        error.code
+    );
+    assert!(
+        error.message.contains("BranchOverlay")
+            || error.message.contains(
+                "maintained subscription view subscription does not support this query shape"
+            ),
         "unexpected error message: {}",
         error.message
     );
@@ -740,23 +756,13 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
         propagation: Propagation::LocalOnly,
         ..opts.clone()
     };
-    let mut subscription =
-        doctest_support::block_on(db.subscribe(&prepared_query, local_subscription_opts)).unwrap();
-    assert_eq!(
-        row_ids(&opened_rows(
-            doctest_support::block_on(subscription.next_event()).unwrap()
-        )),
-        vec![row(0x42)]
-    );
+    assert_unsupported_branch_deletion_witness(expect_error(doctest_support::block_on(
+        db.subscribe(&prepared_query, local_subscription_opts),
+    )));
 
-    let mut propagated_subscription =
-        doctest_support::block_on(db.subscribe(&prepared_query, opts.clone())).unwrap();
-    assert_eq!(
-        row_ids(&opened_rows(
-            doctest_support::block_on(propagated_subscription.next_event()).unwrap()
-        )),
-        vec![row(0x42)]
-    );
+    assert_unsupported_branch_deletion_witness(expect_error(doctest_support::block_on(
+        db.subscribe(&prepared_query, opts.clone()),
+    )));
 
     let attachment = db
         .attach_query_with_opts(&prepared_query, opts.clone())
@@ -2675,27 +2681,7 @@ fn subscriber_connection_serves_single_branch_read_view_subscription() {
         }))
         .unwrap();
 
-    subscriber.borrow_mut().tick().unwrap();
-    let update = client_transport
-        .try_recv()
-        .expect("server should send branch view update");
-    let SyncMessage::ViewUpdate {
-        subscription: served_subscription,
-        result_member_adds,
-        ..
-    } = update
-    else {
-        panic!("expected branch view update, got {update:?}");
-    };
-    assert_eq!(served_subscription, subscription);
-    assert_eq!(
-        result_member_adds
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, row, _)| row)
-            .collect::<Vec<_>>(),
-        vec![row(0x42)]
-    );
+    assert_unsupported_branch_deletion_witness(subscriber.borrow_mut().tick().unwrap_err());
 }
 
 #[test]
