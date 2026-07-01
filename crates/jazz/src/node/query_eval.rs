@@ -351,21 +351,10 @@ struct LoweredQueryClauseOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LoweredQuerySource {
-    IncludeDeletedCurrent { table: String, tier: DurabilityTier },
     InlineCurrent { table: String },
 }
 
 impl LoweredQuerySource {
-    fn is_include_deleted_current_for(&self, table: &str, tier: DurabilityTier) -> bool {
-        matches!(
-            self,
-            Self::IncludeDeletedCurrent {
-                table: source_table,
-                tier: source_tier,
-            } if source_table == table && *source_tier == tier
-        )
-    }
-
     fn is_inline_current_for(&self, table: &str) -> bool {
         matches!(
             self,
@@ -437,6 +426,12 @@ where
             .table_in_schema(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let (graph, descriptor, metadata) = if let Some(position) = history_position {
+            if request.visibility != RowVisibility::Visible {
+                return Err(source_resolution_error(
+                    request,
+                    SourceGap::HistoricalStorageCut,
+                ));
+            }
             let rows = self
                 .node
                 .current_rows_for_schema_at(
@@ -449,6 +444,15 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             let descriptor = current_row_descriptor(&table);
             (graph, descriptor, BTreeMap::new())
+        } else if request.visibility == RowVisibility::IncludeDeleted {
+            (
+                include_deleted_current_graph(
+                    &table,
+                    graph_tier.expect("visible current source has a tier"),
+                ),
+                include_deleted_current_row_descriptor(&table),
+                BTreeMap::new(),
+            )
         } else {
             resolved_current_source_graph(
                 self.node,
@@ -1963,6 +1967,29 @@ where
         self.compile_query_program_request(request)
     }
 
+    fn compile_include_deleted_query_program(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<QueryProgram, Error> {
+        let input = RowSetProgramInput {
+            shape: self.normalized_include_deleted_row_set_shape(shape, binding)?,
+            binding: ProgramBinding {
+                id: binding.binding_id(),
+                values: binding.values().clone(),
+            },
+        };
+        let request = QueryProgramRequest {
+            reads: current_query_read_set(&input.shape, shape.schema_version(), tier),
+            policy: self.query_program_policy_context(identity),
+            input,
+            output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
+        };
+        self.compile_query_program_request(request)
+    }
+
     fn compile_query_program_request(
         &mut self,
         request: QueryProgramRequest,
@@ -2207,6 +2234,23 @@ where
         })
     }
 
+    fn normalized_include_deleted_row_set_shape(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<NormalizedRowSetShape, Error> {
+        let mut normalized = self.normalized_row_set_shape(shape, binding)?;
+        let root_source = root_source_id(&shape.query().table);
+        for node in normalized.nodes.values_mut() {
+            if let RowSetExpr::Source { source, visibility } = node
+                && *source == root_source
+            {
+                *visibility = RowVisibility::IncludeDeleted;
+            }
+        }
+        Ok(normalized)
+    }
+
     fn query_program_policy_context(&self, identity: AuthorId) -> PolicyContext {
         if identity == AuthorId::SYSTEM {
             PolicyContext::System
@@ -2344,8 +2388,9 @@ where
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         if include_deleted {
-            let mut rows =
-                self.query_rows_including_deleted_with_lowered_clauses(shape, binding, tier)?;
+            let mut rows = self.query_rows_including_deleted_with_lowered_clauses(
+                shape, binding, tier, identity,
+            )?;
             let query = shape.query();
             self.apply_include_modes(query, shape.schema_version(), &mut rows, tier, identity)?;
             self.finish_query_rows(query, &mut rows)?;
@@ -2514,6 +2559,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
+        identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_schema = self
             .catalogue
@@ -2526,19 +2572,13 @@ where
         let table = self
             .table_in_schema(&query.table, lowered_shape.schema_version())?
             .clone();
-        let LoweredQueryCore {
-            source,
-            graph,
-            param_names,
-            param_types,
-        } = self.lower_include_deleted_query_core(&lowered_shape, tier)?;
-        debug_assert!(source.is_include_deleted_current_for(&query.table, tier));
-        if !param_names.is_empty() || !param_types.is_empty() {
-            return Err(Error::InvalidStoredValue(
-                "include-deleted snapshot lowering must bind all params",
-            ));
-        }
-        let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
+        let binding = lowered_shape.bind(BTreeMap::new())?;
+        let program =
+            self.compile_include_deleted_query_program(&lowered_shape, &binding, tier, identity)?;
+        let deltas = self
+            .database
+            .query_graph(lowered_app_rows_graph(&program)?)
+            .map_err(Error::Groove)?;
         self.materialize_include_deleted_query_rows(table, deltas)
     }
 
@@ -3774,90 +3814,6 @@ where
         Ok(rows)
     }
 
-    fn include_deleted_current_rows_for_schema(
-        &mut self,
-        table: &str,
-        read_schema_version: SchemaVersionId,
-        tier: DurabilityTier,
-    ) -> Result<Vec<(CurrentRow, bool)>, Error> {
-        let read_table = self.table_in_schema(table, read_schema_version)?.clone();
-        let mut content = BTreeMap::<RowUuid, VersionRow>::new();
-        let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
-        for version in self.query_table_versions(table)? {
-            let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id)? else {
-                continue;
-            };
-            let visible_at_tier = match tier {
-                DurabilityTier::Global => {
-                    matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Global
-                }
-                DurabilityTier::Edge => {
-                    matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Edge
-                }
-                DurabilityTier::None | DurabilityTier::Local => {
-                    !matches!(tx.fate, Fate::Rejected(_))
-                }
-            };
-            if !visible_at_tier {
-                continue;
-            }
-            let target = match version.layer() {
-                VersionLayer::Content => &mut content,
-                VersionLayer::Deletion => &mut deletions,
-            };
-            let replace = target.get(&version.row_uuid()).is_none_or(|existing| {
-                version.tx_time().sort_key(tx_id.node)
-                    > existing.tx_time().sort_key(
-                        self.version_tx_id(existing)
-                            .expect("valid version tx id")
-                            .node,
-                    )
-            });
-            if replace {
-                target.insert(version.row_uuid(), version);
-            }
-        }
-        let mut rows = Vec::new();
-        for (row_uuid, version) in content {
-            let source_schema = self
-                .schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "history schema version alias must exist",
-                ))?;
-            let source_table = self.table_in_schema(version.table(), source_schema)?;
-            let mut cells = version.cells(&source_table)?;
-            let projected_table = self.translate_cells(
-                source_schema,
-                read_schema_version,
-                version.table(),
-                &mut cells,
-            )?;
-            if projected_table != table {
-                continue;
-            }
-            let deletion = deletions.get(&row_uuid).filter(|deletion| {
-                deletion.deletion() == Some(DeletionEvent::Deleted)
-                    && deletion.tx_time() > version.tx_time()
-            });
-            let deleted = deletion.is_some();
-            let provenance = deletion.unwrap_or(&version);
-            rows.push((
-                current_row_from_materialized_cells_with_provenance(
-                    &read_table,
-                    &version,
-                    provenance,
-                    &cells,
-                )?,
-                deleted,
-            ));
-        }
-        rows.sort_by(|(left, _), (right, _)| {
-            left.row_uuid().to_bytes().cmp(&right.row_uuid().to_bytes())
-        });
-        Ok(rows)
-    }
-
     fn current_rows_for_schema_at(
         &mut self,
         table: &str,
@@ -4114,103 +4070,6 @@ where
         };
         self.query.query_shape_cache.insert(key, plan.clone());
         Ok(plan)
-    }
-
-    fn lower_include_deleted_query_core(
-        &mut self,
-        shape: &ValidatedQuery,
-        tier: DurabilityTier,
-    ) -> Result<LoweredQueryCore, Error> {
-        let query = shape.query();
-        let table = self
-            .table_in_schema(&query.table, shape.schema_version())?
-            .clone();
-        let param_types = self.inline_current_param_types(shape, &table)?;
-        let mut output_fields = current_row_fields(&table);
-        output_fields.push("__jazz_deleted".to_owned());
-        let source = if self.uses_partitioned_or_schema_projected_read(shape) {
-            let rows = self.include_deleted_current_rows_for_schema(
-                &query.table,
-                shape.schema_version(),
-                tier,
-            )?;
-            inline_include_deleted_current_graph(&table, rows)?
-        } else {
-            include_deleted_current_graph(&table, tier)
-        };
-        let (source_overrides, table_overrides) =
-            self.include_deleted_source_overrides(shape, tier)?;
-        let graph = self.apply_lowered_query_clauses(
-            source,
-            shape,
-            &table,
-            &param_types,
-            LoweredQueryClauseOptions {
-                tier,
-                output_fields,
-                keep_binding_params_in_output: true,
-                binding_source_shape: include_deleted_query_binding_source_shape(shape, tier),
-                source_overrides,
-                table_overrides,
-            },
-        )?;
-        let param_names = param_types.keys().cloned().collect::<Vec<_>>();
-        let param_types = param_names
-            .iter()
-            .map(|name| {
-                param_types
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| QueryError::MissingParam(name.clone()).into())
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(LoweredQueryCore {
-            source: LoweredQuerySource::IncludeDeletedCurrent {
-                table: table.name.clone(),
-                tier,
-            },
-            graph,
-            param_names,
-            param_types,
-        })
-    }
-
-    fn include_deleted_source_overrides(
-        &mut self,
-        shape: &ValidatedQuery,
-        tier: DurabilityTier,
-    ) -> Result<
-        (
-            BTreeMap<String, GraphBuilder>,
-            BTreeMap<String, TableSchema>,
-        ),
-        Error,
-    > {
-        let mut sources = BTreeMap::new();
-        let mut tables = BTreeMap::new();
-        for table_name in collect_join_source_tables(shape.query()) {
-            let table = self
-                .table_in_schema(&table_name, shape.schema_version())?
-                .clone();
-            let rows = self.current_rows_for_schema(&table_name, shape.schema_version(), tier)?;
-            sources.insert(table_name.clone(), inline_current_graph(&table, rows)?);
-            tables.insert(table_name, table);
-        }
-        for reachable in &shape.query().reachable {
-            for table_name in [&reachable.access_table, &reachable.edge_table] {
-                if sources.contains_key(table_name) {
-                    continue;
-                }
-                let table = self
-                    .table_in_schema(table_name, shape.schema_version())?
-                    .clone();
-                let rows =
-                    self.current_rows_for_schema(table_name, shape.schema_version(), tier)?;
-                sources.insert(table_name.clone(), inline_current_graph(&table, rows)?);
-                tables.insert(table_name.clone(), table);
-            }
-        }
-        Ok((sources, tables))
     }
 
     fn lower_inline_current_query_core(
@@ -8696,18 +8555,6 @@ fn query_binding_source_shape_for_binding(shape: &ValidatedQuery, binding: &Bind
     )
 }
 
-fn include_deleted_query_binding_source_shape(
-    shape: &ValidatedQuery,
-    tier: DurabilityTier,
-) -> String {
-    format!(
-        "jazz-query-include-deleted:{}:{}:{}",
-        shape.shape_id().0,
-        tier as u8,
-        query_binding_param_signature(shape)
-    )
-}
-
 fn query_binding_param_signature(shape: &ValidatedQuery) -> String {
     shape
         .params()
@@ -9289,42 +9136,6 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
             ])
             .chain([("__jazz_deleted".to_owned(), ValueType::Bool)]),
     )
-}
-
-fn inline_include_deleted_current_graph(
-    table: &TableSchema,
-    rows: Vec<(CurrentRow, bool)>,
-) -> Result<GraphBuilder, Error> {
-    let descriptor = include_deleted_current_row_descriptor(table);
-    let records = rows
-        .iter()
-        .map(|(row, deleted)| {
-            let mut values = Vec::with_capacity(table.columns.len() + 8);
-            values.push(Value::Uuid(row.row_uuid().0));
-            for column in &table.columns {
-                values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
-            }
-            if let Some(provenance) = row.provenance()? {
-                values.push(Value::Uuid(provenance.created_by.0));
-                values.push(Value::U64(provenance.created_at.0));
-                values.push(Value::Uuid(provenance.updated_by.0));
-                values.push(Value::U64(provenance.updated_at.0));
-            } else {
-                values.push(Value::Uuid(AuthorId::SYSTEM.0));
-                values.push(Value::U64(0));
-                values.push(Value::Uuid(AuthorId::SYSTEM.0));
-                values.push(Value::U64(0));
-            }
-            let (tx_time, tx_node_alias) = row
-                .projected_tx_alias()
-                .unwrap_or((TxTime(0), NodeAlias(0)));
-            values.push(Value::U64(tx_time.0));
-            values.push(Value::U64(tx_node_alias.0));
-            values.push(Value::Bool(*deleted));
-            Ok(descriptor.create(&values)?)
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
 fn current_source_graph(

@@ -46,10 +46,15 @@ pub(crate) fn lower_query_program(
 
     let source_requirements = source_requirements(&request, &plan)?;
     let mut resolved_sources = BTreeMap::new();
+    let source_visibilities = source_visibilities(&plan);
     for (source, requirements) in source_requirements {
+        let visibility = source_visibilities
+            .get(&source)
+            .copied()
+            .unwrap_or(RowVisibility::Visible);
         let source_request = SourceRequest {
             source: source.clone(),
-            visibility: RowVisibility::Visible,
+            visibility,
             requirements,
         };
         let resolved_source = source_resolver
@@ -170,7 +175,10 @@ struct LinearCurrentRoot {
 
 #[derive(Clone, Debug)]
 enum LinearRoot {
-    Source(SourceId),
+    Source {
+        source: SourceId,
+        visibility: RowVisibility,
+    },
     Value {
         shape: String,
         columns: Vec<ValueSourceColumn>,
@@ -185,7 +193,7 @@ enum LinearRoot {
 impl LinearRoot {
     fn source(&self) -> Option<&SourceId> {
         match self {
-            LinearRoot::Source(source) => Some(source),
+            LinearRoot::Source { source, .. } => Some(source),
             LinearRoot::Value { .. } | LinearRoot::Frontier { .. } => None,
         }
     }
@@ -662,6 +670,76 @@ fn program_sources(request: &QueryProgramRequest, plan: &AnalyzedQueryPlan) -> B
     sources
 }
 
+fn source_visibilities(plan: &AnalyzedQueryPlan) -> BTreeMap<SourceId, RowVisibility> {
+    let mut visibilities = BTreeMap::new();
+    collect_plan_source_visibilities(plan, &mut visibilities);
+    visibilities
+}
+
+fn collect_plan_source_visibilities(
+    plan: &AnalyzedQueryPlan,
+    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
+) {
+    match plan {
+        AnalyzedQueryPlan::Linear(linear) => {
+            collect_linear_source_visibilities(linear, visibilities);
+        }
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            collect_linear_source_visibilities(&path.parent, visibilities);
+            collect_correlated_path_source_visibilities(path, visibilities);
+        }
+        AnalyzedQueryPlan::RecursiveRelation(relation) => {
+            collect_linear_source_visibilities(&relation.seed, visibilities);
+            collect_linear_source_visibilities(&relation.step, visibilities);
+        }
+    }
+}
+
+fn collect_correlated_path_source_visibilities(
+    path: &CorrelatedPathPlan,
+    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
+) {
+    collect_linear_source_visibilities(&path.child, visibilities);
+    for nested in &path.nested {
+        collect_linear_source_visibilities(&nested.parent, visibilities);
+        collect_correlated_path_source_visibilities(nested, visibilities);
+    }
+}
+
+fn collect_linear_source_visibilities(
+    plan: &LinearCurrentRoot,
+    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
+) {
+    if let LinearRoot::Source { source, visibility } = &plan.root {
+        let entry = visibilities
+            .entry(source.clone())
+            .or_insert(RowVisibility::Visible);
+        if *visibility > *entry {
+            *entry = *visibility;
+        }
+    }
+    for step in &plan.steps {
+        if let LinearStep::Join { right, .. } = step {
+            collect_relation_source_visibilities(right, visibilities);
+        }
+    }
+}
+
+fn collect_relation_source_visibilities(
+    plan: &RelationInputPlan,
+    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
+) {
+    match plan {
+        RelationInputPlan::Linear(linear) => {
+            collect_linear_source_visibilities(linear, visibilities);
+        }
+        RelationInputPlan::Recursive(relation) => {
+            collect_linear_source_visibilities(&relation.seed, visibilities);
+            collect_linear_source_visibilities(&relation.step, visibilities);
+        }
+    }
+}
+
 fn linear_plan_sources(plan: &LinearCurrentRoot) -> BTreeSet<SourceId> {
     let mut sources = plan
         .root
@@ -724,14 +802,13 @@ fn analyze_current_node(
     };
 
     match node {
-        RowSetExpr::Source { source, visibility } => {
-            if *visibility != RowVisibility::Visible {
-                return Err(UnsupportedReason::Operator(
-                    "include-deleted roots are not lowered yet".to_owned(),
-                ));
-            }
-            Ok((LinearRoot::Source(source.clone()), Vec::new()))
-        }
+        RowSetExpr::Source { source, visibility } => Ok((
+            LinearRoot::Source {
+                source: source.clone(),
+                visibility: *visibility,
+            },
+            Vec::new(),
+        )),
         RowSetExpr::ValueSource {
             shape,
             columns,
@@ -1621,12 +1698,12 @@ fn linear_output_fields(
             .collect();
     }
     let mut fields: BTreeSet<String> = match &plan.root {
-        LinearRoot::Source(_) => source_fields(root_source).collect(),
+        LinearRoot::Source { .. } => source_fields(root_source).collect(),
         LinearRoot::Value { columns, .. } | LinearRoot::Frontier { columns, .. } => {
             columns.iter().map(|column| column.name.clone()).collect()
         }
     };
-    if matches!(plan.root, LinearRoot::Source(_)) {
+    if matches!(plan.root, LinearRoot::Source { .. }) {
         let routing = parameter_domain(&request.input.shape).routing_params;
         for step in &plan.steps {
             if let LinearStep::Join { right, .. } = step {
@@ -1650,7 +1727,7 @@ fn linear_nullable_output_fields(
     if matches!(plan.steps.last(), Some(LinearStep::Project(_))) {
         return BTreeSet::new();
     }
-    if !matches!(plan.root, LinearRoot::Source(_)) {
+    if !matches!(plan.root, LinearRoot::Source { .. }) {
         return BTreeSet::new();
     }
     root_source
@@ -1689,7 +1766,7 @@ fn relation_output_fields_for_routing(
                     .collect();
             }
             let mut fields = linear_root_fields(&linear.root);
-            if matches!(linear.root, LinearRoot::Source(_)) {
+            if matches!(linear.root, LinearRoot::Source { .. }) {
                 let routing = parameter_domain(&request.input.shape).routing_params;
                 for step in &linear.steps {
                     if let LinearStep::Join { right, .. } = step {
@@ -1710,7 +1787,7 @@ fn relation_output_fields_for_routing(
 
 fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
     match root {
-        LinearRoot::Source(_) => BTreeSet::new(),
+        LinearRoot::Source { .. } => BTreeSet::new(),
         LinearRoot::Value { columns, .. } | LinearRoot::Frontier { columns, .. } => {
             columns.iter().map(|column| column.name.clone()).collect()
         }
@@ -1784,7 +1861,7 @@ fn lower_linear_plan_steps(
     request: &QueryProgramRequest,
 ) -> Result<GraphBuilder, UnsupportedReason> {
     let mut graph = match &plan.root {
-        LinearRoot::Source(_) => graph,
+        LinearRoot::Source { .. } => graph,
         LinearRoot::Value {
             shape,
             columns,
@@ -1824,7 +1901,7 @@ fn lower_linear_plan_steps(
                     &lowered_right,
                     request,
                 )?;
-                if matches!(&plan.root, LinearRoot::Source(_))
+                if matches!(&plan.root, LinearRoot::Source { .. })
                     && source_field_is_nullable(root_source, &left_key)
                 {
                     graph = graph.unwrap_nullable(left_key.clone());
@@ -1836,7 +1913,7 @@ fn lower_linear_plan_steps(
                 }
                 graph = GraphBuilder::join(graph, right_graph, [left_key], [right_key]);
                 last_join_right = Some(((**right).clone(), right_nullable_fields));
-                if matches!(&plan.root, LinearRoot::Source(_)) {
+                if matches!(&plan.root, LinearRoot::Source { .. }) {
                     graph = graph.project_fields(project_left_source_fields_with_routing(
                         root_source,
                         &lowered_right.fields,
@@ -2190,7 +2267,9 @@ fn lower_linear_root_key_ref(
     request: &QueryProgramRequest,
 ) -> Result<String, UnsupportedReason> {
     match root {
-        LinearRoot::Source(source_id) => lower_join_key_ref(value, source_id, source, request),
+        LinearRoot::Source {
+            source: source_id, ..
+        } => lower_join_key_ref(value, source_id, source, request),
         LinearRoot::Frontier { frontier, columns } => match value {
             NormalizedValueRef::FrontierColumn {
                 frontier: value_frontier,
@@ -2270,8 +2349,8 @@ fn lower_projection_source(
     request: &QueryProgramRequest,
 ) -> Result<ProjectionSource, UnsupportedReason> {
     if let Ok(field) = lower_linear_root_key_ref(value, &plan.root, source, request) {
-        let nullable =
-            matches!(plan.root, LinearRoot::Source(_)) && source_field_is_nullable(source, &field);
+        let nullable = matches!(plan.root, LinearRoot::Source { .. })
+            && source_field_is_nullable(source, &field);
         return Ok(ProjectionSource::Field {
             field: match last_join_right {
                 Some(_) => format!("left.{field}"),
@@ -2307,7 +2386,7 @@ fn lower_relation_projection_ref(
 ) -> Result<Option<String>, UnsupportedReason> {
     match plan {
         RelationInputPlan::Linear(linear) => {
-            if matches!(linear.root, LinearRoot::Source(_)) {
+            if matches!(linear.root, LinearRoot::Source { .. }) {
                 if let Some(source_id) = linear.root.source() {
                     match value {
                         NormalizedValueRef::SourceField {
