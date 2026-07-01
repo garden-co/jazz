@@ -6606,9 +6606,11 @@ where
 
     fn ensure_maintained_view_query_slice(&self, query: &crate::query::Query) -> Result<(), Error> {
         if !maintained_view_query_slice_supported(query) {
-            return Err(Error::InvalidStoredValue(
-                "maintained subscription view subscription does not support this query shape",
-            ));
+            // TODO(query-engine): remove this pre-lowering guard once maintained
+            // output support is expressed entirely as typed query-engine
+            // capabilities and mapped to the same public error at the peer
+            // boundary.
+            return Err(crate::peer::unsupported_maintained_subscription_shape_error());
         }
         Ok(())
     }
