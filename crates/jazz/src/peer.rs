@@ -506,10 +506,7 @@ impl PeerState {
                     result_member_removes,
                     identity: self.identity(),
                     tier,
-                    versions_by_tx: |tx_id| maintained.versions_by_tx(tx_id),
-                    replacement_for: |table: String, row_uuid| {
-                        maintained.replacement_for(&table, row_uuid)
-                    },
+                    maintained_facts: maintained,
                 },
             )
         };
@@ -659,10 +656,7 @@ impl PeerState {
                 result_member_removes,
                 identity: self.identity(),
                 tier,
-                versions_by_tx: |tx_id| maintained.versions_by_tx(tx_id),
-                replacement_for: |table: String, row_uuid| {
-                    maintained.replacement_for(&table, row_uuid)
-                },
+                maintained_facts: &maintained,
             },
         );
         let mut update = match update {
@@ -844,10 +838,7 @@ impl PeerState {
                     result_member_removes: Vec::new(),
                     identity: self.identity(),
                     tier,
-                    versions_by_tx: |tx_id| maintained.versions_by_tx(tx_id),
-                    replacement_for: |table: String, row_uuid| {
-                        maintained.replacement_for(&table, row_uuid)
-                    },
+                    maintained_facts: maintained,
                 },
             )
         };
