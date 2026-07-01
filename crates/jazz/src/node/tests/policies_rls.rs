@@ -3864,6 +3864,58 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
 }
 
 #[test]
+fn maintained_subscription_view_explicit_include_suppresses_other_implicit_references() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "roots",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("primary", ColumnType::Uuid),
+                ColumnSchema::new("secondary", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("primary", "targets")
+        .with_reference("secondary", "targets"),
+        TableSchema::new("targets", [ColumnSchema::new("name", ColumnType::String)]),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let included = row(0x11);
+    let excluded = row(0x22);
+    let root = row(0x33);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("targets", included, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("included"))])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("targets", excluded, 11)
+            .cells(BTreeMap::from([("name".to_owned(), v("excluded"))])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("roots", root, 12).cells(BTreeMap::from([
+            ("title".to_owned(), v("root")),
+            ("primary".to_owned(), Value::Uuid(included.0)),
+            ("secondary".to_owned(), Value::Uuid(excluded.0)),
+        ])),
+    );
+
+    let shape = Query::from("roots")
+        .include("primary")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::for_author(user(0xa1));
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+    assert_view_update_only_ships_rows(&update, BTreeSet::from([root, included]));
+    let metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(metrics.full_recomputes_out, 0);
+    assert_eq!(metrics.unsupported_skips_out, 0);
+}
+
+#[test]
 fn reachable_closure_helper_yields_seed_reachable_team_set() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
     let shape = recursive_reachable_shape(&core);

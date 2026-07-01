@@ -831,18 +831,21 @@ where
     let mut paths = Vec::new();
     let root_source = root_source_id(root_table);
     let root_schema = node.table_in_schema(root_table, schema_version)?;
-    for (reference_index, (column, target_table)) in root_schema.references.iter().enumerate() {
-        let target = include_auxiliary_source_id(target_table.clone(), usize::MAX, reference_index);
-        sources.insert(target.clone());
-        paths.push(ClosurePath {
-            id: format!("reference:{column}"),
-            segments: vec![ClosurePathSegment {
-                parent: root_source.clone(),
-                target,
-                source_field: column.clone(),
-            }],
-            gates_root: false,
-        });
+    if includes.is_empty() {
+        for (reference_index, (column, target_table)) in root_schema.references.iter().enumerate() {
+            let target =
+                include_auxiliary_source_id(target_table.clone(), usize::MAX, reference_index);
+            sources.insert(target.clone());
+            paths.push(ClosurePath {
+                id: format!("reference:{column}"),
+                segments: vec![ClosurePathSegment {
+                    parent: root_source.clone(),
+                    target,
+                    source_field: column.clone(),
+                }],
+                gates_root: false,
+            });
+        }
     }
     for (include_index, include) in includes.iter().enumerate() {
         let mut current_table_name = root_table.to_owned();
