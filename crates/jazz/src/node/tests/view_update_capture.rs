@@ -1986,7 +1986,8 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
     let bob = user(0xb2);
     let mut parents = BTreeMap::<RowUuid, TxId>::new();
 
-    accept_owner_capture_row(&mut core, &mut parents, row(0x11), alice, "match", 1_000);
+    let initial_alice_tx =
+        accept_owner_capture_row(&mut core, &mut parents, row(0x11), alice, "match", 1_000);
     accept_owner_capture_row(&mut core, &mut parents, row(0x12), bob, "match", 1_001);
     accept_owner_capture_row(&mut core, &mut parents, row(0x13), alice, "other", 1_002);
 
@@ -2000,21 +2001,18 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
         binding_id: binding.binding_id(),
     read_view: Default::default(),
 };
-    let mut peer = PeerState::for_author(alice);
-    peer.force_full_recompute_path_for_test(true);
-    peer.track_query_for_test(&mut core, &shape, &binding)
-        .unwrap();
 
-    let full_recompute_initial = peer.query_update(&mut core, &shape, &binding).unwrap();
     let (mut maintained, maintained_initial) =
         MaintainedSubscriptionViewSubscription::new(&mut core, &shape, &binding, subscription, alice);
-    assert_eq!(
-        capture_view_update(maintained_initial),
-        capture_view_update(full_recompute_initial),
-        "maintained subscription view cold snapshot diverged before incremental read-cost tick"
+    assert_maintained_subscription_view_tick(
+        maintained_initial,
+        &[result_row("todos", row(0x11), initial_alice_tx)],
+        &[],
+        false,
+        (alice, 0, "read-cost-initial"),
     );
 
-    accept_owner_capture_row(&mut core, &mut parents, row(0x14), alice, "match", 2_000);
+    let added_tx = accept_owner_capture_row(&mut core, &mut parents, row(0x14), alice, "match", 2_000);
     accept_owner_capture_row(&mut core, &mut parents, row(0x15), bob, "match", 2_001);
 
     reset_query_versions_for_tx_call_count();
@@ -2026,34 +2024,28 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
     let maintained_materialize_calls = maintained_view_materialize_call_count();
     let maintained_full_bundle_count = view_update_full_bundle_count(&maintained_update);
 
-    core.reset_storage_read_metrics();
-    let full_recompute_update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let full_recompute_metrics = core.take_storage_read_metrics();
-    let full_recompute_full_bundle_count = view_update_full_bundle_count(&full_recompute_update);
-
     println!(
-        "maintained_incremental_read_cost full_recompute_history_index_ranges={} maintained_history_index_ranges={} maintained_tx_row_reads={} maintained_full_bundles={}",
-        full_recompute_metrics.history_indexes.ranges,
+        "maintained_incremental_read_cost maintained_history_index_ranges={} maintained_tx_row_reads={} maintained_full_bundles={}",
         maintained_metrics.history_indexes.ranges,
         maintained_metrics.transactions_rows.reads,
         maintained_full_bundle_count
     );
 
-    assert_eq!(
-        capture_view_update(maintained_update),
-        capture_view_update(full_recompute_update),
-        "maintained subscription view incremental read-cost tick diverged from full recompute"
+    assert_maintained_subscription_view_tick(
+        maintained_update,
+        &[result_row("todos", row(0x14), added_tx)],
+        &[],
+        false,
+        (alice, 0, "read-cost-add"),
     );
     assert_eq!(
         maintained_metrics.history_indexes.ranges, 0,
-        "maintained per-reader incremental update scanned by_tx; full_recompute_history_index_ranges={}, maintained_metrics={maintained_metrics:?}",
-        full_recompute_metrics.history_indexes.ranges
+        "maintained per-reader incremental update scanned by_tx; maintained_metrics={maintained_metrics:?}"
     );
     assert!(
         maintained_metrics.transactions_rows.reads <= maintained_full_bundle_count,
         "maintained per-reader incremental update exceeded one transaction-row point lookup per full-bundle tx; full_bundles={maintained_full_bundle_count}, metrics={maintained_metrics:?}"
     );
-    let _ = full_recompute_full_bundle_count;
     assert_eq!(
         maintained_materialize_calls, 0,
         "maintained incremental update re-materialized the maintained view graph"
