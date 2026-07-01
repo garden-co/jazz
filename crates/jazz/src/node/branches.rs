@@ -327,23 +327,8 @@ where
         if !self.branch_read_policy_allows(&branch, identity, &mut context)? {
             return Ok(Vec::new());
         }
-        let query = shape.query();
-        let table_schema = self.table(&query.table)?.clone();
         let mut rows =
             self.query_rows_on_branch_query_engine(branch_id, shape, binding, identity)?;
-        let mut policy_rows = Vec::new();
-        for row in rows {
-            if self.branch_read_policy_allows_current_row(
-                &branch,
-                &table_schema,
-                &row,
-                identity,
-                &mut context,
-            )? {
-                policy_rows.push(row);
-            }
-        }
-        rows = policy_rows;
         sort_current_rows(&mut rows);
         Ok(rows)
     }
@@ -403,33 +388,6 @@ where
             },
             context,
             |column| branch_metadata_value(&branch, column),
-        )
-    }
-
-    fn branch_read_policy_allows_current_row(
-        &mut self,
-        branch: &BranchRecord,
-        table: &TableSchema,
-        row: &CurrentRow,
-        identity: AuthorId,
-        context: &mut BranchEvaluationContext,
-    ) -> Result<bool, Error> {
-        if identity == AuthorId::SYSTEM {
-            return Ok(true);
-        }
-        let Some(policy) = table.read_policy.clone() else {
-            return Ok(true);
-        };
-        self.branch_policy_allows(
-            BranchPolicyRequest {
-                table,
-                policy: &policy,
-                row_uuid: row.row_uuid(),
-                identity,
-                branch,
-            },
-            context,
-            |column| row.cell(table, column),
         )
     }
 
