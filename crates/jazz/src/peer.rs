@@ -14,13 +14,15 @@ use groove::ivm::RecordDeltas;
 use groove::storage::OrderedKvStorage;
 
 use crate::ids::{AuthorId, RowUuid};
+#[cfg(test)]
+use crate::node::PreparedQueryPlan;
 use crate::node::content_store::Extent;
 use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionView,
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
     MaintainedTerminalSchemas,
 };
-use crate::node::{Error, NodeState, PreparedQueryPlan, apply_maintained_multisink_deltas};
+use crate::node::{Error, NodeState, apply_maintained_multisink_deltas};
 #[cfg(test)]
 use crate::node::{JAZZ_APP_ROWS_SINK, take_optional_sink_deltas};
 #[cfg(test)]
@@ -141,8 +143,9 @@ enum MemberIndexKey {
 
 #[derive(Debug)]
 struct CachedPeerQueryPlan {
-    shape: ValidatedQuery,
+    #[cfg(test)]
     binding: Binding,
+    #[cfg(test)]
     plan: PreparedQueryPlan,
     tier: DurabilityTier,
 }
@@ -357,15 +360,18 @@ impl PeerState {
             .and_then(|state| state.prepared_query.as_ref())
             .is_none();
         if needs_prepare {
-            let (prepared_shape, prepared_binding, plan) = node.prepare_query_binding_for_link(
+            let (_prepared_shape, prepared_binding, plan) = node.prepare_query_binding_for_link(
                 &shape,
                 &binding,
                 DurabilityTier::Global,
                 self.identity(),
             )?;
+            #[cfg(not(test))]
+            let _ = (&prepared_binding, &plan);
             let cached = CachedPeerQueryPlan {
-                shape: prepared_shape,
+                #[cfg(test)]
                 binding: prepared_binding,
+                #[cfg(test)]
                 plan,
                 tier: DurabilityTier::Global,
             };
@@ -428,22 +434,17 @@ impl PeerState {
                 Some(table),
             );
         }
-        let prepared_plan = self
-            .subscriptions
-            .get(&subscription)
-            .and_then(|state| state.prepared_query.as_ref())
-            .map(|prepared| (&prepared.shape, &prepared.binding, &prepared.plan));
         let previous_tx_ids = previous_tx_ids(previous_row_result_set.iter());
-        let mut update = node.view_update_for_query_binding_with_peer_payload_inventory_and_plan(
-            &shape,
-            &binding,
-            subscription,
-            self.acknowledged_complete_tx_payloads(),
-            previous_tx_ids,
-            previous_member_result_set,
-            self.identity(),
-            prepared_plan,
-        )?;
+        let mut update = node
+            .cold_maintained_view_update_for_query_binding_with_peer_payload_inventory(
+                &shape,
+                &binding,
+                subscription,
+                self.acknowledged_complete_tx_payloads(),
+                previous_tx_ids,
+                previous_member_result_set,
+                self.identity(),
+            )?;
         filter_view_update_to_result_table(&mut update, table);
         self.record_outgoing_view_update(&update);
         let update = update;
@@ -522,15 +523,18 @@ impl PeerState {
             binding_id: binding.binding_id(),
             read_view: RegisterShapeOptions::default().read_view_key(),
         };
-        let (prepared_shape, prepared_binding, plan) = node.prepare_query_binding_for_link(
+        let (_prepared_shape, prepared_binding, plan) = node.prepare_query_binding_for_link(
             shape,
             binding,
             DurabilityTier::Global,
             self.identity(),
         )?;
+        #[cfg(not(test))]
+        let _ = (&prepared_binding, &plan);
         let cached = CachedPeerQueryPlan {
-            shape: prepared_shape,
+            #[cfg(test)]
             binding: prepared_binding,
+            #[cfg(test)]
             plan,
             tier: DurabilityTier::Global,
         };
@@ -605,10 +609,9 @@ impl PeerState {
                 .ok_or(Error::InvalidStoredValue(
                     "live query subscription is missing prepared state",
                 ))?;
-            let prepared_plan = Some((&prepared.shape, &prepared.binding, &prepared.plan));
             let tier = prepared.tier;
             let update = node
-                .view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+                .cold_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
                     shape,
                     binding,
                     subscription,
@@ -616,7 +619,6 @@ impl PeerState {
                     previous_tx_ids,
                     previous_member_result_set,
                     self.identity(),
-                    prepared_plan,
                     tier,
                 )?;
             self.record_outgoing_view_update(&update);
@@ -672,10 +674,9 @@ impl PeerState {
             .ok_or(Error::InvalidStoredValue(
                 "live query subscription is missing prepared state",
             ))?;
-        let prepared_plan = Some((&prepared.shape, &prepared.binding, &prepared.plan));
         let tier = prepared.tier;
         let update = node
-            .view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+            .cold_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
                 shape,
                 binding,
                 subscription,
@@ -683,7 +684,6 @@ impl PeerState {
                 state.previous_tx_ids(),
                 previous_member_result_set,
                 self.identity(),
-                prepared_plan,
                 tier,
             )?;
         self.record_outgoing_view_update(&update);
@@ -952,13 +952,8 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let prepared_plan = self
-            .subscriptions
-            .get(&subscription)
-            .and_then(|state| state.prepared_query.as_ref())
-            .map(|prepared| (&prepared.shape, &prepared.binding, &prepared.plan));
         let mut update = node
-            .view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+            .cold_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
                 shape,
                 binding,
                 subscription,
@@ -966,7 +961,6 @@ impl PeerState {
                 [],
                 [],
                 self.identity(),
-                prepared_plan,
                 tier,
             )?;
         if !previous_row_result_set.is_empty() {
@@ -976,7 +970,7 @@ impl PeerState {
                 .map(ResultMemberEntry::from)
                 .collect::<BTreeSet<_>>();
             let diff_update = node
-                .view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+                .cold_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
                     shape,
                     binding,
                     subscription,
@@ -984,7 +978,6 @@ impl PeerState {
                     previous_tx_ids,
                     previous_member_result_set,
                     self.identity(),
-                    prepared_plan,
                     tier,
                 )?;
             merge_rehydrate_diff(&mut update, diff_update);
@@ -1094,12 +1087,15 @@ impl PeerState {
         #[cfg(test)]
         let previous_tx_ids = previous_tx_ids(previous_row_result_set.iter());
         self.forget_subscription_with_node(node, subscription);
-        let (prepared_shape, prepared_binding, plan) = node
+        let (_prepared_shape, prepared_binding, plan) = node
             .prepare_query_binding_for_link(shape, binding, opts.tier, self.identity())
             .map_err(normalize_maintained_subscription_unsupported_error)?;
+        #[cfg(not(test))]
+        let _ = (&prepared_binding, &plan);
         let cached = CachedPeerQueryPlan {
-            shape: prepared_shape,
+            #[cfg(test)]
             binding: prepared_binding,
+            #[cfg(test)]
             plan,
             tier: opts.tier,
         };
