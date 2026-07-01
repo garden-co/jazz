@@ -295,12 +295,14 @@ impl PeerState {
             .and_then(|state| state.prepared_query.as_ref())
             .is_none();
         if needs_prepare {
-            let (_prepared_shape, _prepared_binding, _plan) = node.prepare_query_binding_for_link(
-                &shape,
-                &binding,
-                DurabilityTier::Global,
-                self.identity(),
-            )?;
+            let (_prepared_shape, _prepared_binding, _plan) = node
+                .prepare_query_binding_for_link(
+                    &shape,
+                    &binding,
+                    DurabilityTier::Global,
+                    self.identity(),
+                )
+                .map_err(normalize_maintained_subscription_unsupported_error)?;
             let cached = CachedPeerQueryPlan {
                 tier: DurabilityTier::Global,
             };

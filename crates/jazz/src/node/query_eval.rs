@@ -4074,7 +4074,6 @@ where
             &self.catalogue.schema,
             ParamBindingMode::RetainAllParams,
         )?;
-        self.ensure_maintained_view_query_slice(shape.query())?;
         let program = self.compile_current_query_program(
             &shape,
             &composed_binding,
@@ -4246,7 +4245,6 @@ where
                 "maintained subscription view policy slice does not support include policies",
             ));
         }
-        self.ensure_maintained_view_query_slice(policy_shape.query())?;
         let policy_shape = maintained_view_bind_filter_literals_with_mode(
             &policy_shape,
             &policy_binding,
@@ -4291,15 +4289,6 @@ where
                     ProjectField::renamed("right.parents", "parents"),
                 ]),
         ))
-    }
-
-    fn ensure_maintained_view_query_slice(&self, query: &crate::query::Query) -> Result<(), Error> {
-        if !maintained_view_query_slice_supported(query) {
-            return Err(Error::QueryCapability(
-                "maintained subscription view window shape is not lowered yet".to_owned(),
-            ));
-        }
-        Ok(())
     }
 
     fn policy_composed_shape_binding(
@@ -4418,18 +4407,6 @@ where
         insert_claim_bindings(&mut values, shape.params(), writer, claims);
         let binding = shape.bind(values)?;
         Ok(Some((shape, binding)))
-    }
-}
-
-fn maintained_view_query_slice_supported(query: &crate::query::Query) -> bool {
-    maintained_view_window_supported(query)
-}
-
-fn maintained_view_window_supported(query: &crate::query::Query) -> bool {
-    if query.order_by.is_empty() {
-        query.offset == 0 && (query.limit.is_none() || query.limit == Some(1))
-    } else {
-        true
     }
 }
 
