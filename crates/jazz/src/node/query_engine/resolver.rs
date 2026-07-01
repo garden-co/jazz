@@ -248,8 +248,6 @@ pub(crate) enum UnsupportedReason {
     Operator(String),
     /// Requested output fact is not yet emitted.
     Output(Box<ProgramFactKey>),
-    /// Policy composition is not yet lowered.
-    Policy(String),
     /// Runtime contract is not yet connected to the lowered graph.
     Runtime(String),
 }

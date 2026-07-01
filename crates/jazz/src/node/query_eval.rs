@@ -3580,6 +3580,7 @@ where
             if let Some(session_claims) = self.session_claims.get(&identity) {
                 claims.extend(session_claims.clone());
             }
+            claims.insert("sub".to_owned(), Value::Uuid(identity.0));
             PolicyContext::Identity {
                 mode: PolicyEnforcementMode::Enforcing,
                 permission_subject: identity,
@@ -5520,11 +5521,24 @@ fn default_permission_scope_claim_values(writer: AuthorId) -> BTreeMap<String, V
 fn default_policy_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
     // Alpha-compat built-ins live at the node admission/query boundary, not in
     // the compiler: lowering receives ordinary claim values plus spec `sub`.
-    BTreeMap::from([
-        ("sub".to_owned(), Value::Uuid(writer.0)),
-        ("user_id".to_owned(), Value::String(writer.0.to_string())),
-        ("isAdmin".to_owned(), Value::Bool(false)),
-    ])
+    BUILTIN_POLICY_CLAIMS
+        .iter()
+        .map(|name| {
+            let value = match *name {
+                "sub" => Value::Uuid(writer.0),
+                "user_id" => Value::String(writer.0.to_string()),
+                "isAdmin" => Value::Bool(false),
+                _ => unreachable!("unknown built-in policy claim"),
+            };
+            ((*name).to_owned(), value)
+        })
+        .collect()
+}
+
+const BUILTIN_POLICY_CLAIMS: &[&str] = &["sub", "user_id", "isAdmin"];
+
+fn is_builtin_policy_claim(name: &str) -> bool {
+    BUILTIN_POLICY_CLAIMS.contains(&name)
 }
 
 fn bind_scope_claim_operands(
@@ -5664,7 +5678,7 @@ fn operand_contains_unbound_claim(
     operand: &Operand,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
-    matches!(operand, Operand::Claim(name) if !default_policy_claim_values(AuthorId::SYSTEM).contains_key(name) && !claims.is_some_and(|claims| claims.contains_key(name)))
+    matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| claims.contains_key(name)))
 }
 
 #[derive(Clone, Copy)]

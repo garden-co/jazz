@@ -480,13 +480,13 @@ where
     ) -> Option<Value> {
         match operand {
             crate::query::Operand::Column(column) => column_value(column),
+            crate::query::Operand::Claim(name) if name == "sub" => Some(Value::Uuid(identity.0)),
             crate::query::Operand::Claim(name) => self
                 .session_claims
                 .get(&identity)
                 .and_then(|claims| claims.get(name))
                 .cloned()
                 .or_else(|| match name.as_str() {
-                    "sub" => Some(Value::Uuid(identity.0)),
                     "user_id" => Some(Value::String(identity.0.to_string())),
                     _ => None,
                 }),
