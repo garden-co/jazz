@@ -1272,12 +1272,9 @@ fn collect_value_requirements(
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) => {
             let _ = value_source;
         }
-        NormalizedValueRef::Param(_) | NormalizedValueRef::Literal(_) => {}
-        NormalizedValueRef::Claim(_) => {
-            return Err(UnsupportedReason::Operator(
-                "claim values are not lowered into Groove predicates yet".to_owned(),
-            ));
-        }
+        NormalizedValueRef::Param(_)
+        | NormalizedValueRef::Claim(_)
+        | NormalizedValueRef::Literal(_) => {}
         NormalizedValueRef::FrontierColumn { .. }
         | NormalizedValueRef::RowId(RowIdRef::Frontier(_)) => {}
     }
@@ -2667,6 +2664,20 @@ fn lower_contains(
                 needle_field,
             })
         }
+        (LoweredValueRef::Literal(LiteralValue::Array(values)), LoweredValueRef::Field(field)) => {
+            if values.is_empty() {
+                return Ok(constant_predicate(false));
+            }
+            Ok(GroovePredicateExpr::Or(
+                values
+                    .into_iter()
+                    .map(|value| GroovePredicateExpr::Eq {
+                        field: field.clone(),
+                        value,
+                    })
+                    .collect(),
+            ))
+        }
         _ => Err(UnsupportedReason::Operator(
             "array contains requires a source field haystack".to_owned(),
         )),
@@ -2767,9 +2778,10 @@ fn lower_value_ref(
             };
             Ok(LoweredValueRef::Literal(value.clone().into()))
         }
-        NormalizedValueRef::Claim(_) => Err(UnsupportedReason::Operator(
-            "claim values are not lowered into Groove predicates yet".to_owned(),
-        )),
+        NormalizedValueRef::Claim(path) => {
+            let value = claim_value(path, &request.policy)?;
+            Ok(LoweredValueRef::Literal(value.into()))
+        }
         NormalizedValueRef::FrontierColumn { .. } => Err(UnsupportedReason::Operator(
             "frontier values are not valid in root source predicates".to_owned(),
         )),
@@ -2805,6 +2817,35 @@ fn lower_value_ref(
             })?;
             Ok(LoweredValueRef::Literal(value.into()))
         }
+    }
+}
+
+fn claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Value, UnsupportedReason> {
+    let PolicyContext::Identity {
+        permission_subject,
+        claims,
+        ..
+    } = policy
+    else {
+        return Err(UnsupportedReason::Operator(
+            "claim values require an identity policy context".to_owned(),
+        ));
+    };
+    let [name] = path.0.as_slice() else {
+        return Err(UnsupportedReason::Operator(
+            "nested claim paths are not lowered yet".to_owned(),
+        ));
+    };
+    if let Some(value) = claims.get(name) {
+        return Ok(value.clone());
+    }
+    match name.as_str() {
+        "sub" => Ok(Value::Uuid(permission_subject.0)),
+        "user_id" => Ok(Value::String(permission_subject.0.to_string())),
+        "isAdmin" => Ok(Value::Bool(false)),
+        _ => Err(UnsupportedReason::Operator(format!(
+            "claim '{name}' is not bound"
+        ))),
     }
 }
 
