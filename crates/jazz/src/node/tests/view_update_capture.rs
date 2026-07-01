@@ -436,7 +436,7 @@ impl MaintainedSubscriptionViewSubscription {
             .iter()
             .map(|(_, _, tx_id)| *tx_id)
             .collect::<BTreeSet<_>>();
-        let mut update = core.view_update_for_query_result_delta_maintained_view_add_bundles(
+        let mut update = core.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
                 subscription: subscription_key,
                 peer_complete_tx_payloads: self.peer_complete_tx_payloads.clone(),
@@ -1696,11 +1696,6 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     let tx_id = accept_owner_capture_row(&mut core, &mut parents, deleted, alice, "match", 5_000);
     txs.insert(deleted, tx_id);
     assert_tick(&mut core, &mut peer, &txs, &[], &[], "restore");
-    assert_eq!(
-        peer.maintained_subscription_view_metrics().full_recomputes_out,
-        0,
-        "real peer maintained subscription view used the full-recompute path for seed {seed:#x}, identity {identity:?}"
-    );
 }
 
 #[test]

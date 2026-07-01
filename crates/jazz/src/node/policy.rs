@@ -946,7 +946,7 @@ where
                 self.catalogue.current_schema_version_id,
                 tier,
             )?;
-            for _ in 0..reachable.bound.legacy_iteration_cap() {
+            for _ in 0..reachable.bound.iteration_cap() {
                 let before = reachable_teams.len();
                 for edge_row in &edge_rows {
                     if !self.policy_filters_allow_current_row(

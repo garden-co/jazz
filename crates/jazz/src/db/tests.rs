@@ -2708,7 +2708,7 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
 
     // Internal sync-loop coverage: public APIs normalize local subscriptions to
     // global upstream coverage. Malformed/direct peers must not install an
-    // edge-tier subscription served by the old full-recompute path.
+    // unsupported edge-tier subscription.
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("todos").validate(&schema).unwrap();
@@ -2913,7 +2913,6 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     assert_eq!(group.subscribers.len(), 2);
     let maintained_metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(maintained_metrics.hits_out, 2);
-    assert_eq!(maintained_metrics.full_recomputes_out, 0);
     assert_eq!(maintained_metrics.footprint.result_rows, 1);
     assert_eq!(prepared_read(&client, &query).len(), 1);
     drop(subscriber_ref);
