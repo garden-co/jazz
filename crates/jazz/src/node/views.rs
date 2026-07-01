@@ -308,7 +308,13 @@ where
                 let filtered_tx_versions = if complete_exclusive_payloads
                     && stored_tx.tx.kind == TxKind::Exclusive
                 {
-                    self.query_versions_for_tx_memo_cloned(*tx_id, &mut context)?
+                    let tx_versions =
+                        self.query_versions_for_tx_memo_cloned(*tx_id, &mut context)?;
+                    self.policy_authorized_versions_for_complete_payload(
+                        &tx_versions,
+                        identity,
+                        tier,
+                    )?
                 } else {
                     tx_versions
                         .iter()
@@ -318,24 +324,10 @@ where
                         .cloned()
                         .collect::<Vec<_>>()
                 };
-                let bundle =
-                    if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
-                        // TODO(query-engine policy): complete exclusive payloads intentionally pull
-                        // the whole tx outside the maintained witness set. Move this remaining
-                        // filter to an authorization-fact query before deleting the read-policy
-                        // evaluator.
-                        self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
-                            &stored_tx,
-                            &filtered_tx_versions,
-                            identity,
-                            &mut context,
-                        )?
-                    } else {
-                        self.version_bundle_for_maintained_view_versions_with_tx(
-                            &stored_tx,
-                            &filtered_tx_versions,
-                        )?
-                    };
+                let bundle = self.version_bundle_for_maintained_view_versions_with_tx(
+                    &stored_tx,
+                    &filtered_tx_versions,
+                )?;
                 version_bundles.push(bundle);
                 record_maintained_view_stream_b_add_bundle();
                 continue;
@@ -673,58 +665,6 @@ where
         Ok((shape, binding))
     }
 
-    pub(super) fn version_bundle_for_maintained_view_policy_readable_versions_with_tx(
-        &mut self,
-        stored_tx: &StoredTransaction,
-        tx_versions: &[VersionRow],
-        identity: AuthorId,
-        context: &mut ViewEvaluationContext,
-    ) -> Result<VersionBundle, Error> {
-        let Transaction {
-            tx_id,
-            kind,
-            n_total_writes,
-            made_by,
-            permission_subject,
-            base_snapshot,
-            user_metadata_json,
-            source_branch,
-            ..
-        } = stored_tx.tx.clone();
-        let tx_payload = Transaction {
-            tx_id,
-            kind,
-            n_total_writes,
-            made_by,
-            permission_subject,
-            base_snapshot,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json,
-            source_branch,
-        };
-        let mut versions = Vec::with_capacity(tx_versions.len());
-        for candidate in tx_versions {
-            let table = self.table(candidate.table())?.clone();
-            if !self.read_policy_allows_version_memo(&table, candidate, identity, context)?
-                && !self.read_policy_allows_deletion_version_memo(
-                    &table, candidate, identity, context,
-                )?
-            {
-                continue;
-            }
-            versions.push(self.version_record_from_row(candidate)?);
-        }
-        Ok(VersionBundle {
-            tx: tx_payload,
-            versions,
-            fate: stored_tx.fate.clone(),
-            global_seq: stored_tx.global_seq,
-            durability: stored_tx.durability,
-        })
-    }
-
     fn version_bundle_for_maintained_view_versions_with_tx(
         &mut self,
         stored_tx: &StoredTransaction,
@@ -764,6 +704,32 @@ where
             global_seq: stored_tx.global_seq,
             durability: stored_tx.durability,
         })
+    }
+
+    fn policy_authorized_versions_for_complete_payload(
+        &mut self,
+        tx_versions: &[VersionRow],
+        identity: AuthorId,
+        tier: DurabilityTier,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let mut authorized_rows_by_table = BTreeMap::<String, BTreeSet<RowUuid>>::new();
+        let mut filtered = Vec::with_capacity(tx_versions.len());
+        for version in tx_versions {
+            let table_name = version.table().to_owned();
+            if !authorized_rows_by_table.contains_key(&table_name) {
+                let table = self.table(&table_name)?.clone();
+                let authorized =
+                    self.read_policy_authorized_row_ids_for_table(&table, identity, tier)?;
+                authorized_rows_by_table.insert(table_name.clone(), authorized);
+            }
+            if authorized_rows_by_table
+                .get(&table_name)
+                .is_some_and(|rows| rows.contains(&version.row_uuid()))
+            {
+                filtered.push(version.clone());
+            }
+        }
+        Ok(filtered)
     }
 }
 
