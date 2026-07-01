@@ -19,11 +19,11 @@ use super::maintained_subscription_view::{MaintainedSubscriptionView, Maintained
 use super::policy::ViewEvaluationContext;
 use super::query_engine::{
     AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathKind,
-    ClosurePathSegment, ComparisonOp as NormalizedComparisonOp, CorrelationRequirement, DataSource,
-    FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
-    NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
-    OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
-    PayloadProjection, PolicyContext, PolicyEnforcementMode,
+    ClosurePathSegment, ClosureRootGate, ComparisonOp as NormalizedComparisonOp,
+    CorrelationRequirement, DataSource, FieldProjection, FrontierId, JoinContribution,
+    JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
+    NormalizedValueRef, OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef,
+    OverlayStack, PayloadProjection, PolicyContext, PolicyEnforcementMode,
     PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProgramOutputSchemas,
     ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet, ReadView,
     RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
@@ -983,13 +983,6 @@ fn required_field_idx(descriptor: &RecordDescriptor, field: &str) -> Result<usiz
     })
 }
 
-fn include_modes_can_drop_parent(query: &JazzQuery) -> bool {
-    query
-        .includes
-        .iter()
-        .any(|include| include.require || include.join_mode == crate::query::JoinMode::Inner)
-}
-
 fn normalize_predicates(
     source: &SourceId,
     predicates: &[Predicate],
@@ -1207,7 +1200,7 @@ where
                     target,
                     source_field: column.clone(),
                 }],
-                gates_root: false,
+                root_gate: None,
             });
         }
     }
@@ -1237,7 +1230,13 @@ where
             id: format!("include:{include_index}:{}", include.path),
             kind: ClosurePathKind::ExplicitInclude,
             segments,
-            gates_root: include.require || include.join_mode == crate::query::JoinMode::Inner,
+            root_gate: if include.require {
+                Some(ClosureRootGate::Required)
+            } else if include.join_mode == crate::query::JoinMode::Inner {
+                Some(ClosureRootGate::Inner)
+            } else {
+                None
+            },
         });
     }
     Ok((sources, paths))
@@ -2405,7 +2404,7 @@ where
             );
             current = order_node;
         }
-        if (query.limit.is_some() || query.offset != 0) && !include_modes_can_drop_parent(query) {
+        if query.limit.is_some() || query.offset != 0 {
             let slice_node = RowSetNodeId("slice".to_owned());
             nodes.insert(
                 slice_node.clone(),
@@ -2603,7 +2602,6 @@ where
                 shape, binding, tier, identity,
             )?;
             let query = shape.query();
-            self.apply_include_modes(query, shape.schema_version(), &mut rows, tier, identity)?;
             self.finish_query_rows(query, &mut rows)?;
             return Ok(rows);
         }
@@ -2684,14 +2682,8 @@ where
             }
         }
         let query = shape.query();
-        if include_modes_can_drop_parent(query) {
-            self.apply_include_modes(query, shape.schema_version(), &mut rows, tier, identity)?;
-            self.finish_query_rows(query, &mut rows)?;
-        } else {
-            self.apply_include_modes(query, shape.schema_version(), &mut rows, tier, identity)?;
-            self.finish_engine_query_rows(query, &mut rows)?;
-            self.apply_projection(query, &mut rows)?;
-        }
+        self.finish_engine_query_rows(query, &mut rows)?;
+        self.apply_projection(query, &mut rows)?;
         Ok(rows)
     }
 
@@ -3413,28 +3405,6 @@ where
         Ok(())
     }
 
-    fn apply_include_modes(
-        &mut self,
-        query: &crate::query::Query,
-        read_schema_version: SchemaVersionId,
-        rows: &mut Vec<CurrentRow>,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<(), Error> {
-        if rows.is_empty()
-            || query.includes.is_empty()
-            || query.includes.iter().all(|include| {
-                !include.require && include.join_mode != crate::query::JoinMode::Inner
-            })
-        {
-            return Ok(());
-        }
-        let include_modes =
-            self.prepare_include_modes(query, read_schema_version, tier, identity)?;
-        rows.retain(|row| include_modes.row_satisfies(row));
-        Ok(())
-    }
-
     fn apply_projection(
         &self,
         query: &crate::query::Query,
@@ -3448,87 +3418,6 @@ where
             *row = row.project(&table, columns)?;
         }
         Ok(())
-    }
-
-    fn prepare_include_modes(
-        &mut self,
-        query: &crate::query::Query,
-        read_schema_version: SchemaVersionId,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<PreparedIncludeModes, Error> {
-        let mut prepared = Vec::new();
-        let mut target_tables = BTreeSet::new();
-        for include in &query.includes {
-            if !include.require && include.join_mode != crate::query::JoinMode::Inner {
-                continue;
-            }
-            let mut current_table_name = query.table.clone();
-            let mut segments = Vec::new();
-            for segment in include.path.split('.') {
-                let current_table =
-                    self.table_in_schema(&current_table_name, read_schema_version)?;
-                let column_position = current_table
-                    .columns
-                    .iter()
-                    .position(|column| column.name == segment)
-                    .ok_or(Error::InvalidStoredValue(
-                        "include column was not validated",
-                    ))?;
-                let target_table = current_table
-                    .references
-                    .get(segment)
-                    .cloned()
-                    .ok_or(Error::InvalidStoredValue("include path was not validated"))?;
-                target_tables.insert(target_table.clone());
-                current_table_name = target_table.clone();
-                segments.push(PreparedIncludeSegment {
-                    column_position,
-                    target_table,
-                });
-            }
-            prepared.push(PreparedIncludePath { segments });
-        }
-
-        let mut rows_by_table = BTreeMap::new();
-        let alias_nodes = self
-            .node_aliases
-            .iter()
-            .map(|(node, alias)| (*alias, *node))
-            .collect::<BTreeMap<_, _>>();
-        let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
-        for table in target_tables {
-            let mut rows = BTreeMap::new();
-            for row in self.current_rows_for_schema(&table, read_schema_version, tier)? {
-                let readable = if identity == AuthorId::SYSTEM {
-                    true
-                } else {
-                    let Some((time, alias)) = row.projected_tx_alias() else {
-                        return Err(Error::InvalidStoredValue(
-                            "current row did not project content tx alias",
-                        ));
-                    };
-                    let Some(node) = alias_nodes.get(&alias).copied() else {
-                        return Err(Error::InvalidStoredValue("unknown content tx node alias"));
-                    };
-                    self.result_set_entry_read_policy_allows_memo(
-                        &table,
-                        row.row_uuid(),
-                        TxId { time, node },
-                        identity,
-                        &mut context,
-                    )?
-                };
-                if readable {
-                    rows.insert(row.row_uuid(), row);
-                }
-            }
-            rows_by_table.insert(table, rows);
-        }
-        Ok(PreparedIncludeModes {
-            paths: prepared,
-            rows_by_table,
-        })
     }
 
     pub(super) fn current_rows_for_schema(
@@ -7114,81 +7003,6 @@ fn claim_binding_value(column_type: Option<&ColumnType>, value: Value) -> Value 
         }
         _ => value,
     }
-}
-
-struct PreparedIncludeModes {
-    paths: Vec<PreparedIncludePath>,
-    rows_by_table: BTreeMap<String, BTreeMap<RowUuid, CurrentRow>>,
-}
-
-impl PreparedIncludeModes {
-    fn row_satisfies(&self, row: &CurrentRow) -> bool {
-        self.paths.iter().all(|path| path.resolves(row, self))
-    }
-
-    fn row(&self, table: &str, row_uuid: RowUuid) -> Option<&CurrentRow> {
-        self.rows_by_table.get(table)?.get(&row_uuid)
-    }
-}
-
-struct PreparedIncludePath {
-    segments: Vec<PreparedIncludeSegment>,
-}
-
-impl PreparedIncludePath {
-    fn resolves(&self, row: &CurrentRow, modes: &PreparedIncludeModes) -> bool {
-        let mut current_rows = vec![row];
-        for segment in &self.segments {
-            let mut next_rows = Vec::new();
-            for current_row in current_rows {
-                match current_row.cell_at(segment.column_position) {
-                    Some(Value::Uuid(target_uuid)) => {
-                        let Some(next_row) = modes.row(&segment.target_table, RowUuid(target_uuid))
-                        else {
-                            return false;
-                        };
-                        next_rows.push(next_row);
-                    }
-                    Some(Value::Array(targets)) => {
-                        for target in targets {
-                            let Value::Uuid(target_uuid) = target else {
-                                return false;
-                            };
-                            let Some(next_row) =
-                                modes.row(&segment.target_table, RowUuid(target_uuid))
-                            else {
-                                return false;
-                            };
-                            next_rows.push(next_row);
-                        }
-                    }
-                    Some(Value::Nullable(None)) | None => {}
-                    Some(Value::Nullable(Some(target))) => {
-                        let Value::Uuid(target_uuid) = target.as_ref() else {
-                            return false;
-                        };
-                        let Some(next_row) =
-                            modes.row(&segment.target_table, RowUuid(*target_uuid))
-                        else {
-                            return false;
-                        };
-                        next_rows.push(next_row);
-                    }
-                    Some(_) => return false,
-                }
-            }
-            current_rows = next_rows;
-            if current_rows.is_empty() {
-                return true;
-            }
-        }
-        true
-    }
-}
-
-struct PreparedIncludeSegment {
-    column_position: usize,
-    target_table: String,
 }
 
 fn apply_query_filters(

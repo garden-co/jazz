@@ -3181,25 +3181,16 @@ fn lower_closure_membership(
 ) -> CapabilityResult<ClosureLowering> {
     let mut visible_root = root_graph;
     for path in &request.input.shape.closure_paths {
-        if !path.gates_root {
+        let Some(root_gate) = path.root_gate else {
             continue;
-        }
-        let path_members = closure_membership_graph_for_path(
-            visible_root.clone(),
+        };
+        visible_root = required_closure_parent_graph(
+            visible_root,
             path,
+            root_gate,
             root_source,
             resolved_sources,
         )?;
-        let Some((_, _, closure_graph)) = path_members.last().cloned() else {
-            continue;
-        };
-        visible_root = GraphBuilder::join(
-            visible_root,
-            closure_graph.project(["__closure_root_row_uuid"]),
-            [root_source.row_shape.row_uuid_field.clone()],
-            ["__closure_root_row_uuid"],
-        )
-        .project_fields(project_source_fields_from_prefix(root_source, "left."));
     }
 
     let mut visible_members = BTreeMap::<SourceId, GraphBuilder>::new();
@@ -3292,6 +3283,148 @@ fn join_contribution_membership_graph(
         contribution_source,
         "right.",
     )))
+}
+
+fn required_closure_parent_graph(
+    parent_graph: GraphBuilder,
+    path: &ClosurePath,
+    root_gate: ClosureRootGate,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<GraphBuilder> {
+    required_closure_parent_graph_from_segment(
+        parent_graph,
+        &path.segments,
+        0,
+        root_gate,
+        root_source,
+        resolved_sources,
+    )
+}
+
+fn required_closure_parent_graph_from_segment(
+    parent_graph: GraphBuilder,
+    segments: &[ClosurePathSegment],
+    index: usize,
+    root_gate: ClosureRootGate,
+    parent_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<GraphBuilder> {
+    let Some(segment) = segments.get(index) else {
+        return Ok(parent_graph);
+    };
+    let target = resolved_sources.get(&segment.target).ok_or_else(|| {
+        Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(format!(
+                "closure target source {:?} was not resolved",
+                segment.target
+            ))],
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    let target_valid = required_closure_parent_graph_from_segment(
+        target.graph.clone(),
+        segments,
+        index + 1,
+        root_gate,
+        target,
+        resolved_sources,
+    )?;
+    let source_key = format!("user_{}", segment.source_field);
+    let Some(source_key_type) = source_field_type(parent_source, &source_key) else {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Operator(format!(
+                "closure source field {source_key:?} is not projected"
+            ))],
+            explain: ExplainPlan::default(),
+        }));
+    };
+    let parent_row_uuid = parent_source.row_shape.row_uuid_field.clone();
+    let target_row_uuid = target.row_shape.row_uuid_field.clone();
+    let (required_base, required_key_type) =
+        unwrap_nullable_layers(parent_graph.clone(), source_key.clone(), source_key_type);
+    let required = match required_key_type {
+        ValueType::Array(_) => {
+            required_base.unnest(source_key.clone(), "__closure_required_element")
+        }
+        _ => required_base,
+    };
+    let left_key = match required_key_type {
+        ValueType::Array(_) => "__closure_required_element".to_owned(),
+        _ => source_key.clone(),
+    };
+    let mut covered_fields = project_source_fields_from_prefix(parent_source, "left.");
+    if left_key == "__closure_required_element" {
+        covered_fields.push(ProjectField::renamed(
+            "left.__closure_required_element",
+            "__closure_required_element",
+        ));
+    }
+    let covered = GraphBuilder::join(
+        required.clone(),
+        target_valid,
+        [left_key.clone()],
+        [target_row_uuid.clone()],
+    )
+    .project_fields(covered_fields);
+    let missing = if left_key == "__closure_required_element" {
+        GraphBuilder::anti_join(
+            required.clone(),
+            covered.clone(),
+            [parent_row_uuid.clone(), left_key],
+            [
+                parent_row_uuid.clone(),
+                source_key_for_required(required_key_type, &source_key),
+            ],
+        )
+    } else {
+        GraphBuilder::anti_join(
+            required.clone(),
+            covered.clone(),
+            [left_key],
+            [source_key_for_required(required_key_type, &source_key)],
+        )
+    }
+    .project_fields(project_source_fields(parent_source));
+    let all_required_refs_resolve = GraphBuilder::anti_join(
+        parent_graph,
+        missing,
+        [parent_row_uuid.clone()],
+        [parent_row_uuid.clone()],
+    );
+    if root_gate == ClosureRootGate::Required {
+        return Ok(all_required_refs_resolve);
+    }
+    Ok(GraphBuilder::join(
+        all_required_refs_resolve,
+        GraphBuilder::arg_min_by(
+            covered,
+            [parent_row_uuid.clone()],
+            [parent_row_uuid.clone()],
+        ),
+        [parent_row_uuid.clone()],
+        [parent_row_uuid],
+    )
+    .project_fields(project_source_fields_from_prefix(parent_source, "left.")))
+}
+
+fn source_key_for_required(source_key_type: &ValueType, source_key: &str) -> String {
+    match source_key_type {
+        ValueType::Array(_) => "__closure_required_element".to_owned(),
+        _ => source_key.to_owned(),
+    }
+}
+
+fn unwrap_nullable_layers(
+    mut graph: GraphBuilder,
+    field: String,
+    mut value_type: &ValueType,
+) -> (GraphBuilder, &ValueType) {
+    while let ValueType::Nullable(inner) = value_type {
+        graph = graph.unwrap_nullable(field.clone());
+        value_type = inner.as_ref();
+    }
+    (graph, value_type)
 }
 
 fn closure_membership_graph_for_path(
