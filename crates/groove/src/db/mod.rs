@@ -610,6 +610,19 @@ where
             .map_err(Error::IvmRuntime)
     }
 
+    /// Run several named graph outputs against the same current storage
+    /// snapshot without registering a live subscription.
+    pub fn query_graphs<I, K>(&mut self, sinks: I) -> Result<MultisinkDeltas, Error>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+    {
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.ivm_runtime
+            .query_snapshots(sinks, &storage)
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Return decoded records whose explicit schema index exactly matches the
     /// supplied index-column key.
     ///
