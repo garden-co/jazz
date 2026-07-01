@@ -5136,11 +5136,36 @@ fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Valu
 }
 
 fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::ColumnType) -> Value {
-    match column_type {
-        groove::schema::ColumnType::Nullable(_) if !matches!(value, Value::Nullable(_)) => {
-            Value::Nullable(Some(Box::new(value)))
+    match (value, column_type) {
+        (Value::String(value), groove::schema::ColumnType::Uuid) => uuid::Uuid::parse_str(&value)
+            .map(Value::Uuid)
+            .unwrap_or(Value::String(value)),
+        (Value::Nullable(Some(value)), column_type) => Value::Nullable(Some(Box::new(
+            coerce_prepared_binding_value(*value, column_type),
+        ))),
+        (Value::Array(values), groove::schema::ColumnType::Array(inner)) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| coerce_prepared_binding_value(value, inner))
+                .collect(),
+        ),
+        (Value::Tuple(values), groove::schema::ColumnType::Tuple(types))
+            if values.len() == types.len() =>
+        {
+            Value::Tuple(
+                values
+                    .into_iter()
+                    .zip(types)
+                    .map(|(value, column_type)| coerce_prepared_binding_value(value, column_type))
+                    .collect(),
+            )
         }
-        _ => value,
+        (value, groove::schema::ColumnType::Nullable(inner))
+            if !matches!(value, Value::Nullable(_)) =>
+        {
+            Value::Nullable(Some(Box::new(coerce_prepared_binding_value(value, inner))))
+        }
+        (value, _) => value,
     }
 }
 
