@@ -452,10 +452,7 @@ impl MaintainedSubscriptionViewSubscription {
                     .collect(),
                 identity,
                 tier: DurabilityTier::Global,
-                versions_by_tx: |tx_id| self.maintained.versions_by_tx(tx_id),
-                replacement_for: |table: String, row_uuid| {
-                    self.maintained.replacement_for(&table, row_uuid)
-                },
+                maintained_facts: &self.maintained,
             },
         )?;
         let SyncMessage::ViewUpdate {

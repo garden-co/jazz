@@ -8,6 +8,7 @@
 
 use super::policy::ViewEvaluationContext;
 use super::*;
+use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{PeerPayloadInventory, ResultMemberEntry};
 
 fn maintained_view_tx_versions_contain_winner(
@@ -54,7 +55,7 @@ fn content_row_members_for_bundle(
         .collect()
 }
 
-pub(crate) struct MaintainedViewBundleInputs<V, R> {
+pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) subscription: SubscriptionKey,
     /// Peer inventory of transactions whose full row-version payload has
     /// already shipped on this link. Partial payload coverage is not recorded
@@ -68,8 +69,7 @@ pub(crate) struct MaintainedViewBundleInputs<V, R> {
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) identity: AuthorId,
     pub(crate) tier: DurabilityTier,
-    pub(crate) versions_by_tx: V,
-    pub(crate) replacement_for: R,
+    pub(crate) maintained_facts: &'a MaintainedSubscriptionView,
 }
 
 impl<S> NodeState<S>
@@ -231,21 +231,16 @@ where
             previous_result_set,
             identity,
             tier,
-            versions_by_tx: |tx_id| maintained.versions_by_tx(tx_id),
-            replacement_for: |table: String, row_uuid| maintained.replacement_for(&table, row_uuid),
+            maintained_facts: &maintained,
         });
         self.unsubscribe_groove_subscription(receiver.id());
         update
     }
 
-    pub(crate) fn view_update_for_maintained_result_members<V, R>(
+    pub(crate) fn view_update_for_maintained_result_members(
         &mut self,
-        inputs: MaintainedViewBundleInputs<V, R>,
-    ) -> Result<SyncMessage, Error>
-    where
-        V: FnMut(TxId) -> Vec<VersionRow>,
-        R: Fn(String, RowUuid) -> (Option<VersionRow>, Option<VersionRow>),
-    {
+        inputs: MaintainedViewBundleInputs<'_>,
+    ) -> Result<SyncMessage, Error> {
         let MaintainedViewBundleInputs {
             subscription,
             peer_complete_tx_payloads,
@@ -255,8 +250,7 @@ where
             result_member_removes,
             identity: _identity,
             tier: _tier,
-            mut versions_by_tx,
-            replacement_for,
+            maintained_facts,
         } = inputs;
         let mut context = ViewEvaluationContext::default();
         let row_result_adds = content_row_members_for_bundle(
@@ -291,12 +285,13 @@ where
             }
             let tx_versions = tx_versions_cache
                 .entry(*tx_id)
-                .or_insert_with(|| versions_by_tx(*tx_id));
+                .or_insert_with(|| maintained_facts.versions_by_tx(*tx_id));
             for (entry_table, row_uuid) in wanted_rows {
                 if maintained_view_find_content_witness(tx_versions, entry_table, *row_uuid)
                     .is_none()
                 {
-                    let (content_winner, _) = replacement_for(entry_table.clone(), *row_uuid);
+                    let (content_winner, _) =
+                        maintained_facts.replacement_for(entry_table, *row_uuid);
                     if let Some(content_winner) = content_winner {
                         if self.version_tx_id(&content_winner)? == *tx_id {
                             tx_versions.push(content_winner);
@@ -334,7 +329,7 @@ where
             ));
         }
         for (entry_table, row_uuid, content_tx_id) in &row_result_adds {
-            let (_, deletion_winner) = replacement_for(entry_table.to_string(), *row_uuid);
+            let (_, deletion_winner) = maintained_facts.replacement_for(entry_table, *row_uuid);
             let Some(version) = deletion_winner.as_ref() else {
                 continue;
             };
@@ -348,7 +343,7 @@ where
             } else {
                 let tx_versions = tx_versions_cache
                     .entry(tx_id)
-                    .or_insert_with(|| versions_by_tx(tx_id));
+                    .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
                 if maintained_view_tx_versions_contain_winner(tx_versions, version) {
                     let stored_tx = self
                         .query_transaction_memo(tx_id, &mut context)?
@@ -369,7 +364,7 @@ where
         }
         for (entry_table, row_uuid, old_tx_id) in &row_result_removes {
             let (content_winner, deletion_winner) =
-                replacement_for(entry_table.to_string(), *row_uuid);
+                maintained_facts.replacement_for(entry_table, *row_uuid);
             for (version, missing_witness) in [
                 (
                     content_winner.as_ref(),
@@ -394,7 +389,7 @@ where
                 }
                 let tx_versions = tx_versions_cache
                     .entry(tx_id)
-                    .or_insert_with(|| versions_by_tx(tx_id));
+                    .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
                 if !maintained_view_tx_versions_contain_winner(tx_versions, version) {
                     return Err(Error::MaintainedViewMissingBundleWitness(missing_witness));
                 }
