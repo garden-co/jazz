@@ -3694,6 +3694,8 @@ mod tests {
         accept_global(&mut core, grant_b, 3);
 
         let mut peer = PeerState::for_author(user_a);
+        peer.set_ship_complete_exclusive_payloads(true);
+        core.reset_query_engine_read_metrics();
         let update = peer.current_rows_update(&mut core, "docs").unwrap();
         let SyncMessage::ViewUpdate {
             version_bundles,
@@ -3721,6 +3723,11 @@ mod tests {
         assert_eq!(version_bundles[0].versions.len(), 1);
         assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_a);
         assert!(peer.shipped_complete_tx_payloads().is_empty());
+        assert!(
+            core.query_engine_read_metrics()
+                .policy_authorized_row_id_queries
+                > 0
+        );
     }
 
     #[test]
