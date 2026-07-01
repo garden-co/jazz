@@ -65,7 +65,7 @@ fn run_groove_social_feed() {
     let mut subscriptions = Vec::with_capacity(config.subscriptions);
     for user_id in 1..=config.subscriptions as u64 {
         subscriptions.push(
-            db.subscribe(feed_graph(user_id))
+            db.subscribe_one_sink(feed_graph(user_id))
                 .expect("subscribe social feed"),
         );
     }
@@ -173,7 +173,7 @@ fn run_groove_social_feed_prepared_with(mode: PreparedFeedMode) {
     match mode {
         PreparedFeedMode::Builder => {
             let family = db
-                .prepare(
+                .prepare_one_sink(
                     feed_prepared_shape_graph(),
                     "feed_params",
                     RecordDescriptor::new([("follower_id", ColumnType::U64.value_type())]),
@@ -182,7 +182,7 @@ fn run_groove_social_feed_prepared_with(mode: PreparedFeedMode) {
                 .expect("subscribe feed family");
             for user_id in 1..=config.subscriptions as u64 {
                 subscriptions.push(
-                    db.bind_shape(family.id(), &[Value::U64(user_id)])
+                    db.bind_shape_one_sink(family.id(), &[Value::U64(user_id)])
                         .expect("subscribe feed param"),
                 );
             }
@@ -826,7 +826,7 @@ fn drain_param_feed_subscription(
 
 fn sqlite_feed_rows(conn: &Connection, user_id: u64) -> BTreeMap<FeedRow, i64> {
     let mut stmt = conn
-        .prepare(
+        .prepare_one_sink(
             "
             SELECT p.author_id, p.id, p.created_at
             FROM follows f
@@ -896,7 +896,7 @@ fn run_groove_acl() {
     let mut subscriptions = Vec::with_capacity(config.subscriptions);
     for principal in 1..=config.subscriptions as u64 {
         subscriptions.push(
-            db.subscribe(acl_graph(principal))
+            db.subscribe_one_sink(acl_graph(principal))
                 .expect("subscribe acl graph"),
         );
     }
@@ -984,7 +984,7 @@ fn run_groove_acl_prepared() {
 
     let subscribe_start = Instant::now();
     let family = db
-        .prepare(
+        .prepare_one_sink(
             acl_prepared_shape_graph(),
             "acl_params",
             RecordDescriptor::new([("principal_id", ColumnType::U64.value_type())]),
@@ -994,7 +994,7 @@ fn run_groove_acl_prepared() {
     let mut subscriptions = Vec::with_capacity(config.subscriptions);
     for principal in 1..=config.subscriptions as u64 {
         subscriptions.push(
-            db.bind_shape(family.id(), &[Value::U64(principal)])
+            db.bind_shape_one_sink(family.id(), &[Value::U64(principal)])
                 .expect("subscribe acl param"),
         );
     }
@@ -1689,7 +1689,7 @@ fn drain_param_acl_subscription(
 
 fn sqlite_acl_rows(conn: &Connection, principal: u64) -> BTreeMap<AclRow, i64> {
     let mut stmt = conn
-        .prepare(
+        .prepare_one_sink(
             "
             WITH RECURSIVE reachable(principal_id) AS (
                 SELECT parent_id FROM group_membership WHERE child_id = ?1
@@ -1788,7 +1788,9 @@ fn run_oneshot_subscribe() {
     for i in 0..config.queries {
         let author = (i as u64 % config.authors as u64) + 1;
         let start = Instant::now();
-        let subscription = db.subscribe(post_graph(author)).expect("subscribe");
+        let subscription = db
+            .subscribe_one_sink(post_graph(author))
+            .expect("subscribe");
         let result = subscription.recv().expect("initial");
         db.unsubscribe(subscription.id());
         metrics.record_commit(start.elapsed());

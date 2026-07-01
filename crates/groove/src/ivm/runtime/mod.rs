@@ -405,7 +405,7 @@ impl IvmRuntime {
         Ok(())
     }
 
-    pub fn subscribe(
+    pub fn subscribe_one_sink(
         &mut self,
         graph: GraphBuilder,
         storage: &impl OrderedKvStorage,
@@ -420,7 +420,7 @@ impl IvmRuntime {
             {
                 shape_id
             } else {
-                let shape = self.prepare(
+                let shape = self.prepare_one_sink(
                     plan.graph.clone(),
                     plan.shape.clone(),
                     plan.binding_descriptor,
@@ -437,13 +437,13 @@ impl IvmRuntime {
                     .insert(plan.key.clone(), shape.id());
                 shape.id()
             };
-            return self.bind_shape(shape_id, &[plan.binding_value], storage);
+            return self.bind_shape_one_sink(shape_id, &[plan.binding_value], storage);
         }
-        let multisink = self.subscribe_multisink([(DEFAULT_SINK, graph)], storage)?;
+        let multisink = self.subscribe([(DEFAULT_SINK, graph)], storage)?;
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
-    pub fn subscribe_multisink<I, K, S>(
+    pub fn subscribe<I, K, S>(
         &mut self,
         sinks: I,
         storage: &S,
@@ -514,7 +514,7 @@ impl IvmRuntime {
         })
     }
 
-    pub fn prepare_routed_multisink<I, S>(
+    pub fn prepare<I, S>(
         &mut self,
         terminals: I,
         binding_source_shape: impl Into<String>,
@@ -591,7 +591,7 @@ impl IvmRuntime {
         Ok(PreparedShape { id: shape_id })
     }
 
-    pub fn bind_routed_multisink_shape<S>(
+    pub fn bind_shape<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -600,15 +600,10 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.bind_routed_multisink_shape_with_public_fields(
-            shape_id,
-            binding_values,
-            BTreeMap::new(),
-            storage,
-        )
+        self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
     }
 
-    fn bind_routed_multisink_shape_with_public_fields<S>(
+    fn bind_shape_with_public_fields<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -693,7 +688,7 @@ impl IvmRuntime {
         })
     }
 
-    pub fn prepare(
+    pub fn prepare_one_sink(
         &mut self,
         graph: GraphBuilder,
         binding_source_shape: impl Into<String>,
@@ -715,7 +710,7 @@ impl IvmRuntime {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let public_fields = descriptor_field_names(&output)?;
-        self.prepare_routed_multisink(
+        self.prepare(
             [RoutedMultisinkTerminal::new(
                 DEFAULT_SINK,
                 graph,
@@ -728,7 +723,7 @@ impl IvmRuntime {
         )
     }
 
-    pub fn prepare_with_routing(
+    pub fn prepare_one_sink_with_routing(
         &mut self,
         output_graph: GraphBuilder,
         routing_graph: GraphBuilder,
@@ -753,7 +748,7 @@ impl IvmRuntime {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let public_fields = descriptor_field_names(&output)?;
-        self.prepare_routed_multisink(
+        self.prepare(
             [RoutedMultisinkTerminal::new(
                 DEFAULT_SINK,
                 routing_graph,
@@ -766,7 +761,7 @@ impl IvmRuntime {
         )
     }
 
-    pub fn bind_shape<S>(
+    pub fn bind_shape_one_sink<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -775,11 +770,11 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let multisink = self.bind_routed_multisink_shape(shape_id, binding_values, storage)?;
+        let multisink = self.bind_shape(shape_id, binding_values, storage)?;
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
-    pub(crate) fn bind_shape_with_output<S>(
+    pub(crate) fn bind_shape_one_sink_with_output<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -797,7 +792,7 @@ impl IvmRuntime {
             &public_output,
         )?;
         let public_fields = descriptor_field_names(&public_output)?;
-        let multisink = self.bind_routed_multisink_shape_with_public_fields(
+        let multisink = self.bind_shape_with_public_fields(
             shape_id,
             binding_values,
             [(DEFAULT_SINK.to_owned(), public_fields)].into(),
@@ -5631,12 +5626,16 @@ mod tests {
         let familied_subscriptions = families
             .iter()
             .cloned()
-            .map(|graph| familied.subscribe(graph, storage_familied).unwrap())
+            .map(|graph| {
+                familied
+                    .subscribe_one_sink(graph, storage_familied)
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
         let direct_subscriptions = families
             .iter()
             .cloned()
-            .map(|graph| direct.subscribe(graph, storage_direct).unwrap())
+            .map(|graph| direct.subscribe_one_sink(graph, storage_direct).unwrap())
             .collect::<Vec<_>>();
 
         assert_eq!(familied.prepared_shapes.len(), expected_prepared_shapes);
@@ -5696,7 +5695,7 @@ mod tests {
         let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
         let storage = crate::storage::MemoryStorage::new(&["albums"]);
         let first = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::table("albums")
                     .filter(PredicateExpr::eq("id", Value::U64(1)))
                     .project(["title"]),
@@ -5704,7 +5703,7 @@ mod tests {
             )
             .unwrap();
         let second = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::table("albums")
                     .filter(PredicateExpr::eq("id", Value::U64(2)))
                     .project(["title"]),
@@ -5767,7 +5766,7 @@ mod tests {
         let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
         let storage = crate::storage::MemoryStorage::new(&["albums"]);
         let subscription = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::table("albums").project_fields([
                     ProjectField::renamed("id", "id"),
                     ProjectField::literal(
@@ -5864,7 +5863,7 @@ mod tests {
             .unwrap();
 
         let subscription = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::table("albums").project_fields([
                     ProjectField::renamed("id", "id"),
                     ProjectField::literal("event_kind", LiteralValue::String("cold".to_owned())),
@@ -5913,7 +5912,7 @@ mod tests {
         let mut runtime = IvmRuntime::new(schema).unwrap();
         let storage = crate::storage::MemoryStorage::new(&["albums"]);
         let subscription = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::table("albums").project(["id", "title"]),
                 &storage,
             )
@@ -5946,7 +5945,7 @@ mod tests {
         let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
         let storage = crate::storage::MemoryStorage::new(&["records"]);
         let first = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::table("records")
                     .filter(PredicateExpr::eq("id", Value::U64(1)))
                     .project(["__auto_binding_0"]),
@@ -5954,7 +5953,7 @@ mod tests {
             )
             .unwrap();
         let second = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::table("records")
                     .filter(PredicateExpr::eq("id", Value::U64(2)))
                     .project(["__auto_binding_0"]),
@@ -6213,10 +6212,10 @@ mod tests {
         let mut runtime = IvmRuntime::new(schema).unwrap();
         let storage = crate::storage::MemoryStorage::new(&["edges"]);
         let first = runtime
-            .subscribe(recursive_reach_from_with_union_step_graph(1), &storage)
+            .subscribe_one_sink(recursive_reach_from_with_union_step_graph(1), &storage)
             .unwrap();
         let second = runtime
-            .subscribe(recursive_reach_from_with_union_step_graph(9), &storage)
+            .subscribe_one_sink(recursive_reach_from_with_union_step_graph(9), &storage)
             .unwrap();
 
         assert!(first.recv().unwrap().is_empty());
@@ -6247,7 +6246,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
         let subscription = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::table("albums")
                     .filter(PredicateExpr::gt("id", Value::U64(10)))
                     .project(["title"]),
@@ -6269,7 +6268,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
         let subscription = runtime
-            .subscribe(GraphBuilder::table("albums"), &storage)
+            .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
             .unwrap();
         let output = runtime.subscription_output_node(subscription.id()).unwrap();
 
@@ -6407,7 +6406,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
         let _first = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::join(
                     GraphBuilder::table("albums"),
                     GraphBuilder::table("artists"),
@@ -6418,7 +6417,7 @@ mod tests {
             )
             .unwrap();
         let _second = runtime
-            .subscribe(
+            .subscribe_one_sink(
                 GraphBuilder::join(
                     GraphBuilder::table("albums").filter(PredicateExpr::gt("id", Value::U64(0))),
                     GraphBuilder::table("artists"),
@@ -6492,10 +6491,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
         let first = runtime
-            .subscribe(recursive_reach_graph(), &storage)
+            .subscribe_one_sink(recursive_reach_graph(), &storage)
             .unwrap();
         let second = runtime
-            .subscribe(recursive_reach_graph(), &storage)
+            .subscribe_one_sink(recursive_reach_graph(), &storage)
             .unwrap();
 
         assert_eq!(

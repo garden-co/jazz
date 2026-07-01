@@ -79,7 +79,7 @@ fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
     let mut db = Database::new(albums_artists_schema(), storage).unwrap();
 
     let join1 = db
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("albums"),
             GraphBuilder::table("artists"),
             ["artist_id"],
@@ -88,7 +88,7 @@ fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
         .unwrap();
     // A second, similar join that shares the artists-by-id arrangement.
     let _join2 = db
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("albums").filter(PredicateExpr::gt("id", Value::U64(0))),
             GraphBuilder::table("artists"),
             ["artist_id"],
@@ -130,7 +130,7 @@ fn recursive_incremental_ticks_do_not_inflate_shared_edge_arrangements() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut db = Database::new(edges_schema(), storage).unwrap();
-    let sub = db.subscribe(reachability_graph()).unwrap();
+    let sub = db.subscribe_one_sink(reachability_graph()).unwrap();
     let _empty_initial = sub.recv().unwrap();
 
     // Tick 1: edge 1 -> 2 (recompute + arrangement preparation).
@@ -173,9 +173,9 @@ fn arrangement_shared_across_sub_ticks_is_applied_once_per_tick() {
     // The recursive subscription advances the shared edges-by-src arrangement
     // at sub_tick 1; the plain two-hop join advances it at sub_tick 0. Each
     // tick's edge delta must be incorporated exactly once regardless.
-    let _reach = db.subscribe(reachability_graph()).unwrap();
+    let _reach = db.subscribe_one_sink(reachability_graph()).unwrap();
     let two_hop = db
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             edge_pairs(),
             edge_pairs(),
             ["dst"],
