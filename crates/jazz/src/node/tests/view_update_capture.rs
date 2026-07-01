@@ -395,7 +395,7 @@ impl MaintainedSubscriptionViewSubscription {
             peer_complete_tx_payloads: BTreeSet::new(),
         };
         let output_tables = core.maintained_view_terminal_tables(shape).unwrap();
-        let result_member_adds: Vec<ResultRowEntry> = transitions
+        let result_member_adds = transitions
             .adds
             .into_iter()
             .filter(|member| {
@@ -404,18 +404,6 @@ impl MaintainedSubscriptionViewSubscription {
                     .is_some_and(|table| output_tables.contains_key(table))
             })
             .filter_map(|member| member.as_row())
-            .collect();
-        let result_member_adds = core
-            .expand_maintained_view_result_rows(
-                shape,
-                binding,
-                result_member_adds,
-                identity,
-                DurabilityTier::Global,
-            )
-            .unwrap()
-            .into_iter()
-            .filter(|entry| output_tables.contains_key(entry.0.as_str()))
             .collect();
         let update = driver
             .view_update(

@@ -855,32 +855,9 @@ impl PeerState {
                 tier,
             )?;
         let output_tables = node.maintained_view_terminal_tables(shape)?;
-        let result_row_adds = transitions
+        let result_member_adds = transitions
             .adds
             .into_iter()
-            .filter(|member| {
-                let Some(table_name) = member.table_name() else {
-                    return false;
-                };
-                result_table_filter.is_none_or(|table| table_name == table)
-                    && output_tables.contains_key(table_name)
-            })
-            .map(|member| {
-                member.as_row().ok_or(Error::InvalidStoredValue(
-                    "maintained result member is not row-shaped for closure expansion",
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let result_member_adds = node
-            .expand_maintained_view_result_rows(
-                shape,
-                binding,
-                result_row_adds,
-                self.identity(),
-                tier,
-            )?
-            .into_iter()
-            .map(ResultMemberEntry::from)
             .filter(|member| {
                 let Some(table_name) = member.table_name() else {
                     return false;
