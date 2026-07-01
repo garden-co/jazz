@@ -64,7 +64,7 @@ fn incremental_ticks_converge_on_cycles() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut db = Database::new(edges_schema(), storage).unwrap();
-    let sub = db.subscribe(reachability_graph()).unwrap();
+    let sub = db.subscribe_one_sink(reachability_graph()).unwrap();
     let _initial = sub.recv().unwrap();
 
     let mut batch = db.open_batch();
@@ -98,7 +98,7 @@ fn recompute_converges_on_cycles_at_subscribe() {
     db.commit_batch(batch).unwrap();
 
     let sub = db
-        .subscribe(reachability_graph())
+        .subscribe_one_sink(reachability_graph())
         .expect("subscribing over a cyclic graph must not hit the iteration limit");
     assert_eq!(
         sorted(sub.recv().unwrap().to_values().unwrap()),
@@ -111,7 +111,7 @@ fn retraction_recompute_converges_while_a_cycle_exists() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut db = Database::new(edges_schema(), storage).unwrap();
-    let sub = db.subscribe(reachability_graph()).unwrap();
+    let sub = db.subscribe_one_sink(reachability_graph()).unwrap();
     let _initial = sub.recv().unwrap();
 
     let mut batch = db.open_batch();

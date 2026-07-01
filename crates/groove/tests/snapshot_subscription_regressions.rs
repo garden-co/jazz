@@ -52,7 +52,7 @@ fn second_subscriber_to_prepared_recursive_graph_gets_full_initial_message() {
     db.commit_batch(batch).unwrap();
 
     // First subscriber: fresh recursive state, recompute path, full initial.
-    let first = db.subscribe(reachability_graph()).unwrap();
+    let first = db.subscribe_one_sink(reachability_graph()).unwrap();
     db.flush().unwrap();
     assert_eq!(
         first.recv().unwrap().to_values().unwrap().len(),
@@ -61,7 +61,7 @@ fn second_subscriber_to_prepared_recursive_graph_gets_full_initial_message() {
     );
 
     // Second subscriber: identical graph dedups to the same prepared node.
-    let second = db.subscribe(reachability_graph()).unwrap();
+    let second = db.subscribe_one_sink(reachability_graph()).unwrap();
     db.flush().unwrap();
     let initial = second.recv().unwrap().to_values().unwrap();
     assert_eq!(
@@ -78,7 +78,7 @@ fn hydrating_a_new_subscriber_must_not_steal_tick_deltas_from_existing_recursive
     let mut db = Database::new(edges_schema(), storage).unwrap();
 
     // Subscriber A: prepared by its first two commits.
-    let a = db.subscribe(reachability_graph()).unwrap();
+    let a = db.subscribe_one_sink(reachability_graph()).unwrap();
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     db.commit_batch(batch).unwrap();
@@ -91,7 +91,7 @@ fn hydrating_a_new_subscriber_must_not_steal_tick_deltas_from_existing_recursive
 
     // Subscriber B shares the same recursive node and gets an immediate
     // snapshot. That read must not steal A's later tick deltas.
-    let b = db.subscribe(reachability_graph()).unwrap();
+    let b = db.subscribe_one_sink(reachability_graph()).unwrap();
     assert!(!b.recv().unwrap().is_empty());
 
     let mut batch = db.open_batch();
@@ -127,7 +127,7 @@ fn one_shot_queries_do_not_perturb_subscription_streams() {
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     db.commit_batch(batch).unwrap();
 
-    let s = db.subscribe(GraphBuilder::table("edges")).unwrap();
+    let s = db.subscribe_one_sink(GraphBuilder::table("edges")).unwrap();
     assert!(!s.recv().unwrap().is_empty());
     let query = Query::Select(Box::new(
         Select::new([SelectItem::Wildcard]).from([TableRef::named("edges")]),
@@ -143,7 +143,7 @@ fn new_subscriber_uses_current_state_not_stale_hydrated_accumulated() {
     let mut db = Database::new(edges_schema(), storage).unwrap();
 
     // S1 hydrates and prepares the shared recursive state.
-    let s1 = db.subscribe(reachability_graph()).unwrap();
+    let s1 = db.subscribe_one_sink(reachability_graph()).unwrap();
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     db.commit_batch(batch).unwrap();
@@ -157,7 +157,7 @@ fn new_subscriber_uses_current_state_not_stale_hydrated_accumulated() {
     db.commit_batch(batch).unwrap();
 
     // S2's immediate initial snapshot must reflect storage as of subscription.
-    let s2 = db.subscribe(reachability_graph()).unwrap();
+    let s2 = db.subscribe_one_sink(reachability_graph()).unwrap();
     let mut values = s2.recv().unwrap().to_values().unwrap();
     values.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     assert_eq!(

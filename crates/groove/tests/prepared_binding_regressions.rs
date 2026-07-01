@@ -61,7 +61,7 @@ fn insert_edge(db: &mut Database<RocksDbStorage>, id: u64, src: u64, dst: u64) {
 fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
     let (_dir, mut db) = open_db();
     let shape = db
-        .prepare(
+        .prepare_one_sink(
             edges_by_src_shape_graph(),
             "edges_by_src",
             binding_descriptor(),
@@ -70,7 +70,9 @@ fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
         .unwrap();
 
     // Subscriber for src=7, whose receiver is dropped without unsubscribe.
-    let sub1 = db.bind_shape(shape.id(), &[Value::U64(7)]).unwrap();
+    let sub1 = db
+        .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .unwrap();
     let _initial = sub1.recv().unwrap();
     drop(sub1);
 
@@ -79,7 +81,9 @@ fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
     insert_edge(&mut db, 1, 7, 100);
 
     // Re-subscribing the same binding must start from weight 1, not 2.
-    let sub2 = db.bind_shape(shape.id(), &[Value::U64(7)]).unwrap();
+    let sub2 = db
+        .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .unwrap();
     let _initial = sub2.recv().unwrap();
 
     insert_edge(&mut db, 2, 7, 200);
@@ -96,14 +100,16 @@ fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
 fn second_identical_shape_does_not_wipe_existing_bindings() {
     let (_dir, mut db) = open_db();
     let shape_a = db
-        .prepare(
+        .prepare_one_sink(
             edges_by_src_shape_graph(),
             "edges_by_src",
             binding_descriptor(),
             ["src"],
         )
         .unwrap();
-    let sub_a = db.bind_shape(shape_a.id(), &[Value::U64(7)]).unwrap();
+    let sub_a = db
+        .bind_shape_one_sink(shape_a.id(), &[Value::U64(7)])
+        .unwrap();
     let _initial = sub_a.recv().unwrap();
 
     insert_edge(&mut db, 1, 7, 100);
@@ -115,7 +121,7 @@ fn second_identical_shape_does_not_wipe_existing_bindings() {
 
     // An identical shape interns to the same shared graph nodes.
     let _shape_b = db
-        .prepare(
+        .prepare_one_sink(
             edges_by_src_shape_graph(),
             "edges_by_src",
             binding_descriptor(),
@@ -135,14 +141,16 @@ fn pending_retraction_does_not_corrupt_freshly_hydrated_sibling_shape() {
     let (_dir, mut db) = open_db();
     // Shape A: src/dst projection.
     let shape_a = db
-        .prepare(
+        .prepare_one_sink(
             edges_by_src_shape_graph(),
             "edges_by_src",
             binding_descriptor(),
             ["src"],
         )
         .unwrap();
-    let sub_a = db.bind_shape(shape_a.id(), &[Value::U64(7)]).unwrap();
+    let sub_a = db
+        .bind_shape_one_sink(shape_a.id(), &[Value::U64(7)])
+        .unwrap();
     let _initial = sub_a.recv().unwrap();
     drop(sub_a);
 
@@ -160,7 +168,7 @@ fn pending_retraction_does_not_corrupt_freshly_hydrated_sibling_shape() {
         ProjectField::renamed("right.dst", "dst"),
     ]);
     let shape_b = db
-        .prepare(
+        .prepare_one_sink(
             shape_b,
             "edges_by_src",
             binding_descriptor(),
@@ -168,7 +176,9 @@ fn pending_retraction_does_not_corrupt_freshly_hydrated_sibling_shape() {
         )
         .unwrap();
 
-    let sub_b = db.bind_shape(shape_b.id(), &[Value::U64(7)]).unwrap();
+    let sub_b = db
+        .bind_shape_one_sink(shape_b.id(), &[Value::U64(7)])
+        .unwrap();
     let _initial = sub_b.recv().unwrap();
 
     insert_edge(&mut db, 2, 7, 200);

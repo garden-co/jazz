@@ -59,7 +59,7 @@ fn anti_join() -> GraphBuilder {
 #[test]
 fn same_tick_left_and_blocking_right_emit_nothing() {
     let (_dir, mut db) = open_db();
-    let sub = db.subscribe(anti_join()).unwrap();
+    let sub = db.subscribe_one_sink(anti_join()).unwrap();
     let _initial = sub.recv().unwrap();
 
     // Album and its blocker arrive in one commit: the album is suppressed
@@ -85,7 +85,7 @@ fn same_tick_left_and_blocking_right_emit_nothing() {
 #[test]
 fn same_tick_left_insert_and_last_blocker_retraction_emit_once() {
     let (_dir, mut db) = open_db();
-    let sub = db.subscribe(anti_join()).unwrap();
+    let sub = db.subscribe_one_sink(anti_join()).unwrap();
     let _initial = sub.recv().unwrap();
 
     // Pre-existing blocked album.

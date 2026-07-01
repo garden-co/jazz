@@ -604,7 +604,7 @@ fn prepared_reachability_shape(
     database: &mut Database<RocksDbStorage>,
 ) -> crate::ivm::PreparedShape {
     database
-        .prepare(
+        .prepare_one_sink(
             prepared_reachability_graph(GraphBuilder::table("edges"), 16),
             "prepared-reach",
             RecordDescriptor::new([("seed", ColumnType::U64.value_type())]),
@@ -623,7 +623,7 @@ fn prepared_reachability_with_antijoin_shape(
         ["src", "dst"],
     );
     database
-        .prepare(
+        .prepare_one_sink(
             prepared_reachability_graph(unblocked, 16),
             "prepared-reach",
             RecordDescriptor::new([("seed", ColumnType::U64.value_type())]),
@@ -773,7 +773,9 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
     let column_families = schema.column_families();
     let storage = RocksDbStorage::open(temp_dir.path(), &column_families).unwrap();
     let mut database = Database::new(schema.clone(), storage).unwrap();
-    let subscription = database.subscribe(GraphBuilder::table("albums")).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     {
@@ -958,7 +960,9 @@ fn commit_metrics_split_storage_and_tick_work() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let subscription = database.subscribe(GraphBuilder::table("albums")).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
     let _initial = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
@@ -1111,7 +1115,9 @@ fn subscribe_sends_empty_hydration_snapshot_without_writes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let subscription_id = database.subscribe(GraphBuilder::table("albums")).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
 
     assert!(subscription_id.try_recv().unwrap().is_empty());
     database.flush().unwrap();
@@ -1206,7 +1212,7 @@ fn atomic_commit_path_supports_indexed_join_and_recursive_workloads() {
     let join_storage = MemoryStorage::new(&["albums", "artists"]);
     let mut joined = Database::new(albums_artists_schema(), join_storage).unwrap();
     let subscription = joined
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("albums"),
             GraphBuilder::table("artists"),
             ["artist_id"],
@@ -1231,7 +1237,9 @@ fn atomic_commit_path_supports_indexed_join_and_recursive_workloads() {
 
     let recursive_storage = MemoryStorage::new(&["edges"]);
     let mut recursive = Database::new(edges_schema(), recursive_storage).unwrap();
-    let subscription = recursive.subscribe(reachability_graph(16)).unwrap();
+    let subscription = recursive
+        .subscribe_one_sink(reachability_graph(16))
+        .unwrap();
     let mut batch = recursive.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
@@ -1253,11 +1261,11 @@ fn subscriptions_reject_unknown_tables_and_indices() {
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
     assert!(matches!(
-        database.subscribe(GraphBuilder::table("missing")),
+        database.subscribe_one_sink(GraphBuilder::table("missing")),
         Err(Error::IvmRuntime(IvmRuntimeError::TableNotFound(table))) if table == "missing"
     ));
     assert!(matches!(
-        database.subscribe(GraphBuilder::index("albums", "missing_idx")),
+        database.subscribe_one_sink(GraphBuilder::index("albums", "missing_idx")),
         Err(Error::IvmRuntime(IvmRuntimeError::IndexNotFound(index))) if index == "missing_idx"
     ));
 }
@@ -1468,7 +1476,9 @@ fn table_subscriptions_receive_insert_update_and_delete_messages() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let subscription_id = database.subscribe(GraphBuilder::table("albums")).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -1509,7 +1519,9 @@ fn dropping_subscription_receiver_unsubscribes_on_next_message() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let subscription = database.subscribe(GraphBuilder::table("albums")).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
     let subscription_id = subscription.id();
     drop(subscription);
 
@@ -1536,7 +1548,9 @@ fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() {
     );
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(GraphBuilder::table("albums")).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
     database.flush().unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -1669,7 +1683,7 @@ fn subscription_reports_incremental_contains_filter_deltas() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription = database
-        .subscribe(
+        .subscribe_one_sink(
             GraphBuilder::table("albums")
                 .filter(PredicateExpr::Contains {
                     field: "title".to_owned(),
@@ -1744,10 +1758,10 @@ fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
             value_field: "wanted".to_owned(),
         });
     let shape = database
-        .prepare(graph, "title_eq_param", binding_descriptor, ["wanted"])
+        .prepare_one_sink(graph, "title_eq_param", binding_descriptor, ["wanted"])
         .unwrap();
     let subscription = database
-        .bind_shape(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .bind_shape_one_sink(shape.id(), &[Value::String("Blue Train".to_owned())])
         .unwrap();
 
     assert!(subscription.recv().unwrap().is_empty());
@@ -1794,7 +1808,7 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
         ProjectField::renamed("left.wanted", "__routing_wanted"),
     ]);
     let shape = database
-        .prepare(
+        .prepare_one_sink(
             graph,
             "hidden_title_eq_param",
             binding_descriptor,
@@ -1806,7 +1820,7 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
         ("title", ColumnType::String.value_type()),
     ]);
     let subscription = database
-        .bind_shape_with_output(
+        .bind_shape_one_sink_with_output(
             shape.id(),
             &[Value::String("Blue Train".to_owned())],
             public_output,
@@ -1870,7 +1884,7 @@ fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
         ProjectField::renamed("left.wanted", "__routing_wanted"),
     ]);
     let shape = database
-        .prepare_with_routing(
+        .prepare_one_sink_with_routing(
             output_graph,
             routing_graph,
             "explicit_route_title_param",
@@ -1879,7 +1893,7 @@ fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
         )
         .unwrap();
     let subscription = database
-        .bind_shape(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .bind_shape_one_sink(shape.id(), &[Value::String("Blue Train".to_owned())])
         .unwrap();
 
     let initial = subscription.recv().unwrap();
@@ -2000,7 +2014,7 @@ fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
     ]);
 
     let shape = database
-        .prepare_with_routing(
+        .prepare_one_sink_with_routing(
             output_graph,
             routing_graph,
             "nullable_doc_route",
@@ -2009,7 +2023,7 @@ fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
         )
         .unwrap();
     let subscription = database
-        .bind_shape(
+        .bind_shape_one_sink(
             shape.id(),
             &[
                 Value::Nullable(Some(Box::new(Value::Uuid(owner)))),
@@ -2098,7 +2112,7 @@ fn prepared_subscription_routes_null_nullable_binding_keys() {
     ]);
 
     let shape = database
-        .prepare_with_routing(
+        .prepare_one_sink_with_routing(
             output_graph,
             null_routing_graph,
             "nullable_doc_null_route",
@@ -2107,7 +2121,7 @@ fn prepared_subscription_routes_null_nullable_binding_keys() {
         )
         .unwrap();
     let subscription = database
-        .bind_shape(shape.id(), &[Value::Nullable(None), Value::Nullable(None)])
+        .bind_shape_one_sink(shape.id(), &[Value::Nullable(None), Value::Nullable(None)])
         .unwrap();
 
     assert_eq!(
@@ -2138,7 +2152,7 @@ fn prepared_subscription_rejects_routing_graph_missing_clean_output_fields() {
     ]);
 
     assert!(matches!(
-        database.prepare_with_routing(
+        database.prepare_one_sink_with_routing(
             output_graph,
             routing_graph,
             "missing_route_title_param",
@@ -2187,7 +2201,7 @@ fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_b
         ProjectField::renamed("left.wanted", "__routing_wanted"),
     ]);
     let shape = database
-        .prepare_with_routing(
+        .prepare_one_sink_with_routing(
             output_graph,
             routing_graph,
             "existing_route_title_param",
@@ -2196,7 +2210,7 @@ fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_b
         )
         .unwrap();
     let subscription = database
-        .bind_shape(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .bind_shape_one_sink(shape.id(), &[Value::String("Blue Train".to_owned())])
         .unwrap();
 
     assert_eq!(
@@ -2244,7 +2258,7 @@ fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_
     let routing_graph = GraphBuilder::recursive(seed, step, "frontier", 16);
 
     let shape = database
-        .prepare_with_routing(
+        .prepare_one_sink_with_routing(
             output_graph,
             routing_graph,
             "prepared-routed-reach",
@@ -2252,7 +2266,9 @@ fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_
             ["__routing_seed"],
         )
         .unwrap();
-    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
 
     let mut values = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut values);
@@ -2308,7 +2324,7 @@ fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_b
         ProjectField::renamed("right.wanted", "__routing_wanted"),
     ]);
     let shape = database
-        .prepare_with_routing(
+        .prepare_one_sink_with_routing(
             output_graph,
             routing_graph,
             "double_route_title_param",
@@ -2317,7 +2333,7 @@ fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_b
         )
         .unwrap();
     let subscription = database
-        .bind_shape(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .bind_shape_one_sink(shape.id(), &[Value::String("Blue Train".to_owned())])
         .unwrap();
 
     assert_eq!(
@@ -2353,10 +2369,10 @@ fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
             needle_field: "needle".to_owned(),
         });
     let shape = database
-        .prepare(graph, "needle_param", binding_descriptor, ["needle"])
+        .prepare_one_sink(graph, "needle_param", binding_descriptor, ["needle"])
         .unwrap();
     let subscription = database
-        .bind_shape(shape.id(), &[Value::String("Train".to_owned())])
+        .bind_shape_one_sink(shape.id(), &[Value::String("Train".to_owned())])
         .unwrap();
 
     assert!(subscription.recv().unwrap().is_empty());
@@ -2698,7 +2714,7 @@ fn unwrap_nullable_retractions_flow_symmetrically() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["tracks", "indices"]).unwrap();
     let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
     let subscription = database
-        .subscribe(
+        .subscribe_one_sink(
             GraphBuilder::table("tracks")
                 .unwrap_nullable("disc")
                 .project(["id", "disc"]),
@@ -2833,7 +2849,7 @@ fn arg_max_by_hydrates_and_tracks_winner_changes() {
     batch.insert("history", history_values(2, 5, 1, "other"));
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(history_arg_max()).unwrap();
+    let subscription = database.subscribe_one_sink(history_arg_max()).unwrap();
     let mut initial = subscription.recv().unwrap().to_values().unwrap();
     initial.sort_by_key(|(values, _)| match values[0] {
         Value::U64(row) => row,
@@ -2875,7 +2891,7 @@ fn arg_max_by_suppresses_non_winner_and_net_zero_deltas() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
-    let subscription = database.subscribe(history_arg_max()).unwrap();
+    let subscription = database.subscribe_one_sink(history_arg_max()).unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -2903,7 +2919,7 @@ fn arg_max_by_handles_multi_delta_same_group_and_tie_by_pk_order() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
-    let subscription = database.subscribe(history_arg_max()).unwrap();
+    let subscription = database.subscribe_one_sink(history_arg_max()).unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -2929,7 +2945,7 @@ fn arg_min_by_hydrates_initial_snapshot_winner() {
     batch.insert("history", history_values(2, 5, 1, "other"));
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(history_arg_min()).unwrap();
+    let subscription = database.subscribe_one_sink(history_arg_min()).unwrap();
     let mut initial = subscription.recv().unwrap().to_values().unwrap();
     initial.sort_by_key(|(values, _)| match values[0] {
         Value::U64(row) => row,
@@ -2949,7 +2965,7 @@ fn arg_min_by_tracks_lower_insert_and_current_winner_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
-    let subscription = database.subscribe(history_arg_min()).unwrap();
+    let subscription = database.subscribe_one_sink(history_arg_min()).unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -2988,7 +3004,7 @@ fn arg_min_by_handles_same_tick_replacement_and_tie_by_pk_order() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
-    let subscription = database.subscribe(history_arg_min()).unwrap();
+    let subscription = database.subscribe_one_sink(history_arg_min()).unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -3024,7 +3040,9 @@ fn top_by_hydrates_limit_two() {
     batch.insert("history", history_values(1, 20, 1, "second"));
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(history_top_by_stamp_asc(2)).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(2))
+        .unwrap();
     let mut initial = subscription.recv().unwrap().to_values().unwrap();
     initial.sort_by_key(|(values, _)| match values[1] {
         Value::U64(stamp) => stamp,
@@ -3044,7 +3062,9 @@ fn top_by_boundary_insert_and_delete_updates_window() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
-    let subscription = database.subscribe(history_top_by_stamp_asc(2)).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(2))
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -3082,7 +3102,9 @@ fn top_by_suppresses_outside_window_changes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
-    let subscription = database.subscribe(history_top_by_stamp_asc(2)).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(2))
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -3114,7 +3136,9 @@ fn top_by_descending_order_keeps_largest_values() {
     batch.insert("history", history_values(1, 30, 1, "third"));
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(history_top_by_stamp_desc(2)).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_desc(2))
+        .unwrap();
     let mut initial = subscription.recv().unwrap().to_values().unwrap();
     initial.sort_by_key(|(values, _)| match values[1] {
         Value::U64(stamp) => std::cmp::Reverse(stamp),
@@ -3142,7 +3166,7 @@ fn top_by_offset_keeps_requested_window() {
     database.commit_batch(batch).unwrap();
 
     let subscription = database
-        .subscribe(history_top_by_stamp_asc_offset(1, 1))
+        .subscribe_one_sink(history_top_by_stamp_asc_offset(1, 1))
         .unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
@@ -3187,7 +3211,7 @@ fn top_by_orders_nullable_sort_keys_null_first() {
     database.commit_batch(batch).unwrap();
 
     let subscription = database
-        .subscribe(GraphBuilder::top_by(
+        .subscribe_one_sink(GraphBuilder::top_by(
             GraphBuilder::table("scores"),
             std::iter::empty::<&str>(),
             [TopByOrder::asc("score")],
@@ -3214,7 +3238,9 @@ fn top_by_uses_stable_tie_field() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
-    let subscription = database.subscribe(history_top_by_stamp_asc(1)).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(1))
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -3245,7 +3271,7 @@ fn arg_max_by_feeds_join_and_anti_join() {
     let mut database = Database::new(history_schema(), storage).unwrap();
 
     let visible = database
-        .subscribe(GraphBuilder::anti_join(
+        .subscribe_one_sink(GraphBuilder::anti_join(
             history_arg_max().project(["row", "stamp"]),
             GraphBuilder::table("blockers"),
             ["row"],
@@ -3306,7 +3332,7 @@ fn arg_max_by_routes_through_prepared_bindings() {
     let mut database = Database::new(history_schema(), storage).unwrap();
     let params = RecordDescriptor::new([("row", ColumnType::U64.value_type())]);
     let shape = database
-        .prepare(
+        .prepare_one_sink(
             GraphBuilder::join(
                 GraphBuilder::binding_source("row_param", params),
                 history_arg_max().project(["row", "stamp"]),
@@ -3322,7 +3348,9 @@ fn arg_max_by_routes_through_prepared_bindings() {
             ["row"],
         )
         .unwrap();
-    let sub = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let sub = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
     assert!(sub.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -3425,7 +3453,7 @@ fn arg_max_by_tracks_union_of_filtered_sources() {
         ["row"],
         ["stamp", "node"],
     );
-    let subscription = database.subscribe(graph.clone()).unwrap();
+    let subscription = database.subscribe_one_sink(graph.clone()).unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -3487,7 +3515,7 @@ fn arg_max_by_tracks_join_filter_input() {
         ProjectField::renamed("left.title", "title"),
     ]);
     let graph = GraphBuilder::arg_max_by(joined_history, ["row"], ["stamp", "node"]);
-    let subscription = database.subscribe(graph.clone()).unwrap();
+    let subscription = database.subscribe_one_sink(graph.clone()).unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -3582,7 +3610,7 @@ fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
     let mut database = Database::new(history_schema(), storage).unwrap();
 
     let err = database
-        .subscribe(GraphBuilder::arg_max_by(
+        .subscribe_one_sink(GraphBuilder::arg_max_by(
             GraphBuilder::table("history"),
             ["row"],
             ["node", "stamp"],
@@ -3591,7 +3619,7 @@ fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
     assert!(format!("{err}").contains("requires primary key"));
 
     database
-        .subscribe(GraphBuilder::recursive(
+        .subscribe_one_sink(GraphBuilder::recursive(
             history_arg_max().project(["row", "stamp"]),
             GraphBuilder::frontier_source(
                 "frontier",
@@ -3678,7 +3706,7 @@ fn unwrap_nullable_can_feed_prepared_binding_join_key() {
 
     let binding_descriptor = RecordDescriptor::new([("disc", ColumnType::U64.value_type())]);
     let shape = database
-        .prepare(
+        .prepare_one_sink(
             GraphBuilder::join(
                 GraphBuilder::binding_source("disc_param", binding_descriptor),
                 GraphBuilder::table("tracks").unwrap_nullable("disc"),
@@ -3694,7 +3722,9 @@ fn unwrap_nullable_can_feed_prepared_binding_join_key() {
             ["id"],
         )
         .unwrap();
-    let disc_one = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let disc_one = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
     assert_eq!(
         expect_recv_vals(&disc_one),
         [(vec![Value::U64(1), Value::U64(1)], 1)]
@@ -3726,7 +3756,7 @@ fn prepared_binding_join_hydrates_anti_join_input() {
         ["id"],
     );
     let shape = database
-        .prepare(
+        .prepare_one_sink(
             GraphBuilder::join(
                 GraphBuilder::binding_source("disc_param", binding_descriptor),
                 visible,
@@ -3742,7 +3772,9 @@ fn prepared_binding_join_hydrates_anti_join_input() {
             ["id"],
         )
         .unwrap();
-    let disc_one = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let disc_one = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
     assert_eq!(
         expect_recv_vals(&disc_one),
         [(vec![Value::U64(1), Value::U64(1)], 1)]
@@ -3799,7 +3831,7 @@ fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
         ["id"],
     );
     let shape = database
-        .prepare(
+        .prepare_one_sink(
             GraphBuilder::join(
                 GraphBuilder::binding_source("owner_param", binding_descriptor),
                 visible,
@@ -3816,7 +3848,7 @@ fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
         )
         .unwrap();
     let bound = database
-        .bind_shape(shape.id(), &[Value::Uuid(owner)])
+        .bind_shape_one_sink(shape.id(), &[Value::Uuid(owner)])
         .unwrap();
     assert_eq!(
         expect_recv_vals(&bound),
@@ -3856,7 +3888,7 @@ fn subscribe_supports_recursive_hydration_snapshot_message() {
     insert_edge(&mut batch, 2, 2, 3);
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(reachability_graph(16)).unwrap();
+    let subscription = database.subscribe_one_sink(reachability_graph(16)).unwrap();
     database.flush().unwrap();
     let mut values = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut values);
@@ -3891,7 +3923,9 @@ fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let subscription_id = database.subscribe(GraphBuilder::table("albums")).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -3931,9 +3965,11 @@ fn inserts_over_existing_primary_keys_are_rejected() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "indices"]).unwrap();
     let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
-    database.subscribe(GraphBuilder::table("albums")).unwrap();
     database
-        .subscribe(GraphBuilder::index("albums", "albums_by_title"))
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
+    database
+        .subscribe_one_sink(GraphBuilder::index("albums", "albums_by_title"))
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -4000,7 +4036,9 @@ fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let subscription = database.subscribe(GraphBuilder::table("albums")).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
     let _initial = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
@@ -4275,7 +4313,7 @@ fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe(reachability_graph(16)).unwrap();
+    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
@@ -4303,7 +4341,7 @@ fn recursive_graph_subscriptions_retract_derived_paths_after_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe(reachability_graph(16)).unwrap();
+    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
@@ -4351,7 +4389,9 @@ fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let shape = prepared_reachability_shape(&mut database);
-    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
     let _empty = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
@@ -4382,7 +4422,9 @@ fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let shape = prepared_reachability_shape(&mut database);
-    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
     let _empty = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
@@ -4414,7 +4456,9 @@ fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let shape = prepared_reachability_shape(&mut database);
-    let first = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let first = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
     let _empty = first.recv().unwrap();
 
     let mut batch = database.open_batch();
@@ -4434,7 +4478,9 @@ fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
         ]
     );
 
-    let second = database.bind_shape(shape.id(), &[Value::U64(9)]).unwrap();
+    let second = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(9)])
+        .unwrap();
     let mut next = expect_recv_vals(&second);
     sort_pairs_by_value(&mut next);
     assert_eq!(
@@ -4456,7 +4502,9 @@ fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
         1
     );
 
-    let third = database.bind_shape(shape.id(), &[Value::U64(5)]).unwrap();
+    let third = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(5)])
+        .unwrap();
     let mut third_values = expect_recv_vals(&third);
     sort_pairs_by_value(&mut third_values);
     assert_eq!(
@@ -4474,7 +4522,9 @@ fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_input() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "blockers"]).unwrap();
     let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
     let shape = prepared_reachability_with_antijoin_shape(&mut database);
-    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
     let _empty = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
@@ -4508,7 +4558,9 @@ fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "blockers"]).unwrap();
     let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
     let shape = prepared_reachability_with_antijoin_shape(&mut database);
-    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
     let _empty = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
@@ -4542,7 +4594,7 @@ fn recursive_graph_subscriptions_collapse_duplicate_derivations() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe(reachability_graph(16)).unwrap();
+    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
@@ -4560,7 +4612,7 @@ fn recursive_graph_subscriptions_recompute_after_edge_update() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe(reachability_graph(16)).unwrap();
+    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
@@ -4590,7 +4642,7 @@ fn recursive_graph_subscriptions_incrementally_extend_existing_reach_with_new_ed
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe(reachability_graph(16)).unwrap();
+    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
@@ -4633,7 +4685,7 @@ fn recursive_graph_subscriptions_incrementally_extend_new_seed_with_existing_edg
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription_id = database.subscribe(reachability_graph(16)).unwrap();
+    let subscription_id = database.subscribe_one_sink(reachability_graph(16)).unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 2, 3);
@@ -4660,7 +4712,7 @@ fn recursive_graph_subscriptions_converge_on_self_cycles() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
-    let subscription = database.subscribe(reachability_graph(2)).unwrap();
+    let subscription = database.subscribe_one_sink(reachability_graph(2)).unwrap();
     let _initial = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
@@ -4692,7 +4744,7 @@ fn recursive_graphs_reject_seed_and_step_output_descriptor_mismatch() {
     );
 
     assert!(matches!(
-        database.subscribe(graph).unwrap_err(),
+        database.subscribe_one_sink(graph).unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::GraphOutputMismatch)
     ));
 }
@@ -4714,7 +4766,7 @@ fn recursive_graphs_reject_nested_recursion_for_v0() {
     );
 
     assert!(matches!(
-        database.subscribe(graph).unwrap_err(),
+        database.subscribe_one_sink(graph).unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::UnsupportedNestedRecursion)
     ));
 }
@@ -4743,8 +4795,12 @@ fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
-    let first = database.subscribe(GraphBuilder::table("albums")).unwrap();
-    let second = database.subscribe(GraphBuilder::table("albums")).unwrap();
+    let first = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
+    let second = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
     let first_output = database
         .ivm_runtime
         .subscription_output_node(first.id())
@@ -4771,7 +4827,7 @@ fn union_subscriptions_receive_deltas_from_multiple_tables() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "archived_albums"]).unwrap();
     let mut database = Database::new(two_album_tables_schema(), storage).unwrap();
     let subscription_id = database
-        .subscribe(GraphBuilder::union([
+        .subscribe_one_sink(GraphBuilder::union([
             GraphBuilder::table("albums"),
             GraphBuilder::table("archived_albums"),
         ]))
@@ -4807,7 +4863,7 @@ fn union_all_subscriptions_preserve_duplicate_derivations() {
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let album_titles = GraphBuilder::table("albums").project(["title"]);
     let subscription_id = database
-        .subscribe(GraphBuilder::union([album_titles.clone(), album_titles]))
+        .subscribe_one_sink(GraphBuilder::union([album_titles.clone(), album_titles]))
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -4832,7 +4888,9 @@ fn filter_subscriptions_emit_only_matching_rows() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
-        .subscribe(GraphBuilder::table("albums").filter(PredicateExpr::gt("id", Value::U64(10))))
+        .subscribe_one_sink(
+            GraphBuilder::table("albums").filter(PredicateExpr::gt("id", Value::U64(10))),
+        )
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -4858,7 +4916,7 @@ fn project_subscriptions_emit_projected_records() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
-        .subscribe(GraphBuilder::table("albums").project(["title"]))
+        .subscribe_one_sink(GraphBuilder::table("albums").project(["title"]))
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -4885,8 +4943,8 @@ fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
         ))
         .project(["title"]);
 
-    let first = database.subscribe(graph.clone()).unwrap();
-    let second = database.subscribe(graph).unwrap();
+    let first = database.subscribe_one_sink(graph.clone()).unwrap();
+    let second = database.subscribe_one_sink(graph).unwrap();
     let first_output = database
         .ivm_runtime
         .subscription_output_node(first.id())
@@ -4918,7 +4976,7 @@ fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let subscription_id = database
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("albums"),
             GraphBuilder::table("artists"),
             ["artist_id"],
@@ -4965,7 +5023,7 @@ fn join_subscriptions_match_array_key_elements() {
     let storage = MemoryStorage::new(&["files", "file_parts"]);
     let mut database = Database::new(files_parts_schema(), storage).unwrap();
     let subscription_id = database
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("files"),
             GraphBuilder::table("file_parts"),
             ["part_ids"],
@@ -5023,7 +5081,7 @@ fn join_subscriptions_match_persisted_array_key_elements() {
     let storage = MemoryStorage::new(&["files", "file_parts"]);
     let mut database = Database::new(files_parts_schema(), storage).unwrap();
     let subscription_id = database
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("files"),
             GraphBuilder::table("file_parts"),
             ["part_ids"],
@@ -5118,7 +5176,7 @@ fn join_subscriptions_match_nullable_array_key_elements() {
     let storage = MemoryStorage::new(&["files", "file_parts"]);
     let mut database = Database::new(nullable_files_parts_schema(), storage).unwrap();
     let subscription_id = database
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("files"),
             GraphBuilder::table("file_parts"),
             ["part_ids"],
@@ -5173,7 +5231,7 @@ fn index_subscriptions_expand_array_key_elements() {
     let storage = MemoryStorage::new(&["files", "indices"]);
     let mut database = Database::new(indexed_files_schema(), storage).unwrap();
     let subscription = database
-        .subscribe(GraphBuilder::index("files", "files_by_part_ids"))
+        .subscribe_one_sink(GraphBuilder::index("files", "files_by_part_ids"))
         .unwrap();
 
     let part_a = uuid(0xa);
@@ -5300,7 +5358,7 @@ fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let subscription_id = database
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("albums"),
             GraphBuilder::table("artists"),
             ["artist_id"],
@@ -5348,7 +5406,7 @@ fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let subscription_id = database
-        .subscribe(GraphBuilder::join(
+        .subscribe_one_sink(GraphBuilder::join(
             GraphBuilder::table("albums"),
             GraphBuilder::table("artists"),
             ["artist_id"],
@@ -5430,7 +5488,7 @@ fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let subscription = database
-        .subscribe(GraphBuilder::anti_join(
+        .subscribe_one_sink(GraphBuilder::anti_join(
             GraphBuilder::table("albums"),
             GraphBuilder::table("artists"),
             ["artist_id"],
@@ -5461,7 +5519,7 @@ fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let subscription = database
-        .subscribe(GraphBuilder::anti_join(
+        .subscribe_one_sink(GraphBuilder::anti_join(
             GraphBuilder::table("albums"),
             GraphBuilder::table("artists"),
             ["artist_id"],
@@ -5507,7 +5565,7 @@ fn anti_join_only_changes_when_right_count_crosses_zero() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "blocks"]).unwrap();
     let mut database = Database::new(albums_blockers_schema(), storage).unwrap();
     let subscription = database
-        .subscribe(GraphBuilder::anti_join(
+        .subscribe_one_sink(GraphBuilder::anti_join(
             GraphBuilder::table("albums"),
             GraphBuilder::table("blocks"),
             ["artist_id"],
@@ -5579,7 +5637,7 @@ fn anti_join_hydration_snapshot_filters_existing_right_matches() {
     database.commit_batch(batch).unwrap();
 
     let subscription = database
-        .subscribe(GraphBuilder::anti_join(
+        .subscribe_one_sink(GraphBuilder::anti_join(
             GraphBuilder::table("albums"),
             GraphBuilder::table("artists"),
             ["artist_id"],
@@ -5611,7 +5669,9 @@ fn anti_join_filters_identical_descriptors_before_projection() {
     batch.insert("edges", vec![Value::U64(2), Value::U64(8), Value::U64(4)]);
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(unblocked_edges_graph()).unwrap();
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![Value::U64(8), Value::U64(4)], 1)]
@@ -5660,7 +5720,9 @@ fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor_block
     }
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(unblocked_edges_graph()).unwrap();
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [
@@ -5684,7 +5746,9 @@ fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives() {
     batch.insert("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(unblocked_edges_graph()).unwrap();
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![Value::U64(4), Value::U64(3)], 1)]
@@ -5713,7 +5777,9 @@ fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() {
     batch.insert("edges", vec![Value::U64(1), Value::U64(8), Value::U64(4)]);
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(unblocked_edges_graph()).unwrap();
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![Value::U64(8), Value::U64(4)], 1)]
@@ -5751,7 +5817,9 @@ fn anti_join_retracts_when_right_update_moves_onto_left_key() {
     );
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(unblocked_edges_graph()).unwrap();
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![Value::U64(4), Value::U64(3)], 1)]
@@ -5780,7 +5848,9 @@ fn anti_join_resubscribe_hydrates_from_storage_after_unretained_changes() {
     batch.insert("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(unblocked_edges_graph()).unwrap();
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![Value::U64(4), Value::U64(3)], 1)]
@@ -5794,7 +5864,9 @@ fn anti_join_resubscribe_hydrates_from_storage_after_unretained_changes() {
     );
     database.commit_batch(batch).unwrap();
 
-    let subscription = database.subscribe(unblocked_edges_graph()).unwrap();
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 }
 
@@ -5824,15 +5896,19 @@ fn parameterized_shape_hydrates_and_routes_by_param() {
     database.commit_batch(batch).unwrap();
 
     let shape = database
-        .prepare(
+        .prepare_one_sink(
             artist_album_shape_graph(),
             "artist_params",
             artist_binding_descriptor(),
             ["artist_id"],
         )
         .unwrap();
-    let coltrane = database.bind_shape(shape.id(), &[Value::U64(7)]).unwrap();
-    let miles = database.bind_shape(shape.id(), &[Value::U64(8)]).unwrap();
+    let coltrane = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .unwrap();
+    let miles = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(8)])
+        .unwrap();
 
     assert_eq!(
         expect_try_recv_vals(&coltrane),
@@ -5900,15 +5976,19 @@ fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
     database.commit_batch(batch).unwrap();
 
     let shape = database
-        .prepare(
+        .prepare_one_sink(
             artist_album_shape_graph(),
             "artist_params",
             artist_binding_descriptor(),
             ["artist_id"],
         )
         .unwrap();
-    let first = database.bind_shape(shape.id(), &[Value::U64(7)]).unwrap();
-    let second = database.bind_shape(shape.id(), &[Value::U64(7)]).unwrap();
+    let first = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .unwrap();
+    let second = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .unwrap();
 
     assert_eq!(expect_try_recv_vals(&first).len(), 1);
     assert_eq!(expect_try_recv_vals(&second).len(), 1);
@@ -6115,7 +6195,7 @@ fn prepared_subscription_filters_not_equal_parameter_predicates() {
         value_field: "title_param".to_owned(),
     });
     let prepared = database
-        .prepare(
+        .prepare_one_sink(
             graph,
             "title_neq_params",
             binding_descriptor,
@@ -6123,7 +6203,7 @@ fn prepared_subscription_filters_not_equal_parameter_predicates() {
         )
         .unwrap();
     let sub = database
-        .bind_shape(prepared.id(), &[Value::String("Blue Train".to_owned())])
+        .bind_shape_one_sink(prepared.id(), &[Value::String("Blue Train".to_owned())])
         .unwrap();
 
     assert_eq!(
@@ -6283,7 +6363,7 @@ fn graph_level_prepare_rejects_output_key_fields_not_in_output_descriptor() {
 
     assert!(matches!(
         database
-            .prepare(graph, "artist_params", binding_descriptor, ["missing"])
+            .prepare_one_sink(graph, "artist_params", binding_descriptor, ["missing"])
             .unwrap_err(),
         Error::IvmRuntime(IvmRuntimeError::ShapeKeyFieldNotFound(field)) if field == "missing"
     ));
@@ -6307,7 +6387,7 @@ fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
     ]);
 
     let _shape = database
-        .prepare(graph, "artist_params", binding_descriptor, ["artist_id"])
+        .prepare_one_sink(graph, "artist_params", binding_descriptor, ["artist_id"])
         .unwrap();
     let retained = database.ivm_runtime.retained_node_ids();
     let retained_output_nodes = retained
@@ -6531,7 +6611,11 @@ fn binding_sources_are_rejected_outside_prepared_shapes() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
 
-    assert!(database.subscribe(artist_album_shape_graph()).is_err());
+    assert!(
+        database
+            .subscribe_one_sink(artist_album_shape_graph())
+            .is_err()
+    );
 }
 
 #[test]
@@ -6545,8 +6629,8 @@ fn duplicate_join_subscriptions_share_state_without_double_applying_deltas() {
         ["artist_id"],
         ["id"],
     );
-    let first = database.subscribe(graph.clone()).unwrap();
-    let second = database.subscribe(graph).unwrap();
+    let first = database.subscribe_one_sink(graph.clone()).unwrap();
+    let second = database.subscribe_one_sink(graph).unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -7638,8 +7722,8 @@ fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
     {
         let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "indices"]).unwrap();
         let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
-        database.subscribe(table_graph.clone()).unwrap();
-        database.subscribe(index_graph.clone()).unwrap();
+        database.subscribe_one_sink(table_graph.clone()).unwrap();
+        database.subscribe_one_sink(index_graph.clone()).unwrap();
 
         let mut batch = database.open_batch();
         batch.insert(
@@ -7652,8 +7736,8 @@ fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
     {
         let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "indices"]).unwrap();
         let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
-        let table_subscription_id = database.subscribe(table_graph).unwrap();
-        let index_subscription_id = database.subscribe(index_graph).unwrap();
+        let table_subscription_id = database.subscribe_one_sink(table_graph).unwrap();
+        let index_subscription_id = database.subscribe_one_sink(index_graph).unwrap();
 
         database.flush().unwrap();
         assert_eq!(
@@ -7717,8 +7801,8 @@ fn persisted_indices_can_be_deleted_after_restart() {
     {
         let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "indices"]).unwrap();
         let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
-        database.subscribe(table_graph.clone()).unwrap();
-        database.subscribe(index_graph.clone()).unwrap();
+        database.subscribe_one_sink(table_graph.clone()).unwrap();
+        database.subscribe_one_sink(index_graph.clone()).unwrap();
 
         let mut batch = database.open_batch();
         batch.insert(
@@ -7731,8 +7815,8 @@ fn persisted_indices_can_be_deleted_after_restart() {
     {
         let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "indices"]).unwrap();
         let mut database = Database::new(indexed_albums_schema(), storage).unwrap();
-        let table_subscription_id = database.subscribe(table_graph).unwrap();
-        let index_subscription_id = database.subscribe(index_graph).unwrap();
+        let table_subscription_id = database.subscribe_one_sink(table_graph).unwrap();
+        let index_subscription_id = database.subscribe_one_sink(index_graph).unwrap();
 
         database.flush().unwrap();
         assert_eq!(
@@ -7879,7 +7963,7 @@ fn run_shape_subscription_oracle(mut seed: u64) {
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let shape = database
-        .prepare(
+        .prepare_one_sink(
             artist_album_shape_graph(),
             "artist_params",
             artist_binding_descriptor(),
@@ -7899,7 +7983,7 @@ fn run_shape_subscription_oracle(mut seed: u64) {
                 let mut subscription = FamilyOracleSubscription::new(
                     param,
                     database
-                        .bind_shape(shape.id(), &[Value::U64(param)])
+                        .bind_shape_one_sink(shape.id(), &[Value::U64(param)])
                         .unwrap(),
                 );
                 subscription.drain();
@@ -8050,8 +8134,11 @@ fn run_graph_subscription_oracle(mut seed: u64) {
                     OracleGraph::TwoHop => two_hop_graph(),
                     OracleGraph::UnblockedEdges => unblocked_edges_graph(),
                 };
-                let mut subscription =
-                    OracleSubscription::new(graph, database.subscribe(builder).unwrap(), step);
+                let mut subscription = OracleSubscription::new(
+                    graph,
+                    database.subscribe_one_sink(builder).unwrap(),
+                    step,
+                );
                 subscription.drain();
                 assert_eq!(table_pairs_from_query(&mut database, "edges"), edges);
                 assert_eq!(table_pairs_from_query(&mut database, "blockers"), blockers);

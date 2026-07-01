@@ -176,7 +176,7 @@ where
     /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"]))
     /// # }
     /// # let mut database = db()?;
-    /// let subscription = database.subscribe(GraphBuilder::table("albums"))?;
+    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums"))?;
     /// assert!(subscription.recv()?.is_empty());
     ///
     /// let mut batch = database.open_batch();
@@ -192,10 +192,10 @@ where
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn subscribe(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
+    pub fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .subscribe(graph, &storage)
+            .subscribe_one_sink(graph, &storage)
             .map_err(Error::IvmRuntime)
     }
 
@@ -203,14 +203,14 @@ where
     ///
     /// The initial message includes every sink, even if that sink is empty.
     /// Later messages are sent only when at least one sink has deltas.
-    pub fn subscribe_multisink<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
+    pub fn subscribe<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .subscribe_multisink(sinks, &storage)
+            .subscribe(sinks, &storage)
             .map_err(Error::IvmRuntime)
     }
 
@@ -256,7 +256,7 @@ where
     /// ```
     pub fn subscribe_query(&mut self, query: Query) -> Result<Subscription, Error> {
         let planned = plan_query(&query, self.ivm_runtime.schema())?;
-        self.subscribe(planned.graph)
+        self.subscribe_one_sink(planned.graph)
     }
 
     /// Prepare a parameterized SQL-ish query shape once so callers can bind many
@@ -297,7 +297,7 @@ where
                 .iter()
                 .map(|field| (field.name.clone(), field.value_type.clone())),
         );
-        let shape = self.prepare(
+        let shape = self.prepare_one_sink(
             planned.planned.graph,
             planned.shape,
             planned.binding_descriptor,
@@ -373,7 +373,7 @@ where
         }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .bind_shape_with_output(prepared.id, &values, prepared.output, &storage)
+            .bind_shape_one_sink_with_output(prepared.id, &values, prepared.output, &storage)
             .map_err(Error::IvmRuntime)
     }
 
@@ -381,11 +381,11 @@ where
     ///
     /// Most callers should prefer [`Database::prepare_query`]. This lower-level
     /// API is useful when a caller already has a [`GraphBuilder`]. Internally it
-    /// is just sugar over [`Database::prepare_routed_multisink`]: the graph is
+    /// is just sugar over [`Database::prepare`]: the graph is
     /// registered as the single route-carrying terminal, `output_key_fields`
-    /// name the hidden route fields, and [`Database::bind_shape`] adapts the
+    /// name the hidden route fields, and [`Database::bind_shape_one_sink`] adapts the
     /// one sink back to a [`Subscription`].
-    pub fn prepare(
+    pub fn prepare_one_sink(
         &mut self,
         graph: GraphBuilder,
         binding_source_shape: impl Into<String>,
@@ -394,7 +394,7 @@ where
     ) -> Result<crate::ivm::PreparedShape, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .prepare(
+            .prepare_one_sink(
                 graph,
                 binding_source_shape,
                 binding_descriptor,
@@ -407,12 +407,12 @@ where
     /// Prepare a one-sink shape with separate public-output and route-carrying
     /// graph descriptions.
     ///
-    /// This is convenience sugar over [`Database::prepare_routed_multisink`],
+    /// This is convenience sugar over [`Database::prepare`],
     /// not a separate prepared-subscription implementation. `routing_graph` is
     /// the graph Groove maintains and routes by; `output_graph` only supplies
     /// the subscriber-visible field names and types that are projected from the
     /// routed terminal.
-    pub fn prepare_with_routing(
+    pub fn prepare_one_sink_with_routing(
         &mut self,
         output_graph: GraphBuilder,
         routing_graph: GraphBuilder,
@@ -422,7 +422,7 @@ where
     ) -> Result<crate::ivm::PreparedShape, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .prepare_with_routing(
+            .prepare_one_sink_with_routing(
                 output_graph,
                 routing_graph,
                 binding_source_shape,
@@ -437,9 +437,9 @@ where
     ///
     /// Each terminal graph carries hidden route columns plus public output
     /// columns. Binding appends ordinary filter/project graph nodes for each
-    /// sink, so callers with one-sink needs should treat [`Database::prepare`]
-    /// and [`Database::prepare_with_routing`] as thin convenience wrappers.
-    pub fn prepare_routed_multisink(
+    /// sink, so callers with one-sink needs should treat [`Database::prepare_one_sink`]
+    /// and [`Database::prepare_one_sink_with_routing`] as thin convenience wrappers.
+    pub fn prepare(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
         binding_source_shape: impl Into<String>,
@@ -447,7 +447,7 @@ where
     ) -> Result<crate::ivm::PreparedShape, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .prepare_routed_multisink(
+            .prepare(
                 terminals,
                 binding_source_shape,
                 binding_descriptor,
@@ -472,7 +472,7 @@ where
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
     /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
     /// let binding_descriptor = RecordDescriptor::new([("year", ColumnType::U64.value_type())]);
-    /// let shape = database.prepare(
+    /// let shape = database.prepare_one_sink(
     ///     GraphBuilder::join(
     ///         GraphBuilder::binding_source("year_params", binding_descriptor),
     ///         GraphBuilder::table("albums"),
@@ -489,18 +489,18 @@ where
     ///     ["id"],
     /// )?;
     ///
-    /// let subscription = database.bind_shape(shape.id(), &[Value::U64(1959)])?;
+    /// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1959)])?;
     /// assert!(subscription.recv()?.is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn bind_shape(
+    pub fn bind_shape_one_sink(
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<Subscription, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .bind_shape(shape, binding_values, &storage)
+            .bind_shape_one_sink(shape, binding_values, &storage)
             .map_err(Error::IvmRuntime)
     }
 
@@ -511,7 +511,7 @@ where
     /// The prepared terminal may contain hidden routing fields from
     /// `output_key_fields` or `routing_key_fields`; `public_output` selects the
     /// descriptor that bound subscribers receive.
-    pub fn bind_shape_with_output(
+    pub fn bind_shape_one_sink_with_output(
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
@@ -519,19 +519,19 @@ where
     ) -> Result<Subscription, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .bind_shape_with_output(shape, binding_values, public_output, &storage)
+            .bind_shape_one_sink_with_output(shape, binding_values, public_output, &storage)
             .map_err(Error::IvmRuntime)
     }
 
     /// Bind a routed multisink shape by positional values.
-    pub fn bind_routed_multisink_shape(
+    pub fn bind_shape(
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .bind_routed_multisink_shape(shape, binding_values, &storage)
+            .bind_shape(shape, binding_values, &storage)
             .map_err(Error::IvmRuntime)
     }
 
@@ -1160,7 +1160,7 @@ where
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
     /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
-    /// let subscription = database.subscribe(GraphBuilder::table("albums"))?;
+    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums"))?;
     /// assert!(subscription.recv()?.is_empty());
     ///
     /// database.flush()?;
