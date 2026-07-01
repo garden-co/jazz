@@ -39,8 +39,7 @@ use super::query_engine::{
 #[cfg(test)]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
-    BindingViewKey, RegisterShapeOptions, ResultMemberEntry, ShapeAst, ShapeBody, Subscribe,
-    SubscriptionKey,
+    BindingViewKey, ResultMemberEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
 };
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
@@ -2578,25 +2577,6 @@ where
             AuthorId::SYSTEM,
             CurrentQueryProgramOutput::AppRows,
         )?;
-        // Ordinary one-shot reads are local-source reads. A settled result set
-        // is an opportunistic cache when this node already maintains the same
-        // canonical binding/view; callers that need remote coverage must attach
-        // or subscribe and check the settled/coverage witness explicitly.
-        if !self.uses_partitioned_or_schema_projected_read(shape) {
-            let binding_view_key = BindingViewKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
-                read_view: RegisterShapeOptions::default().read_view_key(),
-            };
-            if self
-                .query
-                .settled_result_sets
-                .contains_key(&binding_view_key)
-            {
-                return self.query_rows_from_result_set(shape, binding_view_key);
-            }
-        }
-
         self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
     }
 
@@ -2658,28 +2638,6 @@ where
                 CurrentQueryProgramOutput::AppRows,
             )?)
         };
-        if prepared_plan.is_none()
-            && matches!(tier, DurabilityTier::Edge | DurabilityTier::Global)
-            && shape.query().reachable.is_empty()
-            && !self.uses_partitioned_or_schema_projected_read(shape)
-        {
-            let binding_view_key = BindingViewKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
-                read_view: RegisterShapeOptions {
-                    tier,
-                    ..RegisterShapeOptions::default()
-                }
-                .read_view_key(),
-            };
-            if self
-                .query
-                .settled_result_sets
-                .contains_key(&binding_view_key)
-            {
-                return self.query_rows_from_result_set(shape, binding_view_key);
-            }
-        }
         let plan = match prepared_plan {
             Some(plan) => Some(plan.clone()),
             None if matches!(tier, DurabilityTier::Edge | DurabilityTier::Global) && {
@@ -3396,51 +3354,6 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
         self.query_rows_at(&shape, &binding, position)
-    }
-
-    fn query_rows_from_result_set(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding_view_key: BindingViewKey,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let table_name = &shape.query().table;
-        let table_schema = self.table(table_name)?.clone();
-        let content_descriptor = table_schema.history_storage_table().record_schema();
-        let mut rows = Vec::new();
-        let row_result_set = self
-            .query
-            .settled_result_sets
-            .get(&binding_view_key)
-            .map(|members| {
-                members
-                    .iter()
-                    .filter_map(crate::protocol::ResultMemberEntry::as_row)
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
-        for (entry_table, row_uuid, tx_id) in row_result_set {
-            if entry_table.as_str() != table_name {
-                continue;
-            }
-            let tx_node_alias = self
-                .node_aliases
-                .get(&tx_id.node)
-                .copied()
-                .ok_or(Error::MissingTransaction(tx_id))?;
-            let version = self
-                .query_version_by_alias_with_descriptor(
-                    table_name,
-                    row_uuid,
-                    VersionLayer::Content,
-                    tx_id.time,
-                    tx_node_alias,
-                    &content_descriptor,
-                )?
-                .ok_or(Error::MissingTransaction(tx_id))?;
-            rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
-        }
-        self.finish_query_rows(shape.query(), &mut rows)?;
-        Ok(rows)
     }
 
     #[allow(clippy::too_many_arguments)]
