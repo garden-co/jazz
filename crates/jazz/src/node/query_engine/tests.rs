@@ -515,6 +515,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 terminal,
                 OutputTerminalSchema::Fact(ProgramFactOutput {
                     key: ProgramFactKey::ResultMembership,
+                    terminal: ProgramFactTerminal::Primary,
                     schema: ProgramFactSchema::ResultMembership(ResultMembershipSchema {
                         version: ResultMembershipVersionSchema::Content(_),
                         ..
@@ -527,6 +528,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 terminal,
                 OutputTerminalSchema::Fact(ProgramFactOutput {
                     key: ProgramFactKey::SourceCoverage(CoverageScope::Program),
+                    terminal: ProgramFactTerminal::Primary,
                     schema: ProgramFactSchema::SourceCoverage(_),
                 })
             )
@@ -536,8 +538,22 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 terminal,
                 OutputTerminalSchema::Fact(ProgramFactOutput {
                     key: ProgramFactKey::VersionWitnesses,
+                    terminal: ProgramFactTerminal::VersionWitnessContent,
                     schema: ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
                         content: Some(_),
+                        ..
+                    }),
+                })
+            )
+        }));
+        assert!(terminals.iter().any(|terminal| {
+            matches!(
+                terminal,
+                OutputTerminalSchema::Fact(ProgramFactOutput {
+                    key: ProgramFactKey::VersionWitnesses,
+                    terminal: ProgramFactTerminal::VersionWitnessDeletion,
+                    schema: ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
+                        deletion: Some(_),
                         ..
                     }),
                 })
@@ -1383,6 +1399,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
                 key: ProgramFactKey::RelationEdges,
+                terminal: ProgramFactTerminal::Primary,
                 schema: ProgramFactSchema::RelationEdges(RelationEdgeSchema {
                     role_field: Some(_),
                     depth_field: None,
@@ -1396,6 +1413,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
                 key: ProgramFactKey::PathCorrelationCoverage,
+                terminal: ProgramFactTerminal::Primary,
                 schema: ProgramFactSchema::PathCorrelationCoverage(PathCorrelationCoverageSchema {
                     expected_count_field: Some(_),
                     ..
@@ -1551,6 +1569,7 @@ fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_row
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
                 key: ProgramFactKey::ResultMembership,
+                terminal: ProgramFactTerminal::Primary,
                 schema: ProgramFactSchema::ResultMembership(_),
             })
         )
@@ -1633,6 +1652,7 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
                 key: ProgramFactKey::RelationEdges,
+                terminal: ProgramFactTerminal::Primary,
                 schema: ProgramFactSchema::RelationEdges(_),
             })
         )
@@ -1642,6 +1662,7 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
                 key: ProgramFactKey::PathCorrelationCoverage,
+                terminal: ProgramFactTerminal::Primary,
                 schema: ProgramFactSchema::PathCorrelationCoverage(_),
             })
         )
@@ -1879,6 +1900,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
                 key: ProgramFactKey::RelationEdges,
+                terminal: ProgramFactTerminal::Primary,
                 schema: ProgramFactSchema::RelationEdges(RelationEdgeSchema {
                     depth_field: Some(_),
                     ..
@@ -1891,6 +1913,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
                 key: ProgramFactKey::PathCorrelationCoverage,
+                terminal: ProgramFactTerminal::Primary,
                 schema: ProgramFactSchema::PathCorrelationCoverage(_),
             })
         )
@@ -2325,6 +2348,7 @@ fn predicate_output_set_facts_carry_compared_versions() {
         key: ProgramFactKey::PredicateOutputSet {
             role: PredicateOutputSetRole::Base,
         },
+        terminal: ProgramFactTerminal::Primary,
         schema: ProgramFactSchema::PredicateOutputSet(PredicateOutputSetSchema {
             role: PredicateOutputSetRole::Base,
             table_field: "table".to_owned(),
@@ -2406,6 +2430,7 @@ fn validation_comparison_reads_are_part_of_one_program_request() {
 fn row_read_facts_distinguish_present_and_absent_reads() {
     let present = ProgramFactOutput {
         key: ProgramFactKey::PointReads { present: true },
+        terminal: ProgramFactTerminal::Primary,
         schema: ProgramFactSchema::PointReads(PointReadFactSchema {
             table_field: "table".to_owned(),
             row_field: "row_uuid".to_owned(),
@@ -2416,6 +2441,7 @@ fn row_read_facts_distinguish_present_and_absent_reads() {
     };
     let absent = ProgramFactOutput {
         key: ProgramFactKey::PointReads { present: false },
+        terminal: ProgramFactTerminal::Primary,
         schema: ProgramFactSchema::PointReads(PointReadFactSchema {
             table_field: "table".to_owned(),
             row_field: "row_uuid".to_owned(),
@@ -2437,6 +2463,7 @@ fn payload_coverage_is_split_into_small_terminal_facts() {
             batch: BatchId(vec![0x01]),
             tier: DurabilityTier::Global,
         },
+        terminal: ProgramFactTerminal::Primary,
         schema: ProgramFactSchema::CompleteTxPayloadCoverage(CompleteTxPayloadCoverageSchema {
             batch: BatchIdentityFields {
                 batch_id_field: "batch_id".to_owned(),
