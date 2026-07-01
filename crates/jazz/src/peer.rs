@@ -503,42 +503,6 @@ impl PeerState {
         self.query_update_inner_for_subscription(node, subscription, shape, binding)
     }
 
-    #[cfg(test)]
-    pub(crate) fn track_query_for_test<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-    ) -> Result<(), Error>
-    where
-        S: OrderedKvStorage,
-    {
-        let subscription = SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: RegisterShapeOptions::default().read_view_key(),
-        };
-        let (_prepared_shape, prepared_binding, plan) = node.prepare_query_binding_for_link(
-            shape,
-            binding,
-            DurabilityTier::Global,
-            self.identity(),
-        )?;
-        #[cfg(not(test))]
-        let _ = (&prepared_binding, &plan);
-        let cached = CachedPeerQueryPlan {
-            #[cfg(test)]
-            binding: prepared_binding,
-            #[cfg(test)]
-            plan,
-            tier: DurabilityTier::Global,
-        };
-        let state = self.subscriptions.entry(subscription).or_default();
-        state.prepared_query = Some(cached);
-        state.groove_runtime_token = Some(node.groove_runtime_token());
-        Ok(())
-    }
-
     fn query_update_inner<S>(
         &mut self,
         node: &mut NodeState<S>,
