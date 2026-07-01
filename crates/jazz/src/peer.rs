@@ -20,8 +20,8 @@ use crate::node::maintained_subscription_view::{
 };
 use crate::node::{Error, NodeState};
 use crate::protocol::{
-    ContentExtent, LargeValueOwnerRef, RegisterShapeOptions, ResultMemberEntry, ResultRowEntry,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    ContentExtent, LargeValueOwnerRef, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
+    ResultRowEntry, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
 };
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
@@ -111,6 +111,7 @@ struct MaintainedRehydrateRequest<'a> {
     reset_result_set: bool,
     result_table_filter: Option<&'a str>,
     tier: DurabilityTier,
+    read_view: &'a ReadViewSpec,
 }
 
 type RowKey = (groove::Intern<String>, RowUuid);
@@ -333,6 +334,7 @@ impl PeerState {
                     reset_result_set: false,
                     result_table_filter: Some(table),
                     tier: DurabilityTier::Global,
+                    read_view: &ReadViewSpec::default(),
                 },
             );
         }
@@ -618,6 +620,7 @@ impl PeerState {
             reset_result_set,
             result_table_filter,
             tier,
+            read_view,
         } = request;
         let (receiver, maintained, terminal_schemas, transitions, tables) = node
             .open_seeded_maintained_subscription_view(
@@ -625,7 +628,7 @@ impl PeerState {
                 binding,
                 self.identity(),
                 tier,
-                &Default::default(),
+                read_view,
             )
             .map_err(normalize_maintained_subscription_unsupported_error)?;
         let output_tables = tables.clone();
@@ -744,11 +747,6 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        if !opts.has_default_read_view() {
-            return Err(Error::InvalidStoredValue(
-                "non-default read_view is not supported for peer rehydration yet",
-            ));
-        }
         self.clear_stale_groove_runtime_handles(node, subscription);
         let previous_member_result_set = self
             .subscriptions
@@ -773,6 +771,7 @@ impl PeerState {
                 reset_result_set: true,
                 result_table_filter: None,
                 tier: opts.tier,
+                read_view: &opts.read_view,
             },
         )
     }

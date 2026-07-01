@@ -8,8 +8,8 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
-    CatalogueAck, LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ShapeAst,
-    Subscribe, TableLens,
+    CatalogueAck, LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    ResultMemberEntry, ShapeAst, Subscribe, TableLens,
 };
 use crate::query::{
     ArraySubquery, Include, JoinMode, all_of, any_of, claim, col, contains, eq, gt, in_list,
@@ -758,19 +758,26 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
         vec![row(0x42)]
     );
 
+    let mut propagated_subscription =
+        doctest_support::block_on(db.subscribe(&prepared_query, opts.clone())).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(
+            doctest_support::block_on(propagated_subscription.next_event()).unwrap()
+        )),
+        vec![row(0x42)]
+    );
+
+    let attachment = db
+        .attach_query_with_opts(&prepared_query, opts.clone())
+        .unwrap();
+    db.detach_query(attachment);
+    let attachment = db
+        .attach_query_with_opts_for_identity(&prepared_query, opts.clone(), db.identity.author)
+        .unwrap();
+    db.detach_query(attachment);
+
     assert_unsupported_read_view(expect_error(doctest_support::block_on(
         db.all_relation_snapshot(&prepared_query, opts.clone()),
-    )));
-    assert_unsupported_read_view(expect_error(doctest_support::block_on(
-        db.subscribe(&prepared_query, opts.clone()),
-    )));
-    assert_unsupported_read_view(expect_error(
-        db.attach_query_with_opts(&prepared_query, opts.clone()),
-    ));
-    assert_unsupported_read_view(expect_error(db.attach_query_with_opts_for_identity(
-        &prepared_query,
-        opts,
-        db.identity.author,
     )));
 }
 
@@ -2557,14 +2564,29 @@ fn db_sync_surface_round_trips_subscription_to_client() {
 }
 
 #[test]
-fn subscriber_connection_rejects_non_default_read_view_before_serving_subscription() {
+fn subscriber_connection_serves_single_branch_read_view_subscription() {
     let schema = schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    server
+        .node()
+        .borrow_mut()
+        .create_branch(branch)
+        .expect("create branch");
+    server
+        .node()
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x42), 10).cells(cells(
+                "branch-only",
+                false,
+                client_author,
+            )),
+        )
+        .expect("commit branch row");
 
-    // Internal sync-loop coverage: the public Db subscription API rejects this
-    // read view before it can produce wire messages, so this test sends protocol
-    // messages directly to exercise the lower serving path.
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("todos").validate(&schema).unwrap();
@@ -2595,7 +2617,27 @@ fn subscriber_connection_rejects_non_default_read_view_before_serving_subscripti
         }))
         .unwrap();
 
-    assert_unsupported_read_view(subscriber.borrow_mut().tick().unwrap_err());
+    subscriber.borrow_mut().tick().unwrap();
+    let update = client_transport
+        .try_recv()
+        .expect("server should send branch view update");
+    let SyncMessage::ViewUpdate {
+        subscription: served_subscription,
+        result_member_adds,
+        ..
+    } = update
+    else {
+        panic!("expected branch view update, got {update:?}");
+    };
+    assert_eq!(served_subscription, subscription);
+    assert_eq!(
+        result_member_adds
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .map(|(_, row, _)| row)
+            .collect::<Vec<_>>(),
+        vec![row(0x42)]
+    );
 }
 
 #[test]
