@@ -206,6 +206,7 @@ impl LoweredQuerySource {
 
 enum CurrentQueryProgramOutput {
     AppRows,
+    RelationSnapshot,
     MaintainedView,
 }
 
@@ -558,6 +559,11 @@ fn current_query_output_request(
 ) -> RowSetOutputRequest {
     let facts = match output {
         CurrentQueryProgramOutput::AppRows => BTreeSet::new(),
+        // Relation snapshots currently use query-engine app-row membership for
+        // root gating and retain manual edge materialization. Relation edge and
+        // path coverage facts need multi-output correlated-path lowering before
+        // they can share this one-shot program.
+        CurrentQueryProgramOutput::RelationSnapshot => BTreeSet::new(),
         CurrentQueryProgramOutput::MaintainedView => BTreeSet::from([
             ProgramFactKey::ResultMembership,
             ProgramFactKey::VersionWitnesses,
@@ -565,11 +571,13 @@ fn current_query_output_request(
         ]),
     };
     RowSetOutputRequest {
-        app_rows: matches!(output, CurrentQueryProgramOutput::AppRows).then(|| {
-            AppRowOutputRequest {
-                projection: app_row_payload_projection(query),
-                large_values: Vec::new(),
-            }
+        app_rows: matches!(
+            output,
+            CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::RelationSnapshot
+        )
+        .then(|| AppRowOutputRequest {
+            projection: app_row_payload_projection(query),
+            large_values: Vec::new(),
         }),
         facts,
     }
@@ -593,6 +601,19 @@ fn app_row_payload_projection(query: &JazzQuery) -> PayloadProjection {
     PayloadProjection::Tree(AppProjectionTree {
         fields: FieldProjection::Fields(fields),
         paths: Vec::new(),
+    })
+}
+
+fn relation_snapshot_root_membership_can_use_query_engine(subqueries: &[ArraySubquery]) -> bool {
+    subqueries.iter().all(|subquery| {
+        // TODO(query-engine): remove this guard once correlated path lowering
+        // supports cardinality coverage, nested array paths, and binding-param
+        // filters as first-class relation/path inputs.
+        !matches!(
+            subquery.requirement,
+            ArraySubqueryRequirement::MatchCorrelationCardinality
+        ) && subquery.nested_arrays.is_empty()
+            && predicate_params(&subquery.filters).is_empty()
     })
 }
 
@@ -2602,12 +2623,47 @@ where
         query.select = None;
         query.limit = None;
         query.offset = 0;
-        query.array_subqueries.clear();
+        if !relation_snapshot_root_membership_can_use_query_engine(&query.array_subqueries) {
+            query.array_subqueries.clear();
+            let source_shape = query
+                .validate(&self.catalogue.schema)
+                .map_err(Error::Query)?;
+            let source_binding = binding_for_shape(&source_shape, binding)?;
+            return self.query_rows_for_link(&source_shape, &source_binding, tier, identity);
+        }
         let source_shape = query
             .validate(&self.catalogue.schema)
             .map_err(Error::Query)?;
         let source_binding = binding_for_shape(&source_shape, binding)?;
-        self.query_rows_for_link(&source_shape, &source_binding, tier, identity)
+        let (source_shape, source_binding) =
+            self.policy_composed_shape_binding(&source_shape, &source_binding, identity)?;
+        let program = self.compile_current_query_program(
+            &source_shape,
+            &source_binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::RelationSnapshot,
+        )?;
+        let snapshots = self
+            .database
+            .query_graphs(lowered_program_sinks(&program))
+            .map_err(Error::Groove)?;
+        let Some(app_rows) = snapshots.get(JAZZ_APP_ROWS_SINK) else {
+            return Err(Error::QueryLowering(
+                "relation snapshot program did not emit app rows".to_owned(),
+            ));
+        };
+        let table = self
+            .table_in_schema(&source_shape.query().table, source_shape.schema_version())?
+            .clone();
+        let mut rows = Vec::new();
+        for (record, weight) in app_rows.iter() {
+            if weight > 0 {
+                let row = decode_current_row(&table, record)?;
+                rows.push(self.materialize_current_row(&table, row)?);
+            }
+        }
+        Ok(rows)
     }
 
     pub(crate) fn subscription_snapshot_for_link(
