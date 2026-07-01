@@ -181,6 +181,19 @@ pub(crate) enum PolicyContext {
         /// Author recorded on writes, when it differs from the permission subject.
         attribution: Option<AuthorId>,
     },
+    /// A policy-authorization subplan evaluates claim-dependent policy logic
+    /// for an identity, but its own source reads are system-authorized to avoid
+    /// recursively applying the same row policy to the policy proof.
+    AuthorizationSubplan {
+        /// Missing-policy behavior.
+        mode: PolicyEnforcementMode,
+        /// Identity whose permissions are being evaluated.
+        permission_subject: AuthorId,
+        /// Trusted claims available to policy queries.
+        claims: BTreeMap<String, Value>,
+        /// Author recorded on writes, when it differs from the permission subject.
+        attribution: Option<AuthorId>,
+    },
 }
 
 /// Missing-policy behavior.
