@@ -42,6 +42,8 @@ pub(crate) struct RowSetProgramInput {
 pub(crate) struct ProgramBinding {
     /// Binding id derived from canonical binding values.
     pub(crate) id: BindingId,
+    /// Groove binding-source shape name used by prepared query graphs.
+    pub(crate) source_shape: Option<String>,
     /// Values by parameter name.
     pub(crate) values: BTreeMap<String, Value>,
 }

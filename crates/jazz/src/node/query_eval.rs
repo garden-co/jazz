@@ -2455,6 +2455,7 @@ where
             shape: self.normalized_row_set_shape(shape, binding)?,
             binding: ProgramBinding {
                 id: binding.binding_id(),
+                source_shape: Some(self.query_binding_source_shape_for_binding(shape, binding)),
                 values: binding.values().clone(),
             },
         };
@@ -2478,6 +2479,7 @@ where
             shape: self.normalized_include_deleted_row_set_shape(shape, binding)?,
             binding: ProgramBinding {
                 id: binding.binding_id(),
+                source_shape: Some(self.query_binding_source_shape_for_binding(shape, binding)),
                 values: binding.values().clone(),
             },
         };
@@ -2511,6 +2513,9 @@ where
             shape: self.normalized_row_set_shape(&lowered_shape, &binding)?,
             binding: ProgramBinding {
                 id: binding.binding_id(),
+                source_shape: Some(
+                    self.query_binding_source_shape_for_binding(&lowered_shape, &binding),
+                ),
                 values: binding.values().clone(),
             },
         };
@@ -2548,6 +2553,9 @@ where
             shape: self.normalized_row_set_shape(&lowered_shape, &binding)?,
             binding: ProgramBinding {
                 id: binding.binding_id(),
+                source_shape: Some(
+                    self.query_binding_source_shape_for_binding(&lowered_shape, &binding),
+                ),
                 values: binding.values().clone(),
             },
         };
@@ -2644,6 +2652,7 @@ where
             shape: self.normalized_row_set_shape(shape, binding)?,
             binding: ProgramBinding {
                 id: binding.binding_id(),
+                source_shape: Some(self.query_binding_source_shape_for_binding(shape, binding)),
                 values: binding.values().clone(),
             },
         };
@@ -4036,11 +4045,12 @@ where
             PreparedQueryPlan::Graph(graph)
         } else {
             let binding_source_shape = self.query_binding_source_shape_for_binding(shape, binding);
+            let route_fields = terminal_route_fields(&route_params, &app_row_fields);
             let prepared = self.database.prepare(
                 [groove::ivm::RoutedMultisinkTerminal::new(
                     JAZZ_APP_ROWS_SINK,
                     graph,
-                    route_params.iter().cloned(),
+                    route_fields,
                     app_row_fields,
                 )],
                 binding_source_shape,
