@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use groove::ivm::RecordDeltas;
+use groove::ivm::{MultisinkDeltas, RecordDeltas};
 use groove::records::{BorrowedRecord, Value};
 
 use super::codec::{
@@ -143,6 +143,23 @@ impl MaintainedSubscriptionView {
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.apply_decoded_deltas(decoded, node_aliases)
+    }
+
+    pub(crate) fn apply_multisink_deltas(
+        &mut self,
+        deltas: MultisinkDeltas,
+        schemas: &MaintainedTerminalSchemas,
+        tables: &TableSchemas,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        let mut transitions = ResultTransitions::default();
+        for (sink, deltas) in deltas.sinks {
+            let delta_transitions =
+                self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
+            transitions.adds.extend(delta_transitions.adds);
+            transitions.removes.extend(delta_transitions.removes);
+        }
+        Ok(transitions)
     }
 
     pub(crate) fn apply_decoded_deltas(

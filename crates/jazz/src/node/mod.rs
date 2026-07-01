@@ -54,7 +54,7 @@ mod query_eval;
 mod recovery;
 pub mod text_oplog;
 mod views;
-pub(crate) use query_eval::{LocalMaintainedViewSubscription, apply_maintained_multisink_deltas};
+pub(crate) use query_eval::LocalMaintainedViewSubscription;
 pub(crate) use views::MaintainedViewBundleInputs;
 
 use branches::BranchRecord;

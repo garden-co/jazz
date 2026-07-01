@@ -355,8 +355,7 @@ impl MaintainedSubscriptionViewSubscription {
         loop {
             match self.subscription.try_recv() {
                 Ok(deltas) => {
-                    let transitions = crate::node::apply_maintained_multisink_deltas(
-                        &mut self.maintained,
+                    let transitions = self.maintained.apply_multisink_deltas(
                         deltas,
                         &self.terminal_schemas,
                         &self.tables,

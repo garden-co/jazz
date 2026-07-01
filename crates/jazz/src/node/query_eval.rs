@@ -68,28 +68,6 @@ pub(crate) fn take_required_sink_deltas(
     })
 }
 
-pub(crate) fn apply_maintained_multisink_deltas(
-    maintained: &mut MaintainedSubscriptionView,
-    deltas: MultisinkDeltas,
-    terminal_schemas: &MaintainedTerminalSchemas,
-    tables: &BTreeMap<String, TableSchema>,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-) -> Result<super::maintained_subscription_view::ResultTransitions, Error> {
-    let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
-    for (sink, deltas) in deltas.sinks {
-        let delta_transitions = maintained.apply_typed_deltas(
-            &sink,
-            &deltas,
-            terminal_schemas,
-            tables,
-            node_aliases,
-        )?;
-        transitions.adds.extend(delta_transitions.adds);
-        transitions.removes.extend(delta_transitions.removes);
-    }
-    Ok(transitions)
-}
-
 fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>, Error> {
     let ProgramOutputSchemas::RowSet(terminals) = output;
     let app_rows = terminals
@@ -3297,8 +3275,7 @@ where
         loop {
             match local.subscription.try_recv() {
                 Ok(deltas) => {
-                    let transitions = apply_maintained_multisink_deltas(
-                        &mut local.maintained,
+                    let transitions = local.maintained.apply_multisink_deltas(
                         deltas,
                         &local.terminal_schemas,
                         &local.tables,
@@ -4106,8 +4083,7 @@ where
         let snapshot = subscription.recv().map_err(|_| {
             Error::InvalidStoredValue("seeded maintained subscription disconnected")
         })?;
-        let snapshot_transitions = apply_maintained_multisink_deltas(
-            &mut maintained,
+        let snapshot_transitions = maintained.apply_multisink_deltas(
             snapshot,
             &terminal_schemas,
             &tables,
@@ -4118,8 +4094,7 @@ where
         loop {
             match subscription.try_recv() {
                 Ok(deltas) => {
-                    let delta_transitions = apply_maintained_multisink_deltas(
-                        &mut maintained,
+                    let delta_transitions = maintained.apply_multisink_deltas(
                         deltas,
                         &terminal_schemas,
                         &tables,
