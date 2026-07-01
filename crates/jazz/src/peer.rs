@@ -775,7 +775,7 @@ impl PeerState {
     fn drain_maintained_subscription_view_changes<S>(
         &mut self,
         node: &mut NodeState<S>,
-        shape: &ValidatedQuery,
+        _shape: &ValidatedQuery,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
     ) -> Result<(Vec<ResultMemberEntry>, Vec<ResultMemberEntry>), Error>
@@ -788,7 +788,12 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        let output_tables = node.maintained_view_terminal_tables(shape)?;
+        let output_tables = self
+            .subscriptions
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .map(|maintained| maintained.tables.clone())
+            .unwrap_or_default();
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         {
             let Some(maintained_subscription_view) = self
@@ -874,7 +879,7 @@ impl PeerState {
                 self.identity(),
                 tier,
             )?;
-        let output_tables = node.maintained_view_terminal_tables(shape)?;
+        let output_tables = tables.clone();
         let result_member_adds = transitions
             .adds
             .into_iter()

@@ -4649,7 +4649,6 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         self.ensure_maintained_view_query_slice(shape.query())?;
-        let tables = self.maintained_view_terminal_tables(&shape)?;
         let program = self.compile_current_query_program(
             &shape,
             &composed_binding,
@@ -4657,6 +4656,7 @@ where
             identity,
             CurrentQueryProgramOutput::MaintainedView,
         )?;
+        let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
         self.database.flush().map_err(Error::Groove)?;
         let subscription = self.subscribe_lowered_program(
@@ -4861,6 +4861,11 @@ where
         Ok(sinks)
     }
 
+    // TODO(query-engine): retained only for the old #[cfg(test)] maintained
+    // graph oracle. Production maintained metadata now comes from
+    // LoweredGraph::maintained_terminal_tables after query-engine source
+    // resolution.
+    #[cfg(test)]
     pub(crate) fn maintained_view_terminal_tables(
         &self,
         shape: &ValidatedQuery,
@@ -4870,6 +4875,7 @@ where
         Ok(tables)
     }
 
+    #[cfg(test)]
     fn collect_maintained_view_terminal_tables_for_query(
         &self,
         query: &crate::query::Query,
@@ -4910,6 +4916,7 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
     fn collect_maintained_view_terminal_tables_for_join(
         &self,
         join: &JoinVia,
@@ -4927,6 +4934,7 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
     fn collect_terminal_table_and_references(
         &self,
         table: TableSchema,
