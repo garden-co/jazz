@@ -1028,22 +1028,8 @@ where
         &mut self,
         commit: MergeableCommit,
     ) -> Result<(TxId, SyncMessage), Error> {
-        let write_schema_version = self.catalogue.current_write_schema.schema;
-        let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
-        let version = VersionRecord::from_commit(&commit, &table_schema, write_schema_version)?;
         let tx_id = self.commit_mergeable(commit)?;
-        let tx = self
-            .query_transaction(tx_id)?
-            .ok_or(Error::MissingTransaction(tx_id))?
-            .tx
-            .clone();
-        Ok((
-            tx_id,
-            SyncMessage::CommitUnit {
-                tx,
-                versions: vec![version],
-            },
-        ))
+        Ok((tx_id, self.commit_unit_for(tx_id)?))
     }
 
     /// Rebuild the sync commit unit for an already-committed local transaction
