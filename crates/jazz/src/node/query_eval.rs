@@ -4193,32 +4193,13 @@ where
             ));
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
-        let input = RowSetProgramInput {
-            shape: self.normalized_row_set_shape(policy_shape, &binding)?,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                values: BTreeMap::new(),
-            },
-        };
-        let reads = current_query_read_set(&input.shape, policy_shape.schema_version(), tier);
-        let read_view = reads.primary.clone();
-        let policy = PolicyContext::System;
-        let mut resolver = CurrentQuerySourceResolver {
-            node: self,
-            read_view: &read_view,
-            policy: &policy,
-        };
-        let request = QueryProgramRequest {
-            reads,
-            policy: policy.clone(),
-            input,
-            output: current_query_output_request(
-                CurrentQueryProgramOutput::AppRows,
-                policy_shape.query(),
-            ),
-        };
-        let program = lower_query_program(request, &mut resolver)
-            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
+        let program = self.compile_current_query_program(
+            policy_shape,
+            &binding,
+            tier,
+            AuthorId::SYSTEM,
+            CurrentQueryProgramOutput::AppRows,
+        )?;
         let authorized = lowered_app_rows_graph(&program)?.project(["row_uuid"]);
         Ok(
             GraphBuilder::join(base, authorized, ["row_uuid"], ["row_uuid"]).project_fields(
