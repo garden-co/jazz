@@ -5,6 +5,7 @@
 //! [`super::ingest`] and [`super::policy`], and query execution in
 //! [`super::query_eval`]. It is the node layer's boundary to groove storage.
 
+use super::query_engine::{left_field, user_column_field};
 use super::*;
 use crate::schema::{
     ColumnSchema, branch_partition_history_table_name, branch_partition_register_table_name,
@@ -427,7 +428,7 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
                 assert_user_field(
                     &descriptor,
                     HistoryRowRecord::USER_CELLS + idx,
-                    &format!("user_{}", column.name),
+                    &user_column_field(&column.name),
                 );
             }
 
@@ -444,7 +445,7 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
                         assert_user_field(
                             &descriptor,
                             GlobalCurrentRowRecord::USER_CELLS + idx,
-                            &format!("user_{}", column.name),
+                            &user_column_field(&column.name),
                         );
                     }
                 }
@@ -456,7 +457,7 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
                 assert_user_field(
                     &wire_descriptor,
                     WireRowRecord::USER_CELLS + idx,
-                    &format!("user_{}", column.name),
+                    &user_column_field(&column.name),
                 );
             }
         }
@@ -1407,7 +1408,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
     let user_fields = table
         .columns
         .iter()
-        .map(|column| format!("user_{}", column.name))
+        .map(|column| user_column_field(&column.name))
         .collect::<Vec<_>>();
     let mut content_fields = vec!["row_uuid".to_owned()];
     content_fields.extend(user_fields.iter().cloned());
@@ -1441,7 +1442,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
         .project_fields(
             fields
                 .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
+                .map(|field| ProjectField::renamed(left_field(&field), field)),
         )
     };
     let (content_current, deleted_winners) = if settled == DurabilityTier::Global {
@@ -1590,7 +1591,7 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
         std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
                 (
-                    format!("user_{}", column.name),
+                    user_column_field(&column.name),
                     records::ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
                 )
             }))

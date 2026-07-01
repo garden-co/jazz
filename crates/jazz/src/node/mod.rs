@@ -21,6 +21,7 @@ use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
 use groove::storage::{self, OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
 
+use self::query_engine::user_column_field;
 use crate::ids::{
     AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias,
     SchemaVersionId,
@@ -2629,7 +2630,7 @@ impl CurrentRow {
             .columns
             .iter()
             .find(|candidate| candidate.name == column)?;
-        let user_name = format!("user_{column}");
+        let user_name = user_column_field(column);
         let idx = self.record.descriptor().fields().iter().position(|field| {
             field.name.as_deref() == Some(user_name.as_str())
                 || field.name.as_deref() == Some(column)
@@ -2681,7 +2682,7 @@ impl CurrentRow {
             std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
                 .chain(projected_columns.iter().map(|column| {
                     (
-                        format!("user_{}", column.name),
+                        user_column_field(&column.name),
                         records::ValueType::Nullable(Box::new(
                             column.column_type.clone().value_type(),
                         )),
@@ -2759,12 +2760,8 @@ impl CurrentRow {
                 if !matches!(field.value_type, records::ValueType::Nullable(_)) {
                     return None;
                 }
-                let name = field
-                    .name
-                    .as_ref()?
-                    .strip_prefix("user_")
-                    .unwrap_or(field.name.as_ref()?)
-                    .to_owned();
+                let name = field.name.as_ref()?.as_str();
+                let name = self::query_engine::logical_user_column(name).to_owned();
                 let value = nullable_value(self.record.borrowed().get_idx(idx).ok()?).ok()??;
                 Some((name, value))
             })

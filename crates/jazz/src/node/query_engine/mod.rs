@@ -30,6 +30,7 @@ use crate::schema::TableSchema;
 use crate::time::GlobalSeq;
 use crate::tx::{DurabilityTier, Snapshot, TxId, TxKind};
 
+mod fields;
 mod input;
 mod lowering;
 mod output;
@@ -38,6 +39,7 @@ mod read;
 mod resolver;
 mod schemas;
 
+pub(crate) use fields::*;
 pub(crate) use input::*;
 #[allow(unused_imports)]
 pub(crate) use lowering::*;
