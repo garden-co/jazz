@@ -18,12 +18,12 @@ use super::maintained_subscription_view::{MaintainedSubscriptionView, Maintained
 use super::policy::ViewEvaluationContext;
 use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
-    AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathKind,
-    ClosurePathSegment, ClosureRootGate, ComparisonOp as NormalizedComparisonOp,
-    CorrelationRequirement, DataSource, FieldProjection, FrontierId, JoinContribution,
-    JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
-    NormalizedValueRef, OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef,
-    OverlayStack, PayloadProjection, PolicyContext, PolicyEnforcementMode,
+    AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathSegment,
+    ClosureRootGate, ComparisonOp as NormalizedComparisonOp, CorrelationRequirement, DataSource,
+    FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
+    NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
+    OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
+    PayloadProjection, PolicyContext, PolicyEnforcementMode,
     PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProgramOutputSchemas,
     ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet,
     ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
@@ -1274,15 +1274,13 @@ where
         }
         let target = include_auxiliary_source_id(target_table.clone(), usize::MAX, reference_index);
         sources.insert(target.clone());
-        paths.push(ClosurePath {
+        paths.push(ClosurePath::ImplicitRootReference {
             id: format!("reference:{column}"),
-            kind: ClosurePathKind::ImplicitRootReference,
-            segments: vec![ClosurePathSegment {
+            segment: ClosurePathSegment {
                 parent: root_source.clone(),
                 target,
                 source_field: column.clone(),
-            }],
-            root_gate: None,
+            },
         });
     }
     for (include_index, include) in includes.iter().enumerate() {
@@ -1307,9 +1305,8 @@ where
             parent = target;
             current_table_name = target_table;
         }
-        paths.push(ClosurePath {
+        paths.push(ClosurePath::ExplicitInclude {
             id: format!("include:{include_index}:{}", include.path),
-            kind: ClosurePathKind::ExplicitInclude,
             segments,
             root_gate: if include.require {
                 Some(ClosureRootGate::Required)
