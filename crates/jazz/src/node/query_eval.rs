@@ -1796,9 +1796,7 @@ fn reachable_frontier_columns(
             ty,
         },
     ];
-    if let Operand::Param(param) = seed
-        && !param.starts_with(CLAIM_PARAM_PREFIX)
-    {
+    if let Operand::Param(param) = seed {
         columns.push(ValueSourceColumn {
             name: route_param_field(param),
             value: NormalizedValueRef::Param(param.clone()),
@@ -1808,7 +1806,6 @@ fn reachable_frontier_columns(
     if let Operand::Param(param) = seed
         && param != "team"
         && param != "reachable_team"
-        && !param.starts_with(CLAIM_PARAM_PREFIX)
     {
         columns.push(ValueSourceColumn {
             name: param.clone(),
@@ -1823,7 +1820,9 @@ fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error>
     match seed {
         Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
         Operand::Literal(Value::Uuid(uuid)) => literal_value_ref(&Value::Uuid(*uuid)),
-        Operand::Claim(claim) => Ok(NormalizedValueRef::Param(claim_param_name(claim))),
+        Operand::Claim(claim) => Ok(NormalizedValueRef::Claim(ClaimPath(
+            claim.split('.').map(str::to_owned).collect(),
+        ))),
         Operand::Column(_) | Operand::Literal(_) => Err(normalization_gap(
             "reachable_via currently supports uuid parameter/claim/literal seeds only",
         )),

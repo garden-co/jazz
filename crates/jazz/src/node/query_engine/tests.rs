@@ -1232,12 +1232,12 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     let frontier_columns = vec![
         ValueSourceColumn {
             name: "team".to_owned(),
-            value: NormalizedValueRef::Param("__jazz_claim_sub".to_owned()),
+            value: NormalizedValueRef::Claim(ClaimPath(vec!["sub".to_owned()])),
             ty: ColumnType::Uuid,
         },
         ValueSourceColumn {
             name: "reachable_team".to_owned(),
-            value: NormalizedValueRef::Param("__jazz_claim_sub".to_owned()),
+            value: NormalizedValueRef::Claim(ClaimPath(vec!["sub".to_owned()])),
             ty: ColumnType::Uuid,
         },
         ValueSourceColumn {
@@ -1248,7 +1248,12 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     ];
     let request = QueryProgramRequest {
         reads: QueryReadSet::primary(recursive_current_read_view()),
-        policy: system_policy_context(),
+        policy: PolicyContext::Identity {
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0x76),
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
         input: RowSetProgramInput {
             shape: NormalizedRowSetShape {
                 identity: NormalizedShapeIdentity {
@@ -1371,13 +1376,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x76; 16])),
-                values: BTreeMap::from([
-                    (
-                        "team".to_owned(),
-                        Value::Uuid(uuid::Uuid::from_bytes([0x76; 16])),
-                    ),
-                    ("route".to_owned(), Value::String("sync".to_owned())),
-                ]),
+                values: BTreeMap::from([("route".to_owned(), Value::String("sync".to_owned()))]),
             },
         },
         output: RowSetOutputRequest {
@@ -1392,20 +1391,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     let mut resolver = FakeSourceResolver::default();
     let program =
         lower_query_program(request, &mut resolver).expect("recursive relation should lower");
-    assert!(
-        program
-            .lowered
-            .parameters
-            .hidden_params
-            .contains_key("__jazz_claim_sub")
-    );
-    assert!(
-        !program
-            .lowered
-            .parameters
-            .user_params
-            .contains_key("__jazz_claim_sub")
-    );
+    assert!(program.lowered.parameters.hidden_params.is_empty());
 
     fn step_input_reads_frontier(input: &GraphBuilder) -> bool {
         match input {
@@ -1441,7 +1427,6 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
                         input.as_ref(),
                         GraphBuilder::BindingSource { shape, output }
                             if shape == "reachable-binding"
-                                && output.field_index("__jazz_claim_sub").is_some()
                                 && output.field_index("route").is_some()
                                 && output.field_index("reachable_team").is_none()
                     )
@@ -1456,10 +1441,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
         program.lowered.parameters.user_params,
         BTreeMap::from([("route".to_owned(), ColumnType::String)])
     );
-    assert_eq!(
-        program.lowered.parameters.hidden_params,
-        BTreeMap::from([("__jazz_claim_sub".to_owned(), ColumnType::Uuid)])
-    );
+    assert!(program.lowered.parameters.hidden_params.is_empty());
     assert_eq!(
         program.lowered.parameters.routing_params,
         BTreeSet::from(["__jazz_route_route".to_owned()])
@@ -1489,7 +1471,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
 }
 
 #[test]
-fn recursive_relation_seed_claim_lowers_as_hidden_binding_value_source() {
+fn recursive_relation_seed_claim_lowers_from_policy_context() {
     let seed_node = RowSetNodeId("seed".to_owned());
     let frontier_node = RowSetNodeId("frontier".to_owned());
     let step_node = RowSetNodeId("step".to_owned());
@@ -1502,12 +1484,12 @@ fn recursive_relation_seed_claim_lowers_as_hidden_binding_value_source() {
     let frontier_columns = vec![
         ValueSourceColumn {
             name: "team".to_owned(),
-            value: NormalizedValueRef::Param("__jazz_claim_sub".to_owned()),
+            value: NormalizedValueRef::Claim(ClaimPath(vec!["sub".to_owned()])),
             ty: ColumnType::Uuid,
         },
         ValueSourceColumn {
             name: "reachable_team".to_owned(),
-            value: NormalizedValueRef::Param("__jazz_claim_sub".to_owned()),
+            value: NormalizedValueRef::Claim(ClaimPath(vec!["sub".to_owned()])),
             ty: ColumnType::Uuid,
         },
     ];
@@ -1645,21 +1627,9 @@ fn recursive_relation_seed_claim_lowers_as_hidden_binding_value_source() {
     let GraphBuilder::Recursive { seed, .. } = &program.lowered.terminals[0].graph else {
         panic!("expected recursive graph");
     };
-    let GraphBuilder::Project { input, fields } = seed.as_ref() else {
-        panic!("expected projected seed");
-    };
-    assert!(matches!(input.as_ref(), GraphBuilder::BindingSource { .. }));
-    assert!(fields.iter().any(|field| field.output_name == "team"));
-    assert!(
-        fields
-            .iter()
-            .any(|field| field.output_name == "reachable_team")
-    );
+    assert!(matches!(seed.as_ref(), GraphBuilder::InlineRecords { .. }));
     assert!(program.lowered.parameters.user_params.is_empty());
-    assert_eq!(
-        program.lowered.parameters.hidden_params,
-        BTreeMap::from([("__jazz_claim_sub".to_owned(), ColumnType::Uuid)])
-    );
+    assert!(program.lowered.parameters.hidden_params.is_empty());
     assert!(program.lowered.parameters.routing_params.is_empty());
 }
 
