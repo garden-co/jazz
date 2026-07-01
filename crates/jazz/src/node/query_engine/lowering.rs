@@ -770,7 +770,7 @@ fn supported_current_storage_projection(
     match source? {
         SourceExpr::VisibleCurrent {
             projection,
-            data: DataSource::Current,
+            data: DataSource::Current | DataSource::Branch(_),
             tier: _,
         }
         | SourceExpr::HistoryCut {
