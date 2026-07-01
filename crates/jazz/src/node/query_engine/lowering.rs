@@ -1168,6 +1168,10 @@ fn supported_current_storage_projection(
             projection,
             data: DataSource::Current,
             snapshot: _,
+        }
+        | SourceExpr::SettledBindingView {
+            projection,
+            binding_view: _,
         } => Some(projection),
         SourceExpr::WithOverlays { input, overlays } => {
             if overlays
