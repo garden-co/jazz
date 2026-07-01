@@ -623,6 +623,18 @@ fn validate_output_capabilities(
     {
         return;
     }
+    if request
+        .input
+        .shape
+        .nodes
+        .values()
+        .any(|node| matches!(node, RowSetExpr::Aggregate { .. }))
+    {
+        gaps.push(UnsupportedReason::Operator(
+            "maintained subscription view aggregate shape is not lowered yet".to_owned(),
+        ));
+        return;
+    }
     if maintained_result_membership_window_supported(plan) {
         return;
     }
@@ -1294,9 +1306,7 @@ fn analyze_current_node(
         RowSetExpr::CorrelatedPathProjection { .. } => Err(UnsupportedReason::Operator(
             "correlated path projection row-set nodes are not lowered yet".to_owned(),
         )),
-        RowSetExpr::Aggregate { .. } => Err(UnsupportedReason::Operator(
-            "aggregate row-set nodes are not lowered yet".to_owned(),
-        )),
+        RowSetExpr::Aggregate { input, .. } => analyze_current_node(input, nodes, visited),
     }
 }
 
@@ -1510,6 +1520,13 @@ fn source_requirements(
                 root_requirements
                     .metadata
                     .insert(SourceMetadataRequirement::VersionWitnesses);
+                for contribution in &request.input.shape.join_contributions {
+                    if let Some(source_requirements) = requirements.get_mut(&contribution.source) {
+                        source_requirements
+                            .metadata
+                            .insert(SourceMetadataRequirement::VersionWitnesses);
+                    }
+                }
             }
             ProgramFactKey::VersionWitnesses | ProgramFactKey::ReplacementWitnesses => {
                 for source_requirements in requirements.values_mut() {
@@ -4035,6 +4052,24 @@ fn provenance_source_field(field: ProvenanceField) -> &'static str {
     }
 }
 
+fn has_explicit_closure_path(shape: &NormalizedRowSetShape) -> bool {
+    shape.closure_paths.iter().any(|path| {
+        matches!(
+            path,
+            ClosurePath::ExplicitInclude { segments, .. } if segments.iter().any(|segment| {
+                segment.target.path.components.iter().any(|role| {
+                    matches!(
+                        role,
+                        SourceRole::Alias(alias)
+                            if alias.starts_with("include:")
+                                && !alias.starts_with("include:18446744073709551615:")
+                    )
+                })
+            })
+        )
+    })
+}
+
 fn lowered_terminals(
     graph: GraphBuilder,
     request: &QueryProgramRequest,
@@ -4111,6 +4146,44 @@ fn lowered_terminals(
                     graph,
                     output: OutputTerminalSchema::Fact(output),
                 });
+            }
+            if has_explicit_closure_path(&request.input.shape) {
+                for contribution in &request.input.shape.join_contributions {
+                    let Some(resolved_source) = resolved_sources.get(&contribution.source) else {
+                        continue;
+                    };
+                    let output = fact_output_with_terminal(
+                        fact,
+                        ProgramFactTerminal::Primary,
+                        plan,
+                        resolved_source,
+                        resolved_sources,
+                        BTreeSet::new(),
+                    )?;
+                    let contribution_graph = join_contribution_membership_graph(
+                        closure.visible_root.clone(),
+                        contribution,
+                        source,
+                        resolved_source,
+                        &request.input.shape.nodes,
+                        resolved_sources,
+                        request,
+                    )?;
+                    let graph = fact_terminal_graph(
+                        fact,
+                        contribution_graph,
+                        plan,
+                        resolved_source,
+                        resolved_sources,
+                        request,
+                        output_routing_fields(&output),
+                    )?;
+                    terminals.push(LoweredTerminal {
+                        sink: scoped_fact_sink_name(fact, &contribution.source),
+                        graph,
+                        output: OutputTerminalSchema::Fact(output),
+                    });
+                }
             }
             continue;
         }

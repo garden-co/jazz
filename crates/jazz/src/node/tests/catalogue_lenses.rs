@@ -777,7 +777,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
     .unwrap();
 
     let readable_row = row(0x48);
-    let (accepted_tx, accepted_unit) = writer
+    let (_accepted_tx, accepted_unit) = writer
         .commit_mergeable_unit(
             MergeableCommit::new("todos", readable_row, 21)
                 .made_by(author)
@@ -796,12 +796,21 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
             ..
         }]
     ));
-    assert!(core
-        .result_set_entry_read_policy_allows("todos", readable_row, accepted_tx, author)
-        .unwrap());
-    assert!(!core
-        .result_set_entry_read_policy_allows("todos", readable_row, accepted_tx, other)
-        .unwrap());
+    let shape = Query::from("todos").validate(&evolved).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, author)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([readable_row])
+    );
+    assert!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, other)
+            .unwrap()
+            .is_empty()
+    );
 
     let denied_row = row(0x49);
     let (_denied_tx, denied_unit) = writer
