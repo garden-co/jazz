@@ -165,6 +165,48 @@ impl IvmRuntime {
         Ok(records)
     }
 
+    pub fn query_snapshots<I, K, S>(
+        &mut self,
+        sinks: I,
+        storage: &S,
+    ) -> Result<MultisinkDeltas, IvmRuntimeError>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+        S: OrderedKvStorage,
+    {
+        let sinks = sinks
+            .into_iter()
+            .map(|(sink, graph)| (sink.into(), graph))
+            .collect::<Vec<_>>();
+        if sinks.is_empty() {
+            return Err(IvmRuntimeError::EmptyMultisinkSubscription);
+        }
+        let mut sink_names = HashSet::new();
+        for (sink, graph) in &sinks {
+            if !sink_names.insert(sink.clone()) {
+                return Err(IvmRuntimeError::DuplicateMultisinkSink(sink.clone()));
+            }
+            if builder_contains_binding_source(graph) {
+                return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
+            }
+        }
+        self.logical_nodes_requested += sinks
+            .iter()
+            .map(|(_, graph)| count_builder_nodes(graph))
+            .sum::<usize>() as u64;
+        let mut outputs = BTreeMap::new();
+        for (sink, graph) in sinks {
+            outputs.insert(sink, self.add_dedup_graph(&graph)?);
+        }
+        let snapshots = self.hydration_snapshots(&outputs, storage);
+        for node in self.gc_ephemeral_nodes(0) {
+            self.remove_node_runtime(node);
+        }
+        self.prune_unreferenced_arrangements();
+        snapshots
+    }
+
     pub fn tick<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,

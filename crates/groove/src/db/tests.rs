@@ -2709,6 +2709,43 @@ fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
 }
 
 #[test]
+fn query_graphs_returns_named_one_shot_snapshots() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Blue Train".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let snapshots = database
+        .query_graphs([
+            ("ids", GraphBuilder::table("albums").project(["id"])),
+            ("titles", GraphBuilder::table("albums").project(["title"])),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        snapshots.get("ids").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1)], 1), (vec![Value::U64(2)], 1)]
+    );
+    assert_eq!(
+        snapshots.get("titles").unwrap().to_values().unwrap(),
+        [
+            (vec![Value::String("Blue Train".to_owned())], 1),
+            (vec![Value::String("Giant Steps".to_owned())], 1)
+        ]
+    );
+}
+
+#[test]
 fn unwrap_nullable_retractions_flow_symmetrically() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["tracks", "indices"]).unwrap();
