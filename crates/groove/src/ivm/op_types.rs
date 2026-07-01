@@ -15,7 +15,7 @@ use crate::schema::IndexSchema;
 // Operator categories:
 // - Sources: TableSourceOp, InlineRecordsOp, FrontierSourceOp, BindingSourceOp.
 // - Stateless transformations: PersistOp, FilterOp, MapProjectOp,
-//   UnwrapNullableOp, IndexByOp.
+//   UnwrapNullableOp, UnnestOp, IndexByOp.
 // - Stateful transformations: JoinOp (join/semi-join/anti-join), RecursiveOp.
 // - Aggregate/window: ArgMaxByOp, ArgMinByOp, TopByOp, AggregateOp.
 
@@ -92,6 +92,17 @@ pub struct UnwrapNullableOp {
     pub field: String,
     /// Resolved logical field index.
     pub field_idx: usize,
+}
+
+/// Array element expansion operator descriptor.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UnnestOp {
+    /// Field to expand from `Array(T)` into one output row per element.
+    pub array_field: String,
+    /// Resolved logical array field index.
+    pub array_field_idx: usize,
+    /// Output field carrying the current array element.
+    pub element_field: String,
 }
 
 /// In-memory or schema-backed index construction descriptor.

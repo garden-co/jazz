@@ -20,7 +20,7 @@ use crate::ivm::{
     FrontierSourceOp, GraphBuilder, IndexByOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind,
     LiteralValue, MapProjectOp, NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp,
     PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer,
-    TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnwrapNullableOp,
+    TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
 };
 use crate::records::{self, BorrowedRecord, RecordDescriptor, Value, ValueType};
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
@@ -1011,6 +1011,15 @@ impl IvmRuntime {
                 let field_idx = resolve_field_ref(&input, field)?;
                 unwrap_nullable_descriptor(&input, field_idx)
             }
+            GraphBuilder::Unnest {
+                input,
+                array_field,
+                element_field,
+            } => {
+                let input = self.infer_builder_output(input)?;
+                let field_idx = resolve_field_ref(&input, array_field)?;
+                unnest_descriptor(&input, field_idx, element_field)
+            }
             GraphBuilder::Project { input, fields } => {
                 let input = self.infer_builder_output(input)?;
                 project_descriptor(&input, fields)
@@ -1809,6 +1818,31 @@ impl IvmRuntime {
                         OpType::UnwrapNullable(UnwrapNullableOp {
                             field: field_ref_name(&input_output, field)?,
                             field_idx,
+                        }),
+                        [input_node],
+                        output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode { output, node })
+            }
+            GraphBuilder::Unnest {
+                input,
+                array_field,
+                element_field,
+            } => {
+                let compiled_input = self.add_dedup_graph(input)?;
+                let input_node = compiled_input.node;
+                let input_output = compiled_input.output;
+                let array_field_idx = resolve_field_ref(&input_output, array_field)?;
+                let output = inferred_output;
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        OpType::Unnest(UnnestOp {
+                            array_field: field_ref_name(&input_output, array_field)?,
+                            array_field_idx,
+                            element_field: element_field.clone(),
                         }),
                         [input_node],
                         output,
@@ -2717,6 +2751,7 @@ fn count_builder_nodes(graph: &GraphBuilder) -> usize {
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. } => 1 + count_builder_nodes(input),
@@ -2736,6 +2771,7 @@ fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. } => builder_contains_binding_source(input),
@@ -2800,6 +2836,7 @@ fn collect_builder_field_names(
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. } => {
@@ -3055,6 +3092,23 @@ fn lift_literal_filter(
                 value: lifted.value,
             }))
         }
+        GraphBuilder::Unnest {
+            input,
+            array_field,
+            element_field,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+                return Ok(None);
+            };
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::Unnest {
+                    input: Box::new(lifted.graph),
+                    array_field: array_field.clone(),
+                    element_field: element_field.clone(),
+                },
+                value: lifted.value,
+            }))
+        }
         GraphBuilder::ArgMaxBy {
             input,
             group_cols,
@@ -3257,6 +3311,7 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
             .any(|field| field.output_name == binding_field),
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. } => graph_outputs_binding(input, binding_field),
@@ -3319,6 +3374,27 @@ fn propagate_binding_through_frontier(
                 fields,
             })
         }
+        GraphBuilder::UnwrapNullable { input, field } => {
+            let input =
+                propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
+            Some(GraphBuilder::UnwrapNullable {
+                input: Box::new(input),
+                field: field.clone(),
+            })
+        }
+        GraphBuilder::Unnest {
+            input,
+            array_field,
+            element_field,
+        } => {
+            let input =
+                propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
+            Some(GraphBuilder::Unnest {
+                input: Box::new(input),
+                array_field: array_field.clone(),
+                element_field: element_field.clone(),
+            })
+        }
         GraphBuilder::Join {
             left,
             right,
@@ -3363,7 +3439,6 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. }
         | GraphBuilder::Recursive { .. }
-        | GraphBuilder::UnwrapNullable { .. }
         | GraphBuilder::ArgMaxBy { .. }
         | GraphBuilder::ArgMinBy { .. }
         | GraphBuilder::TopBy { .. }
@@ -3396,6 +3471,15 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
         GraphBuilder::UnwrapNullable { input, field } => GraphBuilder::UnwrapNullable {
             input: Box::new(replace_binding_shape(*input, shape)),
             field,
+        },
+        GraphBuilder::Unnest {
+            input,
+            array_field,
+            element_field,
+        } => GraphBuilder::Unnest {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            array_field,
+            element_field,
         },
         GraphBuilder::ArgMaxBy {
             input,
@@ -3610,6 +3694,40 @@ impl NodeState {
         })
     }
 
+    fn update_unnest(
+        unnest: &UnnestOp,
+        output_desc: RecordDescriptor,
+        input: RecordDeltas,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let mut deltas = Vec::new();
+        for delta in input.deltas {
+            let values = delta
+                .borrowed(&input.descriptor)
+                .to_values()
+                .map_err(IvmRuntimeError::RecordEncoding)?;
+            let Some(value) = values.get(unnest.array_field_idx) else {
+                return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(
+                    unnest.array_field_idx,
+                ));
+            };
+            let Value::Array(elements) = value else {
+                return Err(IvmRuntimeError::UnsupportedOperator);
+            };
+            for element in elements {
+                let mut output_values = values.clone();
+                output_values.push(element.clone());
+                deltas.push(RecordDelta {
+                    record: output_desc.create(&output_values)?,
+                    weight: delta.weight,
+                });
+            }
+        }
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas,
+        })
+    }
+
     fn update_union(
         output_desc: RecordDescriptor,
         inputs: Vec<RecordDeltas>,
@@ -3697,6 +3815,7 @@ fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. } => builder_contains_recursive(input),
@@ -3935,6 +4054,10 @@ where
             OpType::UnwrapNullable(unwrap) => {
                 let input = self.update_unary_input(&graph_node, node)?;
                 NodeState::update_unwrap_nullable(unwrap, output_desc, input)
+            }
+            OpType::Unnest(unnest) => {
+                let input = self.update_unary_input(&graph_node, node)?;
+                NodeState::update_unnest(unnest, output_desc, input)
             }
             OpType::ArgMaxBy(arg_max_by) => {
                 let input = self.update_unary_input(&graph_node, node)?;
@@ -4727,6 +4850,32 @@ fn unwrap_nullable_descriptor(
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
         .map(RecordDescriptor::new)
+}
+
+fn unnest_descriptor(
+    input: &RecordDescriptor,
+    array_field_idx: usize,
+    element_field: &str,
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    let array_field = input
+        .fields()
+        .get(array_field_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(array_field_idx))?;
+    let ValueType::Array(element_type) = &array_field.value_type else {
+        return Err(IvmRuntimeError::UnsupportedOperator);
+    };
+    let mut fields = input
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name.clone().unwrap_or_default(),
+                field.value_type.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    fields.push((element_field.to_owned(), (**element_type).clone()));
+    Ok(RecordDescriptor::new(fields))
 }
 
 fn index_record_descriptor() -> RecordDescriptor {

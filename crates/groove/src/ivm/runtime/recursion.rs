@@ -534,6 +534,10 @@ where
                 let input = self.eval_unary_input(graph_node, node)?;
                 NodeState::update_unwrap_nullable(unwrap, output_desc, input)
             }
+            OpType::Unnest(unnest) => {
+                let input = self.eval_unary_input(graph_node, node)?;
+                NodeState::update_unnest(unnest, output_desc, input)
+            }
             OpType::ArgMaxBy(arg_max_by) => {
                 let input = self.eval_unary_input(graph_node, node)?;
                 let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Vec<u8>)>::new();
