@@ -6,8 +6,9 @@
  * Run via: pnpm walkthrough:shots
  */
 
-import { join } from "node:path";
 import { startLocalJazzServer, deploy } from "jazz-tools/testing";
+import permissions from "../permissions.js";
+import { app } from "../schema.js";
 
 export const SCREENSHOT_PORT = 4201;
 export const SCREENSHOT_APP_ID = "00000000-0000-0000-0000-000000000006";
@@ -24,7 +25,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     serverUrl: server.url,
     appId: SCREENSHOT_APP_ID,
     adminSecret: ADMIN_SECRET,
-    schemaDir: join(import.meta.dirname, ".."),
+    schema: app,
+    permissions,
   });
 
   return () => server.stop();

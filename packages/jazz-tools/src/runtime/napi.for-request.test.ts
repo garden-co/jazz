@@ -4,11 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { schema as s } from "jazz-tools";
-import {
-  fetchPermissionsHead,
-  publishStoredPermissions,
-  publishStoredSchema,
-} from "./schema-fetch.js";
+import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
 // ---------------------------------------------------------------------------
@@ -72,18 +68,12 @@ async function createTestContext(
   backendSecret: string,
   adminSecret: string,
 ) {
-  const { hash: schemaHash } = await publishStoredSchema(server.url, {
+  await deploy({
     appId,
+    serverUrl: server.url,
     adminSecret,
-    schema: todoApp.wasmSchema,
-  });
-  const { head } = await fetchPermissionsHead(server.url, { appId, adminSecret });
-  await publishStoredPermissions(server.url, {
-    appId,
-    adminSecret,
-    schemaHash,
+    schema: todoApp,
     permissions: todoAppPermissions,
-    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 
   const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-concurrent-request-"));
