@@ -1941,9 +1941,6 @@ fn unsupported_join_via_reason(join: &JoinVia) -> Option<String> {
     if join.source_lookup.is_some() {
         reasons.push("source_lookup");
     }
-    if !join.correlated_filters.is_empty() {
-        reasons.push("correlated_filters");
-    }
     if !join.nested_joins.is_empty() {
         reasons.push("nested_joins");
     }
@@ -2508,12 +2505,44 @@ where
                     NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone()))
                 }
             };
+            let mut key_pairs = vec![(root_key.clone(), join_key.clone())];
+            key_pairs.extend(join.correlated_filters.iter().map(|correlation| {
+                (
+                    NormalizedValueRef::SourceField {
+                        source: root_source.clone(),
+                        field: correlation.source_column.clone(),
+                    },
+                    NormalizedValueRef::SourceField {
+                        source: join_source.clone(),
+                        field: correlation.join_column.clone(),
+                    },
+                )
+            }));
+            let join_predicate = if key_pairs.len() == 1 {
+                let (left, right) = key_pairs[0].clone();
+                NormalizedPredicateExpr::Compare {
+                    left,
+                    op: NormalizedComparisonOp::Eq,
+                    right,
+                }
+            } else {
+                NormalizedPredicateExpr::And(
+                    key_pairs
+                        .iter()
+                        .cloned()
+                        .map(|(left, right)| NormalizedPredicateExpr::Compare {
+                            left,
+                            op: NormalizedComparisonOp::Eq,
+                            right,
+                        })
+                        .collect(),
+                )
+            };
             join_contributions.push(JoinContribution {
                 id: format!("join_via:{index}"),
                 source: join_source.clone(),
                 input: right.clone(),
-                root_key: root_key.clone(),
-                join_key: join_key.clone(),
+                key_pairs,
             });
             let join_node = RowSetNodeId(format!("join_via:{index}:join"));
             nodes.insert(
@@ -2522,11 +2551,7 @@ where
                     left: current,
                     right,
                     mode: NormalizedJoinMode::Inner,
-                    on: NormalizedPredicateExpr::Compare {
-                        left: root_key,
-                        op: NormalizedComparisonOp::Eq,
-                        right: join_key,
-                    },
+                    on: join_predicate,
                 },
             );
             current = join_node;

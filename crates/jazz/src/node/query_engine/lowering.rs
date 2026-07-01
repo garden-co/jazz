@@ -1915,7 +1915,7 @@ fn lower_linear_plan_steps(
                     ));
                 }
                 let lowered_right = lower_relation_input(right, resolved_sources, request)?;
-                let (left_key, right_key) = lower_linear_join_key_pair(
+                let (left_keys, right_keys) = lower_linear_join_key_pairs(
                     on,
                     &plan.root,
                     root_source,
@@ -1923,17 +1923,27 @@ fn lower_linear_plan_steps(
                     &lowered_right,
                     request,
                 )?;
-                if matches!(&plan.root, LinearRoot::Source { .. })
-                    && source_field_is_nullable(root_source, &left_key)
-                {
-                    graph = graph.unwrap_nullable(left_key.clone());
+                if matches!(&plan.root, LinearRoot::Source { .. }) {
+                    let mut unwrapped_left_keys = BTreeSet::new();
+                    for left_key in &left_keys {
+                        if source_field_is_nullable(root_source, left_key)
+                            && unwrapped_left_keys.insert(left_key.clone())
+                        {
+                            graph = graph.unwrap_nullable(left_key.clone());
+                        }
+                    }
                 }
                 let right_nullable_fields = lowered_right.nullable_fields.clone();
                 let mut right_graph = lowered_right.graph;
-                if lowered_right.nullable_fields.contains(&right_key) {
-                    right_graph = right_graph.unwrap_nullable(right_key.clone());
+                let mut unwrapped_right_keys = BTreeSet::new();
+                for right_key in &right_keys {
+                    if lowered_right.nullable_fields.contains(right_key)
+                        && unwrapped_right_keys.insert(right_key.clone())
+                    {
+                        right_graph = right_graph.unwrap_nullable(right_key.clone());
+                    }
                 }
-                graph = GraphBuilder::join(graph, right_graph, [left_key], [right_key]);
+                graph = GraphBuilder::join(graph, right_graph, left_keys, right_keys);
                 last_join_right = Some(((**right).clone(), right_nullable_fields));
                 if matches!(&plan.root, LinearRoot::Source { .. }) {
                     let introduced_route_fields = route_fields
@@ -2254,6 +2264,45 @@ fn lower_join_key_pair(
     }
 }
 
+fn lower_join_key_pairs(
+    predicate: &PredicateExpr,
+    left_source_id: &SourceId,
+    left_source: &ResolvedSource,
+    right_source_id: &SourceId,
+    right_source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    let pairs = match predicate {
+        PredicateExpr::And(predicates) => predicates
+            .iter()
+            .map(|predicate| {
+                lower_join_key_pair(
+                    predicate,
+                    left_source_id,
+                    left_source,
+                    right_source_id,
+                    right_source,
+                    request,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => vec![lower_join_key_pair(
+            predicate,
+            left_source_id,
+            left_source,
+            right_source_id,
+            right_source,
+            request,
+        )?],
+    };
+    if pairs.is_empty() {
+        return Err(UnsupportedReason::Operator(
+            "join_via requires at least one equality join predicate".to_owned(),
+        ));
+    }
+    Ok(pairs.into_iter().unzip())
+}
+
 fn lower_linear_join_key_pair(
     predicate: &PredicateExpr,
     left_root: &LinearRoot,
@@ -2289,6 +2338,45 @@ fn lower_linear_join_key_pair(
             )),
         },
     }
+}
+
+fn lower_linear_join_key_pairs(
+    predicate: &PredicateExpr,
+    left_root: &LinearRoot,
+    left_source: &ResolvedSource,
+    right_plan: &RelationInputPlan,
+    right_output: &LoweredRelationInput,
+    request: &QueryProgramRequest,
+) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    let pairs = match predicate {
+        PredicateExpr::And(predicates) => predicates
+            .iter()
+            .map(|predicate| {
+                lower_linear_join_key_pair(
+                    predicate,
+                    left_root,
+                    left_source,
+                    right_plan,
+                    right_output,
+                    request,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => vec![lower_linear_join_key_pair(
+            predicate,
+            left_root,
+            left_source,
+            right_plan,
+            right_output,
+            request,
+        )?],
+    };
+    if pairs.is_empty() {
+        return Err(UnsupportedReason::Operator(
+            "join_via requires at least one equality join predicate".to_owned(),
+        ));
+    }
+    Ok(pairs.into_iter().unzip())
 }
 
 fn lower_relation_key_ref(
@@ -3370,12 +3458,19 @@ fn join_contribution_membership_graph(
         .map_err(single_gap_report)?;
     let lowered =
         lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
-    let predicate = PredicateExpr::Compare {
-        left: contribution.root_key.clone(),
-        op: ComparisonOp::Eq,
-        right: contribution.join_key.clone(),
-    };
-    let (root_key, join_key) = lower_join_key_pair(
+    let predicate = PredicateExpr::And(
+        contribution
+            .key_pairs
+            .iter()
+            .cloned()
+            .map(|(left, right)| PredicateExpr::Compare {
+                left,
+                op: ComparisonOp::Eq,
+                right,
+            })
+            .collect(),
+    );
+    let (root_keys, join_keys) = lower_join_key_pairs(
         &predicate,
         &root_source.row_shape.source,
         root_source,
@@ -3384,7 +3479,10 @@ fn join_contribution_membership_graph(
         request,
     )
     .map_err(single_gap_report)?;
-    if !lowered.fields.contains(&join_key) {
+    if let Some(join_key) = join_keys
+        .iter()
+        .find(|join_key| !lowered.fields.contains(*join_key))
+    {
         return Err(Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Operator(format!(
                 "join contribution {} does not provide join key field {join_key}",
@@ -3399,15 +3497,18 @@ fn join_contribution_membership_graph(
         }));
     }
     let mut contribution_graph = lowered.graph;
-    if lowered.nullable_fields.contains(&join_key) {
-        contribution_graph = contribution_graph.unwrap_nullable(join_key.clone());
+    let mut unwrapped_join_keys = BTreeSet::new();
+    for join_key in &join_keys {
+        if lowered.nullable_fields.contains(join_key)
+            && unwrapped_join_keys.insert(join_key.clone())
+        {
+            contribution_graph = contribution_graph.unwrap_nullable(join_key.clone());
+        }
     }
     Ok(
-        GraphBuilder::join(visible_root, contribution_graph, [root_key], [join_key])
-            .project_fields(project_source_fields_from_prefix(
-                contribution_source,
-                "right.",
-            )),
+        GraphBuilder::join(visible_root, contribution_graph, root_keys, join_keys).project_fields(
+            project_source_fields_from_prefix(contribution_source, "right."),
+        ),
     )
 }
 
