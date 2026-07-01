@@ -33,7 +33,7 @@ use super::query_engine::{
     SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
     SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
     SourceResolutionError, SourceResolver, SourceRole, SourceRowShape, StorageSchemaSelection,
-    TypedOutputField, ValueSourceColumn, ValueSourceMode, VersionIdentityFields,
+    TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields,
     VersionedRowRefSchema, lower_query_program,
 };
 use crate::protocol::{
@@ -2125,24 +2125,93 @@ fn reachable_seed_source_id(seed: &crate::query::ReachableSeed, index: usize) ->
     }
 }
 
+struct FilterJoinChain<'a> {
+    filters: &'a [Predicate],
+    joins: &'a [JoinVia],
+}
+
+fn normalize_filter_join_chain(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    join_contributions: &mut Vec<JoinContribution>,
+    schema: &JazzSchema,
+    root_source: &SourceId,
+    start: RowSetNodeId,
+    prefix: &str,
+    chain: FilterJoinChain<'_>,
+    record_join_contributions: bool,
+) -> Result<RowSetNodeId, Error> {
+    let mut current = start;
+    if !chain.filters.is_empty() {
+        let filter_node = RowSetNodeId(format!("{prefix}:filter"));
+        nodes.insert(
+            filter_node.clone(),
+            RowSetExpr::Filter {
+                input: current,
+                predicate: normalize_predicates(root_source, chain.filters)?,
+            },
+        );
+        current = filter_node;
+    }
+
+    for (index, join) in chain.joins.iter().enumerate() {
+        let path = format!("{prefix}:join_via:{index}");
+        let (right, join_source) =
+            normalize_join_via_right(nodes, auxiliary_sources, schema, join, &path)?;
+        let join_predicate = join_via_predicate(root_source, &join_source, join);
+        if record_join_contributions {
+            join_contributions.push(JoinContribution {
+                id: path.clone(),
+                source: join_source.clone(),
+                input: right.clone(),
+                membership: join_predicate.clone(),
+            });
+        }
+        let join_node = RowSetNodeId(format!("{path}:join"));
+        nodes.insert(
+            join_node.clone(),
+            RowSetExpr::Join {
+                left: current,
+                right,
+                mode: NormalizedJoinMode::Inner,
+                on: join_predicate,
+            },
+        );
+        current = join_node;
+    }
+    Ok(current)
+}
+
+fn normalize_row_id_projection(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    input: RowSetNodeId,
+    root_source: &SourceId,
+    node_id: RowSetNodeId,
+) -> RowSetNodeId {
+    nodes.insert(
+        node_id.clone(),
+        RowSetExpr::Project {
+            input,
+            columns: vec![RowProjection {
+                output: TypedOutputField {
+                    name: "row_uuid".to_owned(),
+                    ty: ColumnType::Uuid,
+                },
+                value: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+            }],
+        },
+    );
+    node_id
+}
+
 fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
     if query.policy_branches.is_empty() {
         return None;
     }
 
     let mut reasons = Vec::new();
-    if !query.joins.is_empty() {
-        reasons.push("base joins");
-    }
     if !query.reachable.is_empty() {
         reasons.push("base reachable");
-    }
-    if query
-        .policy_branches
-        .iter()
-        .any(|branch| !branch.joins.is_empty())
-    {
-        reasons.push("branch joins");
     }
     if query
         .policy_branches
@@ -2627,62 +2696,113 @@ where
 
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
         if unsupported_policy_branch.is_none() && !query.policy_branches.is_empty() {
-            let filter_node = RowSetNodeId("policy_branch_filter".to_owned());
-            let mut alternatives = vec![normalize_predicates(&root_source, &query.filters)?];
-            alternatives.extend(
-                query
-                    .policy_branches
-                    .iter()
-                    .map(|branch| normalize_predicates(&root_source, &branch.filters))
-                    .collect::<Result<Vec<_>, Error>>()?,
-            );
+            let mut union_inputs = Vec::new();
+            let base_source_node = RowSetNodeId("policy_branch:base:root".to_owned());
             nodes.insert(
-                filter_node.clone(),
-                RowSetExpr::Filter {
-                    input: current,
-                    predicate: NormalizedPredicateExpr::Or(alternatives),
+                base_source_node.clone(),
+                RowSetExpr::Source {
+                    source: root_source.clone(),
+                    visibility: RowVisibility::Visible,
                 },
             );
-            current = filter_node;
-        } else if !query.filters.is_empty() {
-            let filter_node = RowSetNodeId("filter".to_owned());
-            nodes.insert(
-                filter_node.clone(),
-                RowSetExpr::Filter {
-                    input: current,
-                    predicate: normalize_predicates(&root_source, &query.filters)?,
-                },
-            );
-            current = filter_node;
-        }
-
-        for (index, join) in query.joins.iter().enumerate() {
-            let path = format!("join_via:{index}");
-            let (right, join_source) = normalize_join_via_right(
+            let base = normalize_filter_join_chain(
                 &mut nodes,
                 &mut auxiliary_sources,
+                &mut join_contributions,
                 &self.catalogue.schema,
-                join,
-                &path,
+                &root_source,
+                base_source_node,
+                "policy_branch:base",
+                FilterJoinChain {
+                    filters: &query.filters,
+                    joins: &query.joins,
+                },
+                false,
             )?;
-            let join_predicate = join_via_predicate(&root_source, &join_source, join);
-            join_contributions.push(JoinContribution {
-                id: path.clone(),
-                source: join_source.clone(),
-                input: right.clone(),
-                membership: join_predicate.clone(),
+            union_inputs.push(UnionInput {
+                node: normalize_row_id_projection(
+                    &mut nodes,
+                    base,
+                    &root_source,
+                    RowSetNodeId("policy_branch:base:row_id".to_owned()),
+                ),
+                label: "base".to_owned(),
             });
-            let join_node = RowSetNodeId(format!("join_via:{index}:join"));
+
+            for (index, branch) in query.policy_branches.iter().enumerate() {
+                let branch_source_node = RowSetNodeId(format!("policy_branch:{index}:root"));
+                nodes.insert(
+                    branch_source_node.clone(),
+                    RowSetExpr::Source {
+                        source: root_source.clone(),
+                        visibility: RowVisibility::Visible,
+                    },
+                );
+                let branch_current = normalize_filter_join_chain(
+                    &mut nodes,
+                    &mut auxiliary_sources,
+                    &mut join_contributions,
+                    &self.catalogue.schema,
+                    &root_source,
+                    branch_source_node,
+                    &format!("policy_branch:{index}"),
+                    FilterJoinChain {
+                        filters: &branch.filters,
+                        joins: &branch.joins,
+                    },
+                    false,
+                )?;
+                union_inputs.push(UnionInput {
+                    node: normalize_row_id_projection(
+                        &mut nodes,
+                        branch_current,
+                        &root_source,
+                        RowSetNodeId(format!("policy_branch:{index}:row_id")),
+                    ),
+                    label: index.to_string(),
+                });
+            }
+
+            let union_node = RowSetNodeId("policy_branch:authorized_rows".to_owned());
+            nodes.insert(
+                union_node.clone(),
+                RowSetExpr::Union {
+                    inputs: union_inputs,
+                },
+            );
+            let join_node = RowSetNodeId("policy_branch:authorize".to_owned());
             nodes.insert(
                 join_node.clone(),
                 RowSetExpr::Join {
                     left: current,
-                    right,
+                    right: union_node,
                     mode: NormalizedJoinMode::Inner,
-                    on: join_predicate,
+                    on: NormalizedPredicateExpr::Compare {
+                        left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                        op: NormalizedComparisonOp::Eq,
+                        right: NormalizedValueRef::SourceField {
+                            source: root_source.clone(),
+                            field: "row_uuid".to_owned(),
+                        },
+                    },
                 },
             );
             current = join_node;
+        } else {
+            current = normalize_filter_join_chain(
+                &mut nodes,
+                &mut auxiliary_sources,
+                &mut join_contributions,
+                &self.catalogue.schema,
+                &root_source,
+                current,
+                "query",
+                FilterJoinChain {
+                    filters: &query.filters,
+                    joins: &query.joins,
+                },
+                true,
+            )?;
         }
 
         let binding_source_shape = self.query_binding_source_shape_for_binding(shape, binding);
