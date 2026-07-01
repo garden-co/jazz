@@ -574,7 +574,6 @@ impl IvmRuntime {
         if terminals.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
         }
-        let binding_arity = binding_descriptor.fields().len();
         let mut sink_names = HashSet::new();
         for terminal in &terminals {
             if !sink_names.insert(terminal.sink.clone()) {
@@ -582,10 +581,10 @@ impl IvmRuntime {
                     terminal.sink.clone(),
                 ));
             }
-            if terminal.route_fields.len() != binding_arity {
+            if terminal.route_fields.len() > binding_descriptor.fields().len() {
                 return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
                     sink: terminal.sink.clone(),
-                    expected: binding_arity,
+                    expected: binding_descriptor.fields().len(),
                     actual: terminal.route_fields.len(),
                 });
             }

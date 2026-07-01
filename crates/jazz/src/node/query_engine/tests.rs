@@ -1225,12 +1225,12 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     let frontier_columns = vec![
         ValueSourceColumn {
             name: "team".to_owned(),
-            value: NormalizedValueRef::Param("team".to_owned()),
+            value: NormalizedValueRef::Param("__jazz_claim_sub".to_owned()),
             ty: ColumnType::Uuid,
         },
         ValueSourceColumn {
             name: "reachable_team".to_owned(),
-            value: NormalizedValueRef::Param("team".to_owned()),
+            value: NormalizedValueRef::Param("__jazz_claim_sub".to_owned()),
             ty: ColumnType::Uuid,
         },
         ValueSourceColumn {
@@ -1384,6 +1384,20 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     let mut resolver = FakeSourceResolver::default();
     let program =
         lower_query_program(request, &mut resolver).expect("recursive relation should lower");
+    assert!(
+        program
+            .lowered
+            .parameters
+            .hidden_params
+            .contains_key("__jazz_claim_sub")
+    );
+    assert!(
+        !program
+            .lowered
+            .parameters
+            .user_params
+            .contains_key("__jazz_claim_sub")
+    );
 
     fn step_input_reads_frontier(input: &GraphBuilder) -> bool {
         match input {
@@ -1413,16 +1427,16 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
                 seed.as_ref(),
                 GraphBuilder::Project { input, fields }
                     if fields.iter().any(|field| field.output_name == "team")
-                        && fields.iter().any(|field| field.output_name == "reachable_team")
-                        && fields.iter().any(|field| field.output_name == "route")
-                        && matches!(
-                            input.as_ref(),
-                            GraphBuilder::BindingSource { shape, output }
-                                if shape == "reachable-binding"
-                                    && output.field_index("team").is_some()
-                                    && output.field_index("route").is_some()
-                                    && output.field_index("reachable_team").is_none()
-                        )
+                    && fields.iter().any(|field| field.output_name == "reachable_team")
+                    && fields.iter().any(|field| field.output_name == "route")
+                    && matches!(
+                        input.as_ref(),
+                        GraphBuilder::BindingSource { shape, output }
+                            if shape == "reachable-binding"
+                                && output.field_index("__jazz_claim_sub").is_some()
+                                && output.field_index("route").is_some()
+                                && output.field_index("reachable_team").is_none()
+                    )
             )
             && matches!(
                 step.as_ref(),
@@ -1432,14 +1446,15 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     ));
     assert_eq!(
         program.lowered.parameters.user_params,
-        BTreeMap::from([
-            ("route".to_owned(), ColumnType::String),
-            ("team".to_owned(), ColumnType::Uuid),
-        ])
+        BTreeMap::from([("route".to_owned(), ColumnType::String)])
+    );
+    assert_eq!(
+        program.lowered.parameters.hidden_params,
+        BTreeMap::from([("__jazz_claim_sub".to_owned(), ColumnType::Uuid)])
     );
     assert_eq!(
         program.lowered.parameters.routing_params,
-        BTreeSet::from(["route".to_owned(), "team".to_owned()])
+        BTreeSet::from(["route".to_owned()])
     );
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert!(terminals.iter().any(|terminal| {

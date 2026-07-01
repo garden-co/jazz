@@ -326,8 +326,9 @@ struct Parking {
 struct QueryServing {
     /// Prepared current-row graph per table and durability tier.
     current_row_graphs: BTreeMap<(String, DurabilityTier), GraphBuilder>,
-    /// Prepared query plans keyed by shape and durability tier.
-    query_shape_cache: BTreeMap<(crate::query::ShapeId, DurabilityTier), PreparedQueryPlan>,
+    /// Prepared query plans keyed by shape, durability tier, and parameter
+    /// descriptor signature.
+    query_shape_cache: BTreeMap<(crate::query::ShapeId, DurabilityTier, String), PreparedQueryPlan>,
     /// Logical tables that have history rows for a stored transaction.
     tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Approximate insertion order for bounding `tx_version_tables_cache`.
@@ -3421,6 +3422,7 @@ pub(crate) struct PreparedQueryParam {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreparedQueryParamSource {
     User,
+    Claim { name: String },
 }
 
 fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> Result<(), Error> {
