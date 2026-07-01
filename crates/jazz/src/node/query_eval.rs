@@ -15,7 +15,6 @@ use groove::records::{EnumSchema, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
-use super::policy::ViewEvaluationContext;
 use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
     AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathSegment,
@@ -55,7 +54,6 @@ pub(crate) struct LocalMaintainedViewSubscription {
     tables: BTreeMap<String, TableSchema>,
     result_table: String,
     result_set: BTreeSet<ResultMemberEntry>,
-    identity: AuthorId,
 }
 
 pub(crate) fn take_required_sink_deltas(
@@ -3485,7 +3483,6 @@ where
             tables,
             result_table: shape.query().table.clone(),
             result_set: BTreeSet::new(),
-            identity,
         };
         let initial = self.apply_local_maintained_view_transitions(&mut local, transitions)?;
         Ok((local, initial.adds))
@@ -3605,10 +3602,6 @@ where
                 .ok_or(Error::MissingTransaction(entry.2))?
                 .clone()
         };
-        let mut context = ViewEvaluationContext::default();
-        if !self.read_policy_allows_version_memo(&table, &version, local.identity, &mut context)? {
-            return Ok(None);
-        }
         self.current_row_from_materialized_version(&table, &version)
             .map(Some)
     }
