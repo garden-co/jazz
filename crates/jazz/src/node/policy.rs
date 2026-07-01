@@ -60,9 +60,13 @@ where
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(true);
         };
-        self.policy_allows(&table, &policy, version.row_uuid(), author, |column| {
-            cells.get(column).cloned()
-        })
+        self.write_policy_query_allows_insert_candidate(
+            &table,
+            &policy,
+            version.row_uuid(),
+            &cells,
+            author,
+        )
     }
 
     pub(crate) fn dry_run_insert_allows(&mut self, commit: MergeableCommit) -> Result<bool, Error> {
