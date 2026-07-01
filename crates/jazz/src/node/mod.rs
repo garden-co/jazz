@@ -3105,7 +3105,6 @@ pub(crate) struct PreparedQueryParam {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreparedQueryParamSource {
     User,
-    Claim { name: String },
 }
 
 fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> Result<(), Error> {
@@ -3237,6 +3236,9 @@ pub enum Error {
     /// Query could not be represented by the unified query engine.
     #[error("query lowering failed: {0}")]
     QueryLowering(String),
+    /// Query-engine capability report for a currently unsupported program.
+    #[error("query capability unsupported: {0}")]
+    QueryCapability(String),
     /// Table was not found in the schema.
     #[error("table not found: {0}")]
     TableNotFound(String),
