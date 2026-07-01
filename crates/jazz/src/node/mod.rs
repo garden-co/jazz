@@ -52,6 +52,7 @@ mod policy;
 mod query_engine;
 mod query_eval;
 mod recovery;
+mod source_resolution;
 pub mod text_oplog;
 mod views;
 pub(crate) use query_eval::LocalMaintainedViewSubscription;
