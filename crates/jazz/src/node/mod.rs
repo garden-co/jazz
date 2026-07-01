@@ -54,10 +54,9 @@ mod query_eval;
 mod recovery;
 pub mod text_oplog;
 mod views;
-pub(crate) use query_eval::{
-    JAZZ_APP_ROWS_SINK, LocalMaintainedViewSubscription, apply_maintained_multisink_deltas,
-    take_optional_sink_deltas,
-};
+#[cfg(test)]
+pub(crate) use query_eval::{JAZZ_APP_ROWS_SINK, take_optional_sink_deltas};
+pub(crate) use query_eval::{LocalMaintainedViewSubscription, apply_maintained_multisink_deltas};
 pub(crate) use views::MaintainedViewBundleInputs;
 
 use branches::BranchRecord;

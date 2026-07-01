@@ -58,6 +58,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    #[cfg(test)]
     pub(super) fn retain_policy_atomic_rows(
         &mut self,
         set: &mut BTreeSet<ResultRowEntry>,
