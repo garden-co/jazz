@@ -58,34 +58,6 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    #[cfg(test)]
-    pub(super) fn retain_policy_atomic_rows(
-        &mut self,
-        set: &mut BTreeSet<ResultRowEntry>,
-        identity: AuthorId,
-        context: &mut ViewEvaluationContext,
-    ) -> Result<(), Error> {
-        if identity == AuthorId::SYSTEM {
-            return Ok(());
-        }
-        let mut row_readable = BTreeMap::new();
-        for (table_name, row_uuid, tx_id) in set.iter() {
-            row_readable.insert(
-                (*table_name, *row_uuid, *tx_id),
-                self.result_set_entry_read_policy_allows_memo(
-                    table_name, *row_uuid, *tx_id, identity, context,
-                )?,
-            );
-        }
-        set.retain(|(table_name, row_uuid, tx_id)| {
-            row_readable
-                .get(&(*table_name, *row_uuid, *tx_id))
-                .copied()
-                .unwrap_or(false)
-        });
-        Ok(())
-    }
-
     #[allow(dead_code)]
     pub(super) fn result_set_entry_read_policy_allows(
         &mut self,
