@@ -329,6 +329,7 @@ enum CurrentQueryProgramOutput {
 struct CurrentQuerySourceResolver<'a, S> {
     node: &'a mut NodeState<S>,
     read_view: &'a ReadView<RequestedSourceStage>,
+    inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
 }
 
 struct CurrentSourceGraph {
@@ -450,6 +451,27 @@ where
             .node
             .table_in_schema_or_branch_metadata(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        if let Some(rows) = self.inline_sources.get(&request.source) {
+            if request.visibility != RowVisibility::Visible
+                || !request.requirements.metadata.is_empty()
+                || !matches!(request.authorization, SourceAuthorizationRequest::System)
+            {
+                return Err(source_resolution_error(request, SourceGap::Coverage));
+            }
+            let graph = inline_current_graph(&table, rows.clone())
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let descriptor = current_row_descriptor(&table);
+            return Ok(ResolvedSource {
+                table_schema: table,
+                graph,
+                row_shape: SourceRowShape {
+                    source: request.source.clone(),
+                    descriptor,
+                    row_uuid_field: "row_uuid".to_owned(),
+                    metadata: BTreeMap::new(),
+                },
+            });
+        }
         let (graph, descriptor, metadata) = if table.name == "jazz_branches"
             && history_position.is_none()
             && open_tx_overlay.is_none()
@@ -3023,10 +3045,19 @@ where
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources(request, BTreeMap::new())
+    }
+
+    fn compile_query_program_request_with_inline_sources(
+        &mut self,
+        request: QueryProgramRequest,
+        inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+    ) -> Result<QueryProgram, Error> {
         let read_view = request.reads.primary.clone();
         let mut resolver = CurrentQuerySourceResolver {
             node: self,
             read_view: &read_view,
+            inline_sources,
         };
         lower_query_program(request, &mut resolver)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))
@@ -3499,6 +3530,81 @@ where
             ),
         };
         let program = self.compile_query_program_request(request)?;
+        self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+    }
+
+    pub(super) fn write_policy_query_allows_insert_candidate(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        let policy_shape = policy.clone().validate(&self.catalogue.schema)?;
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        let policy_shape = bind_query_params_with_mode(
+            &policy_shape,
+            &policy_binding,
+            &self.catalogue.schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let root_source = root_source_id(policy_shape.query().table.as_str());
+        let input = RowSetProgramInput {
+            shape: input_shape,
+            binding: ProgramBinding {
+                id: binding.binding_id(),
+                source_shape: Some(
+                    self.query_binding_source_shape_for_binding(&policy_shape, &binding),
+                ),
+                extra_user_params: BTreeMap::new(),
+                values: binding.values().clone(),
+            },
+        };
+        let policy = match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        };
+        let request = QueryProgramRequest {
+            reads: current_query_read_set(
+                &input.shape,
+                policy_shape.schema_version(),
+                policy_shape.schema_version(),
+                DurabilityTier::Local,
+                None,
+            ),
+            policy,
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                policy_shape.query(),
+            ),
+        };
+        let candidate = current_row_from_cells(table, row_uuid, cells)?;
+        let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
+        let program =
+            self.compile_query_program_request_with_inline_sources(request, inline_sources)?;
+        self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+    }
+
+    fn write_policy_query_program_allows(
+        &mut self,
+        program: &QueryProgram,
+        policy_shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<bool, Error> {
         let deltas =
             match self.prepared_query_plan_from_program(&program, &policy_shape, &binding)? {
                 PreparedQueryPlan::Graph(graph) => {

@@ -4347,6 +4347,95 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
 }
 
 #[test]
+fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
+    // Internal node coverage is intentional here: this pins sync-unit admission
+    // fates for proposed insert rows before the public client layer has a
+    // matching recursive write-policy fixture.
+    let schema = recursive_doc_write_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xb2);
+    let direct_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000011"));
+    let closure_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000012"));
+    let hidden_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000013"));
+    let parent_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000012"));
+    let hidden_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000013"));
+
+    for (team, name) in [
+        (RowUuid(reader.0), "reader"),
+        (parent_team, "parent"),
+        (hidden_team, "hidden"),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String(name.to_owned()),
+            )])),
+        );
+    }
+    for (idx, doc, team) in [
+        (0xb1, direct_doc, RowUuid(reader.0)),
+        (0xb2, closure_doc, parent_team),
+        (0xb3, hidden_doc, hidden_team),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("doc_access", row(idx), 30).cells(BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ])),
+        );
+    }
+    accept_global(
+        &mut core,
+        MergeableCommit::new("team_edges", row(0xe2), 40).cells(BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(reader.0)),
+            ("parent".to_owned(), Value::Uuid(parent_team.0)),
+        ])),
+    );
+
+    for (doc, title, expected_fate) in [
+        (direct_doc, "direct insert", Fate::Accepted),
+        (closure_doc, "closure insert", Fate::Accepted),
+        (
+            hidden_doc,
+            "hidden insert",
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+        ),
+    ] {
+        let (tx_id, unit) = writer
+            .commit_mergeable_unit(
+                MergeableCommit::new("docs", doc, 50)
+                    .made_by(reader)
+                    .cells(recursive_doc_cells(title, "inserted")),
+            )
+            .unwrap();
+        let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+        assert_eq!(
+            fate,
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate: expected_fate.clone(),
+                global_seq: matches!(expected_fate, Fate::Accepted)
+                    .then_some(GlobalSeq(core.clock.next_global_seq.0 - 1)),
+                durability: matches!(expected_fate, Fate::Accepted)
+                    .then_some(DurabilityTier::Global),
+            }
+        );
+    }
+
+    assert_eq!(
+        core.current_rows("docs", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([direct_doc, closure_doc])
+    );
+}
+
+#[test]
 fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() {
     let mut schema = recursive_doc_write_policy_schema();
     let policy = Policy::shape(Query::from("docs").reachable_via(
