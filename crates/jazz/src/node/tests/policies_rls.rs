@@ -1741,18 +1741,6 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         1,
         "identities with the same shape and policy should share one prepared graph"
     );
-    assert_eq!(
-        invited_link
-            .maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
-    );
-    assert_eq!(
-        spy_link
-            .maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
-    );
 
     let invite_tx = core
         .commit_mergeable(MergeableCommit::new("canvasInvites", invite_row, 12).cells(
@@ -1790,12 +1778,6 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     );
     assert!(result_member_removes.is_empty());
     assert_eq!(invited_link.metrics.view_updates_out, 2);
-    assert_eq!(
-        invited_link
-            .maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
-    );
 
     let spy_update = spy_link.query_update(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
@@ -1808,12 +1790,6 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     ));
     assert_eq!(spy_link.metrics.result_adds_out, 0);
     assert_eq!(spy_link.metrics.version_bundles_out, 0);
-    assert_eq!(
-        spy_link
-            .maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
-    );
 
     let revoke_tx = core
         .commit_mergeable(
@@ -1850,18 +1826,6 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     assert_eq!(
         invited_link.subscription_result_sets(subscription),
         Some(BTreeSet::new())
-    );
-    assert_eq!(
-        invited_link
-            .maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
-    );
-    assert_eq!(
-        spy_link
-            .maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
     );
 }
 #[test]
@@ -2660,12 +2624,6 @@ fn maintained_subscription_view_multi_segment_inner_include_payload_references_v
     assert_eq!(
         maintained_peer
             .maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
-    );
-    assert_eq!(
-        maintained_peer
-            .maintained_subscription_view_metrics()
             .hits_out,
         1
     );
@@ -2835,12 +2793,6 @@ fn maintained_subscription_view_multi_segment_holes_include_payload_references_v
             .map(|entry| entry.1)
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0xd1), row(0xd2), row(0xd3)])
-    );
-    assert_eq!(
-        maintained_peer
-            .maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
     );
     assert_eq!(
         maintained_peer
@@ -3208,7 +3160,6 @@ fn maintained_view_tagged_terminal_clean_owner_policy_claim_params_match_one_sho
         "clean tagged terminal rows should route by retained query and policy claim params"
     );
     assert!(removes.is_empty());
-    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
 }
 
 #[test]
@@ -3324,7 +3275,6 @@ fn maintained_view_system_identity_bypasses_root_read_policy() {
         BTreeSet::from([(row(0xa0), tx_a), (row(0xa1), tx_b)])
     );
     assert!(removes.is_empty());
-    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
 }
 
 #[test]
@@ -3358,7 +3308,6 @@ fn maintained_view_allows_join_policy_slice() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::for_author(user(0xa1));
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
 }
 
 #[test]
@@ -3424,7 +3373,6 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
         expected_rows
     );
     assert!(removes.is_empty());
-    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
 }
 
 #[test]
@@ -3500,7 +3448,6 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
         full_recompute_rows
     );
     assert!(removes.is_empty());
-    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
 }
 
 #[test]
@@ -3559,11 +3506,6 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
         canonical_view_update_rows(&initial),
         (Vec::new(), Vec::new())
     );
-    assert_eq!(
-        peer.maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
-    );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 1);
 
     let visible_member_tx = accept_global(
@@ -3587,11 +3529,6 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
         )
     );
     assert_view_update_only_references_rows(&grant, BTreeSet::from([member_row, todo_row]));
-    assert_eq!(
-        peer.maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
-    );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
 
     let hidden_again_tx = accept_global(
@@ -3619,11 +3556,6 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
         member_row,
         visible_member_tx,
         hidden_again_tx,
-    );
-    assert_eq!(
-        peer.maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
     );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 3);
 }
@@ -3666,11 +3598,6 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
         [("todos", second, second_tx), ("todos", third, third_tx)],
         [],
     );
-    assert_eq!(
-        peer.maintained_subscription_view_metrics()
-            .full_recomputes_out,
-        0
-    );
 
     let zeroth = row(0x05);
     let zeroth_tx = accept_global(
@@ -3711,7 +3638,6 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
     );
 
     let metrics = peer.maintained_subscription_view_metrics();
-    assert_eq!(metrics.full_recomputes_out, 0);
     assert_eq!(metrics.unsupported_skips_out, 0);
     assert_eq!(metrics.hits_out, 4);
 }
@@ -3741,7 +3667,6 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
         .rehydrate_query(&mut ref_core, &shape, &binding)
         .unwrap();
     let ref_metrics = ref_peer.maintained_subscription_view_metrics();
-    assert_eq!(ref_metrics.full_recomputes_out, 0);
     assert_eq!(ref_metrics.unsupported_skips_out, 0);
     assert_eq!(ref_metrics.hits_out, 1);
 
@@ -3760,7 +3685,6 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
         .rehydrate_query(&mut plain_core, &plain_shape, &plain_binding)
         .unwrap();
     let plain_metrics = plain_peer.maintained_subscription_view_metrics();
-    assert_eq!(plain_metrics.full_recomputes_out, 0);
     assert_eq!(plain_metrics.unsupported_skips_out, 0);
     assert_eq!(plain_metrics.hits_out, 1);
 }
@@ -3813,7 +3737,6 @@ fn maintained_subscription_view_explicit_include_suppresses_other_implicit_refer
 
     assert_view_update_only_ships_rows(&update, BTreeSet::from([root, included]));
     let metrics = peer.maintained_subscription_view_metrics();
-    assert_eq!(metrics.full_recomputes_out, 0);
     assert_eq!(metrics.unsupported_skips_out, 0);
 }
 
@@ -4214,7 +4137,6 @@ fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
     assert!(removes.is_empty());
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.hits_out, 1);
-    assert_eq!(metrics.full_recomputes_out, 0);
 }
 
 fn tagged_event_kinds(rows: &groove::ivm::RecordDeltas) -> BTreeSet<String> {

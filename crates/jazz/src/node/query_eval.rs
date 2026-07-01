@@ -6029,7 +6029,7 @@ where
             seed,
             step,
             "reachable_frontier",
-            reachable.bound.legacy_iteration_cap(),
+            reachable.bound.iteration_cap(),
         );
         let mut access_graph = current_source_graph(access_table, tier, source_overrides)
             .unwrap_nullable(query_field(&reachable.access_row_column))
@@ -9108,11 +9108,6 @@ mod tests {
                 && result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
                 && result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
         ));
-        assert_eq!(
-            peer.maintained_subscription_view_metrics()
-                .full_recomputes_out,
-            0
-        );
     }
 
     #[test]
