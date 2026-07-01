@@ -131,7 +131,7 @@ where
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
     ) -> Result<SyncMessage, Error> {
-        self.cold_maintained_view_update_for_query_binding_with_peer_payload_inventory(
+        self.seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
             shape,
             binding,
             subscription,
@@ -145,7 +145,7 @@ where
     /// Build a cold maintained query-binding view update using the peer's
     /// payload inventory.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn cold_maintained_view_update_for_query_binding_with_peer_payload_inventory(
+    pub(crate) fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -155,7 +155,7 @@ where
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
     ) -> Result<SyncMessage, Error> {
-        self.cold_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
+        self.seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
             shape,
             binding,
             subscription,
@@ -167,7 +167,7 @@ where
         )
     }
 
-    pub(crate) fn cold_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
+    pub(crate) fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -186,7 +186,7 @@ where
             .into_iter()
             .collect::<BTreeSet<_>>();
         let (receiver, maintained, _terminal_schemas, transitions, tables) =
-            self.maintained_subscription_view_from_cold_snapshot(shape, binding, identity, tier)?;
+            self.open_seeded_maintained_subscription_view(shape, binding, identity, tier)?;
         debug_assert!(
             transitions.removes.is_empty(),
             "cold maintained snapshot emitted result removes"

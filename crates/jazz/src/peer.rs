@@ -354,7 +354,7 @@ impl PeerState {
         }
         let previous_tx_ids = previous_tx_ids(previous_row_result_set.iter());
         let mut update = node
-            .cold_maintained_view_update_for_query_binding_with_peer_payload_inventory(
+            .seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
                 &shape,
                 &binding,
                 subscription,
@@ -464,7 +464,7 @@ impl PeerState {
                 ))?;
             let tier = prepared.tier;
             let update = node
-                .cold_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
+                .seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
                     shape,
                     binding,
                     subscription,
@@ -664,13 +664,8 @@ impl PeerState {
             result_table_filter,
             tier,
         } = request;
-        let (receiver, maintained, terminal_schemas, transitions, tables) = node
-            .maintained_subscription_view_from_cold_snapshot(
-                shape,
-                binding,
-                self.identity(),
-                tier,
-            )?;
+        let (receiver, maintained, terminal_schemas, transitions, tables) =
+            node.open_seeded_maintained_subscription_view(shape, binding, self.identity(), tier)?;
         let output_tables = tables.clone();
         let result_member_adds = transitions
             .adds

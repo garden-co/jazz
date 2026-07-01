@@ -293,7 +293,7 @@ impl MaintainedSubscriptionViewSubscription {
         identity: AuthorId,
     ) -> (Self, SyncMessage) {
         let (subscription, maintained, terminal_schemas, transitions, tables) = core
-            .maintained_subscription_view_from_cold_snapshot(
+            .open_seeded_maintained_subscription_view(
                 shape,
                 binding,
                 identity,
