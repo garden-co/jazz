@@ -359,6 +359,44 @@ where
                 data: DataSource::Current,
                 position,
             } => (projection, None, Some(*position), None, None),
+            SourceExpr::SettledBindingView {
+                projection,
+                binding_view,
+            } => {
+                let table = self
+                    .node
+                    .table_in_schema(&request.source.table, self.read_view.read_schema)
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+                if request.visibility != RowVisibility::Visible {
+                    return Err(source_resolution_error(request, SourceGap::Coverage));
+                }
+                if !matches!(projection.schema_family, SchemaFamilySelection::Current)
+                    || !matches!(projection.storage, StorageSchemaSelection::Single(_))
+                    || !matches!(projection.lens, LensSelection::Canonical)
+                {
+                    return Err(source_resolution_error(
+                        request,
+                        SourceGap::SchemaProjection,
+                    ));
+                }
+                let rows = self
+                    .node
+                    .settled_binding_view_source_rows(&request.source.table, *binding_view)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let graph = inline_current_graph(&table, rows)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let descriptor = current_row_descriptor(&table);
+                return Ok(ResolvedSource {
+                    table_schema: table,
+                    graph,
+                    row_shape: SourceRowShape {
+                        source: request.source.clone(),
+                        descriptor,
+                        row_uuid_field: "row_uuid".to_owned(),
+                        metadata: BTreeMap::new(),
+                    },
+                });
+            }
             SourceExpr::WithOverlays { input, overlays } => {
                 let (projection, tier) = match input.as_ref() {
                     SourceExpr::VisibleCurrent {
@@ -806,6 +844,7 @@ fn current_query_read_set(
     shape: &NormalizedRowSetShape,
     schema_version: SchemaVersionId,
     tier: DurabilityTier,
+    settled_binding_view: Option<BindingViewKey>,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
         schema_family: SchemaFamilySelection::Current,
@@ -818,10 +857,17 @@ fn current_query_read_set(
         .filter_map(|node| match node {
             RowSetExpr::Source { source, .. } => Some((
                 source.clone(),
-                SourceExpr::VisibleCurrent {
-                    projection: projection.clone(),
-                    data: DataSource::Current,
-                    tier,
+                if let Some(binding_view) = settled_binding_view {
+                    SourceExpr::SettledBindingView {
+                        projection: projection.clone(),
+                        binding_view,
+                    }
+                } else {
+                    SourceExpr::VisibleCurrent {
+                        projection: projection.clone(),
+                        data: DataSource::Current,
+                        tier,
+                    }
                 },
             )),
             _ => None,
@@ -830,10 +876,17 @@ fn current_query_read_set(
     for source in &shape.auxiliary_sources {
         sources.insert(
             source.clone(),
-            SourceExpr::VisibleCurrent {
-                projection: projection.clone(),
-                data: DataSource::Current,
-                tier,
+            if let Some(binding_view) = settled_binding_view {
+                SourceExpr::SettledBindingView {
+                    projection: projection.clone(),
+                    binding_view,
+                }
+            } else {
+                SourceExpr::VisibleCurrent {
+                    projection: projection.clone(),
+                    data: DataSource::Current,
+                    tier,
+                }
             },
         );
     }
@@ -2459,7 +2512,28 @@ where
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
-        let request = self.current_query_program_request(shape, binding, tier, identity, output)?;
+        self.compile_current_query_program_with_settled_view(
+            shape, binding, tier, identity, output, None,
+        )
+    }
+
+    fn compile_current_query_program_with_settled_view(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        settled_binding_view: Option<BindingViewKey>,
+    ) -> Result<QueryProgram, Error> {
+        let request = self.current_query_program_request(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            settled_binding_view,
+        )?;
         self.compile_query_program_request(request)
     }
 
@@ -2506,7 +2580,7 @@ where
             },
         };
         let request = QueryProgramRequest {
-            reads: current_query_read_set(&input.shape, shape.schema_version(), tier),
+            reads: current_query_read_set(&input.shape, shape.schema_version(), tier, None),
             policy: self.query_program_policy_context(identity),
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
@@ -2647,6 +2721,7 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
+        settled_binding_view: Option<BindingViewKey>,
     ) -> Result<QueryProgramRequest, Error> {
         let input = RowSetProgramInput {
             shape: self.normalized_row_set_shape(shape, binding)?,
@@ -2658,7 +2733,12 @@ where
             },
         };
         Ok(QueryProgramRequest {
-            reads: current_query_read_set(&input.shape, shape.schema_version(), tier),
+            reads: current_query_read_set(
+                &input.shape,
+                shape.schema_version(),
+                tier,
+                settled_binding_view,
+            ),
             policy: self.query_program_policy_context(identity),
             input,
             output: current_query_output_request(output, shape.query()),
@@ -3035,28 +3115,26 @@ where
             self.apply_projection(query, &mut rows)?;
             return Ok(rows);
         }
-        if tier == DurabilityTier::Global
-            && let Some(mut rows) = self.settled_binding_view_query_rows(shape, binding)?
-        {
-            let query = shape.query();
-            self.finish_engine_query_rows(query, &mut rows)?;
-            self.apply_projection(query, &mut rows)?;
-            return Ok(rows);
-        }
+        let settled_binding_view = (tier == DurabilityTier::Global)
+            .then(|| self.settled_binding_view_key_for_query(shape, binding))
+            .transpose()?
+            .flatten();
         let program = if prepared_plan.is_some() {
             None
         } else {
-            Some(self.compile_current_query_program(
+            Some(self.compile_current_query_program_with_settled_view(
                 shape,
                 binding,
                 tier,
                 identity,
                 CurrentQueryProgramOutput::AppRows,
+                settled_binding_view,
             )?)
         };
         let plan = match prepared_plan {
-            Some(plan) => Some(plan.clone()),
-            None if {
+            Some(plan) if settled_binding_view.is_none() => Some(plan.clone()),
+            Some(_) => None,
+            None if settled_binding_view.is_none() && {
                 let parameters = &program
                     .as_ref()
                     .expect("program is compiled when no prepared plan is supplied")
@@ -3110,31 +3188,38 @@ where
         Ok(rows)
     }
 
-    fn settled_binding_view_query_rows(
-        &mut self,
+    fn settled_binding_view_key_for_query(
+        &self,
         shape: &ValidatedQuery,
         binding: &Binding,
-    ) -> Result<Option<Vec<CurrentRow>>, Error> {
-        // TODO(query-engine): model settled binding-view result sets as a
-        // first-class source/read expression. Partial exclusive payloads can be
-        // view-complete without being transaction-complete, so global
-        // registered one-shot reads need this scope until lowering owns it.
+    ) -> Result<Option<BindingViewKey>, Error> {
         let binding_view_key = BindingViewKey::new(
             shape.shape_id(),
             binding.binding_id(),
             ReadViewKey::default(),
         );
-        let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view_key) else {
-            return Ok(None);
+        Ok(self
+            .query
+            .settled_result_sets
+            .contains_key(&binding_view_key)
+            .then_some(binding_view_key))
+    }
+
+    fn settled_binding_view_source_rows(
+        &mut self,
+        table: &str,
+        binding_view: BindingViewKey,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view) else {
+            return Ok(Vec::new());
         };
-        let query_table = shape.query().table.clone();
-        let table_schema = self.table(&query_table)?.clone();
-        let content_descriptor = table_schema.history_storage_table().record_schema();
         let row_entries = row_result_set
             .iter()
             .filter_map(ResultMemberEntry::as_row)
-            .filter(|(entry_table, _, _)| entry_table.as_str() == query_table)
+            .filter(|(entry_table, _, _)| entry_table.as_str() == table)
             .collect::<Vec<_>>();
+        let table_schema = self.table(table)?.clone();
+        let content_descriptor = table_schema.history_storage_table().record_schema();
         let mut rows = Vec::with_capacity(row_entries.len());
         for (_, row_uuid, tx_id) in row_entries {
             let tx_node_alias = self
@@ -3144,7 +3229,7 @@ where
                 .ok_or(Error::MissingTransaction(tx_id))?;
             let version = self
                 .query_version_by_alias_with_descriptor(
-                    &query_table,
+                    table,
                     row_uuid,
                     VersionLayer::Content,
                     tx_id.time,
@@ -3158,7 +3243,7 @@ where
                 &version.cells(&table_schema)?,
             )?);
         }
-        Ok(Some(rows))
+        Ok(rows)
     }
 
     /// Evaluate a validated query against the globally settled state at
@@ -4272,7 +4357,7 @@ where
             },
         };
         Ok(QueryProgramRequest {
-            reads: current_query_read_set(&input.shape, policy_shape.schema_version(), tier),
+            reads: current_query_read_set(&input.shape, policy_shape.schema_version(), tier, None),
             policy: match self.query_program_policy_context(identity) {
                 PolicyContext::Identity {
                     mode,
