@@ -1296,22 +1296,26 @@ where
     let mut paths = Vec::new();
     let root_source = root_source_id(root_table);
     let root_schema = node.table_in_schema(root_table, schema_version)?;
-    if includes.is_empty() {
-        for (reference_index, (column, target_table)) in root_schema.references.iter().enumerate() {
-            let target =
-                include_auxiliary_source_id(target_table.clone(), usize::MAX, reference_index);
-            sources.insert(target.clone());
-            paths.push(ClosurePath {
-                id: format!("reference:{column}"),
-                kind: ClosurePathKind::ImplicitRootReference,
-                segments: vec![ClosurePathSegment {
-                    parent: root_source.clone(),
-                    target,
-                    source_field: column.clone(),
-                }],
-                root_gate: None,
-            });
+    let explicit_root_segments = includes
+        .iter()
+        .filter_map(|include| include.path.split('.').next())
+        .collect::<BTreeSet<_>>();
+    for (reference_index, (column, target_table)) in root_schema.references.iter().enumerate() {
+        if explicit_root_segments.contains(column.as_str()) {
+            continue;
         }
+        let target = include_auxiliary_source_id(target_table.clone(), usize::MAX, reference_index);
+        sources.insert(target.clone());
+        paths.push(ClosurePath {
+            id: format!("reference:{column}"),
+            kind: ClosurePathKind::ImplicitRootReference,
+            segments: vec![ClosurePathSegment {
+                parent: root_source.clone(),
+                target,
+                source_field: column.clone(),
+            }],
+            root_gate: None,
+        });
     }
     for (include_index, include) in includes.iter().enumerate() {
         let mut current_table_name = root_table.to_owned();
