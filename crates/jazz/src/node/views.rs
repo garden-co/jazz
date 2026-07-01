@@ -252,7 +252,7 @@ where
             mut versions_by_tx,
             replacement_for,
         } = inputs;
-        let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
+        let mut context = ViewEvaluationContext::default();
         let row_result_adds = content_row_members_for_bundle(
             &result_member_adds,
             "real row result member is missing content transaction for bundle shipping",
