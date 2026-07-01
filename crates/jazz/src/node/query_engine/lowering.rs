@@ -4,6 +4,8 @@ use groove::ivm::{
 };
 use groove::records::ValueType;
 
+const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
+
 /// Parameter domains attached to one lowered graph.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ParameterDomain {
@@ -131,8 +133,14 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
             } => {
                 for column in columns {
                     if let NormalizedValueRef::Param(param) = &column.value {
-                        domain.user_params.insert(param.clone(), column.ty.clone());
-                        domain.routing_params.insert(param.clone());
+                        if param.strip_prefix(CLAIM_PARAM_PREFIX).is_some() {
+                            domain
+                                .hidden_params
+                                .insert(param.clone(), column.ty.clone());
+                        } else {
+                            domain.user_params.insert(param.clone(), column.ty.clone());
+                            domain.routing_params.insert(param.clone());
+                        }
                     }
                 }
             }
@@ -1921,14 +1929,21 @@ fn lower_value_source(
     let descriptor = value_source_descriptor(columns);
     match mode {
         ValueSourceMode::Binding => {
-            let params = parameter_domain(&request.input.shape).user_params;
+            let domain = parameter_domain(&request.input.shape);
+            let route_params = domain.routing_params.clone();
+            let params = domain
+                .user_params
+                .iter()
+                .chain(domain.hidden_params.iter())
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect::<Vec<_>>();
             for column in columns {
                 let NormalizedValueRef::Param(param) = &column.value else {
                     return Err(UnsupportedReason::Operator(
                         "binding value source columns must reference binding params".to_owned(),
                     ));
                 };
-                let Some(existing) = params.get(param) else {
+                let Some((_, existing)) = params.iter().find(|(name, _)| name == param) else {
                     return Err(UnsupportedReason::Operator(format!(
                         "binding parameter '{param}' is not part of the program parameter domain"
                     )));
@@ -1944,14 +1959,26 @@ fn lower_value_source(
                     .iter()
                     .map(|(name, column_type)| (name.clone(), column_type.value_type())),
             );
+            let projected = columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<BTreeSet<_>>();
+            let retained_routes = route_params
+                .into_iter()
+                .filter(|param| !projected.contains(param))
+                .map(ProjectField::named)
+                .collect::<Vec<_>>();
             Ok(
                 GraphBuilder::binding_source(shape.to_owned(), input_descriptor).project_fields(
-                    columns.iter().map(|column| {
-                        let NormalizedValueRef::Param(param) = &column.value else {
-                            unreachable!("checked above");
-                        };
-                        ProjectField::renamed(param.clone(), column.name.clone())
-                    }),
+                    columns
+                        .iter()
+                        .map(|column| {
+                            let NormalizedValueRef::Param(param) = &column.value else {
+                                unreachable!("checked above");
+                            };
+                            ProjectField::renamed(param.clone(), column.name.clone())
+                        })
+                        .chain(retained_routes),
                 ),
             )
         }

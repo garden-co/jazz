@@ -463,8 +463,11 @@ impl PeerState {
                 .subscriptions
                 .get(&subscription)
                 .and_then(|state| state.prepared_query.as_ref())
-            && let Some(receiver) =
-                node.subscribe_query_binding_with_plan(&prepared.binding, &prepared.plan)?
+            && let Some(receiver) = node.subscribe_query_binding_with_plan(
+                &prepared.binding,
+                &prepared.plan,
+                self.identity(),
+            )?
         {
             drain_initial_subscription_snapshot(&receiver);
             let state = self.subscriptions.entry(subscription).or_default();
@@ -991,8 +994,11 @@ impl PeerState {
                 .subscriptions
                 .get(&subscription)
                 .and_then(|state| state.prepared_query.as_ref())
-            && let Some(receiver) =
-                node.subscribe_query_binding_with_plan(&prepared.binding, &prepared.plan)?
+            && let Some(receiver) = node.subscribe_query_binding_with_plan(
+                &prepared.binding,
+                &prepared.plan,
+                self.identity(),
+            )?
         {
             drain_initial_subscription_snapshot(&receiver);
             let state = self.subscriptions.entry(subscription).or_default();
@@ -5078,7 +5084,7 @@ mod tests {
             )
             .unwrap();
         let receiver = core
-            .subscribe_query_binding_with_plan(&prepared_binding, &plan)
+            .subscribe_query_binding_with_plan(&prepared_binding, &plan, peer.identity())
             .unwrap()
             .unwrap();
         drain_initial_subscription_snapshot(&receiver);
