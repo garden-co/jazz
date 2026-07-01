@@ -164,6 +164,7 @@ fn fact_public_fields(
     use super::query_engine::ProgramFactSchema;
 
     match schema {
+        ProgramFactSchema::AuthorizedRows(schema) => Ok(vec![schema.row_field.clone()]),
         ProgramFactSchema::ResultMembership(schema) => {
             let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
             fields.extend(schema.branch_or_prefix_field.clone());
@@ -217,7 +218,8 @@ fn fact_public_fields(
             ProgramFactSchema::LargeValueExtents(_) => {
                 "large-value extent facts are not prepared yet"
             }
-            ProgramFactSchema::ResultMembership(_)
+            ProgramFactSchema::AuthorizedRows(_)
+            | ProgramFactSchema::ResultMembership(_)
             | ProgramFactSchema::RelationEdges(_)
             | ProgramFactSchema::VersionWitnesses(_)
             | ProgramFactSchema::ReplacementWitnesses(_) => unreachable!(),
@@ -319,6 +321,7 @@ pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
 
 enum CurrentQueryProgramOutput {
     AppRows,
+    AuthorizedRows,
     RelationSnapshot,
     MaintainedView,
 }
@@ -975,6 +978,9 @@ fn current_query_output_request(
 ) -> RowSetOutputRequest {
     let facts = match output {
         CurrentQueryProgramOutput::AppRows => BTreeSet::new(),
+        CurrentQueryProgramOutput::AuthorizedRows => {
+            BTreeSet::from([ProgramFactKey::AuthorizedRows])
+        }
         CurrentQueryProgramOutput::RelationSnapshot => BTreeSet::from([
             ProgramFactKey::RelationEdges,
             ProgramFactKey::PathCorrelationCoverage,
@@ -2631,7 +2637,7 @@ where
         request: QueryProgramRequest,
     ) -> Result<GraphBuilder, Error> {
         let program = self.compile_query_program_request(request)?;
-        Ok(lowered_app_rows_graph(&program)?.project(["row_uuid"]))
+        lowered_terminal_graph(&program, "policy.authorized_rows")
     }
 
     fn current_query_program_request(
@@ -4284,7 +4290,7 @@ where
             },
             input,
             output: current_query_output_request(
-                CurrentQueryProgramOutput::AppRows,
+                CurrentQueryProgramOutput::AuthorizedRows,
                 policy_shape.query(),
             ),
         })
