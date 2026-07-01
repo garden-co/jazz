@@ -928,6 +928,72 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
 }
 
 #[test]
+fn relation_snapshot_single_level_array_uses_query_engine_edges() {
+    let schema = relation_snapshot_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x47), schema.clone());
+    let alice = row(0xa1);
+    let bob = row(0xb1);
+    let todo_a = row(0x11);
+    let todo_b = row(0x12);
+
+    node.commit_mergeable(
+        MergeableCommit::new("users", alice, 10).cells(BTreeMap::from([(
+            "name".to_owned(),
+            v("alice"),
+        )])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("users", bob, 11).cells(BTreeMap::from([("name".to_owned(), v("bob"))])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("todos", todo_a, 12).cells(BTreeMap::from([
+            ("title".to_owned(), v("alpha")),
+            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("todos", todo_b, 13).cells(BTreeMap::from([
+            ("title".to_owned(), v("beta")),
+            ("owner_id".to_owned(), Value::Uuid(bob.0)),
+        ])),
+    )
+    .unwrap();
+
+    let shape = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let snapshot = node
+        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .map(|row| (row.table().to_owned(), row.row_uuid()))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([("users".to_owned(), alice), ("todos".to_owned(), todo_a)])
+    );
+    assert_eq!(
+        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([RelationEdge {
+            source_table: "users".to_owned(),
+            source_row: alice,
+            relation: "todosViaOwner".to_owned(),
+            target_table: "todos".to_owned(),
+            target_row: todo_a,
+        }])
+    );
+}
+
+#[test]
 fn relation_snapshot_materializes_reverse_array_edges() {
     let schema = relation_snapshot_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(0x44), schema.clone());
