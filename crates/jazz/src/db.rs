@@ -414,14 +414,14 @@ where
 
     /// Synchronously read rows for a prepared query.
     ///
-    /// If an upstream/server subscription has covered this exact shape and
-    /// binding, prefer that authoritative settled result set; otherwise read
-    /// the local preview.
+    /// This is a synchronous local-preview read. Upstream/server settled
+    /// coverage is tracked separately by query attachments and durability-aware
+    /// subscription reads.
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         self.node
             .node
             .borrow_mut()
-            .query_rows_prefer_settled_result_set(
+            .query_rows_local_preview(
                 &prepared.shape,
                 &prepared.binding,
                 prepared.plan_for_tier(DurabilityTier::Local),
