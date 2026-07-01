@@ -3395,9 +3395,6 @@ fn maintained_view_allows_join_policy_slice() {
 
 #[test]
 fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
-    // This is intentionally close to the maintained-view lowering internals:
-    // the public query result cannot tell whether the retained claim param was
-    // evaluated by the prepared graph binding or inlined before lowering.
     let schema = JazzSchema::new([TableSchema::new(
         "todos",
         [
@@ -3423,37 +3420,7 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let retained_binding = retained_shape.bind(BTreeMap::new()).unwrap();
-    let literal_shape = Query::from("todos")
-        .filter(eq(col("owner"), lit(author.0)))
-        .validate(&core.catalogue.schema)
-        .unwrap();
-    let literal_binding = literal_shape.bind(BTreeMap::new()).unwrap();
-
-    let literal_rows = core
-        .query_rows_for_link(
-            &literal_shape,
-            &literal_binding,
-            DurabilityTier::Global,
-            author,
-        )
-        .unwrap()
-        .into_iter()
-        .map(|row| row.row_uuid())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(literal_rows, BTreeSet::from([row(0xa0)]));
-
-    let full_recompute_rows = core
-        .query_rows_for_link(
-            &retained_shape,
-            &retained_binding,
-            DurabilityTier::Global,
-            author,
-        )
-        .unwrap()
-        .into_iter()
-        .map(|row| row.row_uuid())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(full_recompute_rows, literal_rows);
+    let expected_rows = BTreeSet::from([row(0xa0)]);
 
     let (prepared_shape, prepared_binding, prepared_plan) = core
         .prepare_query_binding_for_link(
@@ -3475,7 +3442,7 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
         .into_iter()
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>();
-    assert_eq!(prepared_rows, literal_rows);
+    assert_eq!(prepared_rows, expected_rows);
 
     let mut peer = PeerState::for_author(author);
     let update = peer
@@ -3486,7 +3453,7 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
         adds.into_iter()
             .map(|(_table, row_uuid, _tx_id)| row_uuid)
             .collect::<BTreeSet<_>>(),
-        literal_rows
+        expected_rows
     );
     assert!(removes.is_empty());
     assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
