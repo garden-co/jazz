@@ -95,6 +95,7 @@ fn row_set_input(byte: u8) -> RowSetProgramInput {
             id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
             source_shape: None,
             extra_user_params: BTreeMap::new(),
+            param_types: BTreeMap::new(),
             values: BTreeMap::new(),
         },
     }
@@ -173,6 +174,7 @@ fn chained_row_set_input(byte: u8, binding_values: BTreeMap<String, Value>) -> R
             id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
             source_shape: None,
             extra_user_params: BTreeMap::new(),
+            param_types: BTreeMap::from([("title".to_owned(), ColumnType::String)]),
             values: binding_values,
         },
     }
@@ -225,6 +227,7 @@ fn claim_filtered_row_set_input(byte: u8, claim: &str) -> RowSetProgramInput {
             id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
             source_shape: None,
             extra_user_params: BTreeMap::new(),
+            param_types: BTreeMap::new(),
             values: BTreeMap::new(),
         },
     }
@@ -753,6 +756,7 @@ fn current_source_select_projection_and_unordered_slice_lower() {
                 id: BindingId(uuid::Uuid::from_bytes([0x74; 16])),
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -876,6 +880,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                 id: BindingId(uuid::Uuid::from_bytes([0x73; 16])),
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1070,6 +1075,7 @@ fn current_join_via_can_use_union_relation_input() {
                 id: BindingId(uuid::Uuid::from_bytes([0x7a; 16])),
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1192,6 +1198,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                 id: BindingId(uuid::Uuid::from_bytes([0x74; 16])),
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1342,6 +1349,7 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
                 id: BindingId(uuid::Uuid::from_bytes([0x76; 16])),
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1434,6 +1442,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
                 id: BindingId(uuid::Uuid::from_bytes([0x75; 16])),
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1575,6 +1584,7 @@ fn correlated_path_request(
                 id: BindingId(uuid::Uuid::from_bytes([0x78; 16])),
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1984,6 +1994,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
                 id: BindingId(uuid::Uuid::from_bytes([0x76; 16])),
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::from([("route".to_owned(), ColumnType::String)]),
                 values: BTreeMap::from([("route".to_owned(), Value::String("sync".to_owned()))]),
             },
         },
@@ -2232,6 +2243,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
                 id: BindingId(uuid::Uuid::from_bytes([0x77; 16])),
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -2363,6 +2375,70 @@ fn identity_policy_context_requests_policy_filtered_sources() {
                 protected_row_field: "row_uuid".to_owned(),
                 binding_source_shape: None,
                 binding_user_params: BTreeMap::new(),
+            },
+        }
+    );
+}
+
+// Internal compiler-boundary test: public query validation already enforces
+// parameter types, but this pins the lowering invariant that descriptor types
+// come from that validated shape, not from the current binding value.
+#[test]
+fn binding_descriptor_types_do_not_depend_on_runtime_array_values() {
+    fn request_for(teams: Value) -> QueryProgramRequest {
+        let mut input = row_set_input(0xa7);
+        input.binding.source_shape = Some("test-binding-source".to_owned());
+        input.binding.param_types = BTreeMap::from([(
+            "teams".to_owned(),
+            ColumnType::Array(Box::new(ColumnType::Uuid)),
+        )]);
+        input.binding.values.insert("teams".to_owned(), teams);
+        QueryProgramRequest {
+            reads: QueryReadSet::primary(current_read_view()),
+            policy: PolicyContext::Identity {
+                mode: PolicyEnforcementMode::Enforcing,
+                permission_subject: author(0xa7),
+                claims: BTreeMap::new(),
+                attribution: None,
+            },
+            input,
+            output: row_set_output(BTreeSet::new()),
+        }
+    }
+
+    let mut empty_resolver = FakeSourceResolver::default();
+    let empty_program =
+        lower_query_program(request_for(Value::Array(Vec::new())), &mut empty_resolver)
+            .expect("empty array binding lowers");
+
+    let mut non_empty_resolver = FakeSourceResolver::default();
+    let non_empty_program = lower_query_program(
+        request_for(Value::Array(vec![Value::Uuid(row(0xa7).0)])),
+        &mut non_empty_resolver,
+    )
+    .expect("non-empty array binding lowers");
+
+    assert_eq!(
+        empty_program.lowered.parameters,
+        non_empty_program.lowered.parameters
+    );
+    assert_eq!(
+        empty_resolver.requests[0].authorization,
+        non_empty_resolver.requests[0].authorization
+    );
+    assert_eq!(
+        empty_resolver.requests[0].authorization,
+        SourceAuthorizationRequest::PolicyFiltered {
+            permission_subject: author(0xa7),
+            plan: PolicyAuthorizationPlan {
+                protected_source: source("todos", SourceRole::Root),
+                role: PolicyDecisionRole::Read,
+                protected_row_field: "row_uuid".to_owned(),
+                binding_source_shape: Some("test-binding-source".to_owned()),
+                binding_user_params: BTreeMap::from([(
+                    "teams".to_owned(),
+                    ColumnType::Array(Box::new(ColumnType::Uuid)),
+                )]),
             },
         }
     );

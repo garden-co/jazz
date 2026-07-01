@@ -2726,6 +2726,24 @@ where
         self.query.registered_shapes.get(&shape_id).cloned()
     }
 
+    fn program_binding_for_shape(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        source_shape: Option<String>,
+        extra_user_params: BTreeMap<String, ColumnType>,
+    ) -> ProgramBinding {
+        let mut param_types = shape.params().clone();
+        param_types.extend(extra_user_params.clone());
+        ProgramBinding {
+            id: binding.binding_id(),
+            source_shape,
+            extra_user_params,
+            param_types,
+            values: binding.values().clone(),
+        }
+    }
+
     pub(super) fn register_shape(&mut self, shape_id: ShapeId, ast: ShapeAst) -> Result<(), Error> {
         if ast.version != ShapeAst::VERSION {
             return Err(Error::InvalidStoredValue("unsupported query AST version"));
@@ -3001,12 +3019,12 @@ where
     ) -> Result<QueryProgram, Error> {
         let input = RowSetProgramInput {
             shape: self.normalized_row_set_shape(shape, binding)?,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: Some(self.query_binding_source_shape_for_binding(shape, binding)),
-                extra_user_params: BTreeMap::new(),
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                shape,
+                binding,
+                Some(self.query_binding_source_shape_for_binding(shape, binding)),
+                BTreeMap::new(),
+            ),
         };
         let request = QueryProgramRequest {
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
@@ -3026,12 +3044,12 @@ where
     ) -> Result<QueryProgram, Error> {
         let input = RowSetProgramInput {
             shape: self.normalized_include_deleted_row_set_shape(shape, binding)?,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: Some(self.query_binding_source_shape_for_binding(shape, binding)),
-                extra_user_params: BTreeMap::new(),
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                shape,
+                binding,
+                Some(self.query_binding_source_shape_for_binding(shape, binding)),
+                BTreeMap::new(),
+            ),
         };
         let request = QueryProgramRequest {
             reads: current_query_read_set(
@@ -3067,14 +3085,12 @@ where
         let binding = lowered_shape.bind(BTreeMap::new())?;
         let input = RowSetProgramInput {
             shape: self.normalized_row_set_shape(&lowered_shape, &binding)?,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: Some(
-                    self.query_binding_source_shape_for_binding(&lowered_shape, &binding),
-                ),
-                extra_user_params: BTreeMap::new(),
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                &lowered_shape,
+                &binding,
+                Some(self.query_binding_source_shape_for_binding(&lowered_shape, &binding)),
+                BTreeMap::new(),
+            ),
         };
         let request = QueryProgramRequest {
             reads: tx_query_read_set(
@@ -3108,14 +3124,12 @@ where
         let binding = lowered_shape.bind(BTreeMap::new())?;
         let input = RowSetProgramInput {
             shape: self.normalized_row_set_shape(&lowered_shape, &binding)?,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: Some(
-                    self.query_binding_source_shape_for_binding(&lowered_shape, &binding),
-                ),
-                extra_user_params: BTreeMap::new(),
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                &lowered_shape,
+                &binding,
+                Some(self.query_binding_source_shape_for_binding(&lowered_shape, &binding)),
+                BTreeMap::new(),
+            ),
         };
         let request = QueryProgramRequest {
             reads: branch_query_read_set(
@@ -3215,12 +3229,7 @@ where
         let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
         let input = RowSetProgramInput {
             shape: input_shape,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: None,
-                extra_user_params: BTreeMap::new(),
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(&policy_shape, &binding, None, BTreeMap::new()),
         };
         let request = QueryProgramRequest {
             reads: current_query_read_set(
@@ -3296,12 +3305,12 @@ where
         };
         let input = RowSetProgramInput {
             shape: self.normalized_row_set_shape(shape, binding)?,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: Some(self.query_binding_source_shape_for_binding(shape, binding)),
-                extra_user_params: BTreeMap::new(),
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                shape,
+                binding,
+                Some(self.query_binding_source_shape_for_binding(shape, binding)),
+                BTreeMap::new(),
+            ),
         };
         Ok(QueryProgramRequest {
             reads: query_read_set_for_read_view(
@@ -3603,14 +3612,12 @@ where
         let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
         let input = RowSetProgramInput {
             shape: input_shape,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: Some(
-                    self.query_binding_source_shape_for_binding(&policy_shape, &binding),
-                ),
-                extra_user_params: BTreeMap::new(),
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                Some(self.query_binding_source_shape_for_binding(&policy_shape, &binding)),
+                BTreeMap::new(),
+            ),
         };
         let policy = match self.query_program_policy_context(identity) {
             PolicyContext::Identity {
@@ -3666,14 +3673,12 @@ where
         let root_source = root_source_id(policy_shape.query().table.as_str());
         let input = RowSetProgramInput {
             shape: input_shape,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: Some(
-                    self.query_binding_source_shape_for_binding(&policy_shape, &binding),
-                ),
-                extra_user_params: BTreeMap::new(),
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                Some(self.query_binding_source_shape_for_binding(&policy_shape, &binding)),
+                BTreeMap::new(),
+            ),
         };
         let policy = match self.query_program_policy_context(identity) {
             PolicyContext::Identity {
@@ -5084,12 +5089,12 @@ where
         }
         let input = RowSetProgramInput {
             shape: input_shape,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: binding_source_shape,
-                extra_user_params: binding_user_params,
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                binding_source_shape,
+                binding_user_params,
+            ),
         };
         Ok(QueryProgramRequest {
             reads: historical_query_read_set(&input.shape, policy_schema_version, position),
@@ -5195,12 +5200,12 @@ where
         }
         let input = RowSetProgramInput {
             shape: input_shape,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: binding_source_shape,
-                extra_user_params: binding_user_params,
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                binding_source_shape,
+                binding_user_params,
+            ),
         };
         Ok(QueryProgramRequest {
             reads: current_query_read_set(
@@ -5267,12 +5272,12 @@ where
         }
         let input = RowSetProgramInput {
             shape: input_shape,
-            binding: ProgramBinding {
-                id: binding.binding_id(),
-                source_shape: binding_source_shape,
-                extra_user_params: binding_user_params,
-                values: binding.values().clone(),
-            },
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                binding_source_shape,
+                binding_user_params,
+            ),
         };
         Ok(QueryProgramRequest {
             reads: branch_query_read_set(
