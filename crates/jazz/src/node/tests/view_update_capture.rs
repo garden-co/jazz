@@ -112,6 +112,34 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
     }
 }
 
+fn assert_real_peer_tick(
+    mut capture: CanonicalViewUpdate,
+    expected_adds: &[ResultRowEntry],
+    expected_removes: &[ResultRowEntry],
+    expected_reset_result_set: bool,
+    case: (AuthorId, u64, &str),
+) {
+    let (identity, seed, tick) = case;
+    capture.result_member_adds.sort();
+    capture.result_member_removes.sort();
+    let mut expected_adds = expected_adds.to_vec();
+    expected_adds.sort();
+    let mut expected_removes = expected_removes.to_vec();
+    expected_removes.sort();
+    assert_eq!(
+        capture.reset_result_set, expected_reset_result_set,
+        "real peer maintained subscription view emitted unexpected reset_result_set for seed {seed:#x}, identity {identity:?}, tick {tick}"
+    );
+    assert_eq!(
+        capture.result_member_adds, expected_adds,
+        "real peer maintained subscription view emitted unexpected adds for seed {seed:#x}, identity {identity:?}, tick {tick}"
+    );
+    assert_eq!(
+        capture.result_member_removes, expected_removes,
+        "real peer maintained subscription view emitted unexpected removes for seed {seed:#x}, identity {identity:?}, tick {tick}"
+    );
+}
+
 fn maintained_view_capture_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
@@ -1562,8 +1590,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
 
 fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: AuthorId) {
     let schema = maintained_view_capture_schema();
-    let (_off_dir, mut off_core) = open_node_with_schema(node(0x82), schema.clone());
-    let (_on_dir, mut on_core) = open_node_with_schema(node(0x82), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
     let alice = user(0xa1);
     let bob = user(0xb2);
     let base = (seed as u8).wrapping_mul(8);
@@ -1580,8 +1607,8 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     let multi_match_a = row(base.wrapping_add(11));
     let multi_match_b = row(base.wrapping_add(12));
     let rls_revoked = row(base.wrapping_add(13));
-    let mut off_parents = BTreeMap::<RowUuid, TxId>::new();
-    let mut on_parents = BTreeMap::<RowUuid, TxId>::new();
+    let mut parents = BTreeMap::<RowUuid, TxId>::new();
+    let mut txs = BTreeMap::<RowUuid, TxId>::new();
 
     for (row_uuid, owner, title, made_at) in [
         (initial_alice, alice, "match", 1_000),
@@ -1591,8 +1618,8 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         (never_match, alice, "other", 1_004),
         (rls_revoked, alice, "match", 1_005),
     ] {
-        accept_owner_capture_row(&mut off_core, &mut off_parents, row_uuid, owner, title, made_at);
-        accept_owner_capture_row(&mut on_core, &mut on_parents, row_uuid, owner, title, made_at);
+        let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
+        txs.insert(row_uuid, tx_id);
     }
 
     let shape = Query::from("todos")
@@ -1600,42 +1627,65 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut off_peer = if identity == AuthorId::SYSTEM {
-        PeerState::new()
-    } else {
-        PeerState::for_author(identity)
-    };
-    off_peer.force_full_recompute_path_for_test(true);
-    let mut on_peer = if identity == AuthorId::SYSTEM {
+    let mut peer = if identity == AuthorId::SYSTEM {
         PeerState::new()
     } else {
         PeerState::for_author(identity)
     };
 
-    let off_initial = off_peer
-        .rehydrate_query(&mut off_core, &shape, &binding)
-        .unwrap();
-    let on_initial = on_peer
-        .rehydrate_query(&mut on_core, &shape, &binding)
-        .unwrap();
-    assert_eq!(
+    let todo_entry = |row_uuid| (groove::Intern::new("todos".to_owned()), row_uuid, txs[&row_uuid]);
+    let expected_initial = if identity == AuthorId::SYSTEM {
+        vec![
+            todo_entry(initial_alice),
+            todo_entry(initial_bob),
+            todo_entry(predicate_remove),
+            todo_entry(deleted),
+            todo_entry(rls_revoked),
+        ]
+    } else {
+        vec![
+            todo_entry(initial_alice),
+            todo_entry(predicate_remove),
+            todo_entry(deleted),
+            todo_entry(rls_revoked),
+        ]
+    };
+
+    let on_initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert_real_peer_tick(
         capture_view_update(on_initial),
-        capture_view_update(off_initial),
-        "real peer maintained subscription view diverged for seed {seed:#x}, identity {identity:?}, tick initial"
+        &expected_initial,
+        &[],
+        true,
+        (identity, seed, "initial"),
     );
 
     let assert_tick =
-        |off_core: &mut NodeState<RocksDbStorage>,
-         on_core: &mut NodeState<RocksDbStorage>,
-         off_peer: &mut PeerState,
-         on_peer: &mut PeerState,
+        |core: &mut NodeState<RocksDbStorage>,
+         peer: &mut PeerState,
+         txs: &BTreeMap<RowUuid, TxId>,
+         expected_add_rows: &[RowUuid],
+         expected_remove_rows: &[RowUuid],
          tick: &str| {
-            let off = off_peer.query_update(off_core, &shape, &binding).unwrap();
-            let on = on_peer.query_update(on_core, &shape, &binding).unwrap();
-            assert_eq!(
+            let on = peer.query_update(core, &shape, &binding).unwrap();
+            let entry =
+                |row_uuid| (groove::Intern::new("todos".to_owned()), row_uuid, txs[&row_uuid]);
+            let expected_adds = expected_add_rows
+                .iter()
+                .copied()
+                .map(entry)
+                .collect::<Vec<_>>();
+            let expected_removes = expected_remove_rows
+                .iter()
+                .copied()
+                .map(entry)
+                .collect::<Vec<_>>();
+            assert_real_peer_tick(
                 capture_view_update(on),
-                capture_view_update(off),
-                "real peer maintained subscription view diverged for seed {seed:#x}, identity {identity:?}, tick {tick}"
+                &expected_adds,
+                &expected_removes,
+                false,
+                (identity, seed, tick),
             );
         };
 
@@ -1643,138 +1693,122 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         (added, alice, "match", 2_000),
         (hidden_added, bob, "match", 2_001),
     ] {
-        accept_owner_capture_row(
-            &mut off_core,
-            &mut off_parents,
-            row_uuid,
-            owner,
-            title,
-            made_at,
-        );
-        accept_owner_capture_row(
-            &mut on_core,
-            &mut on_parents,
-            row_uuid,
-            owner,
-            title,
-            made_at,
-        );
+        let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
+        txs.insert(row_uuid, tx_id);
     }
-    assert_tick(
-        &mut off_core,
-        &mut on_core,
-        &mut off_peer,
-        &mut on_peer,
-        "add",
-    );
+    let add_rows = if identity == AuthorId::SYSTEM {
+        vec![added, hidden_added]
+    } else {
+        vec![added]
+    };
+    assert_tick(&mut core, &mut peer, &txs, &add_rows, &[], "add");
 
-    for core in [&mut off_core, &mut on_core] {
-        let sibling_tx = core
-            .commit_mergeable_many(vec![
-                MergeableCommit::new("todos", sibling_match, 2_100)
-                    .cells(owner_cells(alice, "match")),
-                MergeableCommit::new("todos", sibling_nonmatch, 2_100)
-                    .cells(owner_cells(alice, "other")),
-                MergeableCommit::new("todos", sibling_hidden, 2_100)
-                    .cells(owner_cells(bob, "match")),
-            ])
-            .unwrap();
-        core.apply_fate_update(
-            sibling_tx,
-            Fate::Accepted,
-            Some(GlobalSeq(100)),
-            Some(DurabilityTier::Global),
-        )
+    let sibling_tx = core
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("todos", sibling_match, 2_100)
+                .cells(owner_cells(alice, "match")),
+            MergeableCommit::new("todos", sibling_nonmatch, 2_100)
+                .cells(owner_cells(alice, "other")),
+            MergeableCommit::new("todos", sibling_hidden, 2_100)
+                .cells(owner_cells(bob, "match")),
+        ])
         .unwrap();
-    }
-    assert_tick(
-        &mut off_core,
-        &mut on_core,
-        &mut off_peer,
-        &mut on_peer,
-        "sibling-add",
-    );
+    core.apply_fate_update(
+        sibling_tx,
+        Fate::Accepted,
+        Some(GlobalSeq(100)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    txs.insert(sibling_match, sibling_tx);
+    txs.insert(sibling_nonmatch, sibling_tx);
+    txs.insert(sibling_hidden, sibling_tx);
+    let sibling_add_rows = if identity == AuthorId::SYSTEM {
+        vec![sibling_match, sibling_hidden]
+    } else {
+        vec![sibling_match]
+    };
+    assert_tick(&mut core, &mut peer, &txs, &sibling_add_rows, &[], "sibling-add");
 
-    for core in [&mut off_core, &mut on_core] {
-        let multi_tx = core
-            .commit_mergeable_many(vec![
-                MergeableCommit::new("todos", multi_match_a, 2_200)
-                    .cells(owner_cells(alice, "match")),
-                MergeableCommit::new("todos", multi_match_b, 2_200)
-                    .cells(owner_cells(alice, "match")),
-            ])
-            .unwrap();
-        core.apply_fate_update(
-            multi_tx,
-            Fate::Accepted,
-            Some(GlobalSeq(101)),
-            Some(DurabilityTier::Global),
-        )
+    let multi_tx = core
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("todos", multi_match_a, 2_200)
+                .cells(owner_cells(alice, "match")),
+            MergeableCommit::new("todos", multi_match_b, 2_200)
+                .cells(owner_cells(alice, "match")),
+        ])
         .unwrap();
-    }
+    core.apply_fate_update(
+        multi_tx,
+        Fate::Accepted,
+        Some(GlobalSeq(101)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    txs.insert(multi_match_a, multi_tx);
+    txs.insert(multi_match_b, multi_tx);
     assert_tick(
-        &mut off_core,
-        &mut on_core,
-        &mut off_peer,
-        &mut on_peer,
+        &mut core,
+        &mut peer,
+        &txs,
+        &[multi_match_a, multi_match_b],
+        &[],
         "multi-add",
     );
 
-    accept_owner_capture_row(&mut off_core, &mut off_parents, rls_revoked, bob, "match", 2_300);
-    accept_owner_capture_row(&mut on_core, &mut on_parents, rls_revoked, bob, "match", 2_300);
-    assert_tick(
-        &mut off_core,
-        &mut on_core,
-        &mut off_peer,
-        &mut on_peer,
-        "rls-revocation",
+    let previous_rls_revoked_tx = txs[&rls_revoked];
+    let tx_id = accept_owner_capture_row(&mut core, &mut parents, rls_revoked, bob, "match", 2_300);
+    let old_rls_entry = (
+        groove::Intern::new("todos".to_owned()),
+        rls_revoked,
+        previous_rls_revoked_tx,
     );
+    let new_rls_entry = (groove::Intern::new("todos".to_owned()), rls_revoked, tx_id);
+    let (rls_adds, rls_removes) = if identity == AuthorId::SYSTEM {
+        (vec![new_rls_entry], vec![old_rls_entry])
+    } else {
+        (vec![], vec![old_rls_entry])
+    };
+    let on = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_real_peer_tick(
+        capture_view_update(on),
+        &rls_adds,
+        &rls_removes,
+        false,
+        (identity, seed, "rls-revocation"),
+    );
+    txs.insert(rls_revoked, tx_id);
 
-    accept_owner_capture_row(
-        &mut off_core,
-        &mut off_parents,
+    let previous_predicate_remove_tx = txs[&predicate_remove];
+    let tx_id = accept_owner_capture_row(
+        &mut core,
+        &mut parents,
         predicate_remove,
         alice,
         "other",
         3_000,
     );
-    accept_owner_capture_row(
-        &mut on_core,
-        &mut on_parents,
-        predicate_remove,
-        alice,
-        "other",
-        3_000,
-    );
+    txs.insert(predicate_remove, previous_predicate_remove_tx);
     assert_tick(
-        &mut off_core,
-        &mut on_core,
-        &mut off_peer,
-        &mut on_peer,
+        &mut core,
+        &mut peer,
+        &txs,
+        &[],
+        &[predicate_remove],
         "predicate-remove",
     );
+    txs.insert(predicate_remove, tx_id);
 
-    accept_capture_delete(&mut off_core, &mut off_parents, deleted, 4_000);
-    accept_capture_delete(&mut on_core, &mut on_parents, deleted, 4_000);
-    assert_tick(
-        &mut off_core,
-        &mut on_core,
-        &mut off_peer,
-        &mut on_peer,
-        "delete",
-    );
+    let previous_deleted_tx = txs[&deleted];
+    accept_capture_delete(&mut core, &mut parents, deleted, 4_000);
+    txs.insert(deleted, previous_deleted_tx);
+    assert_tick(&mut core, &mut peer, &txs, &[], &[deleted], "delete");
 
-    accept_owner_capture_row(&mut off_core, &mut off_parents, deleted, alice, "match", 5_000);
-    accept_owner_capture_row(&mut on_core, &mut on_parents, deleted, alice, "match", 5_000);
-    assert_tick(
-        &mut off_core,
-        &mut on_core,
-        &mut off_peer,
-        &mut on_peer,
-        "restore",
-    );
+    let tx_id = accept_owner_capture_row(&mut core, &mut parents, deleted, alice, "match", 5_000);
+    txs.insert(deleted, tx_id);
+    assert_tick(&mut core, &mut peer, &txs, &[], &[], "restore");
     assert_eq!(
-        on_peer.maintained_subscription_view_metrics().full_recomputes_out,
+        peer.maintained_subscription_view_metrics().full_recomputes_out,
         0,
         "real peer maintained subscription view used the full-recompute path for seed {seed:#x}, identity {identity:?}"
     );
@@ -1958,10 +1992,10 @@ fn maintained_subscription_view_recursive_rls_matches_full_recompute_view_update
 }
 
 #[test]
-fn maintained_subscription_view_real_peer_path_matches_forced_full_recompute_view_update_capture() {
+fn maintained_subscription_view_real_peer_path_emits_expected_view_updates() {
     let seeds = [0x51, 0x62];
     eprintln!(
-        "maintained_subscription_view_real_peer_path_matches_forced_full_recompute_view_update_capture seeds={}",
+        "maintained_subscription_view_real_peer_path_emits_expected_view_updates seeds={}",
         seeds
             .iter()
             .map(|seed| format!("{seed:#x}"))

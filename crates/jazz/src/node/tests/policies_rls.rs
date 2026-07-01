@@ -2632,7 +2632,7 @@ fn inner_multi_segment_include_missing_or_unreadable_second_hop_drops_parent() {
 }
 
 #[test]
-fn maintained_subscription_view_multi_segment_inner_include_matches_full_recompute() {
+fn maintained_subscription_view_multi_segment_inner_include_payload_references_visible_path() {
     let schema = multi_segment_required_include_rls_schema();
     let (_full_recompute_dir, mut full_recompute_core) =
         open_node_with_schema(node(9), schema.clone());
@@ -3428,7 +3428,7 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
 }
 
 #[test]
-fn maintained_view_join_policy_retained_claim_param_matches_full_recompute() {
+fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result() {
     let schema = JazzSchema::new([
         TableSchema::new(
             "todos",
