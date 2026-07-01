@@ -4226,32 +4226,6 @@ where
             .unwrap_or_else(|| self.table(table_name))
     }
 
-    #[cfg(test)]
-    pub(crate) fn maintained_view_result_current(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-    ) -> Result<groove::ivm::RecordDeltas, Error> {
-        let (shape, _binding, graph) =
-            self.maintained_view_result_current_graph(shape, binding, identity)?;
-        self.materialize_maintained_view_graph(graph, &shape)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn maintained_view_policy_readable_versions(
-        &mut self,
-        shape: &ValidatedQuery,
-        _binding: &Binding,
-        identity: AuthorId,
-    ) -> Result<groove::ivm::RecordDeltas, Error> {
-        self.ensure_maintained_view_query_slice(shape.query())?;
-        let table = self.table(&shape.query().table)?.clone();
-        let policy_shape = self.maintained_view_table_policy_shape(&table, identity)?;
-        let graph = self.maintained_view_policy_readable_versions_graph(&table, &policy_shape)?;
-        self.materialize_maintained_view_graph(graph, &policy_shape)
-    }
-
     pub(crate) fn open_seeded_maintained_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -4389,19 +4363,6 @@ where
             .map_err(Error::Groove)
     }
 
-    #[cfg(test)]
-    fn maintained_view_table_policy_shape(
-        &self,
-        table: &TableSchema,
-        identity: AuthorId,
-    ) -> Result<ValidatedQuery, Error> {
-        self.maintained_view_table_policy_shape_with_mode(
-            table,
-            identity,
-            ParamBindingMode::InlineAllReachableSeeds,
-        )
-    }
-
     fn maintained_view_table_policy_shape_with_mode(
         &self,
         table: &TableSchema,
@@ -4428,66 +4389,6 @@ where
         Ok(policy_shape)
     }
 
-    #[cfg(test)]
-    pub(crate) fn maintained_view_result_current_graph(
-        &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-    ) -> Result<(ValidatedQuery, Binding, GraphBuilder), Error> {
-        self.ensure_maintained_view_query_slice(shape.query())?;
-        let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
-        self.ensure_maintained_view_query_slice(shape.query())?;
-        let shape = maintained_view_bind_filter_literals(&shape, &binding, &self.catalogue.schema)?;
-        let binding = shape.bind(BTreeMap::new())?;
-        let table = self.table(&shape.query().table)?;
-        let graph =
-            self.maintained_view_content_current_with_version(table, DurabilityTier::Global)?;
-        let graph = self.apply_maintained_view_filters(
-            graph,
-            &shape,
-            table,
-            maintained_view_version_fields(table),
-            DurabilityTier::Global,
-        )?;
-        Ok((
-            shape,
-            binding,
-            graph.project_fields(maintained_view_result_current_fields(table)),
-        ))
-    }
-
-    #[cfg(test)]
-    fn maintained_view_policy_readable_versions_graph(
-        &self,
-        table: &TableSchema,
-        policy_shape: &ValidatedQuery,
-    ) -> Result<GraphBuilder, Error> {
-        let content = self.apply_maintained_view_filters(
-            GraphBuilder::table(history_table_name(&table.name)),
-            policy_shape,
-            table,
-            maintained_view_version_fields(table),
-            DurabilityTier::Global,
-        )?;
-        let content = content.project_fields(maintained_view_policy_content_fields(table));
-
-        let readable_current = self
-            .apply_maintained_view_filters(
-                normalized_global_current_graph(table),
-                policy_shape,
-                table,
-                current_row_fields(table),
-                DurabilityTier::Global,
-            )?
-            .project(["row_uuid"]);
-        let deleted = GraphBuilder::table(register_table_name(&table.name))
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)));
-        let deletion = GraphBuilder::join(deleted, readable_current, ["row_uuid"], ["row_uuid"])
-            .project_fields(maintained_view_policy_deletion_fields(table));
-
-        Ok(GraphBuilder::union([content, deletion]))
-    }
     fn maintained_view_content_current_with_version(
         &self,
         table: &TableSchema,
@@ -4551,21 +4452,6 @@ where
                 table_overrides: BTreeMap::new(),
             },
         )
-    }
-
-    #[cfg(test)]
-    fn materialize_maintained_view_graph(
-        &mut self,
-        graph: GraphBuilder,
-        shape: &ValidatedQuery,
-    ) -> Result<groove::ivm::RecordDeltas, Error> {
-        record_maintained_view_materialize_call();
-        if !shape.params().is_empty() {
-            return Err(Error::InvalidStoredValue(
-                "maintained subscription view materializer expects bound filter literals",
-            ));
-        }
-        self.database.query_graph(graph).map_err(Error::Groove)
     }
 
     fn ensure_maintained_view_query_slice(&self, query: &crate::query::Query) -> Result<(), Error> {
@@ -5765,20 +5651,6 @@ fn reachable_frontier_descriptor(
     RecordDescriptor::new(fields)
 }
 
-#[cfg(test)]
-fn maintained_view_bind_filter_literals(
-    shape: &ValidatedQuery,
-    binding: &Binding,
-    schema: &JazzSchema,
-) -> Result<ValidatedQuery, Error> {
-    maintained_view_bind_filter_literals_with_mode(
-        shape,
-        binding,
-        schema,
-        ParamBindingMode::InlineAllReachableSeeds,
-    )
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum ParamBindingMode {
     InlineAllReachableSeeds,
@@ -6737,29 +6609,6 @@ fn global_current_storage_fields(table: &TableSchema) -> Vec<String> {
     fields
 }
 
-#[cfg(test)]
-fn normalized_global_current_graph(table: &TableSchema) -> GraphBuilder {
-    GraphBuilder::table(global_current_table_name(&table.name))
-        .project(global_current_storage_fields(table))
-        .project_fields(
-            std::iter::once(ProjectField::named("row_uuid"))
-                .chain(
-                    table
-                        .columns
-                        .iter()
-                        .map(|column| ProjectField::named(format!("user_{}", column.name))),
-                )
-                .chain([
-                    ProjectField::renamed("created_by", "$createdBy"),
-                    ProjectField::renamed("created_at", "$createdAt"),
-                    ProjectField::renamed("updated_by", "$updatedBy"),
-                    ProjectField::renamed("updated_at", "$updatedAt"),
-                    ProjectField::named("tx_time"),
-                    ProjectField::named("tx_node_id"),
-                ]),
-        )
-}
-
 fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
     RecordDescriptor::new(
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
@@ -7228,80 +7077,6 @@ fn maintained_view_nullable_deletion_type() -> ValueType {
     ValueType::Nullable(Box::new(ValueType::Enum(
         EnumSchema::new("jazz_deletion", ["deleted", "restored"]).expect("valid deletion enum"),
     )))
-}
-
-#[cfg(test)]
-fn maintained_view_result_current_fields(table: &TableSchema) -> Vec<ProjectField> {
-    let mut fields = vec![
-        ProjectField::literal("event_kind", Value::String("result_content".to_owned())),
-        ProjectField::named("row_uuid"),
-        ProjectField::renamed("tx_time", "content_tx_time"),
-        ProjectField::renamed("tx_node_id", "content_tx_node_id"),
-        ProjectField::renamed("tx_time", "version_tx_time"),
-        ProjectField::renamed("tx_node_id", "version_tx_node_id"),
-        ProjectField::named("schema_version"),
-        ProjectField::named("parents"),
-        ProjectField::literal("created_by", Value::Uuid(AuthorId::SYSTEM.0)),
-        ProjectField::literal("created_at", Value::U64(0)),
-        ProjectField::literal("updated_by", Value::Uuid(AuthorId::SYSTEM.0)),
-        ProjectField::literal("updated_at", Value::U64(0)),
-        ProjectField::null_typed("_deletion", maintained_view_nullable_deletion_type()),
-    ];
-    fields.extend(
-        table
-            .columns
-            .iter()
-            .map(|column| ProjectField::named(format!("user_{}", column.name))),
-    );
-    fields
-}
-
-#[cfg(test)]
-fn maintained_view_policy_content_fields(table: &TableSchema) -> Vec<ProjectField> {
-    let mut fields = vec![
-        ProjectField::literal("event_kind", Value::String("content".to_owned())),
-        ProjectField::renamed("row_uuid", "version_row_uuid"),
-        ProjectField::renamed("tx_time", "version_tx_time"),
-        ProjectField::renamed("tx_node_id", "version_tx_node_id"),
-        ProjectField::named("schema_version"),
-        ProjectField::named("parents"),
-        ProjectField::literal("created_by", Value::Uuid(AuthorId::SYSTEM.0)),
-        ProjectField::literal("created_at", Value::U64(0)),
-        ProjectField::literal("updated_by", Value::Uuid(AuthorId::SYSTEM.0)),
-        ProjectField::literal("updated_at", Value::U64(0)),
-        ProjectField::null_typed("_deletion", maintained_view_nullable_deletion_type()),
-    ];
-    fields.extend(
-        table
-            .columns
-            .iter()
-            .map(|column| ProjectField::named(format!("user_{}", column.name))),
-    );
-    fields
-}
-
-#[cfg(test)]
-fn maintained_view_policy_deletion_fields(table: &TableSchema) -> Vec<ProjectField> {
-    let mut fields = vec![
-        ProjectField::literal("event_kind", Value::String("deletion".to_owned())),
-        ProjectField::renamed("left.row_uuid", "version_row_uuid"),
-        ProjectField::renamed("left.tx_time", "version_tx_time"),
-        ProjectField::renamed("left.tx_node_id", "version_tx_node_id"),
-        ProjectField::renamed("left.schema_version", "schema_version"),
-        ProjectField::renamed("left.parents", "parents"),
-        ProjectField::renamed("left.created_by", "created_by"),
-        ProjectField::renamed("left.created_at", "created_at"),
-        ProjectField::renamed("left.updated_by", "updated_by"),
-        ProjectField::renamed("left.updated_at", "updated_at"),
-        ProjectField::nullable("left._deletion", "_deletion"),
-    ];
-    fields.extend(table.columns.iter().map(|column| {
-        ProjectField::null_typed(
-            format!("user_{}", column.name),
-            ValueType::Nullable(Box::new(column.column_type.value_type())),
-        )
-    }));
-    fields
 }
 
 fn maintained_view_hidden_param_column_types(
