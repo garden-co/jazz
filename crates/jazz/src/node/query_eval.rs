@@ -812,11 +812,11 @@ fn root_source_id(table: &str) -> SourceId {
     }
 }
 
-fn join_source_id(join: &JoinVia, index: usize) -> SourceId {
+fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
     SourceId {
         table: join.table.clone(),
         path: SourcePath {
-            components: vec![SourceRole::Alias(format!("join_via:{index}"))],
+            components: vec![SourceRole::Alias(path.to_owned())],
         },
     }
 }
@@ -1663,6 +1663,65 @@ fn normalize_reachable(
     ))
 }
 
+fn normalize_join_via_right(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    schema: &JazzSchema,
+    join: &JoinVia,
+    path: &str,
+) -> Result<(RowSetNodeId, SourceId), Error> {
+    let join_source = nested_join_source_id(join, path);
+    auxiliary_sources.insert(join_source.clone());
+    let source_node = RowSetNodeId(format!("{path}:source"));
+    nodes.insert(
+        source_node.clone(),
+        RowSetExpr::Source {
+            source: join_source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    let mut current = source_node;
+    if !join.filters.is_empty() {
+        let filter_node = RowSetNodeId(format!("{path}:filter"));
+        nodes.insert(
+            filter_node.clone(),
+            RowSetExpr::Filter {
+                input: current,
+                predicate: normalize_predicates(&join_source, &join.filters)?,
+            },
+        );
+        current = filter_node;
+    }
+
+    let table = table_schema(schema, &join.table)?;
+    for (nested_index, nested) in join.nested_joins.iter().enumerate() {
+        let nested_path = format!("{path}:nested:{nested_index}");
+        let (nested_right, nested_source) =
+            normalize_join_via_right(nodes, auxiliary_sources, schema, nested, &nested_path)?;
+        let nested_join_node = RowSetNodeId(format!("{nested_path}:join"));
+        nodes.insert(
+            nested_join_node.clone(),
+            RowSetExpr::Join {
+                left: current,
+                right: nested_right,
+                mode: NormalizedJoinMode::Inner,
+                on: join_via_predicate(&join_source, &nested_source, nested),
+            },
+        );
+        let project_node = RowSetNodeId(format!("{nested_path}:parent_project"));
+        nodes.insert(
+            project_node.clone(),
+            RowSetExpr::Project {
+                input: nested_join_node,
+                columns: source_public_field_projections(table, &join_source),
+            },
+        );
+        current = project_node;
+    }
+
+    Ok((current, join_source))
+}
+
 fn reachable_dedupe_keys(
     frontier: &FrontierId,
     columns: &[ValueSourceColumn],
@@ -1865,6 +1924,101 @@ fn typed_output_field(name: impl Into<String>, ty: ColumnType) -> TypedOutputFie
     }
 }
 
+fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> Result<&'a TableSchema, Error> {
+    schema
+        .tables
+        .iter()
+        .find(|candidate| candidate.name == table)
+        .ok_or_else(|| Error::QueryLowering(format!("unknown query table {table}")))
+}
+
+fn row_id_output_field() -> TypedOutputField {
+    typed_output_field("id", ColumnType::Uuid)
+}
+
+fn source_public_field_projections(table: &TableSchema, source: &SourceId) -> Vec<RowProjection> {
+    std::iter::once(RowProjection {
+        output: row_id_output_field(),
+        value: NormalizedValueRef::RowId(RowIdRef::Source(source.clone())),
+    })
+    .chain(table.columns.iter().map(|column| RowProjection {
+        output: typed_output_field(column.name.clone(), column.column_type.clone()),
+        value: NormalizedValueRef::SourceField {
+            source: source.clone(),
+            field: column.name.clone(),
+        },
+    }))
+    .collect()
+}
+
+fn join_via_root_key(root_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
+    join.source_column
+        .as_ref()
+        .map(|field| {
+            if field == "id" {
+                NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone()))
+            } else {
+                NormalizedValueRef::SourceField {
+                    source: root_source.clone(),
+                    field: field.clone(),
+                }
+            }
+        })
+        .unwrap_or_else(|| NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())))
+}
+
+fn join_via_target_key(join_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
+    match join.target {
+        JoinTarget::Column => NormalizedValueRef::SourceField {
+            source: join_source.clone(),
+            field: join.on_column.clone(),
+        },
+        JoinTarget::RowId => NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone())),
+    }
+}
+
+fn join_via_predicate(
+    left_source: &SourceId,
+    right_source: &SourceId,
+    join: &JoinVia,
+) -> NormalizedPredicateExpr {
+    let mut key_pairs = vec![(
+        join_via_root_key(left_source, join),
+        join_via_target_key(right_source, join),
+    )];
+    key_pairs.extend(join.correlated_filters.iter().map(|correlation| {
+        (
+            NormalizedValueRef::SourceField {
+                source: left_source.clone(),
+                field: correlation.source_column.clone(),
+            },
+            NormalizedValueRef::SourceField {
+                source: right_source.clone(),
+                field: correlation.join_column.clone(),
+            },
+        )
+    }));
+    if key_pairs.len() == 1 {
+        let (left, right) = key_pairs.remove(0);
+        NormalizedPredicateExpr::Compare {
+            left,
+            op: NormalizedComparisonOp::Eq,
+            right,
+        }
+    } else {
+        NormalizedPredicateExpr::And(
+            key_pairs
+                .into_iter()
+                .map(|(left, right)| NormalizedPredicateExpr::Compare {
+                    left,
+                    op: NormalizedComparisonOp::Eq,
+                    right,
+                })
+                .collect(),
+        )
+    }
+}
+
 fn reachable_edge_source_id(reachable: &crate::query::ReachableVia, index: usize) -> SourceId {
     SourceId {
         table: reachable.edge_table.clone(),
@@ -1940,9 +2094,6 @@ fn unsupported_join_via_reason(join: &JoinVia) -> Option<String> {
     let mut reasons = Vec::new();
     if join.source_lookup.is_some() {
         reasons.push("source_lookup");
-    }
-    if !join.nested_joins.is_empty() {
-        reasons.push("nested_joins");
     }
     (!reasons.is_empty()).then(|| format!("unsupported join_via features: {}", reasons.join(", ")))
 }
@@ -2458,88 +2609,17 @@ where
                 continue;
             }
 
-            let join_source = join_source_id(join, index);
-            auxiliary_sources.insert(join_source.clone());
-            let source_node = RowSetNodeId(format!("join_via:{index}:source"));
-            nodes.insert(
-                source_node.clone(),
-                RowSetExpr::Source {
-                    source: join_source.clone(),
-                    visibility: RowVisibility::Visible,
-                },
-            );
-            let mut right = source_node;
-            if !join.filters.is_empty() {
-                let filter_node = RowSetNodeId(format!("join_via:{index}:filter"));
-                nodes.insert(
-                    filter_node.clone(),
-                    RowSetExpr::Filter {
-                        input: right,
-                        predicate: normalize_predicates(&join_source, &join.filters)?,
-                    },
-                );
-                right = filter_node;
-            }
-            let root_key = join
-                .source_column
-                .as_ref()
-                .map(|field| {
-                    if field == "id" {
-                        NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone()))
-                    } else {
-                        NormalizedValueRef::SourceField {
-                            source: root_source.clone(),
-                            field: field.clone(),
-                        }
-                    }
-                })
-                .unwrap_or_else(|| {
-                    NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone()))
-                });
-            let join_key = match join.target {
-                JoinTarget::Column => NormalizedValueRef::SourceField {
-                    source: join_source.clone(),
-                    field: join.on_column.clone(),
-                },
-                JoinTarget::RowId => {
-                    NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone()))
-                }
-            };
-            let mut key_pairs = vec![(root_key.clone(), join_key.clone())];
-            key_pairs.extend(join.correlated_filters.iter().map(|correlation| {
-                (
-                    NormalizedValueRef::SourceField {
-                        source: root_source.clone(),
-                        field: correlation.source_column.clone(),
-                    },
-                    NormalizedValueRef::SourceField {
-                        source: join_source.clone(),
-                        field: correlation.join_column.clone(),
-                    },
-                )
-            }));
-            let join_predicate = if key_pairs.len() == 1 {
-                let (left, right) = key_pairs[0].clone();
-                NormalizedPredicateExpr::Compare {
-                    left,
-                    op: NormalizedComparisonOp::Eq,
-                    right,
-                }
-            } else {
-                NormalizedPredicateExpr::And(
-                    key_pairs
-                        .iter()
-                        .cloned()
-                        .map(|(left, right)| NormalizedPredicateExpr::Compare {
-                            left,
-                            op: NormalizedComparisonOp::Eq,
-                            right,
-                        })
-                        .collect(),
-                )
-            };
+            let path = format!("join_via:{index}");
+            let (right, join_source) = normalize_join_via_right(
+                &mut nodes,
+                &mut auxiliary_sources,
+                &self.catalogue.schema,
+                join,
+                &path,
+            )?;
+            let join_predicate = join_via_predicate(&root_source, &join_source, join);
             join_contributions.push(JoinContribution {
-                id: format!("join_via:{index}"),
+                id: path.clone(),
                 source: join_source.clone(),
                 input: right.clone(),
                 membership: join_predicate.clone(),
@@ -8167,6 +8247,45 @@ mod tests {
     }
 
     #[test]
+    fn join_via_nested_joins_normalize_as_parent_projection_gate() {
+        let (_dir, node) = open_node();
+        let nested = Query::from("issue_members")
+            .join_via_row_id("users", "user", [eq(col("name"), lit("Alice"))])
+            .joins
+            .into_iter()
+            .next()
+            .unwrap();
+        let shape = Query::from("issues")
+            .join_via_with_nested_joins("issue_members", "issue", [], [nested])
+            .validate(&schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
+
+        assert_eq!(normalized.join_contributions.len(), 1);
+        let contribution = &normalized.join_contributions[0];
+        assert_eq!(contribution.input.0, "join_via:0:nested:0:parent_project");
+        assert!(matches!(
+            normalized.nodes.get(&contribution.input),
+            Some(RowSetExpr::Project { input, columns })
+                if input.0 == "join_via:0:nested:0:join"
+                    && columns.iter().any(|column| column.output.name == "id")
+                    && columns.iter().any(|column| column.output.name == "issue")
+                    && columns.iter().any(|column| column.output.name == "user")
+        ));
+        assert!(matches!(
+            normalized.nodes.get(&RowSetNodeId("join_via:0:nested:0:join".to_owned())),
+            Some(RowSetExpr::Join { left, right, .. })
+                if left.0 == "join_via:0:source"
+                    && right.0 == "join_via:0:nested:0:filter"
+        ));
+        assert!(matches!(
+            normalized.nodes.get(&normalized.root),
+            Some(RowSetExpr::Join { right, .. }) if right == &contribution.input
+        ));
+    }
+
+    #[test]
     fn aggregate_sum_min_max_over_filtered_query() {
         let (_dir, mut node) = open_node();
         let alice = author(1);
@@ -8263,6 +8382,41 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(alice_rows, BTreeSet::from([row(0), row(2)]));
         assert_eq!(bob_rows, BTreeSet::from([row(2), row(5)]));
+    }
+
+    #[test]
+    fn query_join_via_nested_joins_filters_visible_roots() {
+        let (_dir, mut node) = open_node();
+        let alice = author(1);
+        let bob = author(2);
+        commit_global_user(&mut node, alice, "Alice", 1);
+        commit_global_user(&mut node, bob, "Bob", 2);
+        for idx in 0..4 {
+            commit_issue(&mut node, idx, "open", bob);
+        }
+        commit_member(&mut node, 0, row(0), alice);
+        commit_member(&mut node, 1, row(1), bob);
+        commit_member(&mut node, 2, row(2), alice);
+
+        let nested = Query::from("issue_members")
+            .join_via_row_id("users", "user", [eq(col("name"), lit("Alice"))])
+            .joins
+            .into_iter()
+            .next()
+            .unwrap();
+        let shape = Query::from("issues")
+            .join_via_with_nested_joins("issue_members", "issue", [], [nested])
+            .validate(&schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let rows = node
+            .query_rows(&shape, &binding, DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(rows, BTreeSet::from([row(0), row(2)]));
     }
 
     #[test]

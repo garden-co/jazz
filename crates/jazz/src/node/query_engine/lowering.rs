@@ -2464,6 +2464,11 @@ fn lower_relation_key_ref(
 ) -> Result<String, UnsupportedReason> {
     match plan {
         RelationInputPlan::Linear(linear) => {
+            if linear_ends_in_projection(linear)
+                && let Ok(field) = lower_named_relation_field(value, &output.fields)
+            {
+                return Ok(field);
+            }
             if let Some(source) = &output.root_source {
                 if let Some(source_id) = linear.root.source() {
                     if let Ok(key) = lower_join_key_ref(value, source_id, source, request) {
@@ -2475,6 +2480,10 @@ fn lower_relation_key_ref(
         }
         RelationInputPlan::Recursive(_) => lower_named_relation_field(value, &output.fields),
     }
+}
+
+fn linear_ends_in_projection(linear: &LinearCurrentRoot) -> bool {
+    matches!(linear.steps.last(), Some(LinearStep::Project(_)))
 }
 
 fn lower_named_relation_field(
