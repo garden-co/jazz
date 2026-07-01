@@ -82,13 +82,6 @@ fn next_groove_runtime_token() -> u64 {
 }
 
 #[cfg(test)]
-#[derive(Clone, Debug, Default)]
-pub(super) struct MaintainedViewReplacementForRemove {
-    pub(super) content_winner: Option<VersionRow>,
-    pub(super) deletion_winner: Option<VersionRow>,
-}
-
-#[cfg(test)]
 std::thread_local! {
     static QUERY_VERSIONS_FOR_TX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MAINTAINED_VIEW_MATERIALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

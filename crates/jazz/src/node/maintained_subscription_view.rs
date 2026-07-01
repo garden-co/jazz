@@ -11,8 +11,6 @@ use super::query_engine::{
     OutputTerminalSchema, ProgramFactSchema, QueryProgram, ResultMembershipSchema,
     VersionWitnessSchema,
 };
-#[cfg(test)]
-use super::query_eval::maintained_view_tagged_user_field;
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::ResultMemberEntry;
 use crate::schema::TableSchema;
@@ -126,23 +124,6 @@ impl MaintainedSubscriptionView {
         program: &QueryProgram,
     ) -> MaintainedTerminalSchemas {
         MaintainedTerminalSchemas::for_program(program)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn apply_tagged_deltas(
-        &mut self,
-        deltas: &RecordDeltas,
-        tables: &TableSchemas,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-    ) -> Result<ResultTransitions, super::Error> {
-        let decoded = deltas
-            .iter()
-            .map(|(record, weight)| {
-                decode_tagged_terminal_record(record, tables, node_aliases)
-                    .map(|event| (event, weight))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.apply_decoded_deltas(decoded, node_aliases)
     }
 
     pub(crate) fn apply_typed_deltas(
@@ -466,103 +447,6 @@ fn decode_typed_version_witness(
     )
 }
 
-#[cfg(test)]
-fn decode_tagged_terminal_record(
-    record: BorrowedRecord<'_>,
-    tables: &TableSchemas,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-) -> Result<DecodedMaintainedEvent, super::Error> {
-    let event_kind = match record.get_idx(field_idx(record, "event_kind")?)? {
-        Value::String(value) => value,
-        _ => {
-            return Err(super::Error::InvalidStoredValue(
-                "event_kind must be string",
-            ));
-        }
-    };
-    let table_name = match record.get_idx(field_idx(record, "table_name")?)? {
-        Value::String(value) => value,
-        _ => {
-            return Err(super::Error::InvalidStoredValue(
-                "table_name must be string",
-            ));
-        }
-    };
-    let table = tables
-        .get(&table_name)
-        .ok_or(super::Error::InvalidStoredValue(
-            "maintained view tagged terminal table_name must exist",
-        ))?;
-
-    if event_kind == "result_current" {
-        let row_uuid = RowUuid(record.get_uuid(field_idx(record, "row_uuid")?)?);
-        let tx_time = TxTime(record_u64(record, "content_tx_time")?);
-        let tx_node_alias = NodeAlias(record_u64(record, "content_tx_node_id")?);
-        let tx_node = node_aliases
-            .iter()
-            .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
-            .ok_or(super::Error::InvalidStoredValue(
-                "result tx node alias must exist",
-            ))?;
-        return Ok(DecodedMaintainedEvent::ResultCurrent(
-            (
-                table.name.clone().into(),
-                row_uuid,
-                TxId::new(tx_time, tx_node),
-            )
-                .into(),
-        ));
-    }
-
-    let version = decode_tagged_terminal_version(record, table)?;
-    match event_kind.as_str() {
-        "version_content" => Ok(DecodedMaintainedEvent::VersionContent(version)),
-        "version_deletion" => Ok(DecodedMaintainedEvent::VersionDeletion(version)),
-        "replacement_content" => Ok(DecodedMaintainedEvent::ReplacementContent(version)),
-        "replacement_deletion" => Ok(DecodedMaintainedEvent::ReplacementDeletion(version)),
-        _ => Err(super::Error::InvalidStoredValue(
-            "unknown maintained view tagged event kind",
-        )),
-    }
-}
-
-#[cfg(test)]
-fn decode_tagged_terminal_version(
-    record: BorrowedRecord<'_>,
-    table: &TableSchema,
-) -> Result<VersionRow, super::Error> {
-    let deletion = tagged_deletion(record.get_idx(field_idx(record, "_deletion")?)?)?;
-    let mut cells = BTreeMap::new();
-    for column in &table.columns {
-        let field = maintained_view_tagged_user_field(&table.name, &column.name);
-        if let Some(value) = nullable_value(record.get_idx(field_idx(record, &field)?)?)? {
-            cells.insert(column.name.clone(), value);
-        }
-    }
-    let tx_time = TxTime(record_u64(record, "tx_time")?);
-    VersionRow::from_parts_with_schema_version(
-        table,
-        VersionRowParts {
-            table: table.name.clone(),
-            row_uuid: RowUuid(record.get_uuid(field_idx(record, "row_uuid")?)?),
-            tx_node_alias: NodeAlias(record_u64(record, "tx_node_id")?),
-            schema_version_alias: crate::ids::SchemaVersionAlias(record_u64(
-                record,
-                "schema_version",
-            )?),
-            tx_time,
-            parents: tx_ids_from_value(record.get_idx(field_idx(record, "parents")?)?)?,
-            created_by: AuthorId(record.get_uuid(field_idx(record, "created_by")?)?),
-            created_at: TxTime(record_u64(record, "created_at")?),
-            updated_by: AuthorId(record.get_uuid(field_idx(record, "updated_by")?)?),
-            updated_at: TxTime(record_u64(record, "updated_at")?),
-            cells,
-            deletion,
-        },
-        None,
-    )
-}
-
 fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {
     match value {
         Value::Nullable(None) => Ok(None),
@@ -591,7 +475,7 @@ fn field_idx(record: BorrowedRecord<'_>, field: &str) -> Result<usize, super::Er
         .descriptor()
         .field_index(field)
         .ok_or(super::Error::InvalidStoredValue(
-            "maintained view tagged terminal missing field",
+            "maintained view terminal missing field",
         ))
 }
 
@@ -815,8 +699,7 @@ fn replacement_winner(
 mod tests {
     use std::collections::BTreeMap;
 
-    use groove::ivm::{RecordDelta, RecordDeltas};
-    use groove::records::{RecordDescriptor, Value, ValueType};
+    use groove::records::Value;
     use groove::schema::ColumnType;
 
     use super::*;
@@ -845,40 +728,6 @@ mod tests {
 
     fn table() -> TableSchema {
         TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)])
-    }
-
-    fn tables() -> BTreeMap<String, TableSchema> {
-        let table = table();
-        BTreeMap::from([(table.name.clone(), table)])
-    }
-
-    fn tagged_descriptor() -> RecordDescriptor {
-        RecordDescriptor::new([
-            ("event_kind", ValueType::String),
-            ("table_name", ValueType::String),
-            ("row_uuid", ValueType::Uuid),
-            ("content_tx_time", ValueType::U64),
-            ("content_tx_node_id", ValueType::U64),
-            ("tx_time", ValueType::U64),
-            ("tx_node_id", ValueType::U64),
-            ("schema_version", ValueType::U64),
-            (
-                "parents",
-                ValueType::Array(Box::new(ValueType::Tuple(vec![
-                    ValueType::U64,
-                    ValueType::Uuid,
-                ]))),
-            ),
-            ("created_by", ValueType::Uuid),
-            ("created_at", ValueType::U64),
-            ("updated_by", ValueType::Uuid),
-            ("updated_at", ValueType::U64),
-            ("_deletion", ValueType::Nullable(Box::new(ValueType::U8))),
-            (
-                "user__todos__title",
-                ValueType::Nullable(Box::new(ValueType::String)),
-            ),
-        ])
     }
 
     fn version(row_uuid: RowUuid, time: u64, title: &str) -> VersionRow {
@@ -927,50 +776,6 @@ mod tests {
 
     fn result(row_uuid: RowUuid, time: u64) -> ResultRowEntry {
         ("todos".to_owned().into(), row_uuid, tx(1, time))
-    }
-
-    #[test]
-    fn tagged_record_deltas_decode_and_apply_to_maintained_indexes() {
-        let aliases = aliases();
-        let descriptor = tagged_descriptor();
-        let row_uuid = row(1);
-        let raw = descriptor
-            .create(&[
-                Value::String("version_content".to_owned()),
-                Value::String("todos".to_owned()),
-                Value::Uuid(row_uuid.0),
-                Value::U64(10),
-                Value::U64(10),
-                Value::U64(10),
-                Value::U64(10),
-                Value::U64(0),
-                Value::Array(Vec::new()),
-                Value::Uuid(AuthorId::SYSTEM.0),
-                Value::U64(10),
-                Value::Uuid(AuthorId::SYSTEM.0),
-                Value::U64(10),
-                Value::Nullable(None),
-                Value::Nullable(Some(Box::new(Value::String("decoded".to_owned())))),
-            ])
-            .unwrap();
-        let deltas = RecordDeltas {
-            descriptor,
-            deltas: vec![RecordDelta {
-                record: raw,
-                weight: 1,
-            }],
-        };
-        let mut maintained = MaintainedSubscriptionView::default();
-
-        let transitions = maintained
-            .apply_tagged_deltas(&deltas, &tables(), &aliases)
-            .unwrap();
-
-        assert_eq!(transitions, ResultTransitions::default());
-        assert_eq!(
-            maintained.versions_by_tx(tx(1, 10)),
-            vec![version(row_uuid, 10, "decoded")]
-        );
     }
 
     #[test]
