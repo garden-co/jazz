@@ -10,7 +10,6 @@ use super::*;
 #[derive(Default)]
 pub(super) struct ViewEvaluationContext {
     pub(super) tx_rows: BTreeMap<TxId, Option<StoredTransaction>>,
-    tx_versions: BTreeMap<TxId, Vec<VersionRow>>,
 }
 
 impl<S> NodeState<S>
@@ -766,22 +765,6 @@ where
             .tx_rows
             .get(&tx_id)
             .expect("tx row memo populated")
-            .clone())
-    }
-
-    pub(super) fn query_versions_for_tx_memo_cloned(
-        &mut self,
-        tx_id: TxId,
-        context: &mut ViewEvaluationContext,
-    ) -> Result<Vec<VersionRow>, Error> {
-        if let std::collections::btree_map::Entry::Vacant(entry) = context.tx_versions.entry(tx_id)
-        {
-            entry.insert(self.query_versions_for_tx(tx_id)?);
-        }
-        Ok(context
-            .tx_versions
-            .get(&tx_id)
-            .expect("tx versions memo populated")
             .clone())
     }
 }
