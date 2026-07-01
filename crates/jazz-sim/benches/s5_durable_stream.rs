@@ -1129,8 +1129,8 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate {
             version_bundles,
             peer_payload_inventory,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
             ..
         } => {
             version_bundles
@@ -1139,7 +1139,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
-                + ((result_row_adds.len() + result_row_removes.len()) as u64 * 64)
+                + ((result_member_adds.len() + result_member_removes.len()) as u64 * 64)
         }
         _ => 0,
     }
@@ -1148,10 +1148,10 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 fn result_row_count(update: &SyncMessage) -> usize {
     match update {
         SyncMessage::ViewUpdate {
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
             ..
-        } => result_row_adds.len() + result_row_removes.len(),
+        } => result_member_adds.len() + result_member_removes.len(),
         _ => 0,
     }
 }
@@ -1175,7 +1175,7 @@ fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
 fn subscription_opened_rows(event: SubscriptionEvent) -> Vec<jazz::node::CurrentRow> {
     match event {
         SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            current
+            current.rows
         }
         other => panic!("expected subscription snapshot, got {other:?}"),
     }
@@ -1193,7 +1193,7 @@ fn drain_subscription_events(
 fn apply_subscription_event(rows: &mut Vec<jazz::node::CurrentRow>, event: SubscriptionEvent) {
     match event {
         SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            *rows = current;
+            *rows = current.rows;
         }
         SubscriptionEvent::Delta {
             added,

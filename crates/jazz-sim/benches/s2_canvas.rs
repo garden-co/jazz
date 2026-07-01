@@ -15,7 +15,7 @@ use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::peer::PeerState;
-use jazz::protocol::{BindingDelta, RegisterShapeOptions, ShapeAst, SyncMessage};
+use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
 use jazz::query::{Binding, Query, ValidatedQuery, claim, col, eq, lit, param};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
@@ -1426,10 +1426,14 @@ fn apply_core_binding(
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    core.apply_sync_message(SyncMessage::BindingDelta(BindingDelta {
+    core.apply_sync_message(SyncMessage::Subscribe(Subscribe {
         shape_id: shape.shape_id(),
-        adds: vec![(binding.binding_id(), values)],
-        removes: Vec::new(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: RegisterShapeOptions::default().read_view_key(),
+        },
+        values,
     }))
     .unwrap();
 }
@@ -1582,10 +1586,11 @@ fn observed_shape_tx_ids(update: &SyncMessage, read_tier: DurabilityTier) -> Vec
     }
     match update {
         SyncMessage::ViewUpdate {
-            result_row_adds, ..
-        } => result_row_adds
+            result_member_adds, ..
+        } => result_member_adds
             .iter()
-            .filter_map(|(table, _, tx_id)| (table.as_ref() == SHAPES).then_some(*tx_id))
+            .filter_map(|entry| entry.as_row())
+            .filter_map(|(table, _, tx_id)| (table.as_ref() == SHAPES).then_some(tx_id))
             .collect(),
         _ => Vec::new(),
     }
@@ -2201,10 +2206,14 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    node.apply_sync_message(SyncMessage::BindingDelta(BindingDelta {
+    node.apply_sync_message(SyncMessage::Subscribe(Subscribe {
         shape_id: shape.shape_id(),
-        adds: vec![(binding.binding_id(), values)],
-        removes: Vec::new(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: RegisterShapeOptions::default().read_view_key(),
+        },
+        values,
     }))
     .unwrap();
 }
@@ -2227,10 +2236,14 @@ fn register_binding(
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    core.apply_sync_message(SyncMessage::BindingDelta(BindingDelta {
+    core.apply_sync_message(SyncMessage::Subscribe(Subscribe {
         shape_id: shape.shape_id(),
-        adds: vec![(binding.binding_id(), values)],
-        removes: Vec::new(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: RegisterShapeOptions::default().read_view_key(),
+        },
+        values,
     }))
     .unwrap();
     ctx.record_counter(&format!("s2_registered_{client}"), 1);
@@ -2361,7 +2374,7 @@ fn apply_db_subscription_event(
         SubscriptionEvent::Opened { current: rows, .. }
         | SubscriptionEvent::Reset { current: rows, .. } => {
             current.clear();
-            current.extend(rows.into_iter().map(|row| (row.row_uuid(), row)));
+            current.extend(rows.rows.into_iter().map(|row| (row.row_uuid(), row)));
         }
         SubscriptionEvent::Delta {
             added,
@@ -2508,8 +2521,8 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate {
             version_bundles,
             peer_payload_inventory,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
             ..
         } => {
             version_bundles
@@ -2517,8 +2530,8 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .map(version_bundle_bytes)
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
-                + result_rows_bytes(result_row_adds)
-                + result_rows_bytes(result_row_removes)
+                + result_rows_bytes(result_member_adds)
+                + result_rows_bytes(result_member_removes)
         }
         SyncMessage::CommitUnit { tx, versions } => {
             transaction_wire_bytes(tx) + versions.iter().map(version_record_bytes).sum::<u64>()
@@ -2528,13 +2541,14 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
             extents.iter().map(|extent| extent.bytes.len() as u64).sum()
         }
         SyncMessage::RegisterShape { .. }
-        | SyncMessage::BindingDelta(_)
+        | SyncMessage::Subscribe(_)
         | SyncMessage::PublishSchema { .. }
         | SyncMessage::PublishLens { .. }
         | SyncMessage::SetCurrentWriteSchema { .. }
         | SyncMessage::CatalogueAck(_)
-        | SyncMessage::Rehydrate { .. }
-        | SyncMessage::FetchContentExtent { .. } => 0,
+        | SyncMessage::FetchContentExtent { .. }
+        | SyncMessage::SessionClaims { .. }
+        | SyncMessage::Unsubscribe { .. } => 0,
     }
 }
 
@@ -2574,8 +2588,9 @@ fn transaction_wire_bytes(tx: &jazz::tx::Transaction) -> u64 {
             .map_or(0, |metadata| metadata.len() as u64)
 }
 
-fn result_rows_bytes(rows: &[jazz::protocol::ResultRowEntry]) -> u64 {
+fn result_rows_bytes(rows: &[jazz::protocol::ResultMemberEntry]) -> u64 {
     rows.iter()
+        .filter_map(|entry| entry.as_row())
         .map(|(table, _, _)| table.len() as u64 + 16 + tx_id_wire_bytes())
         .sum()
 }
@@ -2587,9 +2602,10 @@ fn tx_id_wire_bytes() -> u64 {
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate {
-            result_row_adds, ..
-        } => result_row_adds
+            result_member_adds, ..
+        } => result_member_adds
             .iter()
+            .filter_map(|entry| entry.as_row())
             .filter(|entry| entry.0.as_ref() == table)
             .count(),
         _ => 0,
