@@ -2141,10 +2141,7 @@ fn unbound_filter_param_reports_operator_gap() {
         reads: QueryReadSet::primary(current_read_view()),
         policy: system_policy_context(),
         input: chained_row_set_input(0x72, BTreeMap::new()),
-        output: RowSetOutputRequest {
-            app_rows: None,
-            facts: BTreeSet::new(),
-        },
+        output: row_set_output(BTreeSet::new()),
     };
 
     let err = lower_query_program(request, &mut FakeSourceResolver::default()).unwrap_err();
@@ -2257,22 +2254,19 @@ fn built_in_sub_claim_lowers_to_permission_subject() {
 }
 
 #[test]
-fn missing_claim_reports_operator_gap() {
+fn missing_claim_lowers_to_deny_predicate() {
     let request = QueryProgramRequest {
         reads: QueryReadSet::primary(current_read_view()),
         policy: policy_context(),
         input: claim_filtered_row_set_input(0x75, "team"),
-        output: RowSetOutputRequest {
-            app_rows: None,
-            facts: BTreeSet::new(),
-        },
+        output: row_set_output(BTreeSet::new()),
     };
 
-    let err = lower_query_program(request, &mut FakeSourceResolver::default()).unwrap_err();
-    assert!(matches!(
-        err.gaps.as_slice(),
-        [UnsupportedReason::Operator(message)] if message.contains("claim 'team' is not bound")
-    ));
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("missing claims lower to a deny predicate");
+    let graph = format!("{:?}", program.lowered.terminals[0].graph);
+    assert!(graph.contains("Filter"), "{graph}");
+    assert!(graph.contains("Or([])"), "{graph}");
 }
 
 #[test]
