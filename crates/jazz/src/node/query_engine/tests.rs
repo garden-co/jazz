@@ -1391,7 +1391,6 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     let mut resolver = FakeSourceResolver::default();
     let program =
         lower_query_program(request, &mut resolver).expect("recursive relation should lower");
-    assert!(program.lowered.parameters.hidden_params.is_empty());
 
     fn step_input_reads_frontier(input: &GraphBuilder) -> bool {
         match input {
@@ -1441,7 +1440,6 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
         program.lowered.parameters.user_params,
         BTreeMap::from([("route".to_owned(), ColumnType::String)])
     );
-    assert!(program.lowered.parameters.hidden_params.is_empty());
     assert_eq!(
         program.lowered.parameters.routing_params,
         BTreeSet::from(["__jazz_route_route".to_owned()])
@@ -1629,7 +1627,6 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
     };
     assert!(matches!(seed.as_ref(), GraphBuilder::InlineRecords { .. }));
     assert!(program.lowered.parameters.user_params.is_empty());
-    assert!(program.lowered.parameters.hidden_params.is_empty());
     assert!(program.lowered.parameters.routing_params.is_empty());
 }
 

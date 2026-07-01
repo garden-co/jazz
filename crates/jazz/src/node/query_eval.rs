@@ -157,18 +157,6 @@ fn prepared_params_from_domain(
             ty: ty.clone(),
             source: PreparedQueryParamSource::User,
         })
-        .chain(
-            parameters
-                .hidden_params
-                .iter()
-                .map(|(name, ty)| PreparedQueryParam {
-                    name: name.clone(),
-                    ty: ty.clone(),
-                    source: PreparedQueryParamSource::Claim {
-                        name: claim_name_from_param(name).to_owned(),
-                    },
-                }),
-        )
         .collect()
 }
 
@@ -2370,7 +2358,7 @@ where
             policy: &policy,
         };
         lower_query_program(request, &mut resolver)
-            .map_err(|report| Error::QueryLowering(format!("{report:?}")))
+            .map_err(|report| Error::QueryCapability(format!("{report:?}")))
     }
 
     fn current_query_program_request(
@@ -2768,7 +2756,7 @@ where
                     .expect("program is compiled when no prepared plan is supplied")
                     .lowered
                     .parameters;
-                !parameters.user_params.is_empty() || !parameters.hidden_params.is_empty()
+                !parameters.user_params.is_empty()
             } =>
             {
                 Some(self.prepared_query_plan(shape, binding, tier, identity)?)
@@ -2784,12 +2772,7 @@ where
                 )?)
                 .map_err(Error::Groove),
             Some(PreparedQueryPlan::Prepared { shape, params }) => {
-                let values = binding_values_for_plan(
-                    binding,
-                    &params,
-                    identity,
-                    self.session_claims.get(&identity),
-                )?;
+                let values = binding_values_for_plan(binding, &params)?;
                 self.database
                     .bind_shape(shape, &values)
                     .map_err(Error::Groove)
@@ -4267,7 +4250,6 @@ where
         let subscription = self.subscribe_lowered_program(
             &program,
             &composed_binding,
-            identity,
             self.query_binding_source_shape_for_binding(&shape, &composed_binding),
         )?;
         let mut maintained = MaintainedSubscriptionView::default();
@@ -4318,7 +4300,6 @@ where
         &mut self,
         program: &QueryProgram,
         binding: &Binding,
-        identity: AuthorId,
         binding_source_shape: String,
     ) -> Result<MultisinkSubscription, Error> {
         let params = prepared_params_from_domain(&program.lowered.parameters);
@@ -4355,12 +4336,7 @@ where
         let prepared =
             self.database
                 .prepare(terminals, binding_source_shape, binding_descriptor)?;
-        let values = binding_values_for_plan(
-            binding,
-            &params,
-            identity,
-            self.session_claims.get(&identity),
-        )?;
+        let values = binding_values_for_plan(binding, &params)?;
         self.database
             .bind_shape(prepared.id(), &values)
             .map_err(Error::Groove)
@@ -5066,12 +5042,6 @@ fn claim_param_name(name: &str) -> String {
     format!("{CLAIM_PARAM_PREFIX}{name}")
 }
 
-fn claim_name_from_param(param: &str) -> &str {
-    param
-        .strip_prefix(CLAIM_PARAM_PREFIX)
-        .expect("hidden claim params must use the claim param prefix")
-}
-
 fn false_predicate() -> Predicate {
     Predicate::Eq(
         Operand::Literal(Value::Bool(true)),
@@ -5188,22 +5158,6 @@ fn insert_claim_bindings(
             }
         }
     }
-}
-
-fn claim_value_for_binding(
-    name: &str,
-    identity: AuthorId,
-    claims: Option<&BTreeMap<String, Value>>,
-) -> Value {
-    claims
-        .and_then(|claims| claims.get(name))
-        .cloned()
-        .unwrap_or_else(|| match name {
-            "sub" => Value::Uuid(identity.0),
-            "user_id" => Value::String(identity.0.to_string()),
-            "isAdmin" => Value::Bool(false),
-            _ => Value::Nullable(None),
-        })
 }
 
 fn claim_binding_value(column_type: Option<&ColumnType>, value: Value) -> Value {
@@ -6210,8 +6164,6 @@ fn collect_nullable_param_types(
 fn binding_values_for_plan(
     binding: &Binding,
     params: &[PreparedQueryParam],
-    identity: AuthorId,
-    claims: Option<&BTreeMap<String, Value>>,
 ) -> Result<Vec<Value>, Error> {
     params
         .iter()
@@ -6224,10 +6176,6 @@ fn binding_values_for_plan(
                     .ok_or_else(|| QueryError::MissingParam(param.name.clone()))?;
                 Ok(coerce_prepared_binding_value(value, &param.ty))
             }
-            PreparedQueryParamSource::Claim { ref name } => Ok(claim_binding_value(
-                Some(&param.ty),
-                claim_value_for_binding(name, identity, claims),
-            )),
         })
         .collect()
 }
