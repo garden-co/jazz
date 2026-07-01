@@ -4325,6 +4325,96 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
 }
 
 #[test]
+fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() {
+    let mut schema = recursive_doc_write_policy_schema();
+    let policy = Policy::shape(Query::from("docs").reachable_via(
+        "doc_access",
+        "doc",
+        "team",
+        claim("sub"),
+        "team_edges",
+        "member",
+        "parent",
+        [],
+    ));
+    schema.tables[0].read_policy = policy;
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xb2);
+    let direct_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000001"));
+    let closure_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000002"));
+    let hidden_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000003"));
+    let parent_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000002"));
+    let hidden_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000003"));
+
+    for (team, name) in [
+        (RowUuid(reader.0), "reader"),
+        (parent_team, "parent"),
+        (hidden_team, "hidden"),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String(name.to_owned()),
+            )])),
+        );
+    }
+    for (doc, title, kind, tx_time) in [
+        (direct_doc, "direct", "visible", 20),
+        (closure_doc, "closure", "visible", 21),
+        (hidden_doc, "hidden", "hidden", 22),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("docs", doc, tx_time).cells(recursive_doc_cells(title, kind)),
+        );
+    }
+    for (idx, doc, team) in [
+        (0xa1, direct_doc, RowUuid(reader.0)),
+        (0xa2, closure_doc, parent_team),
+        (0xa3, hidden_doc, hidden_team),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("doc_access", row(idx), 30).cells(BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ])),
+        );
+    }
+    accept_global(
+        &mut core,
+        MergeableCommit::new("team_edges", row(0xe1), 40).cells(BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(reader.0)),
+            ("parent".to_owned(), Value::Uuid(parent_team.0)),
+        ])),
+    );
+
+    let shape = Query::from("docs").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::for_author(reader);
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+
+    assert_eq!(
+        adds,
+        vec![
+            (
+                "docs".to_owned().into(),
+                direct_doc,
+                TxId::new(TxTime::from(20), node(9)),
+            ),
+            (
+                "docs".to_owned().into(),
+                closure_doc,
+                TxId::new(TxTime::from(21), node(9)),
+            ),
+        ]
+    );
+    assert!(removes.is_empty());
+}
+
+#[test]
 fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
     let schema = JazzSchema::new([
         TableSchema::new("files", [ColumnSchema::new("name", ColumnType::String)])

@@ -623,6 +623,8 @@ where
                     "policy authorization plan does not match resolved source".to_owned(),
                 ));
             }
+            let binding_source_shape = plan.binding_source_shape.clone();
+            let binding_user_params = plan.binding_user_params.clone();
             let policy_shape = node.maintained_view_table_policy_shape_with_mode(
                 table,
                 *permission_subject,
@@ -639,6 +641,8 @@ where
                 &output_fields,
                 tier,
                 *permission_subject,
+                binding_source_shape,
+                binding_user_params,
             )?;
             storage_graph.project_fields(storage_to_canonical_current_source_fields(
                 table,
@@ -2467,6 +2471,7 @@ where
             binding: ProgramBinding {
                 id: binding.binding_id(),
                 source_shape: Some(self.query_binding_source_shape_for_binding(shape, binding)),
+                extra_user_params: BTreeMap::new(),
                 values: binding.values().clone(),
             },
         };
@@ -2491,6 +2496,7 @@ where
             binding: ProgramBinding {
                 id: binding.binding_id(),
                 source_shape: Some(self.query_binding_source_shape_for_binding(shape, binding)),
+                extra_user_params: BTreeMap::new(),
                 values: binding.values().clone(),
             },
         };
@@ -2527,6 +2533,7 @@ where
                 source_shape: Some(
                     self.query_binding_source_shape_for_binding(&lowered_shape, &binding),
                 ),
+                extra_user_params: BTreeMap::new(),
                 values: binding.values().clone(),
             },
         };
@@ -2567,6 +2574,7 @@ where
                 source_shape: Some(
                     self.query_binding_source_shape_for_binding(&lowered_shape, &binding),
                 ),
+                extra_user_params: BTreeMap::new(),
                 values: binding.values().clone(),
             },
         };
@@ -2624,6 +2632,8 @@ where
         policy_shape: &ValidatedQuery,
         tier: DurabilityTier,
         permission_subject: AuthorId,
+        binding_source_shape: Option<String>,
+        binding_user_params: BTreeMap<String, ColumnType>,
     ) -> Result<GraphBuilder, Error> {
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut request = self.current_query_program_request(
@@ -2633,6 +2643,11 @@ where
             permission_subject,
             CurrentQueryProgramOutput::AppRows,
         )?;
+        if let Some(binding_source_shape) = binding_source_shape {
+            request.input.binding.source_shape = Some(binding_source_shape.clone());
+            request.input.binding.extra_user_params = binding_user_params;
+            retarget_binding_value_sources(&mut request.input.shape, &binding_source_shape);
+        }
         if let PolicyContext::Identity {
             mode,
             permission_subject,
@@ -2664,6 +2679,7 @@ where
             binding: ProgramBinding {
                 id: binding.binding_id(),
                 source_shape: Some(self.query_binding_source_shape_for_binding(shape, binding)),
+                extra_user_params: BTreeMap::new(),
                 values: binding.values().clone(),
             },
         };
@@ -4210,6 +4226,8 @@ where
         output_fields: &[String],
         tier: DurabilityTier,
         permission_subject: AuthorId,
+        binding_source_shape: Option<String>,
+        binding_user_params: BTreeMap<String, ColumnType>,
     ) -> Result<GraphBuilder, Error> {
         // TODO(query-engine): replace this bridge with a first-class policy
         // authorization subplan in the query-engine IR. `SourceRequest::authorization`
@@ -4221,8 +4239,13 @@ where
                     .to_owned(),
             ));
         }
-        let authorized =
-            self.policy_authorization_row_id_graph(policy_shape, tier, permission_subject)?;
+        let authorized = self.policy_authorization_row_id_graph(
+            policy_shape,
+            tier,
+            permission_subject,
+            binding_source_shape,
+            binding_user_params,
+        )?;
         Ok(
             GraphBuilder::join(base, authorized, ["row_uuid"], ["row_uuid"]).project_fields(
                 output_fields
@@ -4248,12 +4271,6 @@ where
                 "maintained subscription view policy slice does not support include policies",
             ));
         }
-        let policy_shape = inline_authorization_bridge_reachable_seed_claims(
-            &policy_shape,
-            identity,
-            self.session_claims.get(&identity),
-            &self.catalogue.schema,
-        )?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
             &policy_binding,
@@ -4410,58 +4427,6 @@ where
         let binding = shape.bind(BTreeMap::new())?;
         Ok(Some((shape, binding)))
     }
-}
-
-fn inline_authorization_bridge_reachable_seed_claims(
-    shape: &ValidatedQuery,
-    identity: AuthorId,
-    claims: Option<&BTreeMap<String, Value>>,
-    schema: &JazzSchema,
-) -> Result<ValidatedQuery, Error> {
-    let mut query = shape.query().clone();
-    for reachable in &mut query.reachable {
-        reachable.from = inline_authorization_bridge_claim_operand(
-            std::mem::replace(&mut reachable.from, Operand::Literal(Value::Bool(false))),
-            identity,
-            claims,
-        );
-    }
-    for branch in &mut query.policy_branches {
-        for reachable in &mut branch.reachable {
-            reachable.from = inline_authorization_bridge_claim_operand(
-                std::mem::replace(&mut reachable.from, Operand::Literal(Value::Bool(false))),
-                identity,
-                claims,
-            );
-        }
-    }
-    let rebound = query.validate(schema)?;
-    if rebound.schema_version() != shape.schema_version() {
-        return Err(Error::InvalidStoredValue(
-            "authorization bridge rebound query schema changed",
-        ));
-    }
-    Ok(rebound)
-}
-
-fn inline_authorization_bridge_claim_operand(
-    operand: Operand,
-    identity: AuthorId,
-    claims: Option<&BTreeMap<String, Value>>,
-) -> Operand {
-    let Operand::Claim(name) = operand else {
-        return operand;
-    };
-    let value = claims
-        .and_then(|claims| claims.get(&name))
-        .cloned()
-        .unwrap_or_else(|| match name.as_str() {
-            "sub" => Value::Uuid(identity.0),
-            "user_id" => Value::String(identity.0.to_string()),
-            "isAdmin" => Value::Bool(false),
-            _ => Value::Bool(false),
-        });
-    Operand::Literal(value)
 }
 
 impl<S> HistoricalRead<'_, S>
@@ -4832,6 +4797,19 @@ fn inline_snapshot_bind_filter_literals(
         schema,
         ParamBindingMode::InlineAllReachableSeeds,
     )
+}
+
+fn retarget_binding_value_sources(shape: &mut NormalizedRowSetShape, binding_source_shape: &str) {
+    for node in shape.nodes.values_mut() {
+        if let RowSetExpr::ValueSource {
+            shape,
+            mode: ValueSourceMode::Binding,
+            ..
+        } = node
+        {
+            *shape = binding_source_shape.to_owned();
+        }
+    }
 }
 
 fn bind_query_predicate(
