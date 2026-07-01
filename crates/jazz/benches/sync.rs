@@ -274,9 +274,13 @@ impl SyncBench {
 
     fn assert_converged(&mut self) {
         let core_rows = current_rows(&mut self.core);
+        let ui_expected_rows = rows_owned_by(&core_rows, self.ui_owner);
+
+        // INV-RLS-11: relay/system links do not narrow; INV-RLS-5: edge-client
+        // links converge to the read-policy view for the link identity.
         assert_eq!(current_rows(&mut self.edge), core_rows);
         assert_eq!(current_rows(&mut self.worker), core_rows);
-        assert_eq!(current_rows(&mut self.ui), core_rows);
+        assert_eq!(current_rows(&mut self.ui), ui_expected_rows);
         let ui_rows = self
             .ui
             .subscription_current_rows(TABLE, DurabilityTier::Global)
@@ -288,6 +292,7 @@ impl SyncBench {
                 .iter()
                 .all(|row| row.cell(table, "owner") == Some(Value::Uuid(self.ui_owner.0)))
         );
+        assert!(!ui_expected_rows.contains_key(&row(250)));
         assert_eq!(
             self.worker.sync_metrics().parked_orphans,
             self.worker.sync_metrics().parked_orphans_resolved
@@ -406,6 +411,16 @@ fn current_rows(
                 .collect();
             (row.row_uuid(), cells)
         })
+        .collect()
+}
+
+fn rows_owned_by(
+    rows: &BTreeMap<RowUuid, BTreeMap<String, Value>>,
+    owner: AuthorId,
+) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+    rows.iter()
+        .filter(|(_row_uuid, cells)| cells.get("owner") == Some(&Value::Uuid(owner.0)))
+        .map(|(row_uuid, cells)| (*row_uuid, cells.clone()))
         .collect()
 }
 

@@ -192,10 +192,41 @@ pub fn smoke() {
         RunMode::ThroughputPropagationInclusive,
         PeerRefreshMode::AfterAccept,
     );
+    let throughput_settlement = replay_jazz(
+        &config,
+        &throughput.accepted_schedule,
+        RunMode::ThroughputSettlement,
+        PeerRefreshMode::SuppressAfterAccept,
+    );
+    assert_eq!(
+        throughput_settlement.accepted_schedule, throughput.accepted_schedule,
+        "settlement and propagation-inclusive throughput runs must use the same accepted workload"
+    );
+    assert_sqlite_replay_matches(
+        &config,
+        &throughput_settlement.accepted_schedule,
+        &throughput_settlement.final_totals,
+    );
     assert_sqlite_replay_matches(
         &config,
         &throughput.accepted_schedule,
         &throughput.final_totals,
+    );
+    let profile = PeerProfile::new(config.profile.clone(), 1, 0, 0);
+    let throughput_sqlite = run_sqlite_reference(&config, &throughput.accepted_schedule);
+    emit_summary(
+        &config,
+        &profile,
+        &throughput_settlement,
+        Some(&throughput_sqlite),
+        RunMode::ThroughputSettlement,
+    );
+    emit_summary(
+        &config,
+        &profile,
+        &throughput,
+        Some(&throughput_sqlite),
+        RunMode::ThroughputPropagationInclusive,
     );
     let slo = run_jazz(
         &config,
@@ -1676,14 +1707,6 @@ fn emit_summary(
         json!(jazz_wall_tx_per_sec),
     );
     fields.insert(
-        "jazz_exclusive_tx_per_sec".to_owned(),
-        json!(jazz_wall_tx_per_sec),
-    );
-    fields.insert(
-        "deprecated_alias".to_owned(),
-        json!("jazz_exclusive_tx_per_sec=jazz_wall_tx_per_sec"),
-    );
-    fields.insert(
         "delivered_orders".to_owned(),
         json!(jazz.final_totals.delivered_orders),
     );
@@ -1777,6 +1800,10 @@ fn emit_summary(
         RunMode::ThroughputSettlement => {
             fields.insert("throughput_line".to_owned(), json!("settlement throughput"));
             fields.insert(
+                "settlement_tx_per_sec".to_owned(),
+                json!(jazz_settle_tx_per_sec),
+            );
+            fields.insert(
                 "measurement_includes".to_owned(),
                 json!("engine commit/accept path"),
             );
@@ -1789,6 +1816,10 @@ fn emit_summary(
             fields.insert(
                 "throughput_line".to_owned(),
                 json!("propagation-inclusive throughput"),
+            );
+            fields.insert(
+                "propagation_inclusive_tx_per_sec".to_owned(),
+                json!(jazz_wall_tx_per_sec),
             );
             fields.insert(
                 "measurement_includes".to_owned(),
