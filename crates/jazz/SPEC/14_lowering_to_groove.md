@@ -202,3 +202,12 @@ role, or hole state in opaque revisions.
 - 🔶 **Alias non-leakage coverage.** Alias→UUID remapping is done on decode, but
   no focused test proves aliases never leak on the wire for nested tx-id fields
   (`INV-LOWER-3` is `untested` until covered).
+- 🔶 **Historical implicit-include source coverage.** Historical root reads with
+  filters and ordinary joins lower through `HistoryCut` sources, but shapes whose
+  normalizer adds an implicit root-reference auxiliary source (for example an
+  include used only to filter child rows by a parent table) do not yet add an
+  aligned historical source expression for that auxiliary source. Until
+  source-aware include coverage is wired into the historical read-set builder,
+  these benchmark phases must report a visible
+  `[needs: historical-implicit-include-source-coverage]` gate rather than being
+  silently counted.

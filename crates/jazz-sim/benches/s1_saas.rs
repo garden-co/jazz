@@ -1325,6 +1325,7 @@ fn hydrate_client(
     let mut delivered_rows = BTreeSet::new();
     for (shape, binding) in subscriptions {
         register_binding(ctx, core, client_name, shape, binding);
+        apply_binding(client, shape, binding);
         let update = peer
             .rehydrate_query(core, shape, binding)
             .expect("hydrate query");
