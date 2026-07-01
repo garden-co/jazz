@@ -6,7 +6,6 @@
 //! sublayer beside the main global history path.
 
 use super::policy::{policy_join_row_value, policy_value_key};
-use super::query_eval::inline_current_graph;
 use super::*;
 use crate::schema::{
     branch_metadata_table_schema, branch_partition_history_table_name,
@@ -330,17 +329,8 @@ where
         }
         let query = shape.query();
         let table_schema = self.table(&query.table)?.clone();
-        let source_rows = self.branch_current_rows(&query.table, &branch)?;
-        let source_overrides = self.branch_query_source_overrides(shape, &branch)?;
-        let mut rows = self.query_rows_from_inline_current_source(
-            shape,
-            binding,
-            &table_schema,
-            source_rows,
-            DurabilityTier::Local,
-            source_overrides,
-            BTreeMap::new(),
-        )?;
+        let mut rows =
+            self.query_rows_on_branch_query_engine(branch_id, shape, binding, identity)?;
         let mut policy_rows = Vec::new();
         for row in rows {
             if self.branch_read_policy_allows_current_row(
@@ -356,30 +346,6 @@ where
         rows = policy_rows;
         sort_current_rows(&mut rows);
         Ok(rows)
-    }
-
-    fn branch_query_source_overrides(
-        &mut self,
-        shape: &ValidatedQuery,
-        branch: &BranchRecord,
-    ) -> Result<BTreeMap<String, GraphBuilder>, Error> {
-        let mut sources = BTreeMap::new();
-        for join in &shape.query().joins {
-            let table = self.table(&join.table)?.clone();
-            let rows = self.branch_current_rows(&join.table, branch)?;
-            sources.insert(join.table.clone(), inline_current_graph(&table, rows)?);
-        }
-        for reachable in &shape.query().reachable {
-            for table_name in [&reachable.access_table, &reachable.edge_table] {
-                if sources.contains_key(table_name) {
-                    continue;
-                }
-                let table = self.table(table_name)?.clone();
-                let rows = self.branch_current_rows(table_name, branch)?;
-                sources.insert(table_name.clone(), inline_current_graph(&table, rows)?);
-            }
-        }
-        Ok(sources)
     }
 
     fn branch_read_policy_allows(
@@ -769,7 +735,7 @@ where
             .expect("branch policy join rows memo populated"))
     }
 
-    fn branch_current_rows(
+    pub(super) fn branch_current_rows(
         &mut self,
         table: &str,
         branch: &BranchRecord,
