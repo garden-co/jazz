@@ -78,14 +78,6 @@ pub(crate) fn take_required_sink_deltas(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn take_optional_sink_deltas(
-    mut deltas: MultisinkDeltas,
-    sink: &str,
-) -> Option<RecordDeltas> {
-    deltas.sinks.remove(sink)
-}
-
 pub(crate) fn apply_maintained_multisink_deltas(
     maintained: &mut MaintainedSubscriptionView,
     deltas: MultisinkDeltas,
@@ -2977,37 +2969,6 @@ where
             }
         }
         Ok(row_ids)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn subscribe_query_binding_with_plan(
-        &mut self,
-        binding: &Binding,
-        plan: &PreparedQueryPlan,
-        identity: AuthorId,
-    ) -> Result<Option<MultisinkSubscription>, Error> {
-        let subscription = match plan.clone() {
-            PreparedQueryPlan::Graph(graph) => self
-                .database
-                .subscribe([(JAZZ_APP_ROWS_SINK, graph)])
-                .map_err(Error::Groove)?,
-            PreparedQueryPlan::Prepared { shape, params } => {
-                let values = binding_values_for_plan(
-                    binding,
-                    &params,
-                    identity,
-                    self.session_claims.get(&identity),
-                )?;
-                self.database
-                    .bind_shape(shape, &values)
-                    .map_err(Error::Groove)?
-            }
-        };
-        let _initial = subscription
-            .recv()
-            .map_err(|_| Error::SubscriptionClosed)
-            .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))?;
-        Ok(Some(subscription))
     }
 
     pub(crate) fn open_local_maintained_view_subscription(
@@ -6902,26 +6863,6 @@ fn lower_maintained_residual_predicate(
             "unsupported query predicate shape",
         )),
     }
-}
-
-#[cfg(test)]
-pub(super) fn binding_for_shape(
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) -> Result<Binding, Error> {
-    let values = shape
-        .params()
-        .keys()
-        .map(|name| {
-            binding
-                .values()
-                .get(name)
-                .cloned()
-                .map(|value| (name.clone(), value))
-                .ok_or_else(|| QueryError::MissingParam(name.clone()))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-    Ok(shape.bind(values)?)
 }
 
 fn attach_output_binding_params(

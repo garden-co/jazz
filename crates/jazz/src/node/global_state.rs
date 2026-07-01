@@ -149,25 +149,6 @@ where
         Some(TxId::new(tx_time, tx_node))
     }
 
-    #[cfg(test)]
-    pub(super) fn visible_global_content_version_now(
-        &mut self,
-        table: &str,
-        row_uuid: RowUuid,
-    ) -> Option<VersionRow> {
-        if let Some(register) = self
-            .query_global_layer_winner(table, row_uuid, VersionLayer::Deletion)
-            .ok()
-            .flatten()
-            && matches!(register.deletion(), Some(DeletionEvent::Deleted))
-        {
-            return None;
-        }
-        self.query_global_layer_winner(table, row_uuid, VersionLayer::Content)
-            .ok()
-            .flatten()
-    }
-
     /// Return locally held content heads for a row.
     pub(super) fn content_heads(
         &mut self,
