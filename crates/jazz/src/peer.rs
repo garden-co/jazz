@@ -446,37 +446,6 @@ impl PeerState {
                 None,
             );
         }
-        let prepared_tier = state
-            .prepared_query
-            .as_ref()
-            .ok_or(Error::InvalidStoredValue(
-                "live query subscription is missing prepared state",
-            ))?
-            .tier;
-        if prepared_tier != DurabilityTier::Global {
-            let previous_tx_ids = state.previous_tx_ids();
-            let previous_member_result_set = state.member_result_set();
-            let prepared = state
-                .prepared_query
-                .as_ref()
-                .ok_or(Error::InvalidStoredValue(
-                    "live query subscription is missing prepared state",
-                ))?;
-            let tier = prepared.tier;
-            let update = node
-                .seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
-                    shape,
-                    binding,
-                    subscription,
-                    self.acknowledged_complete_tx_payloads(),
-                    previous_tx_ids,
-                    previous_member_result_set,
-                    self.identity(),
-                    tier,
-                )?;
-            self.record_outgoing_view_update(&update);
-            return Ok(update);
-        }
         Err(Error::InvalidStoredValue(
             "live query subscription is missing maintained state",
         ))
