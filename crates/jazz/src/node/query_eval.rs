@@ -4181,6 +4181,10 @@ where
         output_fields: &[String],
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
+        // TODO(query-engine): replace this bridge with first-class policy
+        // source authorization lowering. `SourceRequest::authorization` now
+        // makes the semantic need explicit, but physical policy-row graph
+        // construction still re-enters the compile boundary here.
         if !policy_shape.params().is_empty() {
             return Err(Error::QueryCapability(
                 "maintained policy source filters with runtime parameters must lower through query-engine binding sources"
