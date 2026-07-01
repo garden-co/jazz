@@ -4740,51 +4740,6 @@ where
                 ),
             ]);
         }
-        for reachable in &shape.query().reachable {
-            for table_name in [&reachable.edge_table, &reachable.access_table] {
-                let table = terminal_tables
-                    .get(table_name)
-                    .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
-                let (version_content, version_deletion) = self
-                    .reachable_policy_readable_version_tagged_graphs(
-                        &shape,
-                        reachable,
-                        table,
-                        terminal_tables.values(),
-                        policy_param_binding_mode,
-                        &hidden_param_types,
-                        tier,
-                    )?;
-                let (replacement_content, replacement_deletion) = self
-                    .reachable_replacement_tagged_graphs(
-                        &shape,
-                        reachable,
-                        table,
-                        terminal_tables.values(),
-                        policy_param_binding_mode,
-                        &hidden_param_types,
-                        tier,
-                    )?;
-                sinks.extend([
-                    (
-                        maintained_reachable_fact_sink("version_content", table_name),
-                        version_content,
-                    ),
-                    (
-                        maintained_reachable_fact_sink("version_deletion", table_name),
-                        version_deletion,
-                    ),
-                    (
-                        maintained_reachable_fact_sink("replacement_content", table_name),
-                        replacement_content,
-                    ),
-                    (
-                        maintained_reachable_fact_sink("replacement_deletion", table_name),
-                        replacement_deletion,
-                    ),
-                ]);
-            }
-        }
         Ok(sinks)
     }
 
@@ -5754,309 +5709,6 @@ where
         Ok((content, deletion))
     }
     #[cfg(test)]
-    pub(crate) fn reachable_edge_constituent_current_graph(
-        &self,
-        shape: &ValidatedQuery,
-        reachable: &crate::query::ReachableVia,
-        tier: DurabilityTier,
-    ) -> Result<GraphBuilder, Error> {
-        let param_types = graph_param_types(shape, &self.catalogue.schema)?;
-        let edge_table = self.table(&reachable.edge_table)?;
-        let access_table = self.table(&reachable.access_table)?;
-        let reachable_graphs = self.lower_reachable_graph_parts(
-            shape,
-            &param_types,
-            reachable,
-            access_table,
-            edge_table,
-            tier,
-            &BTreeMap::new(),
-        )?;
-        let edge_current = self.maintained_view_content_current_with_version(edge_table, tier)?;
-        let edge_keyed = GraphBuilder::join(
-            edge_current
-                .clone()
-                .unwrap_nullable(query_field(&reachable.edge_member_column))
-                .unwrap_nullable(query_field(&reachable.edge_parent_column)),
-            reachable_graphs.edge_current.project(["row_uuid"]),
-            ["row_uuid"],
-            ["row_uuid"],
-        )
-        .project_fields(
-            ["row_uuid", &query_field(&reachable.edge_member_column)]
-                .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
-        );
-        let reachable_edge_keys = GraphBuilder::join(
-            edge_keyed,
-            reachable_graphs
-                .closure
-                .clone()
-                .project(["team", "reachable_team"]),
-            [query_field(&reachable.edge_member_column)],
-            ["reachable_team".to_owned()],
-        )
-        .project_fields([
-            ProjectField::renamed("left.row_uuid", "row_uuid"),
-            ProjectField::renamed_resolved(2, reachable_graphs.seed_param.clone()),
-        ])
-        .project_fields([
-            ProjectField::named("row_uuid"),
-            ProjectField::nullable(
-                reachable_graphs.seed_param.clone(),
-                reachable_graphs.seed_param.clone(),
-            ),
-        ]);
-        let edge_current_for_version =
-            edge_current.project(maintained_view_version_fields(edge_table));
-        Ok(GraphBuilder::join(
-            edge_current_for_version,
-            reachable_edge_keys,
-            ["row_uuid"],
-            ["row_uuid"],
-        )
-        .project_fields({
-            let left_fields = maintained_view_version_fields(edge_table);
-            let seed_idx = left_fields.len() + 1;
-            left_fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field))
-                .chain(
-                    param_types
-                        .keys()
-                        .map(|param| ProjectField::renamed_resolved(seed_idx, param.clone())),
-                )
-                .collect::<Vec<_>>()
-        })
-        .project_fields(
-            maintained_view_version_fields(edge_table)
-                .into_iter()
-                .map(ProjectField::named)
-                .chain(param_types.keys().cloned().map(ProjectField::named)),
-        ))
-    }
-    #[cfg(test)]
-    pub(crate) fn reachable_access_constituent_current_graph(
-        &self,
-        shape: &ValidatedQuery,
-        reachable: &crate::query::ReachableVia,
-        tier: DurabilityTier,
-    ) -> Result<GraphBuilder, Error> {
-        let param_types = graph_param_types(shape, &self.catalogue.schema)?;
-        let edge_table = self.table(&reachable.edge_table)?;
-        let access_table = self.table(&reachable.access_table)?;
-        let reachable_graphs = self.lower_reachable_graph_parts(
-            shape,
-            &param_types,
-            reachable,
-            access_table,
-            edge_table,
-            tier,
-            &BTreeMap::new(),
-        )?;
-        let access_current =
-            self.maintained_view_content_current_with_version(access_table, tier)?;
-        let access_keyed = GraphBuilder::join(
-            access_current
-                .clone()
-                .unwrap_nullable(query_field(&reachable.access_row_column))
-                .unwrap_nullable(query_field(&reachable.access_team_column)),
-            reachable_graphs.access_current.project(["row_uuid"]),
-            ["row_uuid"],
-            ["row_uuid"],
-        )
-        .project_fields(
-            ["row_uuid", &query_field(&reachable.access_team_column)]
-                .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
-        );
-        let reachable_access_keys = GraphBuilder::join(
-            access_keyed,
-            reachable_graphs.closure.project(["team", "reachable_team"]),
-            [query_field(&reachable.access_team_column)],
-            ["reachable_team".to_owned()],
-        )
-        .project_fields([
-            ProjectField::renamed("left.row_uuid", "row_uuid"),
-            ProjectField::renamed_resolved(2, reachable_graphs.seed_param.clone()),
-        ])
-        .project_fields([
-            ProjectField::named("row_uuid"),
-            ProjectField::nullable(
-                reachable_graphs.seed_param.clone(),
-                reachable_graphs.seed_param.clone(),
-            ),
-        ]);
-        let access_current_for_version =
-            access_current.project(maintained_view_version_fields(access_table));
-        Ok(GraphBuilder::join(
-            access_current_for_version,
-            reachable_access_keys,
-            ["row_uuid"],
-            ["row_uuid"],
-        )
-        .project_fields({
-            let left_fields = maintained_view_version_fields(access_table);
-            let seed_idx = left_fields.len() + 1;
-            left_fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field))
-                .chain(
-                    param_types
-                        .keys()
-                        .map(|param| ProjectField::renamed_resolved(seed_idx, param.clone())),
-                )
-                .collect::<Vec<_>>()
-        })
-        .project_fields(
-            maintained_view_version_fields(access_table)
-                .into_iter()
-                .map(ProjectField::named)
-                .chain(param_types.keys().cloned().map(ProjectField::named)),
-        ))
-    }
-    #[cfg(test)]
-    pub(crate) fn reachable_policy_readable_version_tagged_graphs<'a>(
-        &self,
-        shape: &ValidatedQuery,
-        reachable: &crate::query::ReachableVia,
-        table: &TableSchema,
-        terminal_tables: impl IntoIterator<Item = &'a TableSchema> + Clone,
-        param_binding_mode: ParamBindingMode,
-        output_hidden_param_types: &BTreeMap<String, groove::schema::ColumnType>,
-        tier: DurabilityTier,
-    ) -> Result<(GraphBuilder, GraphBuilder), Error> {
-        self.ensure_reachable_constituent_table(reachable, table)?;
-        let param_types = graph_param_types(shape, &self.catalogue.schema)?;
-        let available_hidden_param_types =
-            hidden_maintained_view_param_types(&param_types, param_binding_mode);
-        let readable_current = match table.name.as_str() {
-            name if name == reachable.edge_table => {
-                self.reachable_edge_constituent_current_graph(shape, reachable, tier)?
-            }
-            name if name == reachable.access_table => {
-                self.reachable_access_constituent_current_graph(shape, reachable, tier)?
-            }
-            _ => unreachable!("checked above"),
-        }
-        .project(
-            std::iter::once("row_uuid".to_owned())
-                .chain(available_hidden_param_types.keys().cloned())
-                .collect::<Vec<_>>(),
-        );
-        let content =
-            GraphBuilder::join(
-                GraphBuilder::table(history_table_name(&table.name)),
-                readable_current.clone(),
-                ["row_uuid"],
-                ["row_uuid"],
-            )
-            .project_fields(
-                maintained_view_version_fields(table)
-                    .into_iter()
-                    .map(|field| ProjectField::renamed(format!("left.{field}"), field))
-                    .chain(available_hidden_param_types.keys().map(|param| {
-                        ProjectField::renamed(format!("right.{param}"), param.clone())
-                    })),
-            )
-            .project_fields(maintained_view_tagged_content_fields(
-                table,
-                "version_content",
-                "",
-                terminal_tables.clone(),
-                output_hidden_param_types,
-                available_hidden_param_types,
-                "",
-            ));
-        let deleted = GraphBuilder::table(register_table_name(&table.name))
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)));
-        let deletion = GraphBuilder::join(deleted, readable_current, ["row_uuid"], ["row_uuid"])
-            .project_fields(maintained_view_tagged_deletion_fields(
-                table,
-                "version_deletion",
-                "left.",
-                terminal_tables,
-                output_hidden_param_types,
-                available_hidden_param_types,
-                "right.",
-            ));
-        Ok((content, deletion))
-    }
-    #[cfg(test)]
-    pub(crate) fn reachable_replacement_tagged_graphs<'a>(
-        &self,
-        shape: &ValidatedQuery,
-        reachable: &crate::query::ReachableVia,
-        table: &TableSchema,
-        terminal_tables: impl IntoIterator<Item = &'a TableSchema> + Clone,
-        param_binding_mode: ParamBindingMode,
-        output_hidden_param_types: &BTreeMap<String, groove::schema::ColumnType>,
-        tier: DurabilityTier,
-    ) -> Result<(GraphBuilder, GraphBuilder), Error> {
-        self.ensure_reachable_constituent_table(reachable, table)?;
-        let param_types = graph_param_types(shape, &self.catalogue.schema)?;
-        let available_hidden_param_types =
-            hidden_maintained_view_param_types(&param_types, param_binding_mode);
-        let content = match table.name.as_str() {
-            name if name == reachable.edge_table => {
-                self.reachable_edge_constituent_current_graph(shape, reachable, tier)?
-            }
-            name if name == reachable.access_table => {
-                self.reachable_access_constituent_current_graph(shape, reachable, tier)?
-            }
-            _ => unreachable!("checked above"),
-        };
-        let content = content.project_fields(maintained_view_tagged_content_fields(
-            table,
-            "replacement_content",
-            "",
-            terminal_tables.clone(),
-            output_hidden_param_types,
-            available_hidden_param_types,
-            "",
-        ));
-        let readable_current = content.clone().project(
-            std::iter::once("row_uuid".to_owned())
-                .chain(available_hidden_param_types.keys().cloned())
-                .collect::<Vec<_>>(),
-        );
-        let deletion_current_keys = maintained_view_register_current_keys(table, tier);
-        let deletion = GraphBuilder::join(
-            GraphBuilder::table(register_table_name(&table.name)),
-            deletion_current_keys,
-            ["row_uuid", "tx_time", "tx_node_id"],
-            ["row_uuid", "tx_time", "tx_node_id"],
-        )
-        .project_fields(maintained_view_register_storage_fields("left."));
-        let deletion = GraphBuilder::join(deletion, readable_current, ["row_uuid"], ["row_uuid"])
-            .project_fields(maintained_view_tagged_deletion_fields(
-                table,
-                "replacement_deletion",
-                "left.",
-                terminal_tables,
-                output_hidden_param_types,
-                available_hidden_param_types,
-                "right.",
-            ));
-        Ok((content, deletion))
-    }
-
-    #[cfg(test)]
-    fn ensure_reachable_constituent_table(
-        &self,
-        reachable: &crate::query::ReachableVia,
-        table: &TableSchema,
-    ) -> Result<(), Error> {
-        if table.name == reachable.edge_table || table.name == reachable.access_table {
-            Ok(())
-        } else {
-            Err(Error::InvalidStoredValue(
-                "reachable constituent table does not match reachable clause",
-            ))
-        }
-    }
-
-    #[cfg(test)]
     pub(crate) fn maintained_view_result_current_graph(
         &self,
         shape: &ValidatedQuery,
@@ -6261,29 +5913,6 @@ where
             Ok(graph)
         }
     }
-    #[cfg(test)]
-    pub(crate) fn lower_reachable_graph_parts(
-        &self,
-        shape: &ValidatedQuery,
-        param_types: &BTreeMap<String, groove::schema::ColumnType>,
-        reachable: &crate::query::ReachableVia,
-        access_table: &TableSchema,
-        edge_table: &TableSchema,
-        tier: DurabilityTier,
-        source_overrides: &BTreeMap<String, GraphBuilder>,
-    ) -> Result<ReachableGraphs, Error> {
-        self.lower_reachable_graph_parts_with_binding_source(
-            shape,
-            param_types,
-            reachable,
-            access_table,
-            edge_table,
-            tier,
-            source_overrides,
-            &query_binding_source_shape(shape),
-        )
-    }
-
     fn lower_reachable_graph_parts_with_binding_source(
         &self,
         _shape: &ValidatedQuery,
@@ -7948,31 +7577,12 @@ fn collect_join_nullable_param_types_from_schema(
     Ok(())
 }
 
-#[cfg(test)]
-fn query_binding_source_shape(shape: &ValidatedQuery) -> String {
-    format!(
-        "jazz-query:{}:{}",
-        shape.shape_id().0,
-        query_binding_param_signature(shape)
-    )
-}
-
 fn query_binding_source_shape_for_binding(shape: &ValidatedQuery, binding: &Binding) -> String {
     format!(
         "jazz-query:{}:{}",
         shape.shape_id().0,
         query_binding_value_signature(binding)
     )
-}
-
-#[cfg(test)]
-fn query_binding_param_signature(shape: &ValidatedQuery) -> String {
-    shape
-        .params()
-        .iter()
-        .map(|(name, ty)| format!("{name}={ty:?}"))
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn query_binding_value_signature(binding: &Binding) -> String {
@@ -7988,14 +7598,9 @@ fn maintained_view_binding_source_shape(shape: &ValidatedQuery) -> String {
     format!("jazz-maintained-query:{}", shape.shape_id().0)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn maintained_fact_sink(event_kind: &str, table: &str) -> String {
     format!("maintained.{event_kind}.{table}")
-}
-
-#[allow(dead_code)]
-fn maintained_reachable_fact_sink(event_kind: &str, table: &str) -> String {
-    format!("maintained.reachable.{event_kind}.{table}")
 }
 
 fn collect_nullable_param_types(
