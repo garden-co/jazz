@@ -79,9 +79,20 @@ pub(crate) struct ClosurePath {
     pub(crate) kind: ClosurePathKind,
     /// Ordered reference hops.
     pub(crate) segments: Vec<ClosurePathSegment>,
-    /// Whether this path must be readable/resolvable for the root row to stay
-    /// in the result set.
-    pub(crate) gates_root: bool,
+    /// Whether and how this path gates root membership.
+    pub(crate) root_gate: Option<ClosureRootGate>,
+}
+
+/// Root-membership gate semantics for explicit include paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClosureRootGate {
+    /// Required includes demand that every non-null/non-empty reference value
+    /// resolves through the rest of the path; null scalar refs and empty arrays
+    /// are vacuously satisfied.
+    Required,
+    /// Inner includes additionally require at least one reference value at each
+    /// path hop to resolve.
+    Inner,
 }
 
 /// Semantic origin of a maintained/sync closure path.

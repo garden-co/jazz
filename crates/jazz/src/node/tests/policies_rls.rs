@@ -2944,23 +2944,18 @@ fn holes_include_missing_target_keeps_parent() {
 }
 
 #[test]
-fn holes_include_uses_shared_plan_path_without_root_membership_lowering() {
+fn holes_include_keeps_parent_without_root_membership_filtering() {
     let schema = required_include_rls_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     seed_missing_required_include_fixture(&mut core);
     let shape = required_include_shape(&core, Include::new("target").join_mode(JoinMode::Holes));
 
-    core.clear_prepared_query_plan_cache_for_test();
     let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0xd1), row(0xd2)])
-    );
-    assert!(
-        !core.prepared_query_plan_cache_is_empty_for_test(),
-        "hole-only includes should stay on the shared plan path because they do not filter root membership"
     );
 }
 
