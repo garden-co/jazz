@@ -144,6 +144,14 @@ fn result_row(table: &str, row_uuid: RowUuid, tx_id: TxId) -> ResultRowEntry {
     (groove::Intern::new(table.to_owned()), row_uuid, tx_id)
 }
 
+fn result_row_from(
+    txs: &BTreeMap<(&'static str, RowUuid), TxId>,
+    table: &'static str,
+    row_uuid: RowUuid,
+) -> ResultRowEntry {
+    result_row(table, row_uuid, txs[&(table, row_uuid)])
+}
+
 fn assert_maintained_subscription_view_tick(
     update: SyncMessage,
     expected_adds: &[ResultRowEntry],
@@ -625,32 +633,6 @@ fn assert_retraction_without_replacement_leak(
             .any(|bundle| bundle.tx.tx_id == unreadable_tx_id),
         "revocation update leaked unreadable tx {unreadable_tx_id:?} as a version bundle"
     );
-}
-
-fn assert_maintained_subscription_view_capture_tick(
-    core: &mut NodeState<RocksDbStorage>,
-    peer: &mut PeerState,
-    maintained: &mut MaintainedSubscriptionViewSubscription,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-    case: (AuthorId, u64, &str),
-) -> SyncMessage {
-    let (identity, seed, tick) = case;
-    let subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-    read_view: Default::default(),
-};
-    let full_recompute = peer.query_update(core, shape, binding).unwrap();
-    let maintained_update = maintained.update(core, shape, subscription, identity);
-    let maintained_capture = capture_view_update(maintained_update.clone());
-    let full_recompute_capture = capture_view_update(full_recompute);
-    assert_eq!(
-        maintained_capture,
-        full_recompute_capture,
-        "maintained subscription view serializer diverged from full recompute for seed {seed:#x}, identity {identity:?}, tick {tick}"
-    );
-    maintained_update
 }
 
 fn seeded_maintained_view_serializer_capture(seed: u64, identity: AuthorId) {
@@ -1491,9 +1473,11 @@ fn seeded_maintained_subscription_view_multitable_capture(
     let member_visible = row(base.wrapping_add(8));
     let member_added = row(base.wrapping_add(9));
     let mut parents = BTreeMap::<(&'static str, RowUuid), TxId>::new();
+    let mut txs = BTreeMap::<(&'static str, RowUuid), TxId>::new();
 
     let accept = |core: &mut NodeState<RocksDbStorage>,
                   parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+                  txs: &mut BTreeMap<(&'static str, RowUuid), TxId>,
                   table: &'static str,
                   row_uuid: RowUuid,
                   made_at: u64,
@@ -1504,12 +1488,14 @@ fn seeded_maintained_subscription_view_multitable_capture(
         }
         let tx_id = accept_global(core, commit);
         parents.insert((table, row_uuid), tx_id);
+        txs.insert((table, row_uuid), tx_id);
         tx_id
     };
 
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "targets",
         target_visible,
         1_000,
@@ -1518,6 +1504,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "targets",
         target_hidden_then_visible,
         1_001,
@@ -1526,6 +1513,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "roots",
         root_visible,
         1_010,
@@ -1534,6 +1522,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "roots",
         root_hidden_target,
         1_011,
@@ -1542,6 +1531,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "roots",
         root_removed,
         1_012,
@@ -1550,6 +1540,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "roots",
         root_deleted,
         1_013,
@@ -1558,6 +1549,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "members",
         member_visible,
         1_020,
@@ -1569,18 +1561,9 @@ fn seeded_maintained_subscription_view_multitable_capture(
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    read_view: Default::default(),
-};
-    let mut peer = if identity == AuthorId::SYSTEM {
-        PeerState::new()
-    } else {
-        PeerState::for_author(identity)
+        read_view: Default::default(),
     };
-    peer.force_full_recompute_path_for_test(true);
-    peer.track_query_for_test(&mut core, &shape, &binding)
-        .unwrap();
 
-    let full_recompute_initial = peer.query_update(&mut core, &shape, &binding).unwrap();
     let (mut maintained, maintained_initial) = MaintainedSubscriptionViewSubscription::new(
         &mut core,
         &shape,
@@ -1588,16 +1571,51 @@ fn seeded_maintained_subscription_view_multitable_capture(
         subscription,
         identity,
     );
-    assert_eq!(
-        capture_view_update(maintained_initial),
-        capture_view_update(full_recompute_initial),
-        "maintained subscription view multitable diverged from full recompute shape={} seed={seed:#x} identity={identity:?} tick initial",
-        capture_shape.name()
+    let expected_initial_rows = match (capture_shape, identity == AuthorId::SYSTEM) {
+        (MultiTableCaptureShape::JoinVia, _) => vec![
+            ("roots", root_visible),
+            ("targets", target_visible),
+        ],
+        (MultiTableCaptureShape::IncludeInner, false) => {
+            vec![
+                ("roots", root_visible),
+                ("roots", root_removed),
+                ("roots", root_deleted),
+                ("targets", target_visible),
+            ]
+        }
+        (_, false) => vec![
+            ("roots", root_visible),
+            ("roots", root_hidden_target),
+            ("roots", root_removed),
+            ("roots", root_deleted),
+            ("targets", target_visible),
+        ],
+        _ => vec![
+            ("roots", root_visible),
+            ("roots", root_hidden_target),
+            ("roots", root_removed),
+            ("roots", root_deleted),
+            ("targets", target_visible),
+            ("targets", target_hidden_then_visible),
+        ],
+    };
+    let expected_initial = expected_initial_rows
+        .into_iter()
+        .map(|(table, row_uuid)| result_row_from(&txs, table, row_uuid))
+        .collect::<Vec<_>>();
+    assert_maintained_subscription_view_tick(
+        maintained_initial,
+        &expected_initial,
+        &[],
+        false,
+        (identity, seed, capture_shape.name()),
     );
 
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "roots",
         root_added,
         2_000,
@@ -1606,54 +1624,105 @@ fn seeded_maintained_subscription_view_multitable_capture(
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "members",
         member_added,
         2_001,
         member_cells(alice, "member", root_added),
     );
-    let _ = assert_maintained_subscription_view_capture_tick(
+    let update = maintained.update(
         &mut core,
-        &mut peer,
-        &mut maintained,
         &shape,
-        &binding,
+        subscription,
+        identity,
+    );
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &[result_row_from(&txs, "roots", root_added)],
+        &[],
+        false,
         (identity, seed, "multitable-add"),
     );
 
+    let target_hidden_initial_tx = txs[&("targets", target_hidden_then_visible)];
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "targets",
         target_hidden_then_visible,
         3_000,
         owner_cells(alice, "became visible"),
     );
-    let _ = assert_maintained_subscription_view_capture_tick(
+    let update = maintained.update(
         &mut core,
-        &mut peer,
-        &mut maintained,
         &shape,
-        &binding,
+        subscription,
+        identity,
+    );
+    let mut update_adds = if matches!(capture_shape, MultiTableCaptureShape::JoinVia) {
+        Vec::new()
+    } else {
+        vec![result_row_from(
+            &txs,
+            "targets",
+            target_hidden_then_visible,
+        )]
+    };
+    if matches!(capture_shape, MultiTableCaptureShape::IncludeInner)
+        && identity != AuthorId::SYSTEM
+    {
+        update_adds.push(result_row_from(&txs, "roots", root_hidden_target));
+    }
+    let update_removes =
+        if !matches!(capture_shape, MultiTableCaptureShape::JoinVia) && identity == AuthorId::SYSTEM
+        {
+            vec![result_row(
+                "targets",
+                target_hidden_then_visible,
+                target_hidden_initial_tx,
+            )]
+        } else {
+            Vec::new()
+        };
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &update_adds,
+        &update_removes,
+        false,
         (identity, seed, "multitable-update"),
     );
 
+    let root_removed_initial_tx = txs[&("roots", root_removed)];
     accept(
         &mut core,
         &mut parents,
+        &mut txs,
         "roots",
         root_removed,
         4_000,
         root_cells(alice, "other", target_visible),
     );
-    let _ = assert_maintained_subscription_view_capture_tick(
+    let update = maintained.update(
         &mut core,
-        &mut peer,
-        &mut maintained,
         &shape,
-        &binding,
+        subscription,
+        identity,
+    );
+    let remove_removes = if matches!(capture_shape, MultiTableCaptureShape::JoinVia) {
+        Vec::new()
+    } else {
+        vec![result_row("roots", root_removed, root_removed_initial_tx)]
+    };
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &[],
+        &remove_removes,
+        false,
         (identity, seed, "multitable-remove"),
     );
 
+    let root_deleted_initial_tx = txs[&("roots", root_deleted)];
     let delete_parent = parents[&("roots", root_deleted)];
     let delete_tx = accept_global(
         &mut core,
@@ -1662,12 +1731,23 @@ fn seeded_maintained_subscription_view_multitable_capture(
             .deletion(DeletionEvent::Deleted),
     );
     parents.insert(("roots", root_deleted), delete_tx);
-    let _ = assert_maintained_subscription_view_capture_tick(
+    txs.insert(("roots", root_deleted), delete_tx);
+    let update = maintained.update(
         &mut core,
-        &mut peer,
-        &mut maintained,
         &shape,
-        &binding,
+        subscription,
+        identity,
+    );
+    let delete_removes = if matches!(capture_shape, MultiTableCaptureShape::JoinVia) {
+        Vec::new()
+    } else {
+        vec![result_row("roots", root_deleted, root_deleted_initial_tx)]
+    };
+    let _ = assert_maintained_subscription_view_tick(
+        update,
+        &[],
+        &delete_removes,
+        false,
         (identity, seed, "multitable-delete"),
     );
 }
@@ -2029,7 +2109,7 @@ fn maintained_subscription_view_emits_expected_owner_policy_updates() {
 }
 
 #[test]
-fn maintained_subscription_view_multitable_matches_full_recompute_view_update_capture() {
+fn maintained_subscription_view_multitable_emits_expected_updates() {
     let seeds = if let Ok(seed) = std::env::var("JAZZ_SEED") {
         vec![seed.parse::<u64>().expect("JAZZ_SEED must be a u64")]
     } else {
@@ -2039,7 +2119,7 @@ fn maintained_subscription_view_multitable_matches_full_recompute_view_update_ca
         (0x6eed..0x6eed + count).collect::<Vec<_>>()
     };
     println!(
-        "maintained_subscription_view_multitable_matches_full_recompute_view_update_capture seeds={}",
+        "maintained_subscription_view_multitable_emits_expected_updates seeds={}",
         seeds.len()
     );
     for seed in seeds {
