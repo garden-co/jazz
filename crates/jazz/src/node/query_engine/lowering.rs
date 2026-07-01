@@ -3624,7 +3624,20 @@ fn lower_predicate(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
-    let lowered = match predicate {
+    let lowered = match lower_predicate_inner(predicate, source_id, source, request) {
+        Err(reason) if is_unbound_claim_reason(&reason) => constant_predicate(false),
+        other => other?,
+    };
+    Ok(lowered.canonicalize())
+}
+
+fn lower_predicate_inner(
+    predicate: &PredicateExpr,
+    source_id: &SourceId,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    Ok(match predicate {
         PredicateExpr::True => GroovePredicateExpr::And(Vec::new()),
         PredicateExpr::False => GroovePredicateExpr::Or(Vec::new()),
         PredicateExpr::Compare { left, op, right } => {
@@ -3666,8 +3679,7 @@ fn lower_predicate(
         PredicateExpr::Not(predicate) => {
             lower_not_predicate(predicate, source_id, source, request)?
         }
-    };
-    Ok(lowered.canonicalize())
+    })
 }
 
 fn lower_not_predicate(
@@ -3676,7 +3688,20 @@ fn lower_not_predicate(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
-    let lowered = match predicate {
+    let lowered = match lower_not_predicate_inner(predicate, source_id, source, request) {
+        Err(reason) if is_unbound_claim_reason(&reason) => constant_predicate(false),
+        other => other?,
+    };
+    Ok(lowered.canonicalize())
+}
+
+fn lower_not_predicate_inner(
+    predicate: &PredicateExpr,
+    source_id: &SourceId,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    Ok(match predicate {
         PredicateExpr::True => GroovePredicateExpr::Or(Vec::new()),
         PredicateExpr::False => GroovePredicateExpr::And(Vec::new()),
         PredicateExpr::Compare { left, op, right } => lower_compare(
@@ -3717,8 +3742,7 @@ fn lower_not_predicate(
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         PredicateExpr::Not(predicate) => lower_predicate(predicate, source_id, source, request)?,
-    };
-    Ok(lowered.canonicalize())
+    })
 }
 
 fn invert_comparison(op: ComparisonOp) -> ComparisonOp {
@@ -4026,10 +4050,14 @@ fn claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Value, Unsupp
         "sub" => Ok(Value::Uuid(permission_subject.0)),
         "user_id" => Ok(Value::String(permission_subject.0.to_string())),
         "isAdmin" => Ok(Value::Bool(false)),
-        _ => Err(UnsupportedReason::Operator(format!(
+        _ => Err(UnsupportedReason::Policy(format!(
             "claim '{name}' is not bound"
         ))),
     }
+}
+
+fn is_unbound_claim_reason(reason: &UnsupportedReason) -> bool {
+    matches!(reason, UnsupportedReason::Policy(message) if message.starts_with("claim '") && message.ends_with("' is not bound"))
 }
 
 fn require_source_field(source: &ResolvedSource, field: &str) -> Result<String, UnsupportedReason> {

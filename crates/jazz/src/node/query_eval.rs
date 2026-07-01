@@ -2887,9 +2887,7 @@ where
         let Some(policy) = self.catalogue.schema.branch_read_policy.clone() else {
             return Ok(BTreeSet::from([RowUuid(branch_id.0)]));
         };
-        let claims = self.session_claims.get(&identity);
         let mut query = policy;
-        rewrite_policy_claims_for_authorization(&mut query, claims);
         query.filters.push(crate::query::eq(
             crate::query::col("id"),
             crate::query::lit(Value::Uuid(branch_id.0)),
@@ -4734,9 +4732,7 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        let claims = self.session_claims.get(&identity);
-        let mut query = authorization_query_from_read_policy(table);
-        rewrite_policy_claims_for_authorization(&mut query, claims);
+        let query = authorization_query_from_read_policy(table);
         if !query.includes.is_empty() {
             return Err(Error::InvalidStoredValue(
                 "maintained subscription view policy slice does not support include policies",
@@ -4812,9 +4808,7 @@ where
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
     ) -> Result<QueryProgramRequest, Error> {
-        let claims = self.session_claims.get(&identity);
-        let mut query = authorization_query_from_read_policy(table);
-        rewrite_policy_claims_for_authorization(&mut query, claims);
+        let query = authorization_query_from_read_policy(table);
         if !query.includes.is_empty() {
             return Err(Error::InvalidStoredValue(
                 "branch policy source filters do not support include policies",
@@ -4926,7 +4920,6 @@ where
         let Some(policy) = self.table(&shape.query().table)?.read_policy.clone() else {
             return Ok((shape.clone(), binding.clone()));
         };
-        let claims = self.session_claims.get(&identity);
         let mut query = shape.query().clone();
         let base_filters = query.filters.clone();
         let base_joins = query.joins.clone();
@@ -4935,40 +4928,25 @@ where
             policy
                 .filters
                 .into_iter()
-                .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims)),
+                .map(deny_unlowerable_flattened_read_policy_predicate),
         );
         query.joins.extend(
             policy
                 .joins
                 .into_iter()
-                .map(|join| rewrite_claim_join_for_binding(join, claims)),
+                .map(deny_unlowerable_flattened_read_policy_join),
         );
-        query
-            .reachable
-            .extend(policy.reachable.into_iter().map(|mut reachable| {
-                reachable.access_filters = reachable
-                    .access_filters
-                    .into_iter()
-                    .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-                    .collect();
-                reachable.edge_filters = reachable
-                    .edge_filters
-                    .into_iter()
-                    .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-                    .collect();
-                if let Some(seed) = &mut reachable.seed {
-                    seed.filters = std::mem::take(&mut seed.filters)
-                        .into_iter()
-                        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-                        .collect();
-                }
-                reachable
-            }));
+        query.reachable.extend(
+            policy
+                .reachable
+                .into_iter()
+                .map(deny_unlowerable_flattened_read_policy_reachable),
+        );
         query.includes.extend(policy.includes);
         query
             .policy_branches
             .extend(policy.policy_branches.into_iter().map(|branch| {
-                compose_policy_branch(branch, &base_filters, &base_joins, &base_reachable, claims)
+                compose_policy_branch(branch, &base_filters, &base_joins, &base_reachable)
             }));
         let composed = query.validate(&self.catalogue.schema)?;
         let binding = composed.bind(binding.values().clone())?;
@@ -5050,33 +5028,118 @@ fn compose_policy_branch(
     base_filters: &[Predicate],
     base_joins: &[JoinVia],
     base_reachable: &[crate::query::ReachableVia],
-    claims: Option<&BTreeMap<String, Value>>,
 ) -> PolicyBranch {
     let mut filters = base_filters.to_vec();
     filters.extend(
         branch
             .filters
             .into_iter()
-            .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims)),
+            .map(deny_unlowerable_flattened_read_policy_predicate),
     );
     let mut joins = base_joins.to_vec();
     joins.extend(
         branch
             .joins
             .into_iter()
-            .map(|join| rewrite_claim_join_for_binding(join, claims)),
+            .map(deny_unlowerable_flattened_read_policy_join),
     );
     let mut reachable = base_reachable.to_vec();
     reachable.extend(
         branch
             .reachable
             .into_iter()
-            .map(|reachable| rewrite_claim_reachable_for_binding(reachable, claims)),
+            .map(deny_unlowerable_flattened_read_policy_reachable),
     );
     PolicyBranch {
         filters,
         joins,
         reachable,
+    }
+}
+
+// TODO(query-engine-policy): delete this with `policy_composed_shape_binding`.
+// While read policy is still flattened into the user query, policy-origin
+// predicates that lowering explicitly rejects must deny without making
+// unsupported user-query predicates look like empty results.
+fn deny_unlowerable_flattened_read_policy_reachable(
+    mut reachable: crate::query::ReachableVia,
+) -> crate::query::ReachableVia {
+    reachable.access_filters = reachable
+        .access_filters
+        .into_iter()
+        .map(deny_unlowerable_flattened_read_policy_predicate)
+        .collect();
+    reachable.edge_filters = reachable
+        .edge_filters
+        .into_iter()
+        .map(deny_unlowerable_flattened_read_policy_predicate)
+        .collect();
+    if let Some(seed) = &mut reachable.seed {
+        seed.filters = std::mem::take(&mut seed.filters)
+            .into_iter()
+            .map(deny_unlowerable_flattened_read_policy_predicate)
+            .collect();
+    }
+    reachable
+}
+
+fn deny_unlowerable_flattened_read_policy_join(mut join: JoinVia) -> JoinVia {
+    join.filters = join
+        .filters
+        .into_iter()
+        .map(deny_unlowerable_flattened_read_policy_predicate)
+        .collect();
+    join.nested_joins = join
+        .nested_joins
+        .into_iter()
+        .map(deny_unlowerable_flattened_read_policy_join)
+        .collect();
+    join
+}
+
+fn deny_unlowerable_flattened_read_policy_predicate(predicate: Predicate) -> Predicate {
+    match predicate {
+        Predicate::All(predicates) => Predicate::All(
+            predicates
+                .into_iter()
+                .map(deny_unlowerable_flattened_read_policy_predicate)
+                .collect(),
+        ),
+        Predicate::Any(predicates) => Predicate::Any(
+            predicates
+                .into_iter()
+                .map(deny_unlowerable_flattened_read_policy_predicate)
+                .collect(),
+        ),
+        Predicate::Not(predicate)
+            if flattened_read_policy_predicate_has_unlowerable_negation(&predicate) =>
+        {
+            false_predicate()
+        }
+        Predicate::Not(predicate) => Predicate::Not(Box::new(
+            deny_unlowerable_flattened_read_policy_predicate(*predicate),
+        )),
+        predicate => predicate,
+    }
+}
+
+fn flattened_read_policy_predicate_has_unlowerable_negation(predicate: &Predicate) -> bool {
+    match predicate {
+        Predicate::Contains(_, _) => true,
+        Predicate::All(predicates) | Predicate::Any(predicates) => predicates
+            .iter()
+            .any(flattened_read_policy_predicate_has_unlowerable_negation),
+        Predicate::Not(predicate) => {
+            flattened_read_policy_predicate_has_unlowerable_negation(predicate)
+        }
+        Predicate::Eq(_, _)
+        | Predicate::Ne(_, _)
+        | Predicate::Gt(_, _)
+        | Predicate::Gte(_, _)
+        | Predicate::Lt(_, _)
+        | Predicate::Lte(_, _)
+        | Predicate::In(_, _)
+        | Predicate::IsNull(_) => false,
     }
 }
 
@@ -5091,28 +5154,6 @@ fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
     query.includes = policy.includes.clone();
     query.policy_branches = policy.policy_branches.clone();
     query
-}
-
-fn rewrite_policy_claims_for_authorization(
-    query: &mut JazzQuery,
-    claims: Option<&BTreeMap<String, Value>>,
-) {
-    query.filters = std::mem::take(&mut query.filters)
-        .into_iter()
-        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-        .collect();
-    query.joins = std::mem::take(&mut query.joins)
-        .into_iter()
-        .map(|join| rewrite_claim_join_for_binding(join, claims))
-        .collect();
-    query.reachable = std::mem::take(&mut query.reachable)
-        .into_iter()
-        .map(|reachable| rewrite_claim_reachable_for_binding(reachable, claims))
-        .collect();
-    query.policy_branches = std::mem::take(&mut query.policy_branches)
-        .into_iter()
-        .map(|branch| compose_policy_branch(branch, &[], &[], &[], claims))
-        .collect();
 }
 
 fn rewrite_claim_join_for_binding(
@@ -5137,29 +5178,6 @@ fn rewrite_claim_join_for_binding(
             .map(|join| rewrite_claim_join_for_binding(join, claims))
             .collect(),
     }
-}
-
-fn rewrite_claim_reachable_for_binding(
-    mut reachable: crate::query::ReachableVia,
-    claims: Option<&BTreeMap<String, Value>>,
-) -> crate::query::ReachableVia {
-    reachable.access_filters = reachable
-        .access_filters
-        .into_iter()
-        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-        .collect();
-    reachable.edge_filters = reachable
-        .edge_filters
-        .into_iter()
-        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-        .collect();
-    if let Some(seed) = &mut reachable.seed {
-        seed.filters = std::mem::take(&mut seed.filters)
-            .into_iter()
-            .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-            .collect();
-    }
-    reachable
 }
 
 fn rewrite_claim_predicate_for_binding(
