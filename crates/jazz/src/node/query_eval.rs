@@ -3429,7 +3429,7 @@ where
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlan), Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
-        let shape = maintained_view_bind_filter_literals_with_mode(
+        let shape = bind_query_params_with_mode(
             &shape,
             &binding,
             &self.catalogue.schema,
@@ -4083,7 +4083,7 @@ where
     > {
         let (composed_shape, composed_binding) =
             self.policy_composed_shape_binding(shape, binding, identity)?;
-        let shape = maintained_view_bind_filter_literals_with_mode(
+        let shape = bind_query_params_with_mode(
             &composed_shape,
             &composed_binding,
             &self.catalogue.schema,
@@ -4243,7 +4243,7 @@ where
             self.session_claims.get(&identity),
             &self.catalogue.schema,
         )?;
-        let policy_shape = maintained_view_bind_filter_literals_with_mode(
+        let policy_shape = bind_query_params_with_mode(
             &policy_shape,
             &policy_binding,
             &self.catalogue.schema,
@@ -4704,7 +4704,7 @@ pub(crate) enum ParamBindingMode {
     RetainAllParams,
 }
 
-fn maintained_view_bind_filter_literals_with_mode(
+fn bind_query_params_with_mode(
     shape: &ValidatedQuery,
     binding: &Binding,
     schema: &JazzSchema,
@@ -4714,7 +4714,7 @@ fn maintained_view_bind_filter_literals_with_mode(
     query.filters = query
         .filters
         .into_iter()
-        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+        .map(|predicate| bind_query_predicate(predicate, binding, mode))
         .collect::<Result<Vec<_>, _>>()?;
     query.joins = query
         .joins
@@ -4726,17 +4726,17 @@ fn maintained_view_bind_filter_literals_with_mode(
         .into_iter()
         .map(|mut reachable| {
             if should_inline_reachable_seed(&reachable.from, mode) {
-                reachable.from = maintained_view_bind_operand(reachable.from, binding, mode)?;
+                reachable.from = bind_query_operand(reachable.from, binding, mode)?;
             }
             reachable.access_filters = reachable
                 .access_filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+                .map(|predicate| bind_query_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             reachable.edge_filters = reachable
                 .edge_filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+                .map(|predicate| bind_query_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             bind_reachable_seed_filters(&mut reachable, binding, mode)?;
             Ok(reachable)
@@ -4754,7 +4754,7 @@ fn maintained_view_bind_filter_literals_with_mode(
             branch.filters = branch
                 .filters
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+                .map(|predicate| bind_query_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             branch.joins = branch
                 .joins
@@ -4766,18 +4766,17 @@ fn maintained_view_bind_filter_literals_with_mode(
                 .into_iter()
                 .map(|mut reachable| {
                     if should_inline_reachable_seed(&reachable.from, mode) {
-                        reachable.from =
-                            maintained_view_bind_operand(reachable.from, binding, mode)?;
+                        reachable.from = bind_query_operand(reachable.from, binding, mode)?;
                     }
                     reachable.access_filters = reachable
                         .access_filters
                         .into_iter()
-                        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+                        .map(|predicate| bind_query_predicate(predicate, binding, mode))
                         .collect::<Result<Vec<_>, _>>()?;
                     reachable.edge_filters = reachable
                         .edge_filters
                         .into_iter()
-                        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+                        .map(|predicate| bind_query_predicate(predicate, binding, mode))
                         .collect::<Result<Vec<_>, _>>()?;
                     bind_reachable_seed_filters(&mut reachable, binding, mode)?;
                     Ok(reachable)
@@ -4788,9 +4787,7 @@ fn maintained_view_bind_filter_literals_with_mode(
         .collect::<Result<Vec<_>, Error>>()?;
     let rebound = query.validate(schema)?;
     if rebound.schema_version() != shape.schema_version() {
-        return Err(Error::InvalidStoredValue(
-            "maintained subscription view rebound query schema changed",
-        ));
+        return Err(Error::InvalidStoredValue("bound query schema changed"));
     }
     Ok(rebound)
 }
@@ -4803,7 +4800,7 @@ fn bind_array_subquery_filter_literals(
     subquery.filters = subquery
         .filters
         .into_iter()
-        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+        .map(|predicate| bind_query_predicate(predicate, binding, mode))
         .collect::<Result<Vec<_>, _>>()?;
     subquery.nested_arrays = subquery
         .nested_arrays
@@ -4818,153 +4815,15 @@ fn inline_snapshot_bind_filter_literals(
     binding: &Binding,
     schema: &JazzSchema,
 ) -> Result<ValidatedQuery, Error> {
-    let mut query = shape.query().clone();
-    query.filters = query
-        .filters
-        .into_iter()
-        .map(|predicate| {
-            maintained_view_bind_predicate(
-                predicate,
-                binding,
-                ParamBindingMode::InlineAllReachableSeeds,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    query.joins = query
-        .joins
-        .into_iter()
-        .map(|join| {
-            bind_join_filter_literals(join, binding, ParamBindingMode::InlineAllReachableSeeds)
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    query.reachable = query
-        .reachable
-        .into_iter()
-        .map(|mut reachable| {
-            reachable.from = maintained_view_bind_operand(
-                reachable.from,
-                binding,
-                ParamBindingMode::InlineAllReachableSeeds,
-            )?;
-            reachable.access_filters = reachable
-                .access_filters
-                .into_iter()
-                .map(|predicate| {
-                    maintained_view_bind_predicate(
-                        predicate,
-                        binding,
-                        ParamBindingMode::InlineAllReachableSeeds,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            reachable.edge_filters = reachable
-                .edge_filters
-                .into_iter()
-                .map(|predicate| {
-                    maintained_view_bind_predicate(
-                        predicate,
-                        binding,
-                        ParamBindingMode::InlineAllReachableSeeds,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            bind_reachable_seed_filters(
-                &mut reachable,
-                binding,
-                ParamBindingMode::InlineAllReachableSeeds,
-            )?;
-            Ok(reachable)
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    query.array_subqueries = query
-        .array_subqueries
-        .into_iter()
-        .map(|subquery| {
-            bind_array_subquery_filter_literals(
-                subquery,
-                binding,
-                ParamBindingMode::InlineAllReachableSeeds,
-            )
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    query.policy_branches = query
-        .policy_branches
-        .into_iter()
-        .map(|mut branch| {
-            branch.filters = branch
-                .filters
-                .into_iter()
-                .map(|predicate| {
-                    maintained_view_bind_predicate(
-                        predicate,
-                        binding,
-                        ParamBindingMode::InlineAllReachableSeeds,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            branch.joins = branch
-                .joins
-                .into_iter()
-                .map(|join| {
-                    bind_join_filter_literals(
-                        join,
-                        binding,
-                        ParamBindingMode::InlineAllReachableSeeds,
-                    )
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            branch.reachable = branch
-                .reachable
-                .into_iter()
-                .map(|mut reachable| {
-                    reachable.from = maintained_view_bind_operand(
-                        reachable.from,
-                        binding,
-                        ParamBindingMode::InlineAllReachableSeeds,
-                    )?;
-                    reachable.access_filters = reachable
-                        .access_filters
-                        .into_iter()
-                        .map(|predicate| {
-                            maintained_view_bind_predicate(
-                                predicate,
-                                binding,
-                                ParamBindingMode::InlineAllReachableSeeds,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    reachable.edge_filters = reachable
-                        .edge_filters
-                        .into_iter()
-                        .map(|predicate| {
-                            maintained_view_bind_predicate(
-                                predicate,
-                                binding,
-                                ParamBindingMode::InlineAllReachableSeeds,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    bind_reachable_seed_filters(
-                        &mut reachable,
-                        binding,
-                        ParamBindingMode::InlineAllReachableSeeds,
-                    )?;
-                    Ok(reachable)
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            Ok(branch)
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    let rebound = query.validate(schema)?;
-    if rebound.schema_version() != shape.schema_version() {
-        return Err(Error::InvalidStoredValue(
-            "inline snapshot rebound query schema changed",
-        ));
-    }
-    Ok(rebound)
+    bind_query_params_with_mode(
+        shape,
+        binding,
+        schema,
+        ParamBindingMode::InlineAllReachableSeeds,
+    )
 }
 
-fn maintained_view_bind_predicate(
+fn bind_query_predicate(
     predicate: Predicate,
     binding: &Binding,
     mode: ParamBindingMode,
@@ -4973,52 +4832,52 @@ fn maintained_view_bind_predicate(
         Predicate::All(predicates) => Predicate::All(
             predicates
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+                .map(|predicate| bind_query_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Predicate::Any(predicates) => Predicate::Any(
             predicates
                 .into_iter()
-                .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+                .map(|predicate| bind_query_predicate(predicate, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        Predicate::Not(predicate) => Predicate::Not(Box::new(maintained_view_bind_predicate(
-            *predicate, binding, mode,
-        )?)),
+        Predicate::Not(predicate) => {
+            Predicate::Not(Box::new(bind_query_predicate(*predicate, binding, mode)?))
+        }
         Predicate::Eq(left, right) => Predicate::Eq(
-            maintained_view_bind_operand(left, binding, mode)?,
-            maintained_view_bind_operand(right, binding, mode)?,
+            bind_query_operand(left, binding, mode)?,
+            bind_query_operand(right, binding, mode)?,
         ),
         Predicate::Ne(left, right) => Predicate::Ne(
-            maintained_view_bind_operand(left, binding, mode)?,
-            maintained_view_bind_operand(right, binding, mode)?,
+            bind_query_operand(left, binding, mode)?,
+            bind_query_operand(right, binding, mode)?,
         ),
         Predicate::In(left, values) => Predicate::In(
-            maintained_view_bind_operand(left, binding, mode)?,
+            bind_query_operand(left, binding, mode)?,
             values
                 .into_iter()
-                .map(|operand| maintained_view_bind_operand(operand, binding, mode))
+                .map(|operand| bind_query_operand(operand, binding, mode))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Predicate::Gt(left, right) => Predicate::Gt(
-            maintained_view_bind_operand(left, binding, mode)?,
-            maintained_view_bind_operand(right, binding, mode)?,
+            bind_query_operand(left, binding, mode)?,
+            bind_query_operand(right, binding, mode)?,
         ),
         Predicate::Gte(left, right) => Predicate::Gte(
-            maintained_view_bind_operand(left, binding, mode)?,
-            maintained_view_bind_operand(right, binding, mode)?,
+            bind_query_operand(left, binding, mode)?,
+            bind_query_operand(right, binding, mode)?,
         ),
         Predicate::Lt(left, right) => Predicate::Lt(
-            maintained_view_bind_operand(left, binding, mode)?,
-            maintained_view_bind_operand(right, binding, mode)?,
+            bind_query_operand(left, binding, mode)?,
+            bind_query_operand(right, binding, mode)?,
         ),
         Predicate::Lte(left, right) => Predicate::Lte(
-            maintained_view_bind_operand(left, binding, mode)?,
-            maintained_view_bind_operand(right, binding, mode)?,
+            bind_query_operand(left, binding, mode)?,
+            bind_query_operand(right, binding, mode)?,
         ),
         Predicate::Contains(left, right) => {
-            let left = maintained_view_bind_operand(left, binding, mode)?;
-            let right = maintained_view_bind_operand(right, binding, mode)?;
+            let left = bind_query_operand(left, binding, mode)?;
+            let right = bind_query_operand(right, binding, mode)?;
             match left {
                 Operand::Literal(Value::Array(values)) => {
                     Predicate::In(right, values.into_iter().map(Operand::Literal).collect())
@@ -5027,7 +4886,7 @@ fn maintained_view_bind_predicate(
             }
         }
         Predicate::IsNull(operand) => {
-            Predicate::IsNull(maintained_view_bind_operand(operand, binding, mode)?)
+            Predicate::IsNull(bind_query_operand(operand, binding, mode)?)
         }
     })
 }
@@ -5040,7 +4899,7 @@ fn bind_reachable_seed_filters(
     if let Some(seed) = &mut reachable.seed {
         seed.filters = std::mem::take(&mut seed.filters)
             .into_iter()
-            .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+            .map(|predicate| bind_query_predicate(predicate, binding, mode))
             .collect::<Result<Vec<_>, _>>()?;
     }
     Ok(())
@@ -5054,7 +4913,7 @@ fn bind_join_filter_literals(
     join.filters = join
         .filters
         .into_iter()
-        .map(|predicate| maintained_view_bind_predicate(predicate, binding, mode))
+        .map(|predicate| bind_query_predicate(predicate, binding, mode))
         .collect::<Result<Vec<_>, _>>()?;
     join.nested_joins = join
         .nested_joins
@@ -5072,7 +4931,7 @@ fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bo
     }
 }
 
-fn maintained_view_bind_operand(
+fn bind_query_operand(
     operand: Operand,
     binding: &Binding,
     mode: ParamBindingMode,
