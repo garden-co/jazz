@@ -2542,7 +2542,7 @@ where
                 id: format!("join_via:{index}"),
                 source: join_source.clone(),
                 input: right.clone(),
-                key_pairs,
+                membership: join_predicate.clone(),
             });
             let join_node = RowSetNodeId(format!("join_via:{index}:join"));
             nodes.insert(

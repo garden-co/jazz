@@ -2379,6 +2379,83 @@ fn lower_linear_join_key_pairs(
     Ok(pairs.into_iter().unzip())
 }
 
+fn lower_root_to_relation_key_pair(
+    predicate: &PredicateExpr,
+    root_source: &ResolvedSource,
+    right_plan: &RelationInputPlan,
+    right_output: &LoweredRelationInput,
+    request: &QueryProgramRequest,
+) -> Result<(String, String), UnsupportedReason> {
+    let PredicateExpr::Compare {
+        left,
+        op: ComparisonOp::Eq,
+        right: right_value,
+    } = predicate
+    else {
+        return Err(UnsupportedReason::Operator(
+            "join contribution membership only lowers equality predicates".to_owned(),
+        ));
+    };
+
+    match (
+        lower_join_key_ref(left, &root_source.row_shape.source, root_source, request),
+        lower_relation_key_ref(right_value, right_plan, right_output, request),
+    ) {
+        (Ok(root_key), Ok(relation_key)) => Ok((root_key, relation_key)),
+        _ => match (
+            lower_join_key_ref(
+                right_value,
+                &root_source.row_shape.source,
+                root_source,
+                request,
+            ),
+            lower_relation_key_ref(left, right_plan, right_output, request),
+        ) {
+            (Ok(root_key), Ok(relation_key)) => Ok((root_key, relation_key)),
+            _ => Err(UnsupportedReason::Operator(
+                "join contribution membership must compare root fields to relation output fields"
+                    .to_owned(),
+            )),
+        },
+    }
+}
+
+fn lower_root_to_relation_key_pairs(
+    predicate: &PredicateExpr,
+    root_source: &ResolvedSource,
+    right_plan: &RelationInputPlan,
+    right_output: &LoweredRelationInput,
+    request: &QueryProgramRequest,
+) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    let pairs = match predicate {
+        PredicateExpr::And(predicates) => predicates
+            .iter()
+            .map(|predicate| {
+                lower_root_to_relation_key_pair(
+                    predicate,
+                    root_source,
+                    right_plan,
+                    right_output,
+                    request,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => vec![lower_root_to_relation_key_pair(
+            predicate,
+            root_source,
+            right_plan,
+            right_output,
+            request,
+        )?],
+    };
+    if pairs.is_empty() {
+        return Err(UnsupportedReason::Operator(
+            "join contribution membership requires at least one equality predicate".to_owned(),
+        ));
+    }
+    Ok(pairs.into_iter().unzip())
+}
+
 fn lower_relation_key_ref(
     value: &NormalizedValueRef,
     plan: &RelationInputPlan,
@@ -3458,24 +3535,11 @@ fn join_contribution_membership_graph(
         .map_err(single_gap_report)?;
     let lowered =
         lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
-    let predicate = PredicateExpr::And(
-        contribution
-            .key_pairs
-            .iter()
-            .cloned()
-            .map(|(left, right)| PredicateExpr::Compare {
-                left,
-                op: ComparisonOp::Eq,
-                right,
-            })
-            .collect(),
-    );
-    let (root_keys, join_keys) = lower_join_key_pairs(
-        &predicate,
-        &root_source.row_shape.source,
+    let (root_keys, join_keys) = lower_root_to_relation_key_pairs(
+        &contribution.membership,
         root_source,
-        &contribution_source.row_shape.source,
-        contribution_source,
+        &plan,
+        &lowered,
         request,
     )
     .map_err(single_gap_report)?;

@@ -868,25 +868,27 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                     id: "join_via:0".to_owned(),
                     source: join_source.clone(),
                     input: join_source_node.clone(),
-                    key_pairs: vec![
-                        (
-                            NormalizedValueRef::SourceField {
+                    membership: PredicateExpr::And(vec![
+                        PredicateExpr::Compare {
+                            left: NormalizedValueRef::SourceField {
                                 source: root_source.clone(),
                                 field: "todo".to_owned(),
                             },
-                            NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone())),
-                        ),
-                        (
-                            NormalizedValueRef::SourceField {
+                            op: ComparisonOp::Eq,
+                            right: NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone())),
+                        },
+                        PredicateExpr::Compare {
+                            left: NormalizedValueRef::SourceField {
                                 source: root_source.clone(),
                                 field: "tag".to_owned(),
                             },
-                            NormalizedValueRef::SourceField {
+                            op: ComparisonOp::Eq,
+                            right: NormalizedValueRef::SourceField {
                                 source: join_source.clone(),
                                 field: "tag".to_owned(),
                             },
-                        ),
-                    ],
+                        },
+                    ]),
                 }],
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
@@ -972,6 +974,141 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                             ] if row_uuid == "row_uuid" && tag == "user_tag"
                         )
             )
+    )));
+}
+
+#[test]
+fn join_contribution_membership_can_use_projected_bridge_fields() {
+    let root = RowSetNodeId("root".to_owned());
+    let join_source_node = RowSetNodeId("join-source".to_owned());
+    let bridge_node = RowSetNodeId("bridge".to_owned());
+    let app_join_node = RowSetNodeId("app-join".to_owned());
+    let root_source = source("todos", SourceRole::Root);
+    let join_source = source("todo_tags", SourceRole::Alias("join_via:0".to_owned()));
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(joined_current_read_view()),
+        policy: system_policy_context(),
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x76),
+                    canonical: vec![0x76],
+                },
+                root: app_join_node.clone(),
+                result: ResultId::RealRow {
+                    table: "todos".to_owned(),
+                    row: ResultRowRef::Source(root_source.clone()),
+                },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: vec![JoinContribution {
+                    id: "join_via:0".to_owned(),
+                    source: join_source.clone(),
+                    input: bridge_node.clone(),
+                    membership: PredicateExpr::Compare {
+                        left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                        op: ComparisonOp::Eq,
+                        right: NormalizedValueRef::SourceField {
+                            source: join_source.clone(),
+                            field: "bridge_root".to_owned(),
+                        },
+                    },
+                }],
+                reachable_contributions: Vec::new(),
+                nodes: BTreeMap::from([
+                    (
+                        root.clone(),
+                        RowSetExpr::Source {
+                            source: root_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        join_source_node.clone(),
+                        RowSetExpr::Source {
+                            source: join_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        bridge_node.clone(),
+                        RowSetExpr::Project {
+                            input: join_source_node,
+                            columns: vec![
+                                RowProjection {
+                                    output: TypedOutputField {
+                                        name: "bridge_root".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::SourceField {
+                                        source: join_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
+                                },
+                                RowProjection {
+                                    output: TypedOutputField {
+                                        name: "tag".to_owned(),
+                                        ty: ColumnType::String,
+                                    },
+                                    value: NormalizedValueRef::SourceField {
+                                        source: join_source.clone(),
+                                        field: "tag".to_owned(),
+                                    },
+                                },
+                                RowProjection {
+                                    output: TypedOutputField {
+                                        name: "id".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::RowId(RowIdRef::Source(
+                                        join_source.clone(),
+                                    )),
+                                },
+                            ],
+                        },
+                    ),
+                    (
+                        app_join_node.clone(),
+                        RowSetExpr::Join {
+                            left: root,
+                            right: bridge_node.clone(),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    root_source.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: join_source.clone(),
+                                    field: "bridge_root".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x76; 16])),
+                values: BTreeMap::new(),
+            },
+        },
+        output: row_set_output(BTreeSet::from([ProgramFactKey::ResultMembership])),
+    };
+
+    let mut resolver = FakeSourceResolver::default();
+    let program = lower_query_program(request, &mut resolver)
+        .expect("join contribution membership should accept projected bridge fields");
+
+    assert!(program.lowered.terminals.iter().any(|terminal| matches!(
+        terminal.graph,
+        GraphBuilder::Project { ref input, ref fields }
+            if fields.iter().any(|field| field.output_name == "row_uuid")
+                && matches!(
+                    input.as_ref(),
+                    GraphBuilder::Join { left_on, right_on, .. }
+                        if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+                            && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "bridge_root")
+                )
     )));
 }
 
