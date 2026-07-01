@@ -604,11 +604,8 @@ fn app_row_payload_projection(query: &JazzQuery) -> PayloadProjection {
 }
 
 fn relation_snapshot_root_membership_can_use_query_engine(subqueries: &[ArraySubquery]) -> bool {
-    subqueries.iter().all(|subquery| {
-        // TODO(query-engine): remove this guard once nested array paths are
-        // first-class relation/path inputs.
-        subquery.nested_arrays.is_empty()
-    })
+    let _ = subqueries;
+    true
 }
 
 fn relation_snapshot_payload_can_use_query_engine(subqueries: &[ArraySubquery]) -> bool {
@@ -784,15 +781,24 @@ fn array_requirement(requirement: ArraySubqueryRequirement) -> CorrelationRequir
     }
 }
 
-fn correlated_child_source_id(subquery: &ArraySubquery, index: usize) -> SourceId {
+fn correlated_child_source_id(
+    owner: &SourceId,
+    subquery: &ArraySubquery,
+    path: &[usize],
+) -> SourceId {
+    let mut components = owner.path.components.clone();
+    let path_id = path
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(".");
+    components.push(SourceRole::CorrelatedChild(format!(
+        "{path_id}:{}",
+        subquery.column_name
+    )));
     SourceId {
         table: subquery.table.clone(),
-        path: SourcePath {
-            components: vec![
-                SourceRole::Root,
-                SourceRole::CorrelatedChild(format!("{index}:{}", subquery.column_name)),
-            ],
-        },
+        path: SourcePath { components },
     }
 }
 
@@ -872,12 +878,17 @@ where
 fn normalize_array_subquery(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     current: RowSetNodeId,
-    root_source: &SourceId,
+    owner_source: &SourceId,
     subquery: &ArraySubquery,
-    index: usize,
+    path: &[usize],
 ) -> Result<RowSetNodeId, Error> {
-    let child_source = correlated_child_source_id(subquery, index);
-    let child_node = RowSetNodeId(format!("array_subquery:{index}:source"));
+    let path_id = path
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(".");
+    let child_source = correlated_child_source_id(owner_source, subquery, path);
+    let child_node = RowSetNodeId(format!("array_subquery:{path_id}:source"));
     nodes.insert(
         child_node.clone(),
         RowSetExpr::Source {
@@ -888,7 +899,7 @@ fn normalize_array_subquery(
     let mut child_current = child_node;
 
     if !subquery.filters.is_empty() {
-        let filter_node = RowSetNodeId(format!("array_subquery:{index}:filter"));
+        let filter_node = RowSetNodeId(format!("array_subquery:{path_id}:filter"));
         nodes.insert(
             filter_node.clone(),
             RowSetExpr::Filter {
@@ -901,7 +912,7 @@ fn normalize_array_subquery(
     }
 
     if !subquery.order_by.is_empty() {
-        let order_node = RowSetNodeId(format!("array_subquery:{index}:order"));
+        let order_node = RowSetNodeId(format!("array_subquery:{path_id}:order"));
         nodes.insert(
             order_node.clone(),
             RowSetExpr::OrderBy {
@@ -918,7 +929,7 @@ fn normalize_array_subquery(
     }
 
     if subquery.limit.is_some() {
-        let slice_node = RowSetNodeId(format!("array_subquery:{index}:slice"));
+        let slice_node = RowSetNodeId(format!("array_subquery:{path_id}:slice"));
         nodes.insert(
             slice_node.clone(),
             RowSetExpr::Slice {
@@ -940,24 +951,25 @@ fn normalize_array_subquery(
         child_current = slice_node;
     }
 
-    let path_node = RowSetNodeId(format!("array_subquery:{index}:path"));
+    let nested_parent_input = child_current.clone();
+    let path_node = RowSetNodeId(format!("array_subquery:{path_id}:path"));
     nodes.insert(
         path_node.clone(),
         RowSetExpr::CorrelatedPathProjection {
             input: current,
             child_input: child_current,
             path: ProgramPathId {
-                owner: root_source.clone(),
+                owner: owner_source.clone(),
                 child: child_source.clone(),
             },
             correlation: NormalizedPredicateExpr::Compare {
                 left: NormalizedValueRef::SourceField {
-                    source: child_source,
+                    source: child_source.clone(),
                     field: subquery.inner_column.clone(),
                 },
                 op: NormalizedComparisonOp::Eq,
                 right: normalize_operand(
-                    root_source,
+                    owner_source,
                     &Operand::Column(subquery.outer_column.clone()),
                 )
                 .map_err(|err| normalization_gap(err.to_string()))?,
@@ -965,6 +977,17 @@ fn normalize_array_subquery(
             requirement: array_requirement(subquery.requirement),
         },
     );
+    for (nested_index, nested) in subquery.nested_arrays.iter().enumerate() {
+        let mut nested_path = path.to_vec();
+        nested_path.push(nested_index);
+        normalize_array_subquery(
+            nodes,
+            nested_parent_input.clone(),
+            &child_source,
+            nested,
+            &nested_path,
+        )?;
+    }
     Ok(path_node)
 }
 
@@ -1842,7 +1865,8 @@ where
         }
 
         for (index, subquery) in query.array_subqueries.iter().enumerate() {
-            current = normalize_array_subquery(&mut nodes, current, &root_source, subquery, index)?;
+            current =
+                normalize_array_subquery(&mut nodes, current, &root_source, subquery, &[index])?;
         }
 
         if !query.order_by.is_empty() {
@@ -5288,7 +5312,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_hidden_param_types_for_shape(
         &self,
         shape: &ValidatedQuery,
@@ -5319,7 +5342,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_policy_readable_version_tagged_graphs<'a>(
         &self,
         table: &TableSchema,
@@ -5385,7 +5407,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_result_closure_graph(
         &self,
         shape: &ValidatedQuery,
@@ -5520,7 +5541,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_filter_result_current_by_include_modes(
         &self,
         root: GraphBuilder,
@@ -5546,7 +5566,6 @@ where
     }
 
     #[cfg(test)]
-
     fn filter_root_current_by_required_include_modes(
         &self,
         root: GraphBuilder,
@@ -5578,7 +5597,6 @@ where
     }
 
     #[cfg(test)]
-
     fn filter_root_current_by_required_include_path(
         &self,
         root: GraphBuilder,
@@ -5659,7 +5677,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_bound_query_current_graph(
         &self,
         shape: &ValidatedQuery,
@@ -5677,7 +5694,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_policy_readable_current_graph(
         &self,
         table: &TableSchema,
@@ -5698,7 +5714,6 @@ where
     }
 
     #[cfg(test)]
-
     fn include_policy_hidden_param_types(
         &self,
         root_table: &TableSchema,
@@ -5739,7 +5754,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_reference_result_graph(
         &self,
         source: GraphBuilder,
@@ -5804,7 +5818,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_include_result_graphs(
         &self,
         root: GraphBuilder,
@@ -5879,7 +5892,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_join_closure_current_graph(
         &self,
         root: GraphBuilder,
@@ -6022,7 +6034,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_bind_filter_literals_for_empty_binding_with_mode(
         &self,
         shape: &ValidatedQuery,
@@ -6046,7 +6057,6 @@ where
     }
 
     #[cfg(test)]
-
     fn apply_maintained_view_policy_to_current_graph(
         &self,
         graph: GraphBuilder,
@@ -6077,7 +6087,6 @@ where
     }
 
     #[cfg(test)]
-
     fn maintained_view_replacement_tagged_graphs<'a>(
         &self,
         table: &TableSchema,
@@ -6438,7 +6447,6 @@ where
     }
 
     #[cfg(test)]
-
     fn ensure_reachable_constituent_table(
         &self,
         reachable: &crate::query::ReachableVia,
