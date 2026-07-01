@@ -42,6 +42,9 @@ resolve that cookie in your own app server and either exchange it for a bearer J
 the Jazz client, or pass a mirrored `cookieSession` to the browser client while the cookie remains
 the transport credential.
 
+If you prefer to start the database server programatically, you can use `startLocalJazzServer` from `jazz-tools/dev`.
+It expects similar arguments as the CLI.
+
 ## Backend context setup
 
 Every backend needs an app ID, typed schema, and usually a permissions bundle. If the backend syncs through a Jazz server, also pass `serverUrl` and the relevant secrets. For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentication). For frontend/browser context creation, see [Client Setup](/docs/getting-started/client-setup).
