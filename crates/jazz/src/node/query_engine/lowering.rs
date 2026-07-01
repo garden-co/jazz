@@ -1896,7 +1896,7 @@ fn lower_linear_plan_steps(
     let mut available_route_fields = BTreeSet::new();
     let route_fields = parameter_domain(&request.input.shape).routing_params;
 
-    for step in &plan.steps {
+    for (step_index, step) in plan.steps.iter().enumerate() {
         match step {
             LinearStep::Filter(predicate) => {
                 last_join_right = None;
@@ -1945,7 +1945,9 @@ fn lower_linear_plan_steps(
                 }
                 graph = GraphBuilder::join(graph, right_graph, left_keys, right_keys);
                 last_join_right = Some(((**right).clone(), right_nullable_fields));
-                if matches!(&plan.root, LinearRoot::Source { .. }) {
+                let next_is_project =
+                    matches!(plan.steps.get(step_index + 1), Some(LinearStep::Project(_)));
+                if matches!(&plan.root, LinearRoot::Source { .. }) && !next_is_project {
                     let introduced_route_fields = route_fields
                         .iter()
                         .filter(|field| lowered_right.fields.contains(*field))

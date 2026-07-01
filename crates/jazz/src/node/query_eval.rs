@@ -821,6 +821,15 @@ fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
     }
 }
 
+fn join_lookup_source_id(lookup: &crate::query::JoinSourceLookup, path: &str) -> SourceId {
+    SourceId {
+        table: lookup.table.clone(),
+        path: SourcePath {
+            components: vec![SourceRole::Alias(format!("{path}:source_lookup"))],
+        },
+    }
+}
+
 fn current_query_read_set(
     shape: &NormalizedRowSetShape,
     schema_version: SchemaVersionId,
@@ -1672,6 +1681,7 @@ fn normalize_join_via_right(
 ) -> Result<(RowSetNodeId, SourceId), Error> {
     let join_source = nested_join_source_id(join, path);
     auxiliary_sources.insert(join_source.clone());
+    let table = table_schema(schema, &join.table)?;
     let source_node = RowSetNodeId(format!("{path}:source"));
     nodes.insert(
         source_node.clone(),
@@ -1693,7 +1703,54 @@ fn normalize_join_via_right(
         current = filter_node;
     }
 
-    let table = table_schema(schema, &join.table)?;
+    if let Some(lookup) = &join.source_lookup {
+        let lookup_source = join_lookup_source_id(lookup, path);
+        auxiliary_sources.insert(lookup_source.clone());
+        let lookup_source_node = RowSetNodeId(format!("{path}:lookup_source"));
+        nodes.insert(
+            lookup_source_node.clone(),
+            RowSetExpr::Source {
+                source: lookup_source.clone(),
+                visibility: RowVisibility::Visible,
+            },
+        );
+        let lookup_join_node = RowSetNodeId(format!("{path}:lookup_join"));
+        nodes.insert(
+            lookup_join_node.clone(),
+            RowSetExpr::Join {
+                left: current,
+                right: lookup_source_node,
+                mode: NormalizedJoinMode::Inner,
+                on: NormalizedPredicateExpr::Compare {
+                    left: join_via_target_key(&join_source, join),
+                    op: NormalizedComparisonOp::Eq,
+                    right: if lookup.value_column == "id" {
+                        NormalizedValueRef::RowId(RowIdRef::Source(lookup_source.clone()))
+                    } else {
+                        NormalizedValueRef::SourceField {
+                            source: lookup_source.clone(),
+                            field: lookup.value_column.clone(),
+                        }
+                    },
+                },
+            },
+        );
+        let lookup_project_node = RowSetNodeId(format!("{path}:lookup_project"));
+        let mut columns = source_public_field_projections(table, &join_source);
+        columns.push(RowProjection {
+            output: typed_output_field(lookup.row_id_source_column.clone(), ColumnType::Uuid),
+            value: NormalizedValueRef::RowId(RowIdRef::Source(lookup_source)),
+        });
+        nodes.insert(
+            lookup_project_node.clone(),
+            RowSetExpr::Project {
+                input: lookup_join_node,
+                columns,
+            },
+        );
+        current = lookup_project_node;
+    }
+
     for (nested_index, nested) in join.nested_joins.iter().enumerate() {
         let nested_path = format!("{path}:nested:{nested_index}");
         let (nested_right, nested_source) =
@@ -1982,10 +2039,23 @@ fn join_via_predicate(
     right_source: &SourceId,
     join: &JoinVia,
 ) -> NormalizedPredicateExpr {
-    let mut key_pairs = vec![(
-        join_via_root_key(left_source, join),
-        join_via_target_key(right_source, join),
-    )];
+    let mut key_pairs = vec![if let Some(lookup) = &join.source_lookup {
+        (
+            NormalizedValueRef::SourceField {
+                source: left_source.clone(),
+                field: lookup.row_id_source_column.clone(),
+            },
+            NormalizedValueRef::SourceField {
+                source: right_source.clone(),
+                field: lookup.row_id_source_column.clone(),
+            },
+        )
+    } else {
+        (
+            join_via_root_key(left_source, join),
+            join_via_target_key(right_source, join),
+        )
+    }];
     key_pairs.extend(join.correlated_filters.iter().map(|correlation| {
         (
             NormalizedValueRef::SourceField {
@@ -2088,14 +2158,6 @@ fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
             reasons.join(", ")
         )
     })
-}
-
-fn unsupported_join_via_reason(join: &JoinVia) -> Option<String> {
-    let mut reasons = Vec::new();
-    if join.source_lookup.is_some() {
-        reasons.push("source_lookup");
-    }
-    (!reasons.is_empty()).then(|| format!("unsupported join_via features: {}", reasons.join(", ")))
 }
 
 impl<S> NodeState<S>
@@ -2595,20 +2657,6 @@ where
         }
 
         for (index, join) in query.joins.iter().enumerate() {
-            if let Some(reason) = unsupported_join_via_reason(join) {
-                let marker = format!("join_via:{index}: {reason}");
-                let node = RowSetNodeId(marker.clone());
-                nodes.insert(
-                    node.clone(),
-                    RowSetExpr::Distinct {
-                        input: current,
-                        keys: vec![NormalizedValueRef::Literal(marker.into_bytes())],
-                    },
-                );
-                current = node;
-                continue;
-            }
-
             let path = format!("join_via:{index}");
             let (right, join_source) = normalize_join_via_right(
                 &mut nodes,
@@ -7212,7 +7260,8 @@ mod tests {
     use crate::peer::PeerState;
     use crate::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SyncMessage};
     use crate::query::{
-        Aggregate, OrderDirection, Query, claim, col, contains, eq, gt, in_list, lit, lte, param,
+        Aggregate, JoinSourceLookup, OrderDirection, Query, claim, col, contains, eq, gt, in_list,
+        lit, lte, param,
     };
     use crate::schema::{JazzSchema, TableSchema};
 
@@ -8286,6 +8335,55 @@ mod tests {
     }
 
     #[test]
+    fn join_via_source_lookup_normalizes_as_lookup_bridge_projection() {
+        let (_dir, node) = open_node();
+        let shape = Query::from("issues")
+            .join_via_source_lookup(
+                "issue_members",
+                "user",
+                JoinSourceLookup {
+                    table: "users".to_owned(),
+                    row_id_source_column: "assignee".to_owned(),
+                    value_column: "id".to_owned(),
+                },
+                [],
+            )
+            .validate(&schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
+
+        assert_eq!(normalized.join_contributions.len(), 1);
+        let contribution = &normalized.join_contributions[0];
+        assert_eq!(contribution.input.0, "join_via:0:lookup_project");
+        assert!(matches!(
+            normalized.nodes.get(&contribution.input),
+            Some(RowSetExpr::Project { input, columns })
+                if input.0 == "join_via:0:lookup_join"
+                    && columns.iter().any(|column| column.output.name == "id")
+                    && columns.iter().any(|column| column.output.name == "issue")
+                    && columns.iter().any(|column| column.output.name == "user")
+                    && columns.iter().any(|column| column.output.name == "assignee")
+        ));
+        assert!(matches!(
+            normalized.nodes.get(&normalized.root),
+            Some(RowSetExpr::Join { right, on, .. })
+                if right == &contribution.input
+                    && matches!(
+                        on,
+                        NormalizedPredicateExpr::Compare { left, right, .. }
+                            if matches!(
+                                left,
+                                NormalizedValueRef::SourceField { field, .. } if field == "assignee"
+                            ) && matches!(
+                                right,
+                                NormalizedValueRef::SourceField { field, .. } if field == "assignee"
+                            )
+                    )
+        ));
+    }
+
+    #[test]
     fn aggregate_sum_min_max_over_filtered_query() {
         let (_dir, mut node) = open_node();
         let alice = author(1);
@@ -8406,6 +8504,43 @@ mod tests {
             .unwrap();
         let shape = Query::from("issues")
             .join_via_with_nested_joins("issue_members", "issue", [], [nested])
+            .validate(&schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let rows = node
+            .query_rows(&shape, &binding, DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(rows, BTreeSet::from([row(0), row(2)]));
+    }
+
+    #[test]
+    fn query_join_via_source_lookup_filters_visible_roots() {
+        let (_dir, mut node) = open_node();
+        let alice = author(1);
+        let bob = author(2);
+        commit_global_user(&mut node, alice, "Alice", 1);
+        commit_global_user(&mut node, bob, "Bob", 2);
+        commit_issue(&mut node, 0, "open", alice);
+        commit_issue(&mut node, 1, "open", bob);
+        commit_issue(&mut node, 2, "open", alice);
+        commit_member(&mut node, 0, row(100), alice);
+        commit_member(&mut node, 1, row(101), bob);
+
+        let shape = Query::from("issues")
+            .join_via_source_lookup(
+                "issue_members",
+                "user",
+                JoinSourceLookup {
+                    table: "users".to_owned(),
+                    row_id_source_column: "assignee".to_owned(),
+                    value_column: "id".to_owned(),
+                },
+                [eq(col("issue"), lit(Value::Uuid(row(100).0)))],
+            )
             .validate(&schema())
             .unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
