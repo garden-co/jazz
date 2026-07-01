@@ -842,6 +842,106 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
 }
 
 #[test]
+fn current_join_via_lowers_source_column_to_row_id_target() {
+    let root = RowSetNodeId("root".to_owned());
+    let join_source_node = RowSetNodeId("join-source".to_owned());
+    let join_node = RowSetNodeId("join".to_owned());
+    let root_source = source("todos", SourceRole::Root);
+    let join_source = source("todo_tags", SourceRole::Alias("join_via:0".to_owned()));
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(joined_current_read_view()),
+        policy: system_policy_context(),
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x74),
+                    canonical: vec![0x74],
+                },
+                root: join_node.clone(),
+                result: ResultId::RealRow {
+                    table: "todos".to_owned(),
+                    row: ResultRowRef::Source(root_source.clone()),
+                },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: vec![JoinContribution {
+                    id: "join_via:0".to_owned(),
+                    source: join_source.clone(),
+                    input: join_source_node.clone(),
+                    root_key: NormalizedValueRef::SourceField {
+                        source: root_source.clone(),
+                        field: "todo".to_owned(),
+                    },
+                    join_key: NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone())),
+                }],
+                reachable_contributions: Vec::new(),
+                nodes: BTreeMap::from([
+                    (
+                        root.clone(),
+                        RowSetExpr::Source {
+                            source: root_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        join_source_node.clone(),
+                        RowSetExpr::Source {
+                            source: join_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        join_node.clone(),
+                        RowSetExpr::Join {
+                            left: root,
+                            right: join_source_node,
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::SourceField {
+                                    source: root_source.clone(),
+                                    field: "todo".to_owned(),
+                                },
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    join_source.clone(),
+                                )),
+                            },
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x74; 16])),
+                values: BTreeMap::new(),
+            },
+        },
+        output: row_set_output(BTreeSet::from([ProgramFactKey::ResultMembership])),
+    };
+
+    let mut resolver = FakeSourceResolver::default();
+    let program = lower_query_program(request, &mut resolver)
+        .expect("source-column row-id join_via should lower");
+
+    assert!(program.lowered.terminals.iter().any(|terminal| matches!(
+        terminal.graph,
+        GraphBuilder::Project { ref input, .. }
+            if matches!(
+                input.as_ref(),
+                GraphBuilder::Join { left, right, left_on, right_on }
+                    if matches!(
+                        left.as_ref(),
+                        GraphBuilder::UnwrapNullable { input, field }
+                            if matches!(input.as_ref(), GraphBuilder::Table { table } if table == "resolved_todos")
+                                && matches!(field, groove::ivm::FieldRef::Name(name) if name == "user_todo")
+                    )
+                        && matches!(right.as_ref(), GraphBuilder::Table { table } if table == "resolved_todo_tags")
+                        && matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+            )
+    )));
+}
+
+#[test]
 fn correlated_path_projection_lowers_with_relation_fact_schemas() {
     let parent_node = RowSetNodeId("parent".to_owned());
     let child_node = RowSetNodeId("child".to_owned());
