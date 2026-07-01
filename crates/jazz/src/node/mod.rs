@@ -84,12 +84,6 @@ fn next_groove_runtime_token() -> u64 {
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct MaintainedViewAddBundleStats {
-    pub(super) stream_b_bundles: usize,
-}
-
-#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub(super) struct MaintainedViewReplacementForRemove {
     pub(super) content_winner: Option<VersionRow>,
@@ -97,17 +91,9 @@ pub(super) struct MaintainedViewReplacementForRemove {
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct MaintainedViewRemovalBundleStats {
-    pub(super) stream_bundles: usize,
-}
-
-#[cfg(test)]
 std::thread_local! {
     static QUERY_VERSIONS_FOR_TX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MAINTAINED_VIEW_MATERIALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -140,44 +126,8 @@ fn record_maintained_view_materialize_call() {
     MAINTAINED_VIEW_MATERIALIZE_CALLS.with(|calls| calls.set(calls.get() + 1));
 }
 
-#[cfg(test)]
-pub(super) fn reset_maintained_view_add_bundle_stats() {
-    MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES.with(|bundles| bundles.set(0));
-}
-
-#[cfg(test)]
-pub(super) fn maintained_view_add_bundle_stats() -> MaintainedViewAddBundleStats {
-    MaintainedViewAddBundleStats {
-        stream_b_bundles: MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES.with(std::cell::Cell::get),
-    }
-}
-
-#[cfg(test)]
-fn record_maintained_view_stream_b_add_bundle() {
-    MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES.with(|bundles| bundles.set(bundles.get() + 1));
-}
-
-#[cfg(not(test))]
 fn record_maintained_view_stream_b_add_bundle() {}
 
-#[cfg(test)]
-pub(super) fn reset_maintained_view_removal_bundle_stats() {
-    MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES.with(|bundles| bundles.set(0));
-}
-
-#[cfg(test)]
-pub(super) fn maintained_view_removal_bundle_stats() -> MaintainedViewRemovalBundleStats {
-    MaintainedViewRemovalBundleStats {
-        stream_bundles: MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES.with(std::cell::Cell::get),
-    }
-}
-
-#[cfg(test)]
-fn record_maintained_view_removal_stream_bundle() {
-    MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES.with(|bundles| bundles.set(bundles.get() + 1));
-}
-
-#[cfg(not(test))]
 fn record_maintained_view_removal_stream_bundle() {}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
