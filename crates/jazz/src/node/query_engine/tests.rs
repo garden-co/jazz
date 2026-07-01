@@ -842,7 +842,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
 }
 
 #[test]
-fn current_join_via_lowers_source_column_to_row_id_target() {
+fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
     let root = RowSetNodeId("root".to_owned());
     let join_source_node = RowSetNodeId("join-source".to_owned());
     let join_node = RowSetNodeId("join".to_owned());
@@ -868,11 +868,25 @@ fn current_join_via_lowers_source_column_to_row_id_target() {
                     id: "join_via:0".to_owned(),
                     source: join_source.clone(),
                     input: join_source_node.clone(),
-                    root_key: NormalizedValueRef::SourceField {
-                        source: root_source.clone(),
-                        field: "todo".to_owned(),
-                    },
-                    join_key: NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone())),
+                    key_pairs: vec![
+                        (
+                            NormalizedValueRef::SourceField {
+                                source: root_source.clone(),
+                                field: "todo".to_owned(),
+                            },
+                            NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone())),
+                        ),
+                        (
+                            NormalizedValueRef::SourceField {
+                                source: root_source.clone(),
+                                field: "tag".to_owned(),
+                            },
+                            NormalizedValueRef::SourceField {
+                                source: join_source.clone(),
+                                field: "tag".to_owned(),
+                            },
+                        ),
+                    ],
                 }],
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
@@ -896,16 +910,29 @@ fn current_join_via_lowers_source_column_to_row_id_target() {
                             left: root,
                             right: join_source_node,
                             mode: JoinMode::Inner,
-                            on: PredicateExpr::Compare {
-                                left: NormalizedValueRef::SourceField {
-                                    source: root_source.clone(),
-                                    field: "todo".to_owned(),
+                            on: PredicateExpr::And(vec![
+                                PredicateExpr::Compare {
+                                    left: NormalizedValueRef::SourceField {
+                                        source: root_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
+                                    op: ComparisonOp::Eq,
+                                    right: NormalizedValueRef::RowId(RowIdRef::Source(
+                                        join_source.clone(),
+                                    )),
                                 },
-                                op: ComparisonOp::Eq,
-                                right: NormalizedValueRef::RowId(RowIdRef::Source(
-                                    join_source.clone(),
-                                )),
-                            },
+                                PredicateExpr::Compare {
+                                    left: NormalizedValueRef::SourceField {
+                                        source: root_source.clone(),
+                                        field: "tag".to_owned(),
+                                    },
+                                    op: ComparisonOp::Eq,
+                                    right: NormalizedValueRef::SourceField {
+                                        source: join_source.clone(),
+                                        field: "tag".to_owned(),
+                                    },
+                                },
+                            ]),
                         },
                     ),
                 ]),
@@ -920,7 +947,7 @@ fn current_join_via_lowers_source_column_to_row_id_target() {
 
     let mut resolver = FakeSourceResolver::default();
     let program = lower_query_program(request, &mut resolver)
-        .expect("source-column row-id join_via should lower");
+        .expect("source-column row-id join_via with correlations should lower");
 
     assert!(program.lowered.terminals.iter().any(|terminal| matches!(
         terminal.graph,
@@ -928,15 +955,22 @@ fn current_join_via_lowers_source_column_to_row_id_target() {
             if matches!(
                 input.as_ref(),
                 GraphBuilder::Join { left, right, left_on, right_on }
-                    if matches!(
-                        left.as_ref(),
-                        GraphBuilder::UnwrapNullable { input, field }
-                            if matches!(input.as_ref(), GraphBuilder::Table { table } if table == "resolved_todos")
-                                && matches!(field, groove::ivm::FieldRef::Name(name) if name == "user_todo")
-                    )
-                        && matches!(right.as_ref(), GraphBuilder::Table { table } if table == "resolved_todo_tags")
-                        && matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
-                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
+                    if matches!(left.as_ref(), GraphBuilder::UnwrapNullable { .. })
+                        && matches!(right.as_ref(), GraphBuilder::UnwrapNullable { .. })
+                        && matches!(
+                            left_on.as_slice(),
+                            [
+                                groove::ivm::FieldRef::Name(todo),
+                                groove::ivm::FieldRef::Name(tag)
+                            ] if todo == "user_todo" && tag == "user_tag"
+                        )
+                        && matches!(
+                            right_on.as_slice(),
+                            [
+                                groove::ivm::FieldRef::Name(row_uuid),
+                                groove::ivm::FieldRef::Name(tag)
+                            ] if row_uuid == "row_uuid" && tag == "user_tag"
+                        )
             )
     )));
 }
