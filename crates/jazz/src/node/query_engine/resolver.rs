@@ -106,6 +106,17 @@ pub(crate) struct ResolvedSource {
     pub(crate) graph: GraphBuilder,
     /// Canonical row shape emitted by the source graph.
     pub(crate) row_shape: SourceRowShape,
+    /// Deletion register rows for the same source, when requested explicitly.
+    pub(crate) deletion_register: Option<DeletionRegisterSource>,
+}
+
+/// Concrete deletion-register source selected by node-side source resolution.
+#[derive(Clone, Debug)]
+pub(crate) struct DeletionRegisterSource {
+    /// Graph emitting current deletion-register rows with canonical storage fields.
+    pub(crate) graph: GraphBuilder,
+    /// Field containing row identity.
+    pub(crate) row_uuid_field: String,
 }
 
 /// Canonical row shape emitted by source resolution.

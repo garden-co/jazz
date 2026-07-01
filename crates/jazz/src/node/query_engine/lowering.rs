@@ -1562,6 +1562,9 @@ fn source_requirements(
                     source_requirements
                         .metadata
                         .insert(SourceMetadataRequirement::VersionWitnesses);
+                    source_requirements
+                        .metadata
+                        .insert(SourceMetadataRequirement::DeletionMarkers);
                 }
             }
             ProgramFactKey::SourceCoverage(_) => {
@@ -4269,7 +4272,7 @@ fn lowered_terminals(
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
                     graph: deletion_witness_graph_for_current_register(
                         resolved_source,
-                        request,
+                        None,
                         "version_deletion",
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
@@ -4309,7 +4312,7 @@ fn lowered_terminals(
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
                     graph: deletion_witness_graph_for_current_register(
                         resolved_source,
-                        request,
+                        None,
                         "replacement_deletion",
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
@@ -5198,107 +5201,33 @@ fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
         .unwrap_or_else(|| path.path.child.table.clone())
 }
 
-fn deletion_witness_graph_for_members(
-    member_graph: GraphBuilder,
-    source: &ResolvedSource,
-    request: &QueryProgramRequest,
-    event_kind: &str,
-) -> CapabilityResult<GraphBuilder> {
-    let tier =
-        source_current_tier(request, &source.row_shape.source).unwrap_or(DurabilityTier::Local);
-    let table = &source.table_schema.name;
-    let deletion_current = register_current_keys_graph(table, tier);
-    let graph = GraphBuilder::join(
-        GraphBuilder::table(register_table_name_for_query_engine(table)),
-        deletion_current,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .project_fields(register_storage_fields("left."));
-    let graph = GraphBuilder::join(
-        graph,
-        member_graph.project([source.row_shape.row_uuid_field.clone()]),
-        ["row_uuid"],
-        [source.row_shape.row_uuid_field.clone()],
-    )
-    .project_fields(register_storage_fields("left."));
-    Ok(graph.project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
-}
-
 fn deletion_witness_graph_for_current_register(
     source: &ResolvedSource,
-    request: &QueryProgramRequest,
+    member_graph: Option<GraphBuilder>,
     event_kind: &str,
 ) -> CapabilityResult<GraphBuilder> {
-    let tier =
-        source_current_tier(request, &source.row_shape.source).unwrap_or(DurabilityTier::Local);
-    let table = &source.table_schema.name;
-    let deletion_current = register_current_keys_graph(table, tier);
-    let graph = GraphBuilder::join(
-        GraphBuilder::table(register_table_name_for_query_engine(table)),
-        deletion_current,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .project_fields(register_storage_fields("left."));
+    let Some(register) = &source.deletion_register else {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(
+                "resolved source did not provide deletion register source".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        }));
+    };
+    let mut graph = register.graph.clone();
+    if let Some(member_graph) = member_graph {
+        graph = GraphBuilder::join(
+            graph,
+            member_graph.project([source.row_shape.row_uuid_field.clone()]),
+            [register.row_uuid_field.clone()],
+            [source.row_shape.row_uuid_field.clone()],
+        )
+        .project_fields(deletion_register_storage_fields("left."));
+    }
     Ok(graph.project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
 }
 
-fn register_table_name_for_query_engine(table: &str) -> String {
-    format!("jazz_{table}_register")
-}
-
-fn register_global_current_table_name_for_query_engine(table: &str) -> String {
-    format!("jazz_{table}_register_global_current")
-}
-
-fn register_ahead_current_table_name_for_query_engine(table: &str) -> String {
-    format!("jazz_{table}_register_ahead_current")
-}
-
-fn register_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
-    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
-    if tier == DurabilityTier::Global {
-        return GraphBuilder::table(register_global_current_table_name_for_query_engine(table))
-            .project(key_fields);
-    }
-    let ahead_table = register_ahead_current_table_name_for_query_engine(table);
-    let ahead = if tier == DurabilityTier::Edge {
-        GraphBuilder::join(
-            GraphBuilder::table(ahead_table).project(key_fields),
-            GraphBuilder::table("jazz_transactions")
-                .filter(
-                    GroovePredicateExpr::Or(vec![
-                        GroovePredicateExpr::eq("durability", Value::Enum(2)),
-                        GroovePredicateExpr::eq("durability", Value::Enum(3)),
-                    ])
-                    .canonicalize(),
-                )
-                .project(["time", "node_id"]),
-            ["tx_time", "tx_node_id"],
-            ["time", "node_id"],
-        )
-        .project_fields(
-            key_fields
-                .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field)),
-        )
-    } else {
-        GraphBuilder::table(ahead_table).project(key_fields)
-    };
-    GraphBuilder::arg_max_by(
-        GraphBuilder::union([
-            GraphBuilder::table(register_global_current_table_name_for_query_engine(table))
-                .project(key_fields),
-            ahead,
-        ]),
-        ["row_uuid"],
-        ["tx_time", "tx_node_id"],
-    )
-    .project(key_fields)
-}
-
-fn register_storage_fields(prefix: &str) -> Vec<ProjectField> {
+fn deletion_register_storage_fields(prefix: &str) -> Vec<ProjectField> {
     [
         "row_uuid",
         "tx_time",
