@@ -508,8 +508,40 @@ where
                 .node
                 .branch_current_rows(&request.source.table, &branch)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let graph = inline_current_graph(&table, rows)
+            let base = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let graph = match &request.authorization {
+                SourceAuthorizationRequest::System => base,
+                SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                } => {
+                    if plan.protected_source.table != table.name
+                        || plan.role != PolicyDecisionRole::Read
+                        || plan.protected_row_field != "row_uuid"
+                    {
+                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    }
+                    let policy_request = self
+                        .node
+                        .branch_table_read_policy_authorization_request(
+                            branch_id,
+                            &table,
+                            *permission_subject,
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                    let output_fields = current_row_fields(&table);
+                    self.node
+                        .policy_filtered_current_source_graph_via_query_engine(
+                            policy_request,
+                            base,
+                            &output_fields,
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                }
+            };
             let descriptor = current_row_descriptor(&table);
             (graph, descriptor, BTreeMap::new())
         } else if let Some(tx_id) = open_tx_overlay {
@@ -4384,6 +4416,79 @@ where
         };
         Ok(QueryProgramRequest {
             reads: current_query_read_set(&input.shape, policy_shape.schema_version(), tier, None),
+            policy: match self.query_program_policy_context(identity) {
+                PolicyContext::Identity {
+                    mode,
+                    permission_subject,
+                    claims,
+                    attribution,
+                } => PolicyContext::AuthorizationSubplan {
+                    mode,
+                    permission_subject,
+                    claims,
+                    attribution,
+                },
+                other => other,
+            },
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AuthorizedRows,
+                policy_shape.query(),
+            ),
+        })
+    }
+
+    fn branch_table_read_policy_authorization_request(
+        &self,
+        branch_id: BranchId,
+        table: &TableSchema,
+        identity: AuthorId,
+        binding_source_shape: Option<String>,
+        binding_user_params: BTreeMap<String, ColumnType>,
+    ) -> Result<QueryProgramRequest, Error> {
+        let claims = self.session_claims.get(&identity);
+        let mut query = authorization_query_from_read_policy(table);
+        rewrite_policy_claims_for_authorization(&mut query, claims);
+        if !query.includes.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "branch policy source filters do not support include policies",
+            ));
+        }
+        let policy_shape = query.validate(&self.catalogue.schema)?;
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        let policy_shape = bind_query_params_with_mode(
+            &policy_shape,
+            &policy_binding,
+            &self.catalogue.schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        if !policy_shape.params().is_empty() {
+            return Err(Error::QueryCapability(
+                "branch policy source filters with runtime parameters must lower through query-engine binding sources"
+                    .to_owned(),
+            ));
+        }
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        if let Some(binding_source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &binding_source_shape);
+        }
+        let input = RowSetProgramInput {
+            shape: input_shape,
+            binding: ProgramBinding {
+                id: binding.binding_id(),
+                source_shape: binding_source_shape,
+                extra_user_params: binding_user_params,
+                values: binding.values().clone(),
+            },
+        };
+        Ok(QueryProgramRequest {
+            reads: branch_query_read_set(
+                &input.shape,
+                policy_shape.schema_version(),
+                DurabilityTier::Local,
+                branch_id,
+            ),
             policy: match self.query_program_policy_context(identity) {
                 PolicyContext::Identity {
                     mode,
