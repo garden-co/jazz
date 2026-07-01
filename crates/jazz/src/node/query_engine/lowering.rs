@@ -646,44 +646,10 @@ fn validate_output_capabilities(
 }
 
 fn maintained_result_membership_window_supported(plan: &AnalyzedQueryPlan) -> bool {
-    match plan {
-        AnalyzedQueryPlan::Linear(linear) => linear_window_supported(&linear.steps),
-        AnalyzedQueryPlan::Union(union) => union
-            .branches
-            .iter()
-            .all(|branch| relation_window_supported(&branch.plan)),
-        AnalyzedQueryPlan::CorrelatedPath(path) => {
-            linear_window_supported(&path.parent.steps)
-                && linear_window_supported(&path.output_steps)
-                && linear_window_supported(&path.child.steps)
-                && path.nested.iter().all(correlated_path_window_supported)
-        }
-        AnalyzedQueryPlan::RecursiveRelation(relation) => {
-            linear_window_supported(&relation.seed.steps)
-                && linear_window_supported(&relation.step.steps)
-        }
-    }
-}
-
-fn correlated_path_window_supported(path: &CorrelatedPathPlan) -> bool {
-    linear_window_supported(&path.parent.steps)
-        && linear_window_supported(&path.output_steps)
-        && linear_window_supported(&path.child.steps)
-        && path.nested.iter().all(correlated_path_window_supported)
-}
-
-fn relation_window_supported(plan: &RelationInputPlan) -> bool {
-    match plan {
-        RelationInputPlan::Linear(linear) => linear_window_supported(&linear.steps),
-        RelationInputPlan::Union(union) => union
-            .branches
-            .iter()
-            .all(|branch| relation_window_supported(&branch.plan)),
-        RelationInputPlan::Recursive(relation) => {
-            linear_window_supported(&relation.seed.steps)
-                && linear_window_supported(&relation.step.steps)
-        }
-    }
+    collect_plan_fragments(plan)
+        .linears
+        .iter()
+        .all(|fragment| linear_window_supported(fragment.steps))
 }
 
 fn linear_window_supported(steps: &[LinearStep]) -> bool {
@@ -696,12 +662,7 @@ fn linear_window_supported(steps: &[LinearStep]) -> bool {
                     return false;
                 }
             }
-            LinearStep::Join { right, .. } => {
-                if !relation_window_supported(right) {
-                    return false;
-                }
-            }
-            LinearStep::Filter(_) | LinearStep::Project(_) => {}
+            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
         }
     }
     true
@@ -1003,29 +964,101 @@ fn validate_result_source(
     }
 }
 
-fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
+struct LinearFragment<'a> {
+    root: Option<&'a LinearRoot>,
+    steps: &'a [LinearStep],
+}
+
+#[derive(Default)]
+struct PlanFragments<'a> {
+    linears: Vec<LinearFragment<'a>>,
+    correlations: Vec<&'a PredicateExpr>,
+    recursives: Vec<&'a RecursiveRelationPlan>,
+}
+
+fn collect_plan_fragments(plan: &AnalyzedQueryPlan) -> PlanFragments<'_> {
+    let mut fragments = PlanFragments::default();
+    collect_analyzed_fragments(plan, &mut fragments);
+    fragments
+}
+
+fn collect_analyzed_fragments<'a>(plan: &'a AnalyzedQueryPlan, fragments: &mut PlanFragments<'a>) {
     match plan {
-        AnalyzedQueryPlan::Linear(linear) => linear_plan_sources(linear),
-        AnalyzedQueryPlan::Union(union) => union_plan_sources(union),
+        AnalyzedQueryPlan::Linear(linear) => collect_linear_fragments(linear, fragments),
+        AnalyzedQueryPlan::Union(union) => collect_union_fragments(union, fragments),
         AnalyzedQueryPlan::CorrelatedPath(path) => {
-            let mut sources = linear_plan_sources(&path.parent);
-            collect_correlated_path_sources(path, &mut sources);
-            sources
+            collect_correlated_path_fragments(path, fragments)
         }
         AnalyzedQueryPlan::RecursiveRelation(relation) => {
-            let mut sources = linear_plan_sources(&relation.seed);
-            sources.extend(linear_plan_sources(&relation.step));
-            sources
+            collect_recursive_fragments(relation, fragments)
         }
     }
 }
 
-fn collect_correlated_path_sources(path: &CorrelatedPathPlan, sources: &mut BTreeSet<SourceId>) {
-    sources.extend(linear_plan_sources(&path.child));
-    for nested in &path.nested {
-        sources.extend(linear_plan_sources(&nested.parent));
-        collect_correlated_path_sources(nested, sources);
+fn collect_correlated_path_fragments<'a>(
+    path: &'a CorrelatedPathPlan,
+    fragments: &mut PlanFragments<'a>,
+) {
+    collect_linear_fragments(&path.parent, fragments);
+    collect_linear_fragments(&path.child, fragments);
+    fragments.correlations.push(&path.correlation);
+    if !path.output_steps.is_empty() {
+        fragments.linears.push(LinearFragment {
+            root: None,
+            steps: &path.output_steps,
+        });
+        collect_step_relation_fragments(&path.output_steps, fragments);
     }
+    for nested in &path.nested {
+        collect_correlated_path_fragments(nested, fragments);
+    }
+}
+
+fn collect_relation_fragments<'a>(plan: &'a RelationInputPlan, fragments: &mut PlanFragments<'a>) {
+    match plan {
+        RelationInputPlan::Linear(linear) => collect_linear_fragments(linear, fragments),
+        RelationInputPlan::Union(union) => collect_union_fragments(union, fragments),
+        RelationInputPlan::Recursive(relation) => collect_recursive_fragments(relation, fragments),
+    }
+}
+
+fn collect_union_fragments<'a>(union: &'a UnionPlan, fragments: &mut PlanFragments<'a>) {
+    for branch in &union.branches {
+        collect_relation_fragments(&branch.plan, fragments);
+    }
+}
+
+fn collect_recursive_fragments<'a>(
+    relation: &'a RecursiveRelationPlan,
+    fragments: &mut PlanFragments<'a>,
+) {
+    fragments.recursives.push(relation);
+    collect_linear_fragments(&relation.seed, fragments);
+    collect_linear_fragments(&relation.step, fragments);
+}
+
+fn collect_linear_fragments<'a>(linear: &'a LinearCurrentRoot, fragments: &mut PlanFragments<'a>) {
+    fragments.linears.push(LinearFragment {
+        root: Some(&linear.root),
+        steps: &linear.steps,
+    });
+    collect_step_relation_fragments(&linear.steps, fragments);
+}
+
+fn collect_step_relation_fragments<'a>(steps: &'a [LinearStep], fragments: &mut PlanFragments<'a>) {
+    for step in steps {
+        if let LinearStep::Join { right, .. } = step {
+            collect_relation_fragments(right, fragments);
+        }
+    }
+}
+
+fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
+    collect_plan_fragments(plan)
+        .linears
+        .into_iter()
+        .filter_map(|fragment| fragment.root?.source().cloned())
+        .collect()
 }
 
 fn program_sources(request: &QueryProgramRequest, plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
@@ -1036,128 +1069,17 @@ fn program_sources(request: &QueryProgramRequest, plan: &AnalyzedQueryPlan) -> B
 
 fn source_visibilities(plan: &AnalyzedQueryPlan) -> BTreeMap<SourceId, RowVisibility> {
     let mut visibilities = BTreeMap::new();
-    collect_plan_source_visibilities(plan, &mut visibilities);
+    for fragment in collect_plan_fragments(plan).linears {
+        if let Some(LinearRoot::Source { source, visibility }) = fragment.root {
+            let entry = visibilities
+                .entry(source.clone())
+                .or_insert(RowVisibility::Visible);
+            if *visibility > *entry {
+                *entry = *visibility;
+            }
+        }
+    }
     visibilities
-}
-
-fn collect_plan_source_visibilities(
-    plan: &AnalyzedQueryPlan,
-    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
-) {
-    match plan {
-        AnalyzedQueryPlan::Linear(linear) => {
-            collect_linear_source_visibilities(linear, visibilities);
-        }
-        AnalyzedQueryPlan::Union(union) => {
-            collect_union_source_visibilities(union, visibilities);
-        }
-        AnalyzedQueryPlan::CorrelatedPath(path) => {
-            collect_linear_source_visibilities(&path.parent, visibilities);
-            collect_correlated_path_source_visibilities(path, visibilities);
-        }
-        AnalyzedQueryPlan::RecursiveRelation(relation) => {
-            collect_linear_source_visibilities(&relation.seed, visibilities);
-            collect_linear_source_visibilities(&relation.step, visibilities);
-        }
-    }
-}
-
-fn collect_correlated_path_source_visibilities(
-    path: &CorrelatedPathPlan,
-    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
-) {
-    collect_linear_source_visibilities(&path.child, visibilities);
-    for nested in &path.nested {
-        collect_linear_source_visibilities(&nested.parent, visibilities);
-        collect_correlated_path_source_visibilities(nested, visibilities);
-    }
-}
-
-fn collect_linear_source_visibilities(
-    plan: &LinearCurrentRoot,
-    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
-) {
-    if let LinearRoot::Source { source, visibility } = &plan.root {
-        let entry = visibilities
-            .entry(source.clone())
-            .or_insert(RowVisibility::Visible);
-        if *visibility > *entry {
-            *entry = *visibility;
-        }
-    }
-    for step in &plan.steps {
-        if let LinearStep::Join { right, .. } = step {
-            collect_relation_source_visibilities(right, visibilities);
-        }
-    }
-}
-
-fn collect_relation_source_visibilities(
-    plan: &RelationInputPlan,
-    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
-) {
-    match plan {
-        RelationInputPlan::Linear(linear) => {
-            collect_linear_source_visibilities(linear, visibilities);
-        }
-        RelationInputPlan::Union(union) => {
-            collect_union_source_visibilities(union, visibilities);
-        }
-        RelationInputPlan::Recursive(relation) => {
-            collect_linear_source_visibilities(&relation.seed, visibilities);
-            collect_linear_source_visibilities(&relation.step, visibilities);
-        }
-    }
-}
-
-fn collect_union_source_visibilities(
-    plan: &UnionPlan,
-    visibilities: &mut BTreeMap<SourceId, RowVisibility>,
-) {
-    for branch in &plan.branches {
-        collect_relation_source_visibilities(&branch.plan, visibilities);
-    }
-}
-
-fn linear_plan_sources(plan: &LinearCurrentRoot) -> BTreeSet<SourceId> {
-    let mut sources = plan
-        .root
-        .source()
-        .cloned()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    sources.extend(step_sources(&plan.steps));
-    sources
-}
-
-fn relation_plan_sources(plan: &RelationInputPlan) -> BTreeSet<SourceId> {
-    match plan {
-        RelationInputPlan::Linear(linear) => linear_plan_sources(linear),
-        RelationInputPlan::Union(union) => union_plan_sources(union),
-        RelationInputPlan::Recursive(relation) => {
-            let mut sources = linear_plan_sources(&relation.seed);
-            sources.extend(linear_plan_sources(&relation.step));
-            sources
-        }
-    }
-}
-
-fn union_plan_sources(plan: &UnionPlan) -> BTreeSet<SourceId> {
-    let mut sources = BTreeSet::new();
-    for branch in &plan.branches {
-        sources.extend(relation_plan_sources(&branch.plan));
-    }
-    sources
-}
-
-fn step_sources(steps: &[LinearStep]) -> BTreeSet<SourceId> {
-    let mut sources = BTreeSet::new();
-    for step in steps {
-        if let LinearStep::Join { right, .. } = step {
-            sources.extend(relation_plan_sources(right));
-        }
-    }
-    sources
 }
 
 fn source_current_tier(request: &QueryProgramRequest, source: &SourceId) -> Option<DurabilityTier> {
@@ -1578,82 +1500,37 @@ fn collect_plan_requirements(
     plan: &AnalyzedQueryPlan,
     requirements: &mut BTreeMap<SourceId, SourceRequirements>,
 ) -> CapabilityResult<()> {
-    match plan {
-        AnalyzedQueryPlan::Linear(linear) => collect_linear_requirements(linear, requirements),
-        AnalyzedQueryPlan::Union(union) => collect_union_requirements(union, requirements),
-        AnalyzedQueryPlan::CorrelatedPath(path) => {
-            collect_linear_requirements(&path.parent, requirements)?;
-            collect_correlated_path_requirements(path, requirements)?;
-            for step in &path.output_steps {
-                for (source, source_requirements) in requirements.iter_mut() {
-                    collect_step_requirements(step, source, source_requirements)?;
-                }
+    let fragments = collect_plan_fragments(plan);
+    for fragment in &fragments.linears {
+        for step in fragment.steps {
+            for (source, source_requirements) in requirements.iter_mut() {
+                collect_step_requirements(step, source, source_requirements)?;
             }
-            Ok(())
         }
-        AnalyzedQueryPlan::RecursiveRelation(relation) => {
-            collect_linear_requirements(&relation.seed, requirements)?;
-            collect_linear_requirements(&relation.step, requirements)?;
+    }
+    for correlation in fragments.correlations {
+        collect_predicate_requirements_for_all_sources(correlation, requirements)?;
+    }
+    for relation in fragments.recursives {
+        if !matches!(
+            relation.frontier_key,
+            NormalizedValueRef::FrontierColumn { .. }
+                | NormalizedValueRef::RowId(RowIdRef::Frontier(_))
+                | NormalizedValueRef::Param(_)
+                | NormalizedValueRef::Literal(_)
+        ) {
+            collect_value_requirements_for_all_sources(&relation.frontier_key, requirements)?;
+        }
+        for key in &relation.dedupe_keys {
             if !matches!(
-                relation.frontier_key,
+                key,
                 NormalizedValueRef::FrontierColumn { .. }
                     | NormalizedValueRef::RowId(RowIdRef::Frontier(_))
                     | NormalizedValueRef::Param(_)
                     | NormalizedValueRef::Literal(_)
             ) {
-                collect_value_requirements_for_all_sources(&relation.frontier_key, requirements)?;
+                collect_value_requirements_for_all_sources(key, requirements)?;
             }
-            for key in &relation.dedupe_keys {
-                if !matches!(
-                    key,
-                    NormalizedValueRef::FrontierColumn { .. }
-                        | NormalizedValueRef::RowId(RowIdRef::Frontier(_))
-                        | NormalizedValueRef::Param(_)
-                        | NormalizedValueRef::Literal(_)
-                ) {
-                    collect_value_requirements_for_all_sources(key, requirements)?;
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-fn collect_union_requirements(
-    union: &UnionPlan,
-    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
-) -> CapabilityResult<()> {
-    for branch in &union.branches {
-        collect_relation_requirements(&branch.plan, requirements)?;
-    }
-    Ok(())
-}
-
-fn collect_correlated_path_requirements(
-    path: &CorrelatedPathPlan,
-    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
-) -> CapabilityResult<()> {
-    collect_linear_requirements(&path.child, requirements)?;
-    collect_predicate_requirements_for_all_sources(&path.correlation, requirements)?;
-    for nested in &path.nested {
-        collect_linear_requirements(&nested.parent, requirements)?;
-        collect_correlated_path_requirements(nested, requirements)?;
-    }
-    Ok(())
-}
-
-fn collect_linear_requirements(
-    plan: &LinearCurrentRoot,
-    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
-) -> CapabilityResult<()> {
-    for step in &plan.steps {
-        if let LinearStep::Join { right, .. } = step {
-            collect_relation_requirements(right, requirements)?;
-        }
-    }
-    for step in &plan.steps {
-        for (source, source_requirements) in requirements.iter_mut() {
-            collect_step_requirements(step, source, source_requirements)?;
         }
     }
     Ok(())
@@ -1750,20 +1627,6 @@ fn collect_step_requirements(
             },
         })
     })
-}
-
-fn collect_relation_requirements(
-    plan: &RelationInputPlan,
-    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
-) -> CapabilityResult<()> {
-    match plan {
-        RelationInputPlan::Linear(linear) => collect_linear_requirements(linear, requirements),
-        RelationInputPlan::Union(union) => collect_union_requirements(union, requirements),
-        RelationInputPlan::Recursive(relation) => {
-            collect_linear_requirements(&relation.seed, requirements)?;
-            collect_linear_requirements(&relation.step, requirements)
-        }
-    }
 }
 
 fn collect_predicate_requirements(
