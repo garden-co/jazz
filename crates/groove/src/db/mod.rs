@@ -31,7 +31,7 @@ use thiserror::Error;
 
 pub use crate::ivm::{
     GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription, PredicateExpr,
-    PreparedShapeId, Subscription, SubscriptionId,
+    PreparedShapeId, RoutedMultisinkTerminal, Subscription, SubscriptionId,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
@@ -422,6 +422,26 @@ where
             .map_err(Error::IvmRuntime)
     }
 
+    /// Prepare a graph-level multisink shape whose terminal graphs carry
+    /// hidden route columns. Binding appends ordinary filter/project graph
+    /// nodes for each sink.
+    pub fn prepare_routed_multisink(
+        &mut self,
+        terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+    ) -> Result<crate::ivm::PreparedShape, Error> {
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.ivm_runtime
+            .prepare_routed_multisink(
+                terminals,
+                binding_source_shape,
+                binding_descriptor,
+                &storage,
+            )
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Bind a prepared graph shape by positional values.
     ///
     /// ```rust
@@ -484,6 +504,18 @@ where
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_with_output(shape, binding_values, public_output, &storage)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Bind a routed multisink shape by positional values.
+    pub fn bind_routed_multisink_shape(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+    ) -> Result<MultisinkSubscription, Error> {
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.ivm_runtime
+            .bind_routed_multisink_shape(shape, binding_values, &storage)
             .map_err(Error::IvmRuntime)
     }
 
