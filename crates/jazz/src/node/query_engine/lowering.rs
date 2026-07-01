@@ -5,6 +5,9 @@ use groove::ivm::{
 use groove::records::ValueType;
 
 const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
+// Groove returns RecursiveIterationLimit instead of silently truncating when
+// this bound is reached before convergence.
+const FIXPOINT_MAX_ITERS: usize = 128;
 
 /// Parameter domains attached to one lowered graph.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -34,14 +37,7 @@ pub(crate) fn lower_query_program(
     request: QueryProgramRequest,
     source_resolver: &mut impl SourceResolver,
 ) -> QueryCompileResult {
-    let mut explain = ExplainPlan {
-        input: format!("{:?}", request.input),
-        read: vec![format!("{:?}", request.reads)],
-        policy: vec![format!("{:?}", request.policy)],
-        output: vec![format!("{:?}", request.output)],
-        capabilities: Vec::new(),
-        physical: Vec::new(),
-    };
+    let mut explain = ExplainPlan::default();
 
     let plan = match analyze_query_plan(&request) {
         Ok(plan) => plan,
@@ -49,7 +45,10 @@ pub(crate) fn lower_query_program(
             explain
                 .capabilities
                 .push("only current-source row-set lowering is implemented".to_owned());
-            return Err(Box::new(CapabilityReport { gaps, explain }));
+            return Err(Box::new(CapabilityReport {
+                gaps,
+                explain: explain_with_request(&request, explain),
+            }));
         }
     };
 
@@ -72,7 +71,7 @@ pub(crate) fn lower_query_program(
             .map_err(|err| {
                 Box::new(CapabilityReport {
                     gaps: vec![UnsupportedReason::Source(err.gap)],
-                    explain: explain.clone(),
+                    explain: explain_with_request(&request, explain.clone()),
                 })
             })?;
         explain.physical.push(format!(
@@ -91,7 +90,7 @@ pub(crate) fn lower_query_program(
                 gaps: vec![UnsupportedReason::Runtime(
                     "root source was not resolved".to_owned(),
                 )],
-                explain: explain.clone(),
+                explain: explain_with_request(&request, explain.clone()),
             })
         })?;
     explain
@@ -107,7 +106,7 @@ pub(crate) fn lower_query_program(
     .map_err(|gap| {
         Box::new(CapabilityReport {
             gaps: vec![gap],
-            explain: explain.clone(),
+            explain: explain_with_request(&request, explain.clone()),
         })
     })?;
 
@@ -161,6 +160,14 @@ pub(crate) fn lower_query_program(
         request,
         explain,
     })
+}
+
+fn explain_with_request(request: &QueryProgramRequest, mut explain: ExplainPlan) -> ExplainPlan {
+    explain.input = format!("{:?}", request.input);
+    explain.read = vec![format!("{:?}", request.reads)];
+    explain.policy = vec![format!("{:?}", request.policy)];
+    explain.output = vec![format!("{:?}", request.output)];
+    explain
 }
 
 fn source_authorization_for_source(
@@ -245,8 +252,10 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
             | RowSetExpr::Project { .. }
             | RowSetExpr::CorrelatedPathProjection { .. }
             | RowSetExpr::OrderBy { .. }
-            | RowSetExpr::Slice { .. }
-            | RowSetExpr::Aggregate { .. } => {}
+            | RowSetExpr::Slice { .. } => {}
+            // INV-LOWER-13: aggregation is node-side post-processing; maintained
+            // aggregate outputs are capability-gated in validate_output_capabilities.
+            RowSetExpr::Aggregate { .. } => {}
         }
     }
     domain
@@ -1217,7 +1226,7 @@ fn analyze_current_node(
 ) -> Result<(LinearRoot, Vec<LinearStep>), UnsupportedReason> {
     if !visited.insert(node_id.clone()) {
         return Err(UnsupportedReason::Operator(format!(
-            "row-set node {:?} participates in a cycle",
+            "shared row-set subgraphs are not lowered yet (node revisited): {:?}",
             node_id
         )));
     }
@@ -1316,6 +1325,8 @@ fn analyze_current_node(
         RowSetExpr::CorrelatedPathProjection { .. } => Err(UnsupportedReason::Operator(
             "correlated path projection row-set nodes are not lowered yet".to_owned(),
         )),
+        // INV-LOWER-13: aggregation is node-side post-processing; maintained
+        // aggregate outputs are capability-gated in validate_output_capabilities.
         RowSetExpr::Aggregate { input, .. } => analyze_current_node(input, nodes, visited),
     }
 }
@@ -1336,7 +1347,7 @@ fn analyze_relation_input_node(
         RowSetExpr::Union { inputs } => {
             if !visited.insert(node_id.clone()) {
                 return Err(UnsupportedReason::Operator(format!(
-                    "row-set node {:?} participates in a cycle",
+                    "shared row-set subgraphs are not lowered yet (node revisited): {:?}",
                     node_id
                 )));
             }
@@ -1352,7 +1363,7 @@ fn analyze_relation_input_node(
         } => {
             if !visited.insert(node_id.clone()) {
                 return Err(UnsupportedReason::Operator(format!(
-                    "row-set node {:?} participates in a cycle",
+                    "shared row-set subgraphs are not lowered yet (node revisited): {:?}",
                     node_id
                 )));
             }
@@ -2438,7 +2449,7 @@ fn lower_recursive_relation(
         request,
     )?;
     let max_iters = match relation.bound {
-        RecursionBound::Fixpoint => 128,
+        RecursionBound::Fixpoint => FIXPOINT_MAX_ITERS,
         RecursionBound::MaxDepth(max_depth) => max_depth.max(1),
     };
     Ok(GraphBuilder::recursive(
@@ -4158,9 +4169,15 @@ fn lowered_terminals(
                 output: OutputTerminalSchema::Fact(output.clone()),
             });
             for (source_id, closure_graph) in &closure.result_members {
-                let Some(resolved_source) = resolved_sources.get(&source_id) else {
-                    continue;
-                };
+                let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
+                    Box::new(CapabilityReport {
+                        gaps: vec![UnsupportedReason::Runtime(format!(
+                            "closure member source {:?} was not resolved",
+                            source_id
+                        ))],
+                        explain: ExplainPlan::default(),
+                    })
+                })?;
                 let output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::Primary,
@@ -4186,9 +4203,16 @@ fn lowered_terminals(
             }
             if has_explicit_closure_path(&request.input.shape) {
                 for contribution in &request.input.shape.join_contributions {
-                    let Some(resolved_source) = resolved_sources.get(&contribution.source) else {
-                        continue;
-                    };
+                    let resolved_source =
+                        resolved_sources.get(&contribution.source).ok_or_else(|| {
+                            Box::new(CapabilityReport {
+                                gaps: vec![UnsupportedReason::Runtime(format!(
+                                    "join contribution source {:?} was not resolved",
+                                    contribution.source
+                                ))],
+                                explain: ExplainPlan::default(),
+                            })
+                        })?;
                     let output = fact_output_with_terminal(
                         fact,
                         ProgramFactTerminal::Primary,
@@ -4222,9 +4246,7 @@ fn lowered_terminals(
                     });
                 }
             }
-            continue;
-        }
-        if matches!(fact, ProgramFactKey::VersionWitnesses) {
+        } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
             for (source_id, resolved_source) in resolved_sources {
                 let content_output = fact_output_with_terminal(
                     fact,
@@ -4253,15 +4275,12 @@ fn lowered_terminals(
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
                     graph: deletion_witness_graph_for_current_register(
                         resolved_source,
-                        None,
                         "version_deletion",
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
                 });
             }
-            continue;
-        }
-        if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
+        } else if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
             for (source_id, resolved_source) in resolved_sources {
                 let content_output = fact_output_with_terminal(
                     fact,
@@ -4293,31 +4312,30 @@ fn lowered_terminals(
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
                     graph: deletion_witness_graph_for_current_register(
                         resolved_source,
-                        None,
                         "replacement_deletion",
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
                 });
             }
-            continue;
+        } else {
+            let output = fact_output(fact, plan, source, resolved_sources, BTreeSet::new())?;
+            let terminal_graph =
+                fact_input_graph(fact, graph.clone(), plan, source, resolved_sources, request)?;
+            let graph = fact_terminal_graph(
+                fact,
+                terminal_graph,
+                plan,
+                source,
+                resolved_sources,
+                request,
+                BTreeSet::new(),
+            )?;
+            terminals.push(LoweredTerminal {
+                sink: fact_sink_name(fact),
+                graph,
+                output: OutputTerminalSchema::Fact(output),
+            });
         }
-        let output = fact_output(fact, plan, source, resolved_sources, BTreeSet::new())?;
-        let terminal_graph =
-            fact_input_graph(fact, graph.clone(), plan, source, resolved_sources, request)?;
-        let graph = fact_terminal_graph(
-            fact,
-            terminal_graph,
-            plan,
-            source,
-            resolved_sources,
-            request,
-            BTreeSet::new(),
-        )?;
-        terminals.push(LoweredTerminal {
-            sink: fact_sink_name(fact),
-            graph,
-            output: OutputTerminalSchema::Fact(output),
-        });
     }
 
     Ok(terminals)
@@ -5184,7 +5202,6 @@ fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
 
 fn deletion_witness_graph_for_current_register(
     source: &ResolvedSource,
-    member_graph: Option<GraphBuilder>,
     event_kind: &str,
 ) -> CapabilityResult<GraphBuilder> {
     let Some(register) = &source.deletion_register else {
@@ -5195,35 +5212,10 @@ fn deletion_witness_graph_for_current_register(
             explain: ExplainPlan::default(),
         }));
     };
-    let mut graph = register.graph.clone();
-    if let Some(member_graph) = member_graph {
-        graph = GraphBuilder::join(
-            graph,
-            member_graph.project([source.row_shape.row_uuid_field.clone()]),
-            [register.row_uuid_field.clone()],
-            [source.row_shape.row_uuid_field.clone()],
-        )
-        .project_fields(deletion_register_storage_fields("left."));
-    }
-    Ok(graph.project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
-}
-
-fn deletion_register_storage_fields(prefix: &str) -> Vec<ProjectField> {
-    [
-        "row_uuid",
-        "tx_time",
-        "tx_node_id",
-        "schema_version",
-        "parents",
-        "created_by",
-        "created_at",
-        "updated_by",
-        "updated_at",
-        "_deletion",
-    ]
-    .into_iter()
-    .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
-    .collect()
+    Ok(register
+        .graph
+        .clone()
+        .project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
 }
 
 fn result_membership_fields(
