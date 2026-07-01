@@ -289,6 +289,9 @@ fn assert_maintained_view_capture_tick(
     reset_query_versions_for_tx_call_count();
     reset_maintained_view_add_bundle_stats();
     reset_maintained_view_removal_bundle_stats();
+    // TODO(query-engine): this helper remains a bundle/read-path oracle. Move
+    // these assertions to the public maintained subscription path once it
+    // exposes equivalent instrumentation for Stream B and replacement usage.
     let (maintained_view, maintained_view_bundle_read_metrics) = core
         .maintained_view_query_update_with_bundle_read_metrics(
             shape,
