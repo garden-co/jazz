@@ -745,6 +745,19 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
     let rows = doctest_support::block_on(db.all(&prepared_query, opts.clone())).unwrap();
     assert_eq!(row_ids(&rows), vec![row(0x42)]);
 
+    let local_subscription_opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..opts.clone()
+    };
+    let mut subscription =
+        doctest_support::block_on(db.subscribe(&prepared_query, local_subscription_opts)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(
+            doctest_support::block_on(subscription.next_event()).unwrap()
+        )),
+        vec![row(0x42)]
+    );
+
     assert_unsupported_read_view(expect_error(doctest_support::block_on(
         db.all_relation_snapshot(&prepared_query, opts.clone()),
     )));

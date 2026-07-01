@@ -784,6 +784,7 @@ where
         ensure_supported_subscription_shape(&prepared.shape)?;
         let read_tier = effective_read_tier(&opts);
         if opts.propagation == Propagation::Full {
+            ensure_default_read_view(&opts)?;
             ensure_supported_propagated_subscription_tier(read_tier)?;
         }
         let (subscription, rows) = self
@@ -795,6 +796,7 @@ where
                 &prepared.binding,
                 author,
                 read_tier,
+                &opts.read_view,
             )?;
         let (maintained_subscription, snapshot) = (
             Some(subscription),
@@ -3890,7 +3892,16 @@ fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error>
             "live subscriptions do not support include_deleted yet",
         ));
     }
-    ensure_default_read_view(opts)
+    match &opts.read_view.source {
+        ReadViewSourceSpec::Current => Ok(()),
+        ReadViewSourceSpec::Branch { .. }
+            if opts.read_view.schema == Default::default()
+                && opts.read_view.overlays.is_empty() =>
+        {
+            Ok(())
+        }
+        _ => ensure_default_read_view(opts),
+    }
 }
 
 fn ensure_supported_subscription_shape(shape: &ValidatedQuery) -> Result<(), Error> {
