@@ -3407,9 +3407,20 @@ pub(crate) enum PreparedQueryPlan {
     Graph(GraphBuilder),
     Prepared {
         shape: PreparedShapeId,
-        param_names: Vec<String>,
-        param_types: Vec<groove::schema::ColumnType>,
+        params: Vec<PreparedQueryParam>,
     },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedQueryParam {
+    pub(crate) name: String,
+    pub(crate) ty: groove::schema::ColumnType,
+    pub(crate) source: PreparedQueryParamSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedQueryParamSource {
+    User,
 }
 
 fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> Result<(), Error> {
