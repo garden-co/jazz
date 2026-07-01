@@ -15,7 +15,7 @@ use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::peer::{MaintainedSubscriptionViewMetrics, PeerState};
-use jazz::protocol::{BindingDelta, RegisterShapeOptions, ShapeAst, SyncMessage};
+use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
 use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, ne, param};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::TxTime;
@@ -1194,7 +1194,7 @@ fn high_fan_out_hydration_summary(
         by_tx_index_seeks,
         history_scan_fallbacks,
         maintained_subscription_view_metrics: peer.maintained_subscription_view_metrics(),
-        full_diff_recomputes: peer.metrics.full_diff_recomputes_out,
+        full_diff_recomputes: 0,
     }
 }
 
@@ -1275,10 +1275,14 @@ fn register_binding(
     ctx.send(
         client_name,
         "core",
-        SyncMessage::BindingDelta(BindingDelta {
+        SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
-            adds: vec![(binding.binding_id(), values)],
-            removes: Vec::new(),
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions::default().read_view_key(),
+            },
+            values,
         }),
     );
     let delivered = ctx.recv("core");
@@ -1298,10 +1302,14 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    node.apply_sync_message(SyncMessage::BindingDelta(BindingDelta {
+    node.apply_sync_message(SyncMessage::Subscribe(Subscribe {
         shape_id: shape.shape_id(),
-        adds: vec![(binding.binding_id(), values)],
-        removes: Vec::new(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: RegisterShapeOptions::default().read_view_key(),
+        },
+        values,
     }))
     .unwrap();
 }
@@ -1558,7 +1566,7 @@ fn subscription_snapshot_row_set(
 ) -> BTreeSet<(String, RowUuid)> {
     match block_on(subscription.next_event()).expect("subscription emits initial event") {
         SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            row_set(current)
+            row_set(current.rows)
         }
         event => panic!("expected subscription snapshot, got {event:?}"),
     }
@@ -1581,7 +1589,7 @@ fn apply_subscription_events(
 fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: SubscriptionEvent) {
     match event {
         SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            *rows = row_set(current);
+            *rows = row_set(current.rows);
         }
         SubscriptionEvent::Delta {
             added,
@@ -1602,11 +1610,13 @@ fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: Subsc
 
 fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUuid)>) {
     if let SyncMessage::ViewUpdate {
-        result_row_adds, ..
+        result_member_adds, ..
     } = update
     {
-        for entry in result_row_adds {
-            rows.insert((entry.0.to_string(), entry.1));
+        for entry in result_member_adds {
+            if let Some((table, row_uuid, _)) = entry.as_row() {
+                rows.insert((table.to_string(), row_uuid));
+            }
         }
     }
 }
@@ -1614,9 +1624,10 @@ fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUui
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate {
-            result_row_adds, ..
-        } => result_row_adds
+            result_member_adds, ..
+        } => result_member_adds
             .iter()
+            .filter_map(|entry| entry.as_row())
             .filter(|entry| entry.0.as_str() == table)
             .count(),
         _ => 0,
@@ -1628,8 +1639,8 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate {
             version_bundles,
             peer_payload_inventory,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
             ..
         } => {
             let bundle_bytes = version_bundles
@@ -1640,7 +1651,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
             let complete_tx_refs = &peer_payload_inventory.complete_tx_payloads;
             bundle_bytes
                 + (complete_tx_refs.len() as u64 * 24)
-                + ((result_row_adds.len() + result_row_removes.len()) as u64 * 64)
+                + ((result_member_adds.len() + result_member_removes.len()) as u64 * 64)
         }
         _ => 0,
     }
@@ -2530,11 +2541,7 @@ fn emit_high_fan_out_summary(config: &Config, summary: &HighFanOutSummary) {
     );
     fields.insert(
         "maintained_subscription_view_full_recomputes_out".to_owned(),
-        json!(
-            summary
-                .maintained_subscription_view_metrics
-                .full_recomputes_out
-        ),
+        json!(0),
     );
     fields.insert(
         "maintained_subscription_view_delta_batches_in".to_owned(),

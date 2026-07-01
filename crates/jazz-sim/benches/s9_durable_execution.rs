@@ -1171,8 +1171,8 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate {
             version_bundles,
             peer_payload_inventory,
-            result_row_adds,
-            result_row_removes,
+            result_member_adds,
+            result_member_removes,
             ..
         } => {
             version_bundles
@@ -1181,7 +1181,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
-                + ((result_row_adds.len() + result_row_removes.len()) as u64 * 64)
+                + ((result_member_adds.len() + result_member_removes.len()) as u64 * 64)
         }
         _ => 0,
     }
