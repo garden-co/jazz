@@ -196,7 +196,7 @@ fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
     db.commit_batch(batch).unwrap();
 
     let shape = db
-        .prepare_routed_multisink(
+        .prepare(
             routed_doc_output_terminals(),
             "project_route",
             route_descriptor(),
@@ -204,7 +204,7 @@ fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
         .unwrap();
 
     let project_20 = db
-        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
         .unwrap();
     let initial_20 = project_20.recv().unwrap();
     assert_eq!(initial_20.sinks.len(), 2);
@@ -218,7 +218,7 @@ fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
     );
 
     let project_21 = db
-        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(21)])
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(21)])
         .unwrap();
     assert!(
         matches!(project_20.try_recv(), Err(TryRecvError::Empty)),
@@ -235,7 +235,7 @@ fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
     );
 
     let project_20_again = db
-        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
         .unwrap();
     assert!(
         matches!(project_20.try_recv(), Err(TryRecvError::Empty)),
@@ -302,7 +302,7 @@ fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks() {
     insert_album(&mut db, 1, "Kind of Blue", 1959);
 
     let subscription = db
-        .subscribe_multisink([
+        .subscribe([
             ("rows", GraphBuilder::table("albums")),
             (
                 "years",
@@ -353,7 +353,7 @@ fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks() {
 fn unsubscribing_multisink_subscription_closes_the_whole_stream() {
     let mut db = database();
     let subscription = db
-        .subscribe_multisink([
+        .subscribe([
             ("rows", GraphBuilder::table("albums")),
             (
                 "years",
@@ -387,11 +387,11 @@ fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks() {
     db.commit_batch(batch).unwrap();
 
     let shape = db
-        .prepare_routed_multisink(routed_terminals(), "project_route", route_descriptor())
+        .prepare(routed_terminals(), "project_route", route_descriptor())
         .unwrap();
 
     let project_20 = db
-        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
         .unwrap();
     let initial_20 = project_20.recv().unwrap();
     assert_eq!(initial_20.sinks.len(), 2);
@@ -412,7 +412,7 @@ fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks() {
     );
 
     let project_21 = db
-        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(21)])
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(21)])
         .unwrap();
     assert!(project_20.try_recv().is_err());
     let initial_21 = project_21.recv().unwrap();
@@ -479,11 +479,11 @@ fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks() {
 fn dropped_routed_multisink_receiver_retracts_binding_before_rebind() {
     let mut db = project_database();
     let shape = db
-        .prepare_routed_multisink(routed_terminals(), "project_route", route_descriptor())
+        .prepare(routed_terminals(), "project_route", route_descriptor())
         .unwrap();
 
     let dropped = db
-        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
         .unwrap();
     let initial = dropped.recv().unwrap();
     assert!(initial.get("docs").unwrap().is_empty());
@@ -494,7 +494,7 @@ fn dropped_routed_multisink_receiver_retracts_binding_before_rebind() {
     db.commit_batch(batch).unwrap();
 
     let rebound = db
-        .bind_routed_multisink_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
         .unwrap();
     assert_eq!(
         rebound

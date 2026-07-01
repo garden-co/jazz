@@ -46,14 +46,14 @@ shared by two _different_ graphs is the open question recorded below.
 
 Prepared shapes can be registered either from an already-built graph or from a
 parameterized query. At the graph level,
-`Database::prepare(graph, binding_source_shape, binding_descriptor,
+`Database::prepare_one_sink(graph, binding_source_shape, binding_descriptor,
 output_key_fields)` registers a retained `PreparedShapeId`. The
 `binding_source_shape` argument is the binding source _name_ (§5.1), not the
-shape id. A caller then uses `Database::bind_shape(id, &[Value])` to create a
+shape id. A caller then uses `Database::bind_shape_one_sink(id, &[Value])` to create a
 `Subscription` for one concrete parameter tuple.
 Graph-level callers that need a clean output graph plus a richer internal
 routing graph use
-`Database::prepare_with_routing(output_graph, routing_graph, binding_source_shape,
+`Database::prepare_one_sink_with_routing(output_graph, routing_graph, binding_source_shape,
 binding_descriptor, routing_key_fields)`: subscribers observe `output_graph`,
 while routing keys are projected from `routing_graph`.
 
@@ -74,7 +74,7 @@ notifications expose only the public query projection. Graph-level callers that
 build internal routed outputs directly can bind with an explicit public output
 descriptor to expose clean rows while retaining hidden routing fields
 internally; callers with separate clean and routed graphs can instead use
-`prepare_with_routing`. `INV-SHAPE-4` — graph-level `prepare` rejects an
+`prepare_one_sink_with_routing`. `INV-SHAPE-4` — graph-level `prepare_one_sink` rejects an
 `output_key_fields` entry absent from the graph output descriptor
 (`ShapeKeyFieldNotFound`).
 
@@ -114,7 +114,7 @@ delivers to each bound subscriber exactly the changes to _its_ parameterized
 result. Graph-level prepared shapes use the same split when bound with an
 explicit public output descriptor: routing observes the internal output, while
 the subscriber stream receives the projected public record. For
-`prepare_with_routing`, the runtime evaluates the routing graph for prepared
+`prepare_one_sink_with_routing`, the runtime evaluates the routing graph for prepared
 ticks, projects routing rows into binding keys, then projects those same rows
 back to the clean output descriptor before maintaining per-binding snapshots and
 notifying subscribers. The routing graph output must therefore contain every

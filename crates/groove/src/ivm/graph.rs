@@ -108,8 +108,8 @@ use super::op_types::*;
 ///     ProjectField::renamed("right.title", "title"),
 /// ]);
 ///
-/// let shape = database.prepare(graph, "artist_params", binding_descriptor, ["artist_id"])?;
-/// let subscription = database.bind_shape(shape.id(), &[Value::U64(1)])?;
+/// let shape = database.prepare_one_sink(graph, "artist_params", binding_descriptor, ["artist_id"])?;
+/// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1)])?;
 /// assert!(subscription.recv()?.is_empty());
 ///
 /// let mut batch = database.open_batch();
