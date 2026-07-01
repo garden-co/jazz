@@ -2,11 +2,7 @@ import { createJazzContext, Db, Session, type JazzContext } from "../backend/ind
 import type { WasmSchema } from "../drivers/types.js";
 import { TransactionScope } from "../index.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import {
-  fetchPermissionsHead,
-  publishStoredPermissions,
-  publishStoredSchema,
-} from "../runtime/schema-fetch.js";
+import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
@@ -118,21 +114,12 @@ export async function createPolicyTestApp(
     adminSecret,
   });
 
-  const { hash: schemaHash } = await publishStoredSchema(server.url, {
+  await deploy({
     appId: server.appId,
+    serverUrl: server.url,
     adminSecret,
-    schema: app.wasmSchema,
-  });
-  const { head } = await fetchPermissionsHead(server.url, {
-    appId: server.appId,
-    adminSecret,
-  });
-  await publishStoredPermissions(server.url, {
-    appId: server.appId,
-    adminSecret,
-    schemaHash,
+    schema: app,
     permissions,
-    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 
   const jazzContext = createJazzContext({
