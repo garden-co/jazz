@@ -625,10 +625,13 @@ where
             }
             let binding_source_shape = plan.binding_source_shape.clone();
             let binding_user_params = plan.binding_user_params.clone();
-            let policy_shape = node.table_read_policy_authorization_shape(
+            let policy_request = node.table_read_policy_authorization_request(
                 table,
                 *permission_subject,
                 ParamBindingMode::InlineAllReachableSeeds,
+                tier,
+                binding_source_shape.clone(),
+                binding_user_params.clone(),
             )?;
             let mut output_fields = global_current_storage_fields(table);
             if needs_version_witnesses {
@@ -636,13 +639,9 @@ where
             }
             let base = node.maintained_view_content_current_with_version(table, tier)?;
             let storage_graph = node.policy_filtered_current_source_graph_via_query_engine(
-                &policy_shape,
+                policy_request,
                 base.clone(),
                 &output_fields,
-                tier,
-                *permission_subject,
-                binding_source_shape,
-                binding_user_params,
             )?;
             storage_graph.project_fields(storage_to_canonical_current_source_fields(
                 table,
@@ -2629,39 +2628,8 @@ where
 
     fn policy_authorization_row_id_graph(
         &mut self,
-        policy_shape: &ValidatedQuery,
-        tier: DurabilityTier,
-        permission_subject: AuthorId,
-        binding_source_shape: Option<String>,
-        binding_user_params: BTreeMap<String, ColumnType>,
+        request: QueryProgramRequest,
     ) -> Result<GraphBuilder, Error> {
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let mut request = self.current_query_program_request(
-            policy_shape,
-            &binding,
-            tier,
-            permission_subject,
-            CurrentQueryProgramOutput::AppRows,
-        )?;
-        if let Some(binding_source_shape) = binding_source_shape {
-            request.input.binding.source_shape = Some(binding_source_shape.clone());
-            request.input.binding.extra_user_params = binding_user_params;
-            retarget_binding_value_sources(&mut request.input.shape, &binding_source_shape);
-        }
-        if let PolicyContext::Identity {
-            mode,
-            permission_subject,
-            claims,
-            attribution,
-        } = request.policy
-        {
-            request.policy = PolicyContext::AuthorizationSubplan {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            };
-        }
         let program = self.compile_query_program_request(request)?;
         Ok(lowered_app_rows_graph(&program)?.project(["row_uuid"]))
     }
@@ -4235,31 +4203,15 @@ where
 
     fn policy_filtered_current_source_graph_via_query_engine(
         &mut self,
-        policy_shape: &ValidatedQuery,
+        policy_request: QueryProgramRequest,
         base: GraphBuilder,
         output_fields: &[String],
-        tier: DurabilityTier,
-        permission_subject: AuthorId,
-        binding_source_shape: Option<String>,
-        binding_user_params: BTreeMap<String, ColumnType>,
     ) -> Result<GraphBuilder, Error> {
-        // TODO(query-engine): replace this bridge with a first-class policy
-        // authorization subplan in the query-engine IR. `SourceRequest::authorization`
-        // now makes the semantic need explicit, but physical policy-row graph
-        // construction still compiles an app-row authorization graph here.
-        if !policy_shape.params().is_empty() {
-            return Err(Error::QueryCapability(
-                "maintained policy source filters with runtime parameters must lower through query-engine binding sources"
-                    .to_owned(),
-            ));
-        }
-        let authorized = self.policy_authorization_row_id_graph(
-            policy_shape,
-            tier,
-            permission_subject,
-            binding_source_shape,
-            binding_user_params,
-        )?;
+        // TODO(query-engine): replace this physical bridge with a first-class
+        // policy authorization graph node. The resolver now receives a
+        // query-engine request directly, so public query composition is no
+        // longer part of source authorization.
+        let authorized = self.policy_authorization_row_id_graph(policy_request)?;
         Ok(
             GraphBuilder::join(base, authorized, ["row_uuid"], ["row_uuid"]).project_fields(
                 output_fields
@@ -4269,12 +4221,15 @@ where
         )
     }
 
-    fn table_read_policy_authorization_shape(
+    fn table_read_policy_authorization_request(
         &self,
         table: &TableSchema,
         identity: AuthorId,
         param_binding_mode: ParamBindingMode,
-    ) -> Result<ValidatedQuery, Error> {
+        tier: DurabilityTier,
+        binding_source_shape: Option<String>,
+        binding_user_params: BTreeMap<String, ColumnType>,
+    ) -> Result<QueryProgramRequest, Error> {
         let claims = self.session_claims.get(&identity);
         let mut query = authorization_query_from_read_policy(table);
         rewrite_policy_claims_for_authorization(&mut query, claims);
@@ -4291,7 +4246,48 @@ where
             &self.catalogue.schema,
             param_binding_mode,
         )?;
-        Ok(policy_shape)
+        if !policy_shape.params().is_empty() {
+            return Err(Error::QueryCapability(
+                "maintained policy source filters with runtime parameters must lower through query-engine binding sources"
+                    .to_owned(),
+            ));
+        }
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        if let Some(binding_source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &binding_source_shape);
+        }
+        let input = RowSetProgramInput {
+            shape: input_shape,
+            binding: ProgramBinding {
+                id: binding.binding_id(),
+                source_shape: binding_source_shape,
+                extra_user_params: binding_user_params,
+                values: binding.values().clone(),
+            },
+        };
+        Ok(QueryProgramRequest {
+            reads: current_query_read_set(&input.shape, policy_shape.schema_version(), tier),
+            policy: match self.query_program_policy_context(identity) {
+                PolicyContext::Identity {
+                    mode,
+                    permission_subject,
+                    claims,
+                    attribution,
+                } => PolicyContext::AuthorizationSubplan {
+                    mode,
+                    permission_subject,
+                    claims,
+                    attribution,
+                },
+                other => other,
+            },
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                policy_shape.query(),
+            ),
+        })
     }
 
     fn maintained_view_content_current_with_version(
