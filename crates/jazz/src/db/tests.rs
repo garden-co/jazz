@@ -6,7 +6,7 @@ use groove::schema::{ColumnSchema, ColumnType};
 use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 
 use super::*;
-use crate::ids::{AuthorId, NodeUuid};
+use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
     CatalogueAck, LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ShapeAst,
     Subscribe, TableLens,
@@ -721,15 +721,30 @@ fn read_opts_default_and_effective_tier_preserve_local_update_contract() {
 }
 
 #[test]
-fn non_default_read_view_fails_closed_on_read_subscription_and_attach_apis() {
+fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    db.node
+        .node
+        .borrow_mut()
+        .create_branch(branch)
+        .expect("create branch");
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x42), 10)
+                .cells(doctest_support::todo_cells("branch-only", false)),
+        )
+        .expect("commit branch row");
     let query = db.table("todos");
     let prepared_query = prepared(&db, &query);
     let opts = branch_read_opts();
 
-    assert_unsupported_read_view(expect_error(doctest_support::block_on(
-        db.all(&prepared_query, opts.clone()),
-    )));
+    let rows = doctest_support::block_on(db.all(&prepared_query, opts.clone())).unwrap();
+    assert_eq!(row_ids(&rows), vec![row(0x42)]);
+
     assert_unsupported_read_view(expect_error(doctest_support::block_on(
         db.all_relation_snapshot(&prepared_query, opts.clone()),
     )));

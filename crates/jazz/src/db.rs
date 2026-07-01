@@ -28,8 +28,8 @@ use crate::node::{
 use crate::peer::PeerState;
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
-    MigrationLens, ReadViewKey, ReadViewSpec, RegisterShapeOptions, SchemaVersion, ShapeAst,
-    Subscribe, SubscriptionKey, SyncMessage,
+    MigrationLens, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
 };
 use crate::query::{Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, TableSchema};
@@ -517,9 +517,22 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        ensure_default_read_view(&opts)?;
         let tier = effective_read_tier(&opts);
         let mut node = self.node.node.borrow_mut();
+        match &opts.read_view.source {
+            ReadViewSourceSpec::Current => {}
+            ReadViewSourceSpec::Branch { branch } if !opts.include_deleted => {
+                return node
+                    .query_rows_on_branch_for_link(
+                        crate::ids::BranchId(*branch),
+                        &prepared.shape,
+                        &prepared.binding,
+                        author,
+                    )
+                    .map_err(Into::into);
+            }
+            _ => ensure_default_read_view(&opts)?,
+        }
         if opts.include_deleted {
             node.query_rows_for_link_including_deleted(
                 &prepared.shape,
