@@ -36,7 +36,8 @@ use super::query_engine::{
     VersionIdentityFields, VersionedRowRefSchema, lower_query_program,
 };
 use crate::protocol::{
-    BindingViewKey, ReadViewKey, ResultMemberEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
+    BindingViewKey, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, ResultMemberEntry, ShapeAst,
+    ShapeBody, Subscribe, SubscriptionKey,
 };
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
@@ -555,8 +556,17 @@ where
                 .node
                 .branch_current_rows(&request.source.table, &branch)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let base = inline_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let (base, descriptor, metadata) = inline_branch_current_graph(
+                &table,
+                rows,
+                self.node
+                    .catalogue
+                    .current_schema_version_alias
+                    .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?,
+                branch_id,
+                &request.requirements,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let graph = match &request.authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -579,7 +589,8 @@ where
                             plan.binding_user_params.clone(),
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                    let output_fields = current_row_fields(&table);
+                    let output_fields = descriptor_field_names(&descriptor)
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                     self.node
                         .policy_filtered_current_source_graph_via_query_engine(
                             policy_request,
@@ -589,8 +600,7 @@ where
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
                 }
             };
-            let descriptor = current_row_descriptor(&table);
-            (graph, descriptor, BTreeMap::new())
+            (graph, descriptor, metadata)
         } else if let Some(tx_id) = open_tx_overlay {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
@@ -963,6 +973,13 @@ fn current_row_descriptor_with_hidden_source_fields(
             ("updated_by".to_owned(), ValueType::Uuid),
             ("updated_at".to_owned(), ValueType::U64),
         ]);
+        if let Some(SourceMetadataFields::VersionWitnesses {
+            branch_or_prefix_field: Some(field),
+            ..
+        }) = metadata.get(&SourceMetadataRequirement::VersionWitnesses)
+        {
+            fields.push((field.clone(), ValueType::Uuid));
+        }
     }
     if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
         fields.push(("coverage".to_owned(), ValueType::String));
@@ -1200,6 +1217,58 @@ fn branch_query_read_set(
         policy_schema: schema_version,
         sources,
     })
+}
+
+fn query_read_set_for_read_view(
+    shape: &NormalizedRowSetShape,
+    read_schema: SchemaVersionId,
+    policy_schema: SchemaVersionId,
+    tier: DurabilityTier,
+    read_view: &ReadViewSpec,
+    settled_binding_view: Option<BindingViewKey>,
+) -> Result<RequestedReadSet, Error> {
+    if settled_binding_view.is_some() {
+        if !read_view.is_default() {
+            return Err(Error::QueryCapability(
+                "settled binding view sources do not support non-default read_view yet".to_owned(),
+            ));
+        }
+        return Ok(current_query_read_set(
+            shape,
+            read_schema,
+            policy_schema,
+            tier,
+            settled_binding_view,
+        ));
+    }
+    match &read_view.source {
+        ReadViewSourceSpec::Current => Ok(current_query_read_set(
+            shape,
+            read_schema,
+            policy_schema,
+            tier,
+            None,
+        )),
+        ReadViewSourceSpec::Branch { branch }
+            if read_view.schema == Default::default() && read_view.overlays.is_empty() =>
+        {
+            Ok(branch_query_read_set(
+                shape,
+                read_schema,
+                tier,
+                BranchId(*branch),
+            ))
+        }
+        ReadViewSourceSpec::MergedBranches { .. } => Err(Error::QueryCapability(
+            "merged branch read_view requires unified branch merge source lowering".to_owned(),
+        )),
+        ReadViewSourceSpec::Snapshot { .. } => Err(Error::QueryCapability(
+            "snapshot read_view requires unified snapshot source lowering".to_owned(),
+        )),
+        ReadViewSourceSpec::Branch { .. } => Err(Error::QueryCapability(
+            "branch read_view does not support schema lenses or overlays yet".to_owned(),
+        )),
+    }
 }
 
 fn current_query_output_request(
@@ -2707,7 +2776,27 @@ where
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
         self.compile_current_query_program_with_settled_view(
-            shape, binding, tier, identity, output, None,
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            &ReadViewSpec::default(),
+            None,
+        )
+    }
+
+    fn compile_current_query_program_for_read_view(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+    ) -> Result<QueryProgram, Error> {
+        self.compile_current_query_program_with_settled_view(
+            shape, binding, tier, identity, output, read_view, None,
         )
     }
 
@@ -2718,6 +2807,7 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request(
@@ -2726,6 +2816,7 @@ where
             tier,
             identity,
             output,
+            read_view,
             settled_binding_view,
         )?;
         self.compile_query_program_request(request)
@@ -3007,6 +3098,7 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
     ) -> Result<QueryProgramRequest, Error> {
         let lowered_shape;
@@ -3034,13 +3126,14 @@ where
             },
         };
         Ok(QueryProgramRequest {
-            reads: current_query_read_set(
+            reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
                 self.catalogue.current_schema_version_id,
                 tier,
+                read_view,
                 settled_binding_view,
-            ),
+            )?,
             policy: self.query_program_policy_context(identity),
             input,
             output: current_query_output_request(output, shape.query()),
@@ -3430,6 +3523,7 @@ where
                 tier,
                 identity,
                 CurrentQueryProgramOutput::AppRows,
+                &ReadViewSpec::default(),
                 settled_binding_view,
             )?)
         };
@@ -3767,9 +3861,10 @@ where
         binding: &Binding,
         identity: AuthorId,
         tier: DurabilityTier,
+        read_view: &ReadViewSpec,
     ) -> Result<(LocalMaintainedViewSubscription, Vec<CurrentRow>), Error> {
-        let (subscription, maintained, terminal_schemas, transitions, tables) =
-            self.open_seeded_maintained_subscription_view(shape, binding, identity, tier)?;
+        let (subscription, maintained, terminal_schemas, transitions, tables) = self
+            .open_seeded_maintained_subscription_view(shape, binding, identity, tier, read_view)?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             maintained,
@@ -4554,6 +4649,7 @@ where
         binding: &Binding,
         identity: AuthorId,
         tier: DurabilityTier,
+        read_view: &ReadViewSpec,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -4571,12 +4667,13 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
-        let program = self.compile_current_query_program(
+        let program = self.compile_current_query_program_for_read_view(
             &shape,
             &binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
+            read_view,
         )?;
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
@@ -5986,6 +6083,119 @@ pub(super) fn inline_current_graph(
         .map(|row| inline_current_record(table, &descriptor, row))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(GraphBuilder::inline_records(descriptor, records))
+}
+
+fn inline_branch_current_graph(
+    table: &TableSchema,
+    rows: Vec<CurrentRow>,
+    schema_version_alias: SchemaVersionAlias,
+    branch_id: BranchId,
+    requirements: &SourceRequirements,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
+    let mut metadata = BTreeMap::new();
+    if requirements
+        .metadata
+        .contains(&SourceMetadataRequirement::VersionWitnesses)
+    {
+        metadata.insert(
+            SourceMetadataRequirement::VersionWitnesses,
+            SourceMetadataFields::VersionWitnesses {
+                schema_version_field: "schema_version".to_owned(),
+                tx_time_field: "tx_time".to_owned(),
+                tx_node_field: "tx_node_id".to_owned(),
+                branch_or_prefix_field: Some("branch_id".to_owned()),
+            },
+        );
+    }
+    if requirements
+        .metadata
+        .contains(&SourceMetadataRequirement::Coverage)
+    {
+        metadata.insert(
+            SourceMetadataRequirement::Coverage,
+            SourceMetadataFields::Coverage {
+                coverage_field: "coverage".to_owned(),
+            },
+        );
+    }
+    for requirement in &requirements.metadata {
+        if let SourceMetadataRequirement::Provenance(field) = requirement {
+            metadata.insert(
+                SourceMetadataRequirement::Provenance(*field),
+                SourceMetadataFields::Provenance {
+                    field: source_provenance_field(*field).to_owned(),
+                },
+            );
+        }
+    }
+    let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
+    let records = rows
+        .iter()
+        .map(|row| {
+            inline_branch_current_record(table, &descriptor, row, schema_version_alias, branch_id)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        GraphBuilder::inline_records(descriptor.clone(), records),
+        descriptor,
+        metadata,
+    ))
+}
+
+fn inline_branch_current_record(
+    table: &TableSchema,
+    descriptor: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+    branch_id: BranchId,
+) -> Result<Vec<u8>, Error> {
+    let mut values = Vec::new();
+    values.push(Value::Uuid(row.row_uuid().0));
+    for column in &table.columns {
+        values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
+    }
+    let provenance = row.provenance()?.unwrap_or(RowProvenance {
+        created_by: AuthorId::SYSTEM,
+        created_at: TxTime(0),
+        updated_by: AuthorId::SYSTEM,
+        updated_at: TxTime(0),
+    });
+    values.extend([
+        Value::Uuid(provenance.created_by.0),
+        Value::U64(provenance.created_at.0),
+        Value::Uuid(provenance.updated_by.0),
+        Value::U64(provenance.updated_at.0),
+    ]);
+    let (tx_time, tx_node_alias) = row
+        .projected_tx_alias()
+        .unwrap_or((TxTime(0), NodeAlias(0)));
+    values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
+    if descriptor.field_index("table").is_some() {
+        values.extend([
+            Value::String(table.name.clone()),
+            Value::String("content".to_owned()),
+            Value::U64(schema_version_alias.0),
+            Value::Array(Vec::new()),
+            Value::Uuid(provenance.created_by.0),
+            Value::U64(provenance.created_at.0),
+            Value::Uuid(provenance.updated_by.0),
+            Value::U64(provenance.updated_at.0),
+        ]);
+        if descriptor.field_index("branch_id").is_some() {
+            values.push(Value::Uuid(branch_id.0));
+        }
+    }
+    if descriptor.field_index("coverage").is_some() {
+        values.push(Value::String("branch-current".to_owned()));
+    }
+    Ok(descriptor.create(&values)?)
 }
 
 fn historical_current_graph(table: &TableSchema, position: GlobalSeq) -> GraphBuilder {

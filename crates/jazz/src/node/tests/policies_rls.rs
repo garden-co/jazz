@@ -3926,6 +3926,7 @@ fn assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
             binding,
             identity,
             DurabilityTier::Global,
+            &Default::default(),
         )
         .unwrap();
     core.unsubscribe_groove_subscription(receiver.id());

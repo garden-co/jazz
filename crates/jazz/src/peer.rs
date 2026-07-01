@@ -620,7 +620,13 @@ impl PeerState {
             tier,
         } = request;
         let (receiver, maintained, terminal_schemas, transitions, tables) = node
-            .open_seeded_maintained_subscription_view(shape, binding, self.identity(), tier)
+            .open_seeded_maintained_subscription_view(
+                shape,
+                binding,
+                self.identity(),
+                tier,
+                &Default::default(),
+            )
             .map_err(normalize_maintained_subscription_unsupported_error)?;
         let output_tables = tables.clone();
         let result_member_adds = transitions
