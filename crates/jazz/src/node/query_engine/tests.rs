@@ -2123,6 +2123,33 @@ fn claim_filter_lowers_from_identity_policy_context() {
 }
 
 #[test]
+fn identity_policy_context_requests_policy_filtered_sources() {
+    let subject = author(0xa6);
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: PolicyContext::Identity {
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: subject,
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input: row_set_input(0x76),
+        output: row_set_output(BTreeSet::new()),
+    };
+
+    let mut resolver = FakeSourceResolver::default();
+    lower_query_program(request, &mut resolver).expect("identity policy source lowers");
+
+    assert_eq!(resolver.requests.len(), 1);
+    assert_eq!(
+        resolver.requests[0].authorization,
+        SourceAuthorizationRequest::PolicyFiltered {
+            permission_subject: subject
+        }
+    );
+}
+
+#[test]
 fn built_in_sub_claim_lowers_to_permission_subject() {
     let subject = author(0xa5);
     let request = QueryProgramRequest {
