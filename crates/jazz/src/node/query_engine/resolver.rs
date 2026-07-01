@@ -24,7 +24,20 @@ pub(crate) enum SourceAuthorizationRequest {
     PolicyFiltered {
         /// Identity whose row-level read permission gates the source.
         permission_subject: AuthorId,
+        /// Query-engine-owned authorization plan for the protected source.
+        plan: PolicyAuthorizationPlan,
     },
+}
+
+/// Logical authorization requirement for one protected source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyAuthorizationPlan {
+    /// Protected source whose rows are gated by this policy proof.
+    pub(crate) protected_source: SourceId,
+    /// Decision role requested for the protected source.
+    pub(crate) role: PolicyDecisionRole,
+    /// Row id field in the protected source graph.
+    pub(crate) protected_row_field: String,
 }
 
 /// Orthogonal source row requirements derived from app output and requested

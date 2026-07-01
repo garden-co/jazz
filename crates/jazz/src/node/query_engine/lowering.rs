@@ -64,7 +64,7 @@ pub(crate) fn lower_query_program(
         let source_request = SourceRequest {
             source: source.clone(),
             visibility,
-            authorization: source_authorization_for_policy(&request.policy),
+            authorization: source_authorization_for_source(&request.policy, &source),
             requirements,
         };
         let resolved_source = source_resolver
@@ -163,7 +163,10 @@ pub(crate) fn lower_query_program(
     })
 }
 
-fn source_authorization_for_policy(policy: &PolicyContext) -> SourceAuthorizationRequest {
+fn source_authorization_for_source(
+    policy: &PolicyContext,
+    source: &SourceId,
+) -> SourceAuthorizationRequest {
     match policy {
         PolicyContext::System => SourceAuthorizationRequest::System,
         PolicyContext::AuthorizationSubplan { .. } => SourceAuthorizationRequest::System,
@@ -171,6 +174,11 @@ fn source_authorization_for_policy(policy: &PolicyContext) -> SourceAuthorizatio
             permission_subject, ..
         } => SourceAuthorizationRequest::PolicyFiltered {
             permission_subject: *permission_subject,
+            plan: PolicyAuthorizationPlan {
+                protected_source: source.clone(),
+                role: PolicyDecisionRole::Read,
+                protected_row_field: "row_uuid".to_owned(),
+            },
         },
     }
 }

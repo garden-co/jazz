@@ -2211,7 +2211,12 @@ fn identity_policy_context_requests_policy_filtered_sources() {
     assert_eq!(
         resolver.requests[0].authorization,
         SourceAuthorizationRequest::PolicyFiltered {
-            permission_subject: subject
+            permission_subject: subject,
+            plan: PolicyAuthorizationPlan {
+                protected_source: source("todos", SourceRole::Root),
+                role: PolicyDecisionRole::Read,
+                protected_row_field: "row_uuid".to_owned(),
+            },
         }
     );
 }

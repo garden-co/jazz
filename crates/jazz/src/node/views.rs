@@ -85,7 +85,11 @@ where
     }
 
     /// Build a current-row view update for a system-identity peer.
-    pub fn view_update_for_current_rows(&mut self, table: &str) -> Result<SyncMessage, Error> {
+    #[cfg(test)]
+    pub(crate) fn view_update_for_current_rows(
+        &mut self,
+        table: &str,
+    ) -> Result<SyncMessage, Error> {
         let subscription = self.whole_table_subscription_key(table)?;
         self.view_update_for_current_rows_with_peer_payload_inventory(
             table,
@@ -98,7 +102,8 @@ where
     }
 
     /// Build a current-row view update using the peer's payload inventory.
-    pub fn view_update_for_current_rows_with_peer_payload_inventory(
+    #[cfg(test)]
+    pub(crate) fn view_update_for_current_rows_with_peer_payload_inventory(
         &mut self,
         table: &str,
         subscription: SubscriptionKey,
@@ -120,8 +125,9 @@ where
     }
 
     /// Build a query-binding view update using the peer's payload inventory.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub fn view_update_for_query_binding_with_peer_payload_inventory(
+    pub(crate) fn view_update_for_query_binding_with_peer_payload_inventory(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -144,6 +150,7 @@ where
 
     /// Build a cold maintained query-binding view update using the peer's
     /// payload inventory.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
         &mut self,
@@ -167,6 +174,7 @@ where
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
         &mut self,
         shape: &ValidatedQuery,
