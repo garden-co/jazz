@@ -407,13 +407,13 @@ fn compiler_boundary_has_no_usage_or_lifecycle_mode() {
     let err = lower_query_program(request, &mut FakeSourceResolver::default()).unwrap_err();
     assert!(matches!(
         err.gaps.as_slice(),
-        [UnsupportedReason::Policy(message)] if message.contains("policy augmentation")
+        [UnsupportedReason::Output(fact)] if matches!(fact.as_ref(), ProgramFactKey::PolicyWitnesses)
     ));
     assert!(
         err.explain
             .capabilities
             .iter()
-            .any(|line| line.contains("current-source row-set"))
+            .any(|line| line.contains("requested fact is not lowered yet"))
     );
 }
 
