@@ -247,8 +247,8 @@ where
             previous_result_set: _previous_result_set,
             result_member_adds,
             result_member_removes,
-            identity,
-            tier,
+            identity: _identity,
+            tier: _tier,
             mut versions_by_tx,
             replacement_for,
         } = inputs;
@@ -305,25 +305,15 @@ where
                 let stored_tx = self
                     .query_transaction_memo(*tx_id, &mut context)?
                     .ok_or(Error::MissingTransaction(*tx_id))?;
-                let filtered_tx_versions = if complete_exclusive_payloads
-                    && stored_tx.tx.kind == TxKind::Exclusive
-                {
-                    let tx_versions =
-                        self.query_versions_for_tx_memo_cloned(*tx_id, &mut context)?;
-                    self.policy_authorized_versions_for_complete_payload(
-                        &tx_versions,
-                        identity,
-                        tier,
-                    )?
-                } else {
-                    tx_versions
-                        .iter()
-                        .filter(|version| {
-                            wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                };
+                let filtered_tx_versions = tx_versions
+                    .iter()
+                    .filter(|version| {
+                        complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive
+                            || wanted_rows
+                                .contains(&(version.table().to_owned(), version.row_uuid()))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let bundle = self.version_bundle_for_maintained_view_versions_with_tx(
                     &stored_tx,
                     &filtered_tx_versions,
@@ -704,32 +694,6 @@ where
             global_seq: stored_tx.global_seq,
             durability: stored_tx.durability,
         })
-    }
-
-    fn policy_authorized_versions_for_complete_payload(
-        &mut self,
-        tx_versions: &[VersionRow],
-        identity: AuthorId,
-        tier: DurabilityTier,
-    ) -> Result<Vec<VersionRow>, Error> {
-        let mut authorized_rows_by_table = BTreeMap::<String, BTreeSet<RowUuid>>::new();
-        let mut filtered = Vec::with_capacity(tx_versions.len());
-        for version in tx_versions {
-            let table_name = version.table().to_owned();
-            if !authorized_rows_by_table.contains_key(&table_name) {
-                let table = self.table(&table_name)?.clone();
-                let authorized =
-                    self.read_policy_authorized_row_ids_for_table(&table, identity, tier)?;
-                authorized_rows_by_table.insert(table_name.clone(), authorized);
-            }
-            if authorized_rows_by_table
-                .get(&table_name)
-                .is_some_and(|rows| rows.contains(&version.row_uuid()))
-            {
-                filtered.push(version.clone());
-            }
-        }
-        Ok(filtered)
     }
 }
 
