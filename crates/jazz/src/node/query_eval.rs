@@ -10,7 +10,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use groove::ivm::RoutedMultisinkTerminal;
-use groove::ivm::TopByOrder;
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
 use groove::records::{EnumSchema, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
@@ -52,8 +51,6 @@ pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 
 pub(crate) struct ReachableGraphs {
     pub(crate) closure: GraphBuilder,
-    #[allow(dead_code)] // Test-oracle reachable constituent helpers still inspect edge rows.
-    pub(crate) edge_current: GraphBuilder,
     pub(crate) access_current: GraphBuilder,
     pub(crate) seed_param: String,
     pub(crate) seed_param_available: bool,
@@ -1941,14 +1938,8 @@ fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
 
 fn unsupported_join_via_reason(join: &JoinVia) -> Option<String> {
     let mut reasons = Vec::new();
-    if join.source_column.is_some() {
-        reasons.push("source_column");
-    }
     if join.source_lookup.is_some() {
         reasons.push("source_lookup");
-    }
-    if join.target != JoinTarget::Column {
-        reasons.push("row_id_target");
     }
     if !join.correlated_filters.is_empty() {
         reasons.push("correlated_filters");
@@ -2492,11 +2483,37 @@ where
                 );
                 right = filter_node;
             }
+            let root_key = join
+                .source_column
+                .as_ref()
+                .map(|field| {
+                    if field == "id" {
+                        NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone()))
+                    } else {
+                        NormalizedValueRef::SourceField {
+                            source: root_source.clone(),
+                            field: field.clone(),
+                        }
+                    }
+                })
+                .unwrap_or_else(|| {
+                    NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone()))
+                });
+            let join_key = match join.target {
+                JoinTarget::Column => NormalizedValueRef::SourceField {
+                    source: join_source.clone(),
+                    field: join.on_column.clone(),
+                },
+                JoinTarget::RowId => {
+                    NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone()))
+                }
+            };
             join_contributions.push(JoinContribution {
                 id: format!("join_via:{index}"),
                 source: join_source.clone(),
                 input: right.clone(),
-                root_ref_field: join.on_column.clone(),
+                root_key: root_key.clone(),
+                join_key: join_key.clone(),
             });
             let join_node = RowSetNodeId(format!("join_via:{index}:join"));
             nodes.insert(
@@ -2506,12 +2523,9 @@ where
                     right,
                     mode: NormalizedJoinMode::Inner,
                     on: NormalizedPredicateExpr::Compare {
-                        left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                        left: root_key,
                         op: NormalizedComparisonOp::Eq,
-                        right: NormalizedValueRef::SourceField {
-                            source: join_source,
-                            field: join.on_column.clone(),
-                        },
+                        right: join_key,
                     },
                 },
             );
@@ -4722,7 +4736,6 @@ where
         )?;
         Ok(ReachableGraphs {
             closure,
-            edge_current: edge_graph,
             access_current: access_graph,
             seed_param,
             seed_param_available,
@@ -4857,43 +4870,6 @@ fn maintained_view_window_supported(query: &crate::query::Query) -> bool {
         query.offset == 0 && (query.limit.is_none() || query.limit == Some(1))
     } else {
         true
-    }
-}
-
-// Groove `TopBy` represents both finite ordered windows and the currently
-// supported unbounded ordered suffix (`ORDER BY ... OFFSET n` with no LIMIT).
-// Keep the sentinel named so this does not look like an accidental finite
-// capability.
-#[allow(dead_code)]
-const UNBOUNDED_ORDERED_WINDOW_LIMIT: usize = usize::MAX;
-
-#[allow(dead_code)]
-fn apply_maintained_view_result_limit(
-    graph: GraphBuilder,
-    query: &crate::query::Query,
-) -> GraphBuilder {
-    if !query.order_by.is_empty() {
-        let order_cols = query.order_by.iter().map(|order| {
-            let field = query_field(&order.column);
-            match order.direction {
-                OrderDirection::Asc => TopByOrder::asc(field),
-                OrderDirection::Desc => TopByOrder::desc(field),
-            }
-        });
-        return GraphBuilder::top_by(
-            graph,
-            std::iter::empty::<&str>(),
-            order_cols,
-            ["row_uuid"],
-            query.offset,
-            query.limit.unwrap_or(UNBOUNDED_ORDERED_WINDOW_LIMIT),
-        );
-    }
-
-    if query.limit == Some(1) {
-        GraphBuilder::arg_min_by(graph, std::iter::empty::<&str>(), ["row_uuid"])
-    } else {
-        graph
     }
 }
 
@@ -5682,19 +5658,6 @@ pub(crate) enum ParamBindingMode {
     RetainAllParams,
 }
 
-#[allow(dead_code)]
-fn hidden_maintained_view_param_types(
-    param_types: &BTreeMap<String, groove::schema::ColumnType>,
-    mode: ParamBindingMode,
-) -> &BTreeMap<String, groove::schema::ColumnType> {
-    static EMPTY: std::sync::LazyLock<BTreeMap<String, groove::schema::ColumnType>> =
-        std::sync::LazyLock::new(BTreeMap::new);
-    match mode {
-        ParamBindingMode::InlineAllReachableSeeds => &EMPTY,
-        ParamBindingMode::RetainAllParams => param_types,
-    }
-}
-
 fn maintained_view_bind_filter_literals_with_mode(
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -6061,24 +6024,6 @@ fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bo
         (Operand::Param(_), ParamBindingMode::RetainAllParams) => false,
         _ => false,
     }
-}
-
-#[allow(dead_code)]
-fn maintained_view_has_binding_dependent_reachable(shape: &ValidatedQuery) -> bool {
-    fn query_has_binding_dependent_reachable(query: &crate::query::Query) -> bool {
-        query.reachable.iter().any(|reachable| {
-            matches!(reachable.from, Operand::Param(_))
-                || reachable
-                    .seed
-                    .as_ref()
-                    .is_some_and(|seed| !predicate_params(&seed.filters).is_empty())
-        }) || query
-            .policy_branches
-            .iter()
-            .any(|branch| query_has_binding_dependent_reachable(&branch.as_query(&query.table)))
-    }
-
-    query_has_binding_dependent_reachable(shape.query())
 }
 
 fn maintained_view_bind_operand(

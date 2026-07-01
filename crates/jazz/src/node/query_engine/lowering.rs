@@ -3370,35 +3370,45 @@ fn join_contribution_membership_graph(
         .map_err(single_gap_report)?;
     let lowered =
         lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
-    let join_field = format!("user_{}", contribution.root_ref_field);
-    if !lowered.fields.contains(&join_field) {
+    let predicate = PredicateExpr::Compare {
+        left: contribution.root_key.clone(),
+        op: ComparisonOp::Eq,
+        right: contribution.join_key.clone(),
+    };
+    let (root_key, join_key) = lower_join_key_pair(
+        &predicate,
+        &root_source.row_shape.source,
+        root_source,
+        &contribution_source.row_shape.source,
+        contribution_source,
+        request,
+    )
+    .map_err(single_gap_report)?;
+    if !lowered.fields.contains(&join_key) {
         return Err(Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Operator(format!(
-                "join contribution {} does not provide root reference field {join_field}",
+                "join contribution {} does not provide join key field {join_key}",
                 contribution.id
             ))],
             explain: ExplainPlan {
                 capabilities: vec![
-                    "join contribution payload requires root reference field".to_owned(),
+                    "join contribution payload requires the normalized join key".to_owned(),
                 ],
                 ..ExplainPlan::default()
             },
         }));
     }
     let mut contribution_graph = lowered.graph;
-    if lowered.nullable_fields.contains(&join_field) {
-        contribution_graph = contribution_graph.unwrap_nullable(join_field.clone());
+    if lowered.nullable_fields.contains(&join_key) {
+        contribution_graph = contribution_graph.unwrap_nullable(join_key.clone());
     }
-    Ok(GraphBuilder::join(
-        visible_root,
-        contribution_graph,
-        [root_source.row_shape.row_uuid_field.clone()],
-        [join_field],
+    Ok(
+        GraphBuilder::join(visible_root, contribution_graph, [root_key], [join_key])
+            .project_fields(project_source_fields_from_prefix(
+                contribution_source,
+                "right.",
+            )),
     )
-    .project_fields(project_source_fields_from_prefix(
-        contribution_source,
-        "right.",
-    )))
 }
 
 fn required_closure_parent_graph(
