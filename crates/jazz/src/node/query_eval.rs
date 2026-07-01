@@ -44,7 +44,7 @@ use crate::protocol::{
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
     Include, JoinTarget, JoinVia, Operand, OrderDirection, PolicyBranch, Predicate,
-    QUERY_NAMESPACE, Query as JazzQuery, ShapeId, ValidatedQuery, col, eq, in_list, lit,
+    QUERY_NAMESPACE, Query as JazzQuery, ShapeId, ValidatedQuery,
 };
 
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
@@ -973,15 +973,6 @@ fn app_row_payload_projection(query: &JazzQuery) -> PayloadProjection {
         fields: FieldProjection::Fields(fields),
         paths: Vec::new(),
     })
-}
-
-fn relation_snapshot_root_membership_can_use_query_engine(subqueries: &[ArraySubquery]) -> bool {
-    let _ = subqueries;
-    true
-}
-
-fn relation_snapshot_payload_can_use_query_engine(subqueries: &[ArraySubquery]) -> bool {
-    relation_snapshot_root_membership_can_use_query_engine(subqueries)
 }
 
 fn required_field_idx(descriptor: &RecordDescriptor, field: &str) -> Result<usize, Error> {
@@ -3103,97 +3094,10 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
-        if relation_snapshot_payload_can_use_query_engine(&shape.query().array_subqueries) {
-            let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
-            let program = self.compile_current_query_program(
-                &shape,
-                &binding,
-                tier,
-                identity,
-                CurrentQueryProgramOutput::RelationSnapshot,
-            )?;
-            let snapshots = self
-                .database
-                .query_graphs(lowered_program_sinks(&program))
-                .map_err(Error::Groove)?;
-            if let Some(snapshot) =
-                self.try_materialize_relation_snapshot_from_query_engine(&shape, &snapshots)?
-            {
-                return Ok(snapshot);
-            }
-        }
-        let mut snapshot = RelationSnapshot::default();
-        let mut relation_source_rows =
-            self.query_relation_source_rows_before_pagination(shape, binding, tier, identity)?;
-        self.retain_rows_satisfying_array_subquery_requirements(
-            &mut relation_source_rows,
-            binding,
-            &shape.query().array_subqueries,
-            shape.schema_version(),
-            tier,
-            identity,
-        )?;
-        let mut relation_source_query = shape.query().clone();
-        relation_source_query.select = None;
-        self.finish_query_rows(&relation_source_query, &mut relation_source_rows)?;
-        let root_rows = if shape.query().select.is_some() {
-            let mut rows = relation_source_rows.clone();
-            self.apply_projection(shape.query(), &mut rows)?;
-            rows
-        } else {
-            relation_source_rows.clone()
-        };
-        let mut row_keys = BTreeSet::new();
-        for row in &root_rows {
-            row_keys.insert((row.table().to_owned(), row.row_uuid()));
-        }
-        snapshot.root_count = root_rows.len();
-        snapshot.rows.extend(root_rows.iter().cloned());
-        let root_table = self
-            .table_in_schema(&shape.query().table, shape.schema_version())?
-            .clone();
-        self.materialize_array_subqueries(
-            &root_table,
-            &relation_source_rows,
-            binding,
-            &shape.query().array_subqueries,
-            shape.schema_version(),
-            tier,
-            identity,
-            &mut snapshot,
-            &mut row_keys,
-        )?;
-        Ok(snapshot)
-    }
-
-    fn query_relation_source_rows_before_pagination(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let mut query = shape.query().clone();
-        query.select = None;
-        query.limit = None;
-        query.offset = 0;
-        if !relation_snapshot_root_membership_can_use_query_engine(&query.array_subqueries) {
-            query.array_subqueries.clear();
-            let source_shape = query
-                .validate(&self.catalogue.schema)
-                .map_err(Error::Query)?;
-            let source_binding = binding_for_shape(&source_shape, binding)?;
-            return self.query_rows_for_link(&source_shape, &source_binding, tier, identity);
-        }
-        let source_shape = query
-            .validate(&self.catalogue.schema)
-            .map_err(Error::Query)?;
-        let source_binding = binding_for_shape(&source_shape, binding)?;
-        let (source_shape, source_binding) =
-            self.policy_composed_shape_binding(&source_shape, &source_binding, identity)?;
+        let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
         let program = self.compile_current_query_program(
-            &source_shape,
-            &source_binding,
+            &shape,
+            &binding,
             tier,
             identity,
             CurrentQueryProgramOutput::RelationSnapshot,
@@ -3202,32 +3106,14 @@ where
             .database
             .query_graphs(lowered_program_sinks(&program))
             .map_err(Error::Groove)?;
-        let Some(app_rows) = snapshots.get(JAZZ_APP_ROWS_SINK) else {
-            return Err(Error::QueryLowering(
-                "relation snapshot program did not emit app rows".to_owned(),
-            ));
-        };
-        let table = self
-            .table_in_schema(&source_shape.query().table, source_shape.schema_version())?
-            .clone();
-        let mut rows = Vec::new();
-        for (record, weight) in app_rows.iter() {
-            if weight > 0 {
-                let row = decode_current_row(&table, record)?;
-                rows.push(self.materialize_current_row(&table, row)?);
-            }
-        }
-        Ok(rows)
+        self.materialize_relation_snapshot_from_query_engine(&shape, &snapshots)
     }
 
-    fn try_materialize_relation_snapshot_from_query_engine(
+    fn materialize_relation_snapshot_from_query_engine(
         &mut self,
         shape: &ValidatedQuery,
         snapshots: &MultisinkDeltas,
-    ) -> Result<Option<RelationSnapshot>, Error> {
-        if !relation_snapshot_payload_can_use_query_engine(&shape.query().array_subqueries) {
-            return Ok(None);
-        }
+    ) -> Result<RelationSnapshot, Error> {
         let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots)?;
         let root_count = root_rows.len();
         let mut snapshot = RelationSnapshot {
@@ -3241,7 +3127,7 @@ where
             .map(|row| (row.table().to_owned(), row.row_uuid()))
             .collect::<BTreeSet<_>>();
         let Some(edges) = snapshots.get("maintained.relation_edges") else {
-            return Ok(Some(snapshot));
+            return Ok(snapshot);
         };
         let descriptor = &edges.descriptor;
         let source_table_idx = required_field_idx(descriptor, "source_table")?;
@@ -3289,7 +3175,7 @@ where
                 snapshot.rows.push(row);
             }
         }
-        Ok(Some(snapshot))
+        Ok(snapshot)
     }
 
     fn materialize_relation_snapshot_root_rows(
@@ -3354,248 +3240,6 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
         self.query_rows_at(&shape, &binding, position)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn materialize_array_subqueries(
-        &mut self,
-        parent_table: &TableSchema,
-        parent_rows: &[CurrentRow],
-        binding: &Binding,
-        subqueries: &[ArraySubquery],
-        schema_version: SchemaVersionId,
-        tier: DurabilityTier,
-        identity: AuthorId,
-        snapshot: &mut RelationSnapshot,
-        row_keys: &mut BTreeSet<(String, RowUuid)>,
-    ) -> Result<(), Error> {
-        for subquery in subqueries {
-            let child_table = self
-                .table_in_schema(&subquery.table, schema_version)?
-                .clone();
-            for parent in parent_rows {
-                let Some(value) =
-                    relation_outer_value(parent_table, parent, &subquery.outer_column)
-                else {
-                    continue;
-                };
-                let child_rows = if relation_correlation_value_is_null(&value) {
-                    Vec::new()
-                } else {
-                    self.query_array_subquery_rows(
-                        subquery,
-                        schema_version,
-                        tier,
-                        identity,
-                        binding,
-                        value.clone(),
-                    )?
-                };
-                if matches!(subquery.requirement, ArraySubqueryRequirement::AtLeastOne)
-                    && child_rows.is_empty()
-                    || matches!(
-                        subquery.requirement,
-                        ArraySubqueryRequirement::MatchCorrelationCardinality
-                    ) && !Self::array_subquery_matches_correlation_cardinality(
-                        &value,
-                        &child_table,
-                        &child_rows,
-                        &subquery.inner_column,
-                    )?
-                {
-                    snapshot.rows.retain(|row| {
-                        row.table() != parent.table() || row.row_uuid() != parent.row_uuid()
-                    });
-                    snapshot.edges.retain(|edge| {
-                        (edge.source_table != parent.table()
-                            || edge.source_row != parent.row_uuid())
-                            && (edge.target_table != parent.table()
-                                || edge.target_row != parent.row_uuid())
-                    });
-                    row_keys.remove(&(parent.table().to_owned(), parent.row_uuid()));
-                    continue;
-                }
-                for child in &child_rows {
-                    if row_keys.insert((child.table().to_owned(), child.row_uuid())) {
-                        snapshot.rows.push(child.clone());
-                    }
-                    snapshot.edges.push(RelationEdge {
-                        source_table: parent.table().to_owned(),
-                        source_row: parent.row_uuid(),
-                        relation: subquery.column_name.clone(),
-                        target_table: child.table().to_owned(),
-                        target_row: child.row_uuid(),
-                    });
-                }
-                self.materialize_array_subqueries(
-                    &child_table,
-                    &child_rows,
-                    binding,
-                    &subquery.nested_arrays,
-                    schema_version,
-                    tier,
-                    identity,
-                    snapshot,
-                    row_keys,
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn retain_rows_satisfying_array_subquery_requirements(
-        &mut self,
-        rows: &mut Vec<CurrentRow>,
-        binding: &Binding,
-        subqueries: &[ArraySubquery],
-        schema_version: SchemaVersionId,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<(), Error> {
-        if subqueries.is_empty() || rows.is_empty() {
-            return Ok(());
-        }
-        let mut retained = Vec::with_capacity(rows.len());
-        for row in std::mem::take(rows) {
-            let parent_table = self.table_in_schema(row.table(), schema_version)?.clone();
-            if self.row_satisfies_array_subquery_requirements(
-                &parent_table,
-                &row,
-                binding,
-                subqueries,
-                schema_version,
-                tier,
-                identity,
-            )? {
-                retained.push(row);
-            }
-        }
-        *rows = retained;
-        Ok(())
-    }
-
-    fn row_satisfies_array_subquery_requirements(
-        &mut self,
-        parent_table: &TableSchema,
-        parent: &CurrentRow,
-        binding: &Binding,
-        subqueries: &[ArraySubquery],
-        schema_version: SchemaVersionId,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<bool, Error> {
-        for subquery in subqueries {
-            let Some(value) = relation_outer_value(parent_table, parent, &subquery.outer_column)
-            else {
-                continue;
-            };
-            let child_table = self
-                .table_in_schema(&subquery.table, schema_version)?
-                .clone();
-            let child_rows = if relation_correlation_value_is_null(&value) {
-                Vec::new()
-            } else {
-                self.query_array_subquery_rows(
-                    subquery,
-                    schema_version,
-                    tier,
-                    identity,
-                    binding,
-                    value.clone(),
-                )?
-            };
-            let satisfies_requirement = match subquery.requirement {
-                ArraySubqueryRequirement::Optional => true,
-                ArraySubqueryRequirement::AtLeastOne => !child_rows.is_empty(),
-                ArraySubqueryRequirement::MatchCorrelationCardinality => {
-                    Self::array_subquery_matches_correlation_cardinality(
-                        &value,
-                        &child_table,
-                        &child_rows,
-                        &subquery.inner_column,
-                    )?
-                }
-            };
-            if !satisfies_requirement {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    fn query_array_subquery_rows(
-        &mut self,
-        subquery: &ArraySubquery,
-        schema_version: SchemaVersionId,
-        tier: DurabilityTier,
-        identity: AuthorId,
-        binding: &Binding,
-        value: Value,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let correlation = match value {
-            Value::Array(values) => in_list(
-                col(subquery.inner_column.clone()),
-                values.into_iter().map(lit).collect::<Vec<_>>(),
-            ),
-            _ => eq(col(subquery.inner_column.clone()), lit(value)),
-        };
-        let mut query = JazzQuery::from(subquery.table.clone()).filter(correlation);
-        for filter in &subquery.filters {
-            query = query.filter(filter.clone());
-        }
-        for order in &subquery.order_by {
-            query = query.order_by(order.column.clone(), order.direction);
-        }
-        if let Some(select) = &subquery.select {
-            query = query.select(select.clone());
-        }
-        if let Some(limit) = subquery.limit {
-            query = query.limit(limit);
-        }
-        let schema = self
-            .catalogue
-            .catalogue_schemas
-            .get(&schema_version)
-            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
-        let shape = query.validate(&schema.schema).map_err(Error::Query)?;
-        let binding = binding_for_shape(&shape, binding)?;
-        self.query_rows_for_link(&shape, &binding, tier, identity)
-    }
-
-    fn array_subquery_matches_correlation_cardinality(
-        correlation_value: &Value,
-        child_table: &TableSchema,
-        child_rows: &[CurrentRow],
-        inner_column: &str,
-    ) -> Result<bool, Error> {
-        let Value::Array(correlation_values) = correlation_value else {
-            return Ok(!child_rows.is_empty());
-        };
-        let required = correlation_values
-            .iter()
-            .filter_map(|value| match value {
-                Value::Uuid(uuid) => Some(RowUuid(*uuid)),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        if required.len() != correlation_values.len() {
-            return Ok(false);
-        }
-        if required.is_empty() {
-            return Ok(true);
-        }
-        let mut covered = BTreeSet::new();
-        for child in child_rows {
-            let value = if inner_column == "id" {
-                Some(Value::Uuid(child.row_uuid().0))
-            } else {
-                child.cell(child_table, inner_column)
-            };
-            if let Some(Value::Uuid(uuid)) = value {
-                covered.insert(RowUuid(uuid));
-            }
-        }
-        Ok(required.is_subset(&covered))
     }
 
     pub(crate) fn uses_partitioned_or_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
@@ -7811,6 +7455,7 @@ fn lower_maintained_residual_predicate(
     }
 }
 
+#[cfg(test)]
 pub(super) fn binding_for_shape(
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -8944,20 +8589,6 @@ fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Opt
         return row.raw_field(column);
     }
     row.cell(table, column)
-}
-
-fn relation_outer_value(table: &TableSchema, row: &CurrentRow, column: &str) -> Option<Value> {
-    if column == "id" {
-        return Some(Value::Uuid(row.row_uuid().0));
-    }
-    if is_magic_current_column(column) {
-        return row.raw_field(column);
-    }
-    row.cell(table, column)
-}
-
-fn relation_correlation_value_is_null(value: &Value) -> bool {
-    matches!(value, Value::Nullable(None))
 }
 
 fn current_row_fields(table: &TableSchema) -> Vec<String> {
