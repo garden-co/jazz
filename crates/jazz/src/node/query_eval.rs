@@ -18,15 +18,16 @@ use super::maintained_subscription_view::{MaintainedSubscriptionView, Maintained
 use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
     AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathSegment,
-    ClosureRootGate, ComparisonOp as NormalizedComparisonOp, CorrelationRequirement, DataSource,
-    DeletionRegisterSource, FieldProjection, FrontierId, JoinContribution,
-    JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
-    NormalizedValueRef, OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef,
-    OverlayStack, PayloadProjection, PolicyContext, PolicyDecisionRole, PolicyEnforcementMode,
-    PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProgramOutputSchemas,
-    ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet,
-    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
-    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    ClosureRootGate, ComparisonOp as NormalizedComparisonOp, ContentVersionSource,
+    CorrelationRequirement, DataSource, DeletionRegisterSource, FieldProjection, FrontierId,
+    JoinContribution, JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape,
+    NormalizedShapeIdentity, NormalizedValueRef, OrderKey as NormalizedOrderKey,
+    OutputTerminalSchema, OverlayRef, OverlayStack, PayloadProjection, PolicyContext,
+    PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
+    ProgramBinding, ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField,
+    QueryProgram, QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView,
+    RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
+    ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
@@ -402,6 +403,7 @@ where
                         row_uuid_field: "row_uuid".to_owned(),
                         metadata: BTreeMap::new(),
                     },
+                    content_version: None,
                     deletion_register: None,
                 });
             }
@@ -471,6 +473,7 @@ where
                     row_uuid_field: "row_uuid".to_owned(),
                     metadata: BTreeMap::new(),
                 },
+                content_version: None,
                 deletion_register: None,
             });
         }
@@ -737,6 +740,14 @@ where
             open_tx_overlay,
             branch_data,
         )?;
+        let content_version = self.content_version_source_for_request(
+            request,
+            &table,
+            graph_tier,
+            history_position,
+            open_tx_overlay,
+            branch_data,
+        )?;
         Ok(ResolvedSource {
             table_schema: table,
             graph,
@@ -746,6 +757,7 @@ where
                 row_uuid_field: "row_uuid".to_owned(),
                 metadata,
             },
+            content_version,
             deletion_register,
         })
     }
@@ -786,6 +798,41 @@ where
         }
         Ok(Some(DeletionRegisterSource {
             graph: deletion_register_current_source_graph(&table.name, tier),
+            row_uuid_field: "row_uuid".to_owned(),
+        }))
+    }
+
+    fn content_version_source_for_request(
+        &self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        graph_tier: Option<DurabilityTier>,
+        history_position: Option<GlobalSeq>,
+        open_tx_overlay: Option<OpenTxId>,
+        branch_data: Option<BranchId>,
+    ) -> Result<Option<ContentVersionSource>, SourceResolutionError> {
+        if !request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::VersionPayloads)
+        {
+            return Ok(None);
+        }
+        let Some(tier) = graph_tier else {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        };
+        if request.visibility != RowVisibility::Visible
+            || history_position.is_some()
+            || open_tx_overlay.is_some()
+            || table.name == "jazz_branches"
+        {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        }
+        if branch_data.is_some() {
+            return Err(source_resolution_error(request, SourceGap::BranchOverlay));
+        }
+        Ok(Some(ContentVersionSource {
+            graph: content_version_current_source_graph(table, tier),
             row_uuid_field: "row_uuid".to_owned(),
         }))
     }
@@ -854,6 +901,57 @@ fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> 
     .project_fields(register_storage_fields_for_query_engine("left."))
 }
 
+fn content_version_current_source_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {
+    let current_keys = content_version_current_keys_graph(&table.name, tier);
+    GraphBuilder::join(
+        GraphBuilder::table(history_table_name(&table.name))
+            .project(maintained_view_history_storage_field_names(table)),
+        current_keys,
+        ["row_uuid", "tx_time", "tx_node_id"],
+        ["row_uuid", "tx_time", "tx_node_id"],
+    )
+    .project_fields(history_storage_fields_for_query_engine(table, "left."))
+}
+
+fn content_version_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
+    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
+    if tier == DurabilityTier::Global {
+        return GraphBuilder::table(global_current_table_name(table)).project(key_fields);
+    }
+    let ahead = if tier == DurabilityTier::Edge {
+        GraphBuilder::join(
+            GraphBuilder::table(ahead_current_table_name(table)).project(key_fields),
+            GraphBuilder::table("jazz_transactions")
+                .filter(
+                    PredicateExpr::Or(vec![
+                        PredicateExpr::eq("durability", Value::Enum(2)),
+                        PredicateExpr::eq("durability", Value::Enum(3)),
+                    ])
+                    .canonicalize(),
+                )
+                .project(["time", "node_id"]),
+            ["tx_time", "tx_node_id"],
+            ["time", "node_id"],
+        )
+        .project_fields(
+            key_fields
+                .into_iter()
+                .map(|field| ProjectField::renamed(left_field(&field), field)),
+        )
+    } else {
+        GraphBuilder::table(ahead_current_table_name(table)).project(key_fields)
+    };
+    GraphBuilder::arg_max_by(
+        GraphBuilder::union([
+            GraphBuilder::table(global_current_table_name(table)).project(key_fields),
+            ahead,
+        ]),
+        ["row_uuid"],
+        ["tx_time", "tx_node_id"],
+    )
+    .project(key_fields)
+}
+
 fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
     let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
     if tier == DurabilityTier::Global {
@@ -891,6 +989,13 @@ fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> Gr
         ["tx_time", "tx_node_id"],
     )
     .project(key_fields)
+}
+
+fn history_storage_fields_for_query_engine(table: &TableSchema, prefix: &str) -> Vec<ProjectField> {
+    maintained_view_history_storage_field_names(table)
+        .into_iter()
+        .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
+        .collect()
 }
 
 fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<ProjectField> {

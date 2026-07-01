@@ -60,8 +60,10 @@ pub(crate) struct SourceRequirements {
 /// Internal source metadata requirement.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum SourceMetadataRequirement {
-    /// Include version identity fields for payload/replacement witnesses.
+    /// Include version identity fields on source rows.
     VersionWitnesses,
+    /// Provide canonical content-version payload rows for witness terminals.
+    VersionPayloads,
     /// Include deletion-register/deletion-marker state.
     DeletionMarkers,
     /// Include batch/member identity and digest fields.
@@ -106,8 +108,20 @@ pub(crate) struct ResolvedSource {
     pub(crate) graph: GraphBuilder,
     /// Canonical row shape emitted by the source graph.
     pub(crate) row_shape: SourceRowShape,
+    /// Content version rows for the same source, when version witnesses are
+    /// requested explicitly.
+    pub(crate) content_version: Option<ContentVersionSource>,
     /// Deletion register rows for the same source, when requested explicitly.
     pub(crate) deletion_register: Option<DeletionRegisterSource>,
+}
+
+/// Concrete content-version source selected by node-side source resolution.
+#[derive(Clone, Debug)]
+pub(crate) struct ContentVersionSource {
+    /// Graph emitting current content history rows with canonical storage fields.
+    pub(crate) graph: GraphBuilder,
+    /// Field containing row identity.
+    pub(crate) row_uuid_field: String,
 }
 
 /// Concrete deletion-register source selected by node-side source resolution.
