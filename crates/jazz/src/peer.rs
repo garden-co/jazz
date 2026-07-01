@@ -774,7 +774,7 @@ impl PeerState {
 
     fn drain_maintained_subscription_view_changes<S>(
         &mut self,
-        node: &NodeState<S>,
+        node: &mut NodeState<S>,
         shape: &ValidatedQuery,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
@@ -782,6 +782,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        node.flush_query_runtime()?;
         let previous_member_result_set = self
             .subscriptions
             .get(&subscription)

@@ -275,22 +275,6 @@ impl IvmRuntime {
             metrics: &mut metrics,
         };
 
-        let retained_roots = self
-            .node_meta
-            .iter()
-            .filter(|(node, meta)| {
-                !meta.retainers.is_empty()
-                    && evaluator
-                        .graph
-                        .node(**node)
-                        .is_some_and(|node| !node.is_durable())
-            })
-            .map(|(node, _)| *node)
-            .collect::<Vec<_>>();
-        for node in retained_roots {
-            evaluator.update_node(node)?;
-        }
-
         for (subscription_id, subscription) in &self.multisink_subscriptions {
             let mut sinks = BTreeMap::new();
             for (sink, output) in &subscription.outputs {
@@ -312,6 +296,25 @@ impl IvmRuntime {
             if !records.is_empty() && subscription.sender.send(records).is_err() {
                 dropped_subscriptions.push(*subscription_id);
             }
+        }
+        // Retained roots are background maintenance. Active subscriptions must
+        // see the tick's deltas before retained-only roots can advance shared
+        // recursive/operator state.
+        let mut retained_roots = self
+            .node_meta
+            .iter()
+            .filter(|(node, meta)| {
+                !meta.retainers.is_empty()
+                    && evaluator
+                        .graph
+                        .node(**node)
+                        .is_some_and(|node| !node.is_durable())
+            })
+            .map(|(node, _)| *node)
+            .collect::<Vec<_>>();
+        retained_roots.sort_unstable();
+        for node in retained_roots {
+            evaluator.update_node(node)?;
         }
         drop(evaluator);
 

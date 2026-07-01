@@ -130,10 +130,16 @@ where
     S: OrderedKvStorage,
 {
     let has_recompute_table_delta = has_recompute_table_delta_for_recursion(&runtime, seed, step)?;
+    let has_table_delta = has_table_delta_for_recursion(&runtime, seed, step)?;
+    let has_any_table_delta = !runtime.table_deltas.is_empty();
     let has_recompute_binding_delta =
         has_recompute_binding_delta_for_recursion(&runtime, seed, step)?;
+    let has_binding_source = has_binding_source_for_recursion(&runtime, seed, step)?;
     let has_binding_deltas = !runtime.binding_deltas.is_empty();
     if has_recompute_table_delta
+        // Prepared/bound recursion can be embedded in larger routed graphs where
+        // positive table deltas must be diffed against the whole bound closure.
+        || (has_binding_source && (has_table_delta || has_any_table_delta))
         || has_recompute_binding_delta
         || (!has_binding_deltas && recursive_state.is_empty())
         || !recursive_state.step_arrangements_hydrated()
@@ -220,6 +226,23 @@ where
     Ok(consolidate_deltas(emitted))
 }
 
+fn has_table_delta_for_recursion<S>(
+    runtime: &GraphRuntimeView<'_, S>,
+    seed: NodeId,
+    step: NodeId,
+) -> Result<bool, IvmRuntimeError>
+where
+    S: OrderedKvStorage,
+{
+    let mut tables = HashMap::<String, RecordDescriptor>::new();
+    collect_table_sources(runtime.graph, seed, &mut tables)?;
+    collect_table_sources(runtime.graph, step, &mut tables)?;
+    Ok(runtime
+        .table_deltas
+        .iter()
+        .any(|table_delta| tables.contains_key(&table_delta.table)))
+}
+
 fn has_recompute_table_delta_for_recursion<S>(
     runtime: &GraphRuntimeView<'_, S>,
     seed: NodeId,
@@ -260,6 +283,20 @@ where
         .iter()
         .filter(|binding_delta| shapes.contains_key(&binding_delta.shape))
         .any(|binding_delta| binding_delta.deltas.iter().any(|delta| delta.weight <= 0)))
+}
+
+fn has_binding_source_for_recursion<S>(
+    runtime: &GraphRuntimeView<'_, S>,
+    seed: NodeId,
+    step: NodeId,
+) -> Result<bool, IvmRuntimeError>
+where
+    S: OrderedKvStorage,
+{
+    let mut shapes = HashMap::<String, RecordDescriptor>::new();
+    collect_binding_sources(runtime.graph, seed, &mut shapes)?;
+    collect_binding_sources(runtime.graph, step, &mut shapes)?;
+    Ok(!shapes.is_empty())
 }
 
 pub(super) fn hydrate_recursive_arrangements<S>(

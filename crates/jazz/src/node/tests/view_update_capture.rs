@@ -428,6 +428,7 @@ impl MaintainedSubscriptionViewSubscription {
         subscription_key: SubscriptionKey,
         identity: AuthorId,
     ) -> SyncMessage {
+        core.flush_query_runtime().unwrap();
         let output_tables = core.maintained_view_terminal_tables(shape).unwrap();
         let mut states = BTreeMap::<ResultRowEntry, (bool, bool)>::new();
         loop {

@@ -468,6 +468,28 @@ fn edges_schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
+fn edges_docs_schema() -> DatabaseSchema {
+    DatabaseSchema::new([
+        TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "docs",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("team", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ])
+}
+
 fn edges_blockers_schema() -> DatabaseSchema {
     DatabaseSchema::new([
         TableSchema::new(
@@ -2279,6 +2301,180 @@ fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_
             (vec![Value::U64(1), Value::U64(2)], 1),
             (vec![Value::U64(1), Value::U64(3)], 1),
         ]
+    );
+}
+
+#[test]
+fn prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_rows() {
+    let storage = MemoryStorage::new(&["edges", "docs"]);
+    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let reach = prepared_reachability_graph(GraphBuilder::table("edges"), 16);
+    let graph = GraphBuilder::join(GraphBuilder::table("docs"), reach, ["team"], ["dst"])
+        .project_fields([
+            ProjectField::renamed("left.id", "id"),
+            ProjectField::renamed("left.team", "team"),
+            ProjectField::renamed("right.seed", "seed"),
+        ]);
+    let shape = database
+        .prepare_one_sink(graph, "prepared-reach", binding_descriptor, ["seed"])
+        .unwrap();
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(11), Value::U64(3), Value::U64(1)], 1)]
+    );
+}
+
+#[test]
+fn routed_prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_rows() {
+    let storage = MemoryStorage::new(&["edges", "docs"]);
+    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let reach = RecordDescriptor::new([
+        ("seed", ColumnType::U64.value_type()),
+        ("dst", ColumnType::U64.value_type()),
+        ("__routing_seed", ColumnType::U64.value_type()),
+    ]);
+    let seed = GraphBuilder::binding_source("prepared-routed-reach-docs", binding_descriptor)
+        .project_fields([
+            ProjectField::renamed("seed", "seed"),
+            ProjectField::renamed("seed", "dst"),
+            ProjectField::renamed("seed", "__routing_seed"),
+        ]);
+    let frontier = GraphBuilder::frontier_source("frontier", reach);
+    let step = GraphBuilder::join(
+        frontier,
+        GraphBuilder::table("edges").project(["src", "dst"]),
+        ["dst"],
+        ["src"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.seed", "seed"),
+        ProjectField::renamed("right.dst", "dst"),
+        ProjectField::renamed("left.__routing_seed", "__routing_seed"),
+    ]);
+    let reach = GraphBuilder::recursive(seed, step, "frontier", 16);
+    let graph = GraphBuilder::join(GraphBuilder::table("docs"), reach, ["team"], ["dst"])
+        .project_fields([
+            ProjectField::renamed("left.id", "id"),
+            ProjectField::renamed("left.team", "team"),
+            ProjectField::renamed("right.seed", "seed"),
+            ProjectField::renamed("right.__routing_seed", "__routing_seed"),
+        ]);
+    let shape = database
+        .prepare(
+            [RoutedMultisinkTerminal::new(
+                "docs",
+                graph,
+                ["__routing_seed"],
+                ["id", "team", "seed"],
+            )],
+            "prepared-routed-reach-docs",
+            binding_descriptor,
+        )
+        .unwrap();
+    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        subscription
+            .recv()
+            .unwrap()
+            .get("docs")
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(vec![Value::U64(11), Value::U64(3), Value::U64(1)], 1)]
+    );
+}
+
+#[test]
+fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas() {
+    let storage = MemoryStorage::new(&["edges", "docs"]);
+    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let reach_descriptor = RecordDescriptor::new([
+        ("seed", ColumnType::U64.value_type()),
+        ("dst", ColumnType::U64.value_type()),
+    ]);
+    let reachable = |frontier_name: &str| {
+        let seed = GraphBuilder::binding_source("prepared-double-reach", binding_descriptor)
+            .project_fields([
+                ProjectField::renamed("seed", "seed"),
+                ProjectField::renamed("seed", "dst"),
+            ]);
+        let frontier = GraphBuilder::frontier_source(frontier_name, reach_descriptor);
+        let step = GraphBuilder::join(
+            frontier,
+            GraphBuilder::table("edges").project(["src", "dst"]),
+            ["dst"],
+            ["src"],
+        )
+        .project_fields([
+            ProjectField::renamed("left.seed", "seed"),
+            ProjectField::renamed("right.dst", "dst"),
+        ]);
+        GraphBuilder::recursive(seed, step, frontier_name, 16)
+    };
+    let left_reach = reachable("frontier_a");
+    let right_reach = reachable("frontier_b").project_fields([
+        ProjectField::renamed("seed", "right_seed"),
+        ProjectField::renamed("dst", "right_dst"),
+    ]);
+    let graph = GraphBuilder::join(GraphBuilder::table("docs"), left_reach, ["team"], ["dst"])
+        .project_fields([
+            ProjectField::renamed("left.id", "id"),
+            ProjectField::renamed("left.team", "team"),
+            ProjectField::renamed("right.seed", "seed"),
+        ]);
+    let graph = GraphBuilder::join(graph, right_reach, ["team"], ["right_dst"]).project_fields([
+        ProjectField::renamed("left.id", "id"),
+        ProjectField::renamed("left.team", "team"),
+        ProjectField::renamed("left.seed", "seed"),
+    ]);
+    let shape = database
+        .prepare_one_sink(graph, "prepared-double-reach", binding_descriptor, ["seed"])
+        .unwrap();
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(11), Value::U64(3), Value::U64(1)], 1)]
     );
 }
 
