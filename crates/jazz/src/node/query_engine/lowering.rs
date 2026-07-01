@@ -322,12 +322,19 @@ fn analyze_query_plan(
 
     for plan_source in analyzed_plan_sources(&plan) {
         let read_source = request.reads.primary.sources.get(&plan_source);
-        let Some(SourceExpr::VisibleCurrent {
-            projection,
-            data: DataSource::Current,
-            tier: _,
-        }) = read_source
-        else {
+        let Some(projection) = (match read_source {
+            Some(SourceExpr::VisibleCurrent {
+                projection,
+                data: DataSource::Current,
+                tier: _,
+            })
+            | Some(SourceExpr::HistoryCut {
+                projection,
+                data: DataSource::Current,
+                position: _,
+            }) => Some(projection),
+            _ => None,
+        }) else {
             gaps.push(UnsupportedReason::Source(SourceGap::HistoricalStorageCut));
             continue;
         };
