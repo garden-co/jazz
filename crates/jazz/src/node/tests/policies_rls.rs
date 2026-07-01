@@ -3885,6 +3885,7 @@ fn reachable_closure_helper_yields_seed_reachable_team_set() {
         &shape,
         graphs.closure.project(["team", "reachable_team"]),
         ["team"],
+        ["team", "reachable_team"],
         team(1),
     );
     seed_recursive_reachable_fixture(&mut core);
@@ -4013,7 +4014,10 @@ fn reachable_edge_constituent_current_graph_yields_closure_edges_with_versions()
         "teamEdges",
         "member",
     );
-    let subscription = subscribe_reachable_test_graph(&mut core, &shape, graph, ["team"], team(1));
+    let mut public_fields = test_maintained_view_version_fields(core.table("teamEdges").unwrap());
+    public_fields.push("team".to_owned());
+    let subscription =
+        subscribe_reachable_test_graph(&mut core, &shape, graph, ["team"], public_fields, team(1));
     let fixture = seed_recursive_reachable_fixture(&mut core);
     let initial = drain_reachable_test_rows(&subscription);
     accept_global(
@@ -4044,7 +4048,10 @@ fn reachable_access_constituent_current_graph_yields_closure_access_rows_with_ve
         "teamAccess",
         "team",
     );
-    let subscription = subscribe_reachable_test_graph(&mut core, &shape, graph, ["team"], team(1));
+    let mut public_fields = test_maintained_view_version_fields(core.table("teamAccess").unwrap());
+    public_fields.push("team".to_owned());
+    let subscription =
+        subscribe_reachable_test_graph(&mut core, &shape, graph, ["team"], public_fields, team(1));
     seed_recursive_reachable_fixture(&mut core);
     let rows = drain_reachable_test_rows(&subscription);
     assert_eq!(
@@ -4073,8 +4080,16 @@ fn reachable_constituents_retract_when_edge_removed_and_closure_shrinks() {
         "teamAccess",
         "team",
     );
-    let subscription =
-        subscribe_reachable_test_graph(&mut core, &shape, before_graph, ["team"], team(1));
+    let mut public_fields = test_maintained_view_version_fields(core.table("teamAccess").unwrap());
+    public_fields.push("team".to_owned());
+    let subscription = subscribe_reachable_test_graph(
+        &mut core,
+        &shape,
+        before_graph,
+        ["team"],
+        public_fields,
+        team(1),
+    );
     let edge_to_remove = seed_recursive_reachable_fixture(&mut core).edge_2_to_3;
     let before = drain_reachable_test_rows(&subscription);
     assert_eq!(
@@ -4312,33 +4327,46 @@ fn subscribe_reachable_test_graph(
     shape: &ValidatedQuery,
     graph: GraphBuilder,
     output_key_fields: impl IntoIterator<Item = impl Into<String>>,
+    public_fields: impl IntoIterator<Item = impl Into<String>>,
     seed_team: uuid::Uuid,
-) -> groove::ivm::Subscription {
+) -> groove::ivm::MultisinkSubscription {
     let binding_descriptor = groove::records::RecordDescriptor::new([(
         "team".to_owned(),
         groove::records::ValueType::Uuid,
     )]);
+    let route_fields = output_key_fields
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>();
+    let public_fields = public_fields.into_iter().map(Into::into).collect::<Vec<_>>();
     let prepared = core
         .database
-        .prepare(
+        .prepare([groove::ivm::RoutedMultisinkTerminal::new(
+            crate::node::JAZZ_APP_ROWS_SINK,
             graph,
-            format!("jazz-query:{}", shape.shape_id().0),
-            binding_descriptor,
-            output_key_fields,
-        )
+            route_fields,
+            public_fields,
+        )],
+        format!("jazz-query:{}", shape.shape_id().0),
+        binding_descriptor)
         .unwrap();
     core.database
         .bind_shape(prepared.id(), &[Value::Uuid(seed_team)])
         .unwrap()
 }
 
-fn drain_reachable_test_rows(subscription: &groove::ivm::Subscription) -> ReachableTestRows {
+fn drain_reachable_test_rows(subscription: &groove::ivm::MultisinkSubscription) -> ReachableTestRows {
     let mut descriptor = None;
     let mut values = Vec::new();
     let mut empty_polls_after_values = 0;
     for _ in 0..100 {
         match subscription.try_recv() {
             Ok(deltas) => {
+                let deltas = crate::node::take_optional_sink_deltas(
+                    deltas,
+                    crate::node::JAZZ_APP_ROWS_SINK,
+                )
+                .unwrap();
                 if descriptor.is_none() {
                     descriptor = Some(deltas.descriptor);
                 }
