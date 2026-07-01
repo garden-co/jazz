@@ -15,6 +15,7 @@ use crate::storage::{OrderedKvStorage, RecordStore};
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
     RecordDelta, RecordDeltas, ScopePath, SubTick, TableDelta, consolidate_deltas, plan_expr_names,
+    project_binding_source_deltas,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -554,10 +555,7 @@ where
                     .get(&binding_source.shape)
                     .cloned()
                     .unwrap_or_else(|| RecordDeltas::empty(output_desc));
-                if deltas.descriptor != output_desc {
-                    return Err(IvmRuntimeError::GraphOutputMismatch);
-                }
-                Ok(deltas)
+                project_binding_source_deltas(&deltas, &output_desc)
             }
             OpType::Filter(filter) => {
                 let input = self.eval_unary_input(graph_node, node)?;
