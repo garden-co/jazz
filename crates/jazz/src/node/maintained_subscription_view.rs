@@ -9,8 +9,9 @@ use super::codec::{
 };
 use super::query_engine::{
     OutputTerminalSchema, ProgramFactSchema, QueryProgram, ResultMembershipSchema,
-    VersionWitnessSchemas,
+    VersionWitnessSchema,
 };
+#[cfg(test)]
 use super::query_eval::maintained_view_tagged_user_field;
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::ResultMemberEntry;
@@ -100,10 +101,10 @@ pub(crate) struct MaintainedTerminalSchemas {
 #[derive(Clone, Debug)]
 enum MaintainedTerminalKind {
     ResultCurrent(ResultMembershipSchema),
-    VersionContent(VersionWitnessSchemas),
-    VersionDeletion(VersionWitnessSchemas),
-    ReplacementContent(VersionWitnessSchemas),
-    ReplacementDeletion(VersionWitnessSchemas),
+    VersionContent(VersionWitnessSchema),
+    VersionDeletion(VersionWitnessSchema),
+    ReplacementContent(VersionWitnessSchema),
+    ReplacementDeletion(VersionWitnessSchema),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -283,19 +284,27 @@ impl MaintainedTerminalSchemas {
                 ProgramFactSchema::VersionWitnesses(schema)
                     if terminal.sink.starts_with("maintained.version_deletion") =>
                 {
-                    Some(MaintainedTerminalKind::VersionDeletion(schema.clone()))
+                    schema
+                        .deletion
+                        .clone()
+                        .map(MaintainedTerminalKind::VersionDeletion)
                 }
-                ProgramFactSchema::VersionWitnesses(schema) => {
-                    Some(MaintainedTerminalKind::VersionContent(schema.clone()))
-                }
+                ProgramFactSchema::VersionWitnesses(schema) => schema
+                    .content
+                    .clone()
+                    .map(MaintainedTerminalKind::VersionContent),
                 ProgramFactSchema::ReplacementWitnesses(schema)
                     if terminal.sink.starts_with("maintained.replacement_deletion") =>
                 {
-                    Some(MaintainedTerminalKind::ReplacementDeletion(schema.clone()))
+                    schema
+                        .deletion
+                        .clone()
+                        .map(MaintainedTerminalKind::ReplacementDeletion)
                 }
-                ProgramFactSchema::ReplacementWitnesses(schema) => {
-                    Some(MaintainedTerminalKind::ReplacementContent(schema.clone()))
-                }
+                ProgramFactSchema::ReplacementWitnesses(schema) => schema
+                    .content
+                    .clone()
+                    .map(MaintainedTerminalKind::ReplacementContent),
                 _ => None,
             };
             if let Some(kind) = kind {
@@ -364,30 +373,33 @@ fn decode_typed_terminal_record(
             ))
         }
         MaintainedTerminalKind::VersionContent(schema) => {
-            validate_witness_event_kind(record, schema, "version_content")?;
-            decode_tagged_terminal_record(record, tables, node_aliases)
+            validate_witness_event_kind(record, "version_content")?;
+            decode_typed_version_witness(record, schema, tables)
+                .map(DecodedMaintainedEvent::VersionContent)
         }
         MaintainedTerminalKind::VersionDeletion(schema) => {
-            validate_witness_event_kind(record, schema, "version_deletion")?;
-            decode_tagged_terminal_record(record, tables, node_aliases)
+            validate_witness_event_kind(record, "version_deletion")?;
+            decode_typed_version_witness(record, schema, tables)
+                .map(DecodedMaintainedEvent::VersionDeletion)
         }
         MaintainedTerminalKind::ReplacementContent(schema) => {
-            validate_witness_event_kind(record, schema, "replacement_content")?;
-            decode_tagged_terminal_record(record, tables, node_aliases)
+            validate_witness_event_kind(record, "replacement_content")?;
+            decode_typed_version_witness(record, schema, tables)
+                .map(DecodedMaintainedEvent::ReplacementContent)
         }
         MaintainedTerminalKind::ReplacementDeletion(schema) => {
-            validate_witness_event_kind(record, schema, "replacement_deletion")?;
-            decode_tagged_terminal_record(record, tables, node_aliases)
+            validate_witness_event_kind(record, "replacement_deletion")?;
+            decode_typed_version_witness(record, schema, tables)
+                .map(DecodedMaintainedEvent::ReplacementDeletion)
         }
     }
 }
 
 fn validate_witness_event_kind(
     record: BorrowedRecord<'_>,
-    schema: &VersionWitnessSchemas,
     expected: &str,
 ) -> Result<(), super::Error> {
-    match record.get_idx(field_idx(record, &schema.role_field)?)? {
+    match record.get_idx(field_idx(record, "event_kind")?)? {
         Value::String(value) if value == expected => Ok(()),
         Value::String(_) => Err(super::Error::InvalidStoredValue(
             "maintained witness event kind did not match query-engine terminal schema",
@@ -398,6 +410,63 @@ fn validate_witness_event_kind(
     }
 }
 
+fn decode_typed_version_witness(
+    record: BorrowedRecord<'_>,
+    schema: &VersionWitnessSchema,
+    tables: &TableSchemas,
+) -> Result<VersionRow, super::Error> {
+    let table_name = match record.get_idx(field_idx(record, &schema.identity.table_field)?)? {
+        Value::String(value) => value,
+        _ => {
+            return Err(super::Error::InvalidStoredValue(
+                "maintained witness table field must be string",
+            ));
+        }
+    };
+    let table = tables
+        .get(&table_name)
+        .ok_or(super::Error::InvalidStoredValue(
+            "maintained witness table_name must exist",
+        ))?;
+    let deletion = tagged_deletion(record.get_idx(field_idx(record, &schema.deletion_field)?)?)?;
+    let mut cells = BTreeMap::new();
+    for column in &table.columns {
+        let field =
+            schema
+                .user_fields
+                .get(&column.name)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "maintained witness schema missing user field",
+                ))?;
+        if let Some(value) = nullable_value(record.get_idx(field_idx(record, field)?)?)? {
+            cells.insert(column.name.clone(), value);
+        }
+    }
+    let tx_time = TxTime(record_u64(record, &schema.identity.tx_time_field)?);
+    VersionRow::from_parts_with_schema_version(
+        table,
+        VersionRowParts {
+            table: table.name.clone(),
+            row_uuid: RowUuid(record.get_uuid(field_idx(record, &schema.identity.row_field)?)?),
+            tx_node_alias: NodeAlias(record_u64(record, &schema.identity.tx_node_field)?),
+            schema_version_alias: crate::ids::SchemaVersionAlias(record_u64(
+                record,
+                &schema.identity.schema_field,
+            )?),
+            tx_time,
+            parents: tx_ids_from_value(record.get_idx(field_idx(record, &schema.parents_field)?)?)?,
+            created_by: AuthorId(record.get_uuid(field_idx(record, &schema.created_by_field)?)?),
+            created_at: TxTime(record_u64(record, &schema.created_at_field)?),
+            updated_by: AuthorId(record.get_uuid(field_idx(record, &schema.updated_by_field)?)?),
+            updated_at: TxTime(record_u64(record, &schema.updated_at_field)?),
+            cells,
+            deletion,
+        },
+        None,
+    )
+}
+
+#[cfg(test)]
 fn decode_tagged_terminal_record(
     record: BorrowedRecord<'_>,
     tables: &TableSchemas,
@@ -457,6 +526,7 @@ fn decode_tagged_terminal_record(
     }
 }
 
+#[cfg(test)]
 fn decode_tagged_terminal_version(
     record: BorrowedRecord<'_>,
     table: &TableSchema,
