@@ -43,6 +43,7 @@ use crate::query::{
     Include, JoinTarget, JoinVia, Operand, OrderDirection, PolicyBranch, Predicate,
     Query as JazzQuery, ShapeId, ValidatedQuery,
 };
+use crate::schema::branch_metadata_table_schema;
 
 const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
@@ -448,9 +449,27 @@ where
         }
         let table = self
             .node
-            .table_in_schema(&request.source.table, self.read_view.read_schema)
+            .table_in_schema_or_branch_metadata(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let (graph, descriptor, metadata) = if let Some(position) = history_position {
+        let (graph, descriptor, metadata) = if table.name == "jazz_branches"
+            && history_position.is_none()
+            && open_tx_overlay.is_none()
+        {
+            if request.visibility != RowVisibility::Visible {
+                return Err(source_resolution_error(
+                    request,
+                    SourceGap::SchemaProjection,
+                ));
+            }
+            let rows = self
+                .node
+                .branch_metadata_current_rows()
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let base = inline_current_graph(&table, rows)
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let descriptor = current_row_descriptor(&table);
+            (base, descriptor, BTreeMap::new())
+        } else if let Some(position) = history_position {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
                     request,
@@ -1366,7 +1385,7 @@ where
     let mut sources = BTreeSet::new();
     let mut paths = Vec::new();
     let root_source = root_source_id(root_table);
-    let root_schema = node.table_in_schema(root_table, schema_version)?;
+    let root_schema = node.table_in_schema_or_branch_metadata(root_table, schema_version)?;
     let explicit_root_segments = includes
         .iter()
         .filter_map(|include| include.path.split('.').next())
@@ -1391,7 +1410,8 @@ where
         let mut parent = root_source.clone();
         let mut segments = Vec::new();
         for (segment_index, segment) in include.path.split('.').enumerate() {
-            let current_table = node.table_in_schema(&current_table_name, schema_version)?;
+            let current_table =
+                node.table_in_schema_or_branch_metadata(&current_table_name, schema_version)?;
             let target_table = current_table
                 .references
                 .get(segment)
@@ -2288,6 +2308,18 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    fn table_in_schema_or_branch_metadata(
+        &self,
+        table: &str,
+        schema_version: SchemaVersionId,
+    ) -> Result<TableSchema, Error> {
+        if table == "jazz_branches" {
+            Ok(branch_metadata_table_schema())
+        } else {
+            self.table_in_schema(table, schema_version)
+        }
+    }
+
     pub(super) fn resolve_time_travel_position(
         &mut self,
         time: TxTime,
@@ -2766,6 +2798,92 @@ where
                 .field_index("row_uuid")
                 .ok_or(Error::InvalidStoredValue(
                     "policy authorization terminal is missing row_uuid",
+                ))?;
+        let mut rows = BTreeSet::new();
+        for (record, weight) in deltas.iter() {
+            if weight <= 0 {
+                continue;
+            }
+            rows.insert(RowUuid(record.get_uuid(row_idx)?));
+        }
+        Ok(rows)
+    }
+
+    pub(super) fn branch_read_policy_authorized_branch_ids(
+        &mut self,
+        branch_id: BranchId,
+        identity: AuthorId,
+    ) -> Result<BTreeSet<RowUuid>, Error> {
+        let Some(policy) = self.catalogue.schema.branch_read_policy.clone() else {
+            return Ok(BTreeSet::from([RowUuid(branch_id.0)]));
+        };
+        let claims = self.session_claims.get(&identity);
+        let mut query = policy;
+        rewrite_policy_claims_for_authorization(&mut query, claims);
+        query.filters.push(crate::query::eq(
+            crate::query::col("id"),
+            crate::query::lit(Value::Uuid(branch_id.0)),
+        ));
+        let policy_shape = query.validate(&self.catalogue.schema)?;
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        let policy_shape = bind_query_params_with_mode(
+            &policy_shape,
+            &policy_binding,
+            &self.catalogue.schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        if !policy_shape.params().is_empty() {
+            return Err(Error::QueryCapability(
+                "branch read policy filters with runtime parameters must lower through query-engine binding sources"
+                    .to_owned(),
+            ));
+        }
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let input = RowSetProgramInput {
+            shape: input_shape,
+            binding: ProgramBinding {
+                id: binding.binding_id(),
+                source_shape: None,
+                extra_user_params: BTreeMap::new(),
+                values: binding.values().clone(),
+            },
+        };
+        let request = QueryProgramRequest {
+            reads: current_query_read_set(
+                &input.shape,
+                policy_shape.schema_version(),
+                DurabilityTier::Local,
+                None,
+            ),
+            policy: match self.query_program_policy_context(identity) {
+                PolicyContext::Identity {
+                    mode,
+                    permission_subject,
+                    claims,
+                    attribution,
+                } => PolicyContext::AuthorizationSubplan {
+                    mode,
+                    permission_subject,
+                    claims,
+                    attribution,
+                },
+                other => other,
+            },
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AuthorizedRows,
+                policy_shape.query(),
+            ),
+        };
+        let graph = self.policy_authorization_row_id_graph(request)?;
+        let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
+        let row_idx =
+            deltas
+                .descriptor
+                .field_index("row_uuid")
+                .ok_or(Error::InvalidStoredValue(
+                    "branch read authorization terminal is missing row_uuid",
                 ))?;
         let mut rows = BTreeSet::new();
         for (record, weight) in deltas.iter() {

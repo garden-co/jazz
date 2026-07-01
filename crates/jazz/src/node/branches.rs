@@ -337,26 +337,13 @@ where
         &mut self,
         branch: &BranchRecord,
         identity: AuthorId,
-        context: &mut BranchEvaluationContext,
+        _context: &mut BranchEvaluationContext,
     ) -> Result<bool, Error> {
         if identity == AuthorId::SYSTEM {
             return Ok(true);
         }
-        let Some(policy) = self.catalogue.schema.branch_read_policy.clone() else {
-            return Ok(true);
-        };
-        let table = branch_metadata_table_schema();
-        self.branch_policy_allows(
-            BranchPolicyRequest {
-                table: &table,
-                policy: &policy,
-                row_uuid: RowUuid(branch.branch_id.0),
-                identity,
-                branch,
-            },
-            context,
-            |column| branch_metadata_value(branch, column),
-        )
+        self.branch_read_policy_authorized_branch_ids(branch.branch_id, identity)
+            .map(|branches| branches.contains(&RowUuid(branch.branch_id.0)))
     }
 
     fn branch_write_policy_allows(
@@ -720,6 +707,15 @@ where
         Ok(rows)
     }
 
+    pub(super) fn branch_metadata_current_rows(&self) -> Result<Vec<CurrentRow>, Error> {
+        let table = branch_metadata_table_schema();
+        self.branches
+            .branches
+            .values()
+            .map(|branch| branch_metadata_current_row(&table, branch))
+            .collect()
+    }
+
     fn branch_overlay_rows(
         &mut self,
         table: &str,
@@ -968,4 +964,17 @@ fn branch_metadata_value(branch: &BranchRecord, column: &str) -> Option<Value> {
         "state" => Some(Value::String(branch_state_string(branch.state).to_owned())),
         _ => None,
     }
+}
+
+fn branch_metadata_current_row(
+    table: &TableSchema,
+    branch: &BranchRecord,
+) -> Result<CurrentRow, Error> {
+    let mut cells = BTreeMap::new();
+    for column in &table.columns {
+        if let Some(value) = branch_metadata_value(branch, &column.name) {
+            cells.insert(column.name.clone(), value);
+        }
+    }
+    current_row_from_cells(table, RowUuid(branch.branch_id.0), &cells)
 }
