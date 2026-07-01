@@ -196,320 +196,57 @@ where
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
         identity: AuthorId,
-        prepared_plan: Option<(&ValidatedQuery, &Binding, &PreparedQueryPlan)>,
+        _prepared_plan: Option<(&ValidatedQuery, &Binding, &PreparedQueryPlan)>,
         tier: DurabilityTier,
     ) -> Result<SyncMessage, Error> {
-        let table_name = shape.query().table.clone();
         let peer_complete_tx_payloads = peer_complete_tx_payloads
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let _previous_result_set = previous_result_set.into_iter().collect::<BTreeSet<_>>();
+        let previous_result_set = previous_result_set.into_iter().collect::<BTreeSet<_>>();
         let previous_member_result_set = previous_member_result_set
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let previous_row_result_set = previous_member_result_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
+        let (receiver, maintained, transitions, tables) =
+            self.maintained_subscription_view_from_cold_snapshot(shape, binding, identity, tier)?;
+        debug_assert!(
+            transitions.removes.is_empty(),
+            "cold maintained snapshot emitted result removes"
+        );
+        let current_member_result_set = transitions
+            .adds
+            .into_iter()
+            .filter(|member| {
+                member
+                    .table_name()
+                    .is_some_and(|table| tables.contains_key(table))
+            })
             .collect::<BTreeSet<_>>();
-        let degenerate_whole_table = is_degenerate_whole_table(shape, binding);
-        let mut context = ViewEvaluationContext::for_policy_read_tier(tier);
-        let rows = if let Some((effective_shape, effective_binding, plan)) = prepared_plan {
-            self.query_rows_with_prepared_plan_for_identity(
-                effective_shape,
-                effective_binding,
-                tier,
-                Some(plan),
-                identity,
-            )?
-        } else {
-            self.query_rows_for_link(shape, binding, tier, identity)?
-        };
-        let mut current_row_result_set = BTreeSet::new();
-        let result_table = groove::Intern::new(table_name.clone());
-        for row in rows {
-            if let Some((time, alias)) = row.projected_tx_alias() {
-                let node = self
-                    .resolve_node_alias(alias)?
-                    .ok_or(Error::InvalidStoredValue(
-                        "query output tx node alias must exist",
-                    ))?;
-                current_row_result_set.insert((
-                    result_table,
-                    row.row_uuid(),
-                    TxId::new(time, node),
-                ));
-            } else {
-                self.add_visible_result_set_entry(
-                    &mut current_row_result_set,
-                    &table_name,
-                    row.row_uuid(),
-                )?;
-            }
-        }
-        self.expand_query_closure(shape, binding, &mut current_row_result_set, tier)?;
-        let root_result_entries = current_row_result_set
-            .iter()
-            .filter(|(entry_table, _, _)| entry_table.as_str() == table_name)
+        let result_member_adds = current_member_result_set
+            .difference(&previous_member_result_set)
             .cloned()
-            .collect::<BTreeSet<_>>();
-        self.retain_policy_atomic_rows(&mut current_row_result_set, identity, &mut context)?;
-        current_row_result_set.extend(root_result_entries.iter().cloned());
-        for (entry_table, row_uuid, tx_id) in &current_row_result_set {
-            if entry_table.as_str() == table_name
-                && !root_result_entries.contains(&(*entry_table, *row_uuid, *tx_id))
-            {
-                debug_assert!(
-                    self.result_set_entry_read_policy_allows_memo(
-                        entry_table,
-                        *row_uuid,
-                        *tx_id,
-                        identity,
-                        &mut context,
-                    )?,
-                    "subscription emitted unreadable output row {entry_table}.{row_uuid:?}"
-                );
-            }
-        }
-        let wanted_rows_by_tx = current_row_result_set
-            .iter()
-            .filter(|entry| !previous_row_result_set.contains(*entry))
-            .map(|(table, row_uuid, tx_id)| (*tx_id, (table.to_string(), *row_uuid)))
-            .fold(
-                BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),
-                |mut by_tx, (tx_id, row)| {
-                    by_tx.entry(tx_id).or_default().insert(row);
-                    by_tx
+            .collect::<Vec<_>>();
+        let result_member_removes = previous_member_result_set
+            .difference(&current_member_result_set)
+            .cloned()
+            .collect::<Vec<_>>();
+        let update = self.view_update_for_query_result_delta_maintained_view_add_bundles(
+            MaintainedViewBundleInputs {
+                subscription,
+                result_member_adds,
+                result_member_removes,
+                peer_complete_tx_payloads,
+                complete_exclusive_payloads: false,
+                previous_result_set,
+                identity,
+                tier,
+                versions_by_tx: |tx_id| maintained.versions_by_tx(tx_id),
+                replacement_for: |table: String, row_uuid| {
+                    maintained.replacement_for(&table, row_uuid)
                 },
-            );
-        let mut version_bundles = Vec::with_capacity(current_row_result_set.len());
-        let mut peer_payload_inventory_refs = Vec::new();
-        let mut witnessed_result_member_adds = BTreeSet::new();
-        let mut emitted_versions = BTreeSet::new();
-        for (entry_table, row_uuid, tx_id) in &current_row_result_set {
-            if previous_row_result_set.contains(&(entry_table.clone(), *row_uuid, *tx_id)) {
-                continue;
-            }
-            if peer_complete_tx_payloads.contains(tx_id) {
-                peer_payload_inventory_refs.push(*tx_id);
-                witnessed_result_member_adds.insert((entry_table.clone(), *row_uuid, *tx_id));
-                continue;
-            }
-            if !emitted_versions.insert(*tx_id) {
-                continue;
-            }
-            let table_schema = self.table(entry_table.as_str())?.clone();
-            let tx_versions = self.query_versions_for_tx_memo_cloned(*tx_id, &mut context)?;
-            let version = tx_versions
-                .iter()
-                .find(|version| {
-                    version.table() == entry_table.as_str()
-                        && version.row_uuid() == *row_uuid
-                        && version.deletion().is_none()
-                })
-                .ok_or(Error::MissingTransaction(*tx_id))?;
-            if self.read_policy_allows_version_memo(
-                &table_schema,
-                version,
-                identity,
-                &mut context,
-            )? {
-                let wanted_rows = wanted_rows_by_tx
-                    .get(tx_id)
-                    .ok_or(Error::MissingTransaction(*tx_id))?;
-                let bundle_versions = tx_versions
-                    .iter()
-                    .filter(|version| {
-                        wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                version_bundles.push(self.version_bundle_for_view_memo_with_versions(
-                    &table_schema,
-                    version,
-                    *tx_id,
-                    &bundle_versions,
-                    identity,
-                    &mut context,
-                )?);
-                for (table, row_uuid) in wanted_rows {
-                    witnessed_result_member_adds.insert((
-                        groove::Intern::new(table.clone()),
-                        *row_uuid,
-                        *tx_id,
-                    ));
-                }
-            }
-        }
-        for (entry_table, row_uuid, content_tx_id) in &current_row_result_set {
-            let Some(version) = self.current_layer_winner_for_view_tier(
-                entry_table,
-                *row_uuid,
-                VersionLayer::Deletion,
-                tier,
-            )?
-            else {
-                continue;
-            };
-            let tx_id = self.version_tx_id(&version)?;
-            if tx_id == *content_tx_id || !emitted_versions.insert(tx_id) {
-                continue;
-            }
-            let table_schema = self.table(entry_table.as_str())?.clone();
-            if self.read_policy_allows_deletion_version_memo(
-                &table_schema,
-                &version,
-                identity,
-                &mut context,
-            )? {
-                if peer_complete_tx_payloads.contains(&tx_id) {
-                    peer_payload_inventory_refs.push(tx_id);
-                } else {
-                    version_bundles.push(self.version_bundle_for_view_memo(
-                        &table_schema,
-                        &version,
-                        identity,
-                        &mut context,
-                    )?);
-                }
-            }
-        }
-        if degenerate_whole_table {
-            let table_schema = self.table(&table_name)?.clone();
-            for version in self.current_deletion_register_versions_for_view(&table_name)? {
-                let tx_id = self.version_tx_id(&version)?;
-                if !self.transaction_read_policy_atomic_for_link_memo(
-                    tx_id,
-                    identity,
-                    &mut context,
-                )? {
-                    continue;
-                }
-                if peer_complete_tx_payloads.contains(&tx_id) || !emitted_versions.insert(tx_id) {
-                    continue;
-                }
-                if self.read_policy_allows_deletion_version_memo(
-                    &table_schema,
-                    &version,
-                    identity,
-                    &mut context,
-                )? {
-                    version_bundles.push(self.version_bundle_for_view_memo(
-                        &table_schema,
-                        &version,
-                        identity,
-                        &mut context,
-                    )?);
-                }
-            }
-        }
-        let current_member_result_set = current_row_result_set
-            .iter()
-            .cloned()
-            .map(ResultMemberEntry::from)
-            .collect::<BTreeSet<_>>();
-        let mut result_member_adds = Vec::with_capacity(current_member_result_set.len());
-        result_member_adds.extend(
-            current_member_result_set
-                .difference(&previous_member_result_set)
-                .filter(|member| {
-                    member
-                        .as_row()
-                        .is_some_and(|entry| witnessed_result_member_adds.contains(&entry))
-                })
-                .cloned(),
-        );
-        let mut result_member_removes = Vec::with_capacity(previous_member_result_set.len());
-        result_member_removes.extend(
-            previous_member_result_set
-                .difference(&current_member_result_set)
-                .cloned(),
-        );
-        for (entry_table, row_uuid, old_tx_id) in result_member_removes
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-        {
-            if let Some(version) =
-                self.visible_global_content_version_now(entry_table.as_str(), row_uuid)
-            {
-                let tx_id = self.version_tx_id(&version)?;
-                if tx_id != old_tx_id && !emitted_versions.contains(&tx_id) {
-                    let table_schema = self.table(entry_table.as_str())?.clone();
-                    if self.read_policy_allows_version_memo(
-                        &table_schema,
-                        &version,
-                        identity,
-                        &mut context,
-                    )? {
-                        if peer_complete_tx_payloads.contains(&tx_id) {
-                            peer_payload_inventory_refs.push(tx_id);
-                        } else {
-                            emitted_versions.insert(tx_id);
-                            version_bundles.push(self.version_bundle_for_view_memo(
-                                &table_schema,
-                                &version,
-                                identity,
-                                &mut context,
-                            )?);
-                        }
-                    }
-                }
-            } else {
-                let Some(version) = self.query_global_layer_winner(
-                    entry_table.as_str(),
-                    row_uuid,
-                    VersionLayer::Deletion,
-                )?
-                else {
-                    continue;
-                };
-                let tx_id = self.version_tx_id(&version)?;
-                if tx_id != old_tx_id && !emitted_versions.contains(&tx_id) {
-                    let table_schema = self.table(entry_table.as_str())?.clone();
-                    if self.read_policy_allows_deletion_version_memo(
-                        &table_schema,
-                        &version,
-                        identity,
-                        &mut context,
-                    )? {
-                        if peer_complete_tx_payloads.contains(&tx_id) {
-                            peer_payload_inventory_refs.push(tx_id);
-                        } else {
-                            emitted_versions.insert(tx_id);
-                            version_bundles.push(self.version_bundle_for_view_memo(
-                                &table_schema,
-                                &version,
-                                identity,
-                                &mut context,
-                            )?);
-                        }
-                    }
-                }
-            }
-        }
-        for bundle in &mut version_bundles {
-            if bundle.tx.kind != TxKind::Exclusive {
-                continue;
-            }
-            let Some(wanted_rows) = wanted_rows_by_tx.get(&bundle.tx.tx_id) else {
-                continue;
-            };
-            bundle.versions.retain(|version| {
-                version.deletion().is_some()
-                    || wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-            });
-        }
-        Ok(SyncMessage::ViewUpdate {
-            subscription,
-            reset_result_set: false,
-            version_bundles,
-            peer_payload_inventory: PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
             },
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        })
+        );
+        self.unsubscribe_groove_subscription(receiver.id());
+        update
     }
 
     /// Translate one query output delta record into the typed output member.
@@ -1309,22 +1046,6 @@ where
         Ok((shape, binding))
     }
 
-    fn add_visible_result_set_entry(
-        &mut self,
-        set: &mut BTreeSet<ResultRowEntry>,
-        table: &str,
-        row_uuid: RowUuid,
-    ) -> Result<(), Error> {
-        if let Some(tx_id) = self.visible_global_content_tx_id_now(table, row_uuid) {
-            set.insert((groove::Intern::new(table.to_owned()), row_uuid, tx_id));
-            Ok(())
-        } else {
-            Err(Error::InvalidStoredValue(
-                "closure row missing global winner",
-            ))
-        }
-    }
-
     fn add_visible_result_set_entry_with_memo(
         &mut self,
         set: &mut BTreeSet<ResultRowEntry>,
@@ -1357,45 +1078,6 @@ where
             self.visible_content_tx_id_for_view_tier_with_memo(table, row_uuid, tier, memo)?
         {
             set.insert((groove::Intern::new(table.to_owned()), row_uuid, tx_id));
-        }
-        Ok(())
-    }
-
-    fn expand_query_closure(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        set: &mut BTreeSet<ResultRowEntry>,
-        tier: DurabilityTier,
-    ) -> Result<(), Error> {
-        let mut memo = ClosureExpansionMemo::default();
-        self.expand_query_closure_with_memo(shape, binding, set, tier, &mut memo)
-    }
-
-    fn expand_query_closure_with_memo(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        set: &mut BTreeSet<ResultRowEntry>,
-        tier: DurabilityTier,
-        memo: &mut ClosureExpansionMemo,
-    ) -> Result<(), Error> {
-        let output_table = shape.query().table.clone();
-        let output_rows = set
-            .iter()
-            .filter(|(table, _, _)| table.as_str() == output_table)
-            .map(|(_, row_uuid, _)| *row_uuid)
-            .collect::<BTreeSet<_>>();
-        for row_uuid in &output_rows {
-            self.expand_reference_closure(
-                &output_table,
-                *row_uuid,
-                &shape.query().includes,
-                set,
-                tier,
-                memo,
-            )?;
-            self.expand_join_closure_for_output(shape, binding, *row_uuid, set, tier, memo)?;
         }
         Ok(())
     }
@@ -1647,46 +1329,6 @@ where
             .expect("join rows memo populated"))
     }
 
-    fn current_deletion_register_versions_for_view(
-        &mut self,
-        table: &str,
-    ) -> Result<Vec<VersionRow>, Error> {
-        let current_table = register_global_current_table_name(table);
-        let rows = self
-            .database
-            .primary_key_scan_raw(&current_table, &[])?
-            .into_iter()
-            .map(|raw| raw.raw().to_vec())
-            .collect::<Vec<_>>();
-        let mut versions = Vec::with_capacity(rows.len());
-        let descriptor = self.table(table)?.global_current_storage_tables()[1].record_schema();
-        for raw in rows {
-            let record = BorrowedRecord::new(&raw, &descriptor);
-            let deletion = deletion_event_from_value(
-                record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
-            )?;
-            if deletion != DeletionEvent::Deleted {
-                continue;
-            }
-            let row_uuid =
-                RowUuid(record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?);
-            let tx_time =
-                TxTime(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-            let tx_node_alias =
-                NodeAlias(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
-            if let Some(version) = self.query_version_by_alias(
-                table,
-                row_uuid,
-                VersionLayer::Deletion,
-                tx_time,
-                tx_node_alias,
-            )? {
-                versions.push(version);
-            }
-        }
-        Ok(versions)
-    }
-
     fn current_layer_winner_for_view_tier(
         &mut self,
         table: &str,
@@ -1833,14 +1475,6 @@ where
             durability: stored_tx.durability,
         })
     }
-}
-
-fn is_degenerate_whole_table(shape: &ValidatedQuery, binding: &Binding) -> bool {
-    let query = shape.query();
-    query.filters.is_empty()
-        && query.joins.is_empty()
-        && query.includes.is_empty()
-        && binding.values().is_empty()
 }
 
 fn view_version_key(version: &VersionRecord) -> (String, RowUuid, VersionLayer) {
