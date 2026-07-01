@@ -1461,6 +1461,9 @@ fn source_requirements(
                         .insert(SourceMetadataRequirement::VersionWitnesses);
                     source_requirements
                         .metadata
+                        .insert(SourceMetadataRequirement::VersionPayloads);
+                    source_requirements
+                        .metadata
                         .insert(SourceMetadataRequirement::DeletionMarkers);
                 }
             }
@@ -3967,9 +3970,7 @@ fn lowered_terminals(
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
-                    graph: resolved_source.graph.clone().project_fields(
-                        version_witness_fields_for_tagged_rows(resolved_source, "version_content")?,
-                    ),
+                    graph: content_version_witness_graph(resolved_source, "version_content")?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
                 let deletion_output = fact_output_with_terminal(
@@ -4001,12 +4002,7 @@ fn lowered_terminals(
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
-                    graph: resolved_source.graph.clone().project_fields(
-                        version_witness_fields_for_tagged_rows(
-                            resolved_source,
-                            "replacement_content",
-                        )?,
-                    ),
+                    graph: content_version_witness_graph(resolved_source, "replacement_content")?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
                 let deletion_output = fact_output_with_terminal(
@@ -4716,12 +4712,12 @@ fn fact_terminal_graph(
         ProgramFactKey::ResultMembership => {
             Ok(graph.project_fields(result_membership_fields(source, routing_param_fields)?))
         }
-        ProgramFactKey::VersionWitnesses => Ok(graph.project_fields(
-            version_witness_fields_for_tagged_rows(source, "version_content")?,
-        )),
-        ProgramFactKey::ReplacementWitnesses => Ok(graph.project_fields(
-            version_witness_fields_for_tagged_rows(source, "replacement_content")?,
-        )),
+        ProgramFactKey::VersionWitnesses => {
+            content_version_witness_graph(source, "version_content")
+        }
+        ProgramFactKey::ReplacementWitnesses => {
+            content_version_witness_graph(source, "replacement_content")
+        }
         ProgramFactKey::RelationEdges => {
             let _ = relation_edge_schema(plan, source, resolved_sources)?;
             relation_edge_graph(key, graph, plan, source, resolved_sources, request)
@@ -4918,6 +4914,32 @@ fn deletion_witness_graph_for_current_register(
         .project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
 }
 
+fn content_version_witness_graph(
+    source: &ResolvedSource,
+    event_kind: &str,
+) -> CapabilityResult<GraphBuilder> {
+    let Some(content_version) = &source.content_version else {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(
+                "resolved source did not provide content version source".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        }));
+    };
+    let version = version_witness_fields(&source.row_shape)?;
+    Ok(GraphBuilder::join(
+        source.graph.clone(),
+        content_version.graph.clone(),
+        [
+            source.row_shape.row_uuid_field.clone(),
+            version.tx_time_field.clone(),
+            version.tx_node_field.clone(),
+        ],
+        ["row_uuid", "tx_time", "tx_node_id"],
+    )
+    .project_fields(version_witness_fields_for_tagged_rows(source, event_kind)?))
+}
+
 fn result_membership_fields(
     source: &ResolvedSource,
     routing_param_fields: BTreeSet<String>,
@@ -4941,29 +4963,36 @@ fn version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
 ) -> CapabilityResult<Vec<ProjectField>> {
-    let version = version_witness_fields(&source.row_shape)?;
+    if source.content_version.is_none() {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(
+                "resolved source did not provide content version source".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        }));
+    };
     let mut fields = vec![
         ProjectField::literal("event_kind", Value::String(event_kind.to_owned())),
         ProjectField::literal(
             "table_name",
             Value::String(source.table_schema.name.clone()),
         ),
-        ProjectField::named(source.row_shape.row_uuid_field.clone()),
-        ProjectField::renamed(version.tx_time_field.clone(), "content_tx_time"),
-        ProjectField::renamed(version.tx_node_field.clone(), "content_tx_node_id"),
-        ProjectField::renamed(version.tx_time_field, "tx_time"),
-        ProjectField::renamed(version.tx_node_field, "tx_node_id"),
-        ProjectField::renamed(version.schema_version_field, "schema_version"),
-        ProjectField::named("parents"),
-        ProjectField::renamed("$createdBy", "created_by"),
-        ProjectField::renamed("$createdAt", "created_at"),
-        ProjectField::renamed("$updatedBy", "updated_by"),
-        ProjectField::renamed("$updatedAt", "updated_at"),
+        ProjectField::renamed("right.row_uuid", "row_uuid"),
+        ProjectField::renamed("right.tx_time", "content_tx_time"),
+        ProjectField::renamed("right.tx_node_id", "content_tx_node_id"),
+        ProjectField::renamed("right.tx_time", "tx_time"),
+        ProjectField::renamed("right.tx_node_id", "tx_node_id"),
+        ProjectField::renamed("right.schema_version", "schema_version"),
+        ProjectField::renamed("right.parents", "parents"),
+        ProjectField::renamed("right.created_by", "created_by"),
+        ProjectField::renamed("right.created_at", "created_at"),
+        ProjectField::renamed("right.updated_by", "updated_by"),
+        ProjectField::renamed("right.updated_at", "updated_at"),
         ProjectField::null_typed("_deletion", ValueType::Nullable(Box::new(ValueType::U8))),
     ];
     fields.extend(source.table_schema.columns.iter().map(|column| {
         ProjectField::renamed(
-            user_column_field(&column.name),
+            right_field(&user_column_field(&column.name)),
             table_user_column_field(&source.table_schema.name, &column.name),
         )
     }));

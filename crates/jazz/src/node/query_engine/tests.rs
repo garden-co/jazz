@@ -409,6 +409,17 @@ impl SourceResolver for FakeSourceResolver {
                 graph: GraphBuilder::table(format!("resolved_{}_deletions", request.source.table)),
                 row_uuid_field: "row_uuid".to_owned(),
             });
+        let content_version = request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::VersionPayloads)
+            .then(|| ContentVersionSource {
+                graph: GraphBuilder::table(format!(
+                    "resolved_{}_content_versions",
+                    request.source.table
+                )),
+                row_uuid_field: "row_uuid".to_owned(),
+            });
         let mut metadata = BTreeMap::from([
             (
                 SourceMetadataRequirement::VersionWitnesses,
@@ -459,6 +470,7 @@ impl SourceResolver for FakeSourceResolver {
                 row_uuid_field: "row_uuid".to_owned(),
                 metadata,
             },
+            content_version,
             deletion_register,
         })
     }
