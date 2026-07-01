@@ -9,25 +9,25 @@ use super::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use groove::ivm::Subscription;
-#[cfg(test)]
 use groove::ivm::TopByOrder;
+use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
 use groove::records::{EnumSchema, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
 use super::maintained_subscription_view::MaintainedSubscriptionView;
 use super::policy::ViewEvaluationContext;
 use super::query_engine::{
-    AppProjectionTree, AppRowOutputRequest, ClaimPath, ComparisonOp as NormalizedComparisonOp,
-    CorrelationRequirement, CoverageScope, DataSource, FieldProjection, FrontierId,
-    JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
-    NormalizedValueRef, OrderKey as NormalizedOrderKey, PayloadProjection, PolicyContext,
+    AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathSegment,
+    ComparisonOp as NormalizedComparisonOp, CorrelationRequirement, DataSource, FieldProjection,
+    FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
+    NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
+    OrderKey as NormalizedOrderKey, OutputTerminalSchema, PayloadProjection, PolicyContext,
     PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
-    ProgramFactKey, ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest,
-    QueryReadSet, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
-    ResultRowRef, RowIdRef, RowProjection, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
-    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
-    SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
+    ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField, QueryProgram,
+    QueryProgramRequest, QueryReadSet, ReadView, RequestedReadSet, RequestedSourceStage,
+    ResolvedSource, ResultId, ResultRowRef, RowIdRef, RowProjection, RowSetExpr, RowSetNodeId,
+    RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
+    SchemaProjection, SortDirection as NormalizedSortDirection, SourceExpr, SourceGap, SourceId,
     SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
     SourceResolutionError, SourceResolver, SourceRole, SourceRowShape, StorageSchemaSelection,
     TypedOutputField, ValueSourceColumn, ValueSourceMode, lower_query_program,
@@ -45,6 +45,7 @@ use crate::query::{
 };
 
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
+pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 
 #[allow(dead_code)]
 pub(crate) struct ReachableGraphs {
@@ -56,12 +57,89 @@ pub(crate) struct ReachableGraphs {
 }
 
 pub(crate) struct LocalMaintainedViewSubscription {
-    subscription: Subscription,
+    subscription: MultisinkSubscription,
     maintained: MaintainedSubscriptionView,
     tables: BTreeMap<String, TableSchema>,
     result_table: String,
     result_set: BTreeSet<ResultMemberEntry>,
     identity: AuthorId,
+}
+
+pub(crate) fn take_required_sink_deltas(
+    mut deltas: MultisinkDeltas,
+    sink: &str,
+) -> Result<RecordDeltas, Error> {
+    deltas.sinks.remove(sink).ok_or({
+        Error::InvalidStoredValue("multisink subscription did not deliver required sink")
+    })
+}
+
+pub(crate) fn take_optional_sink_deltas(
+    mut deltas: MultisinkDeltas,
+    sink: &str,
+) -> Option<RecordDeltas> {
+    deltas.sinks.remove(sink)
+}
+
+pub(crate) fn apply_maintained_multisink_deltas(
+    maintained: &mut MaintainedSubscriptionView,
+    deltas: MultisinkDeltas,
+    tables: &BTreeMap<String, TableSchema>,
+    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+) -> Result<super::maintained_subscription_view::ResultTransitions, Error> {
+    let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
+    for (_sink, deltas) in deltas.sinks {
+        let delta_transitions = maintained.apply_tagged_deltas(&deltas, tables, node_aliases)?;
+        transitions.adds.extend(delta_transitions.adds);
+        transitions.removes.extend(delta_transitions.removes);
+    }
+    Ok(transitions)
+}
+
+fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>, Error> {
+    let ProgramOutputSchemas::RowSet(terminals) = output;
+    let app_rows = terminals
+        .iter()
+        .find_map(|terminal| match terminal {
+            OutputTerminalSchema::AppRows(rows) => Some(rows),
+            OutputTerminalSchema::Fact(_) => None,
+        })
+        .ok_or(Error::InvalidStoredValue(
+            "query program did not emit app row terminal",
+        ))?;
+    app_rows
+        .descriptor
+        .fields()
+        .iter()
+        .map(|field| {
+            field.name.clone().ok_or(Error::InvalidStoredValue(
+                "app row terminal field must be named",
+            ))
+        })
+        .collect()
+}
+
+fn lowered_terminal_graph(program: &QueryProgram, sink: &str) -> Result<GraphBuilder, Error> {
+    program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == sink)
+        .map(|terminal| terminal.graph.clone())
+        .ok_or_else(|| Error::QueryLowering(format!("query program did not emit sink {sink}")))
+}
+
+fn lowered_app_rows_graph(program: &QueryProgram) -> Result<GraphBuilder, Error> {
+    lowered_terminal_graph(program, JAZZ_APP_ROWS_SINK)
+}
+
+fn lowered_program_sinks(program: &QueryProgram) -> Vec<(String, GraphBuilder)> {
+    program
+        .lowered
+        .terminals
+        .iter()
+        .map(|terminal| (terminal.sink.clone(), terminal.graph.clone()))
+        .collect()
 }
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
@@ -127,12 +205,13 @@ impl LoweredQuerySource {
 
 enum CurrentQueryProgramOutput {
     AppRows,
-    AppRowsWithSyncFacts,
+    MaintainedView,
 }
 
 struct CurrentQuerySourceResolver<'a, S> {
     node: &'a NodeState<S>,
     read_view: &'a ReadView<RequestedSourceStage>,
+    policy: &'a PolicyContext,
 }
 
 impl<S> SourceResolver for CurrentQuerySourceResolver<'_, S>
@@ -176,9 +255,14 @@ where
             .node
             .table_in_schema(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let (graph, descriptor, metadata) =
-            resolved_current_source_graph(self.node, &table, *tier, &request.requirements)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+        let (graph, descriptor, metadata) = resolved_current_source_graph(
+            self.node,
+            &table,
+            *tier,
+            &request.requirements,
+            self.policy,
+        )
+        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(ResolvedSource {
             table_schema: table,
             graph,
@@ -204,6 +288,7 @@ fn resolved_current_source_graph<S>(
     table: &TableSchema,
     tier: DurabilityTier,
     requirements: &SourceRequirements,
+    policy: &PolicyContext,
 ) -> Result<
     (
         GraphBuilder,
@@ -230,10 +315,10 @@ where
             ProjectField::literal("layer", Value::String("content".to_owned())),
             ProjectField::named("schema_version"),
             ProjectField::named("parents"),
-            ProjectField::named("created_by"),
-            ProjectField::named("created_at"),
-            ProjectField::named("updated_by"),
-            ProjectField::named("updated_at"),
+            ProjectField::renamed("$createdBy", "created_by"),
+            ProjectField::renamed("$createdAt", "created_at"),
+            ProjectField::renamed("$updatedBy", "updated_by"),
+            ProjectField::renamed("$updatedAt", "updated_at"),
         ]);
         metadata.insert(
             SourceMetadataRequirement::VersionWitnesses,
@@ -262,10 +347,35 @@ where
     }
 
     let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
-    let base = if needs_version_witnesses {
-        node.maintained_view_content_current_with_version(table, tier)?
-    } else {
-        visible_current_graph(table, tier)
+    let base = match policy {
+        PolicyContext::System => {
+            if needs_version_witnesses {
+                node.maintained_view_content_current_with_version(table, tier)?
+                    .project_fields(storage_to_canonical_current_source_fields(table, true))
+            } else {
+                visible_current_graph(table, tier)
+                    .project_fields(canonical_current_source_fields(table, false))
+            }
+        }
+        PolicyContext::Identity {
+            permission_subject, ..
+        } => {
+            let policy_shape = node.maintained_view_table_policy_shape_with_mode(
+                table,
+                *permission_subject,
+                ParamBindingMode::InlineAllReachableSeeds,
+            )?;
+            let mut output_fields = global_current_storage_fields(table);
+            if needs_version_witnesses {
+                output_fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
+            }
+            let base = node.maintained_view_content_current_with_version(table, tier)?;
+            node.apply_maintained_view_filters(base, &policy_shape, table, output_fields, tier)?
+                .project_fields(storage_to_canonical_current_source_fields(
+                    table,
+                    needs_version_witnesses,
+                ))
+        }
     };
     let graph = if metadata.is_empty() {
         base
@@ -273,6 +383,64 @@ where
         base.project_fields(fields)
     };
     Ok((graph, descriptor, metadata))
+}
+
+fn canonical_current_source_fields(
+    table: &TableSchema,
+    include_version: bool,
+) -> Vec<ProjectField> {
+    let mut fields = std::iter::once(ProjectField::named("row_uuid"))
+        .chain(
+            table
+                .columns
+                .iter()
+                .map(|column| ProjectField::named(format!("user_{}", column.name))),
+        )
+        .chain([
+            ProjectField::named("$createdBy"),
+            ProjectField::named("$createdAt"),
+            ProjectField::named("$updatedBy"),
+            ProjectField::named("$updatedAt"),
+            ProjectField::named("tx_time"),
+            ProjectField::named("tx_node_id"),
+        ])
+        .collect::<Vec<_>>();
+    if include_version {
+        fields.extend([
+            ProjectField::named("schema_version"),
+            ProjectField::named("parents"),
+        ]);
+    }
+    fields
+}
+
+fn storage_to_canonical_current_source_fields(
+    table: &TableSchema,
+    include_version: bool,
+) -> Vec<ProjectField> {
+    let mut fields = std::iter::once(ProjectField::named("row_uuid"))
+        .chain(
+            table
+                .columns
+                .iter()
+                .map(|column| ProjectField::named(format!("user_{}", column.name))),
+        )
+        .chain([
+            ProjectField::renamed("created_by", "$createdBy"),
+            ProjectField::renamed("created_at", "$createdAt"),
+            ProjectField::renamed("updated_by", "$updatedBy"),
+            ProjectField::renamed("updated_at", "$updatedAt"),
+            ProjectField::named("tx_time"),
+            ProjectField::named("tx_node_id"),
+        ])
+        .collect::<Vec<_>>();
+    if include_version {
+        fields.extend([
+            ProjectField::named("schema_version"),
+            ProjectField::named("parents"),
+        ]);
+    }
+    fields
 }
 
 fn current_row_descriptor_with_hidden_source_fields(
@@ -351,7 +519,7 @@ fn current_query_read_set(
         storage: StorageSchemaSelection::Single(schema_version),
         lens: LensSelection::Canonical,
     };
-    let sources = shape
+    let mut sources = shape
         .nodes
         .values()
         .filter_map(|node| match node {
@@ -365,7 +533,17 @@ fn current_query_read_set(
             )),
             _ => None,
         })
-        .collect();
+        .collect::<BTreeMap<_, _>>();
+    for source in &shape.auxiliary_sources {
+        sources.insert(
+            source.clone(),
+            SourceExpr::VisibleCurrent {
+                projection: projection.clone(),
+                data: DataSource::Current,
+                tier,
+            },
+        );
+    }
     QueryReadSet::primary(ReadView {
         read_schema: schema_version,
         policy_schema: schema_version,
@@ -379,16 +557,18 @@ fn current_query_output_request(
 ) -> RowSetOutputRequest {
     let facts = match output {
         CurrentQueryProgramOutput::AppRows => BTreeSet::new(),
-        CurrentQueryProgramOutput::AppRowsWithSyncFacts => BTreeSet::from([
+        CurrentQueryProgramOutput::MaintainedView => BTreeSet::from([
             ProgramFactKey::ResultMembership,
-            ProgramFactKey::SourceCoverage(CoverageScope::Program),
             ProgramFactKey::VersionWitnesses,
+            ProgramFactKey::ReplacementWitnesses,
         ]),
     };
     RowSetOutputRequest {
-        app_rows: Some(AppRowOutputRequest {
-            projection: app_row_payload_projection(query),
-            large_values: Vec::new(),
+        app_rows: matches!(output, CurrentQueryProgramOutput::AppRows).then(|| {
+            AppRowOutputRequest {
+                projection: app_row_payload_projection(query),
+                large_values: Vec::new(),
+            }
         }),
         facts,
     }
@@ -588,6 +768,79 @@ fn correlated_child_source_id(subquery: &ArraySubquery, index: usize) -> SourceI
     }
 }
 
+fn include_auxiliary_source_id(
+    table: impl Into<String>,
+    include_index: usize,
+    segment_index: usize,
+) -> SourceId {
+    SourceId {
+        table: table.into(),
+        path: SourcePath {
+            components: vec![
+                SourceRole::Root,
+                SourceRole::Alias(format!("include:{include_index}:{segment_index}")),
+            ],
+        },
+    }
+}
+
+fn collect_closure_paths<S>(
+    node: &NodeState<S>,
+    root_table: &str,
+    schema_version: SchemaVersionId,
+    includes: &[Include],
+) -> Result<(BTreeSet<SourceId>, Vec<ClosurePath>), Error>
+where
+    S: OrderedKvStorage,
+{
+    let mut sources = BTreeSet::new();
+    let mut paths = Vec::new();
+    let root_source = root_source_id(root_table);
+    let root_schema = node.table_in_schema(root_table, schema_version)?;
+    for (reference_index, (column, target_table)) in root_schema.references.iter().enumerate() {
+        let target = include_auxiliary_source_id(target_table.clone(), usize::MAX, reference_index);
+        sources.insert(target.clone());
+        paths.push(ClosurePath {
+            id: format!("reference:{column}"),
+            segments: vec![ClosurePathSegment {
+                parent: root_source.clone(),
+                target,
+                source_field: column.clone(),
+            }],
+            gates_root: false,
+        });
+    }
+    for (include_index, include) in includes.iter().enumerate() {
+        let mut current_table_name = root_table.to_owned();
+        let mut parent = root_source.clone();
+        let mut segments = Vec::new();
+        for (segment_index, segment) in include.path.split('.').enumerate() {
+            let current_table = node.table_in_schema(&current_table_name, schema_version)?;
+            let target_table = current_table
+                .references
+                .get(segment)
+                .cloned()
+                .ok_or(Error::InvalidStoredValue("include path was not validated"))?;
+            let target =
+                include_auxiliary_source_id(target_table.clone(), include_index, segment_index);
+            sources.insert(target.clone());
+            segments.push(ClosurePathSegment {
+                parent: parent.clone(),
+                target: target.clone(),
+                source_field: segment.to_owned(),
+            });
+            parent = target;
+            current_table_name = target_table;
+        }
+        paths.push(ClosurePath {
+            id: format!("include:{include_index}:{}", include.path),
+            segments,
+            gates_root: include.require || include.join_mode == crate::query::JoinMode::Inner,
+        });
+    }
+    Ok((sources, paths))
+}
+
 fn normalize_array_subquery(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     current: RowSetNodeId,
@@ -752,26 +1005,39 @@ fn normalize_reachable(
         },
     );
     let step_project_node = RowSetNodeId(format!("reachable:{index}:step_project"));
+    let mut step_columns = vec![
+        RowProjection {
+            output: typed_output_field("team", ColumnType::Uuid),
+            value: NormalizedValueRef::FrontierColumn {
+                frontier: frontier.clone(),
+                field: "team".to_owned(),
+            },
+        },
+        RowProjection {
+            output: typed_output_field("reachable_team", ColumnType::Uuid),
+            value: NormalizedValueRef::SourceField {
+                source: edge_source.clone(),
+                field: reachable.edge_parent_column.clone(),
+            },
+        },
+    ];
+    step_columns.extend(
+        columns
+            .iter()
+            .filter(|column| column.name != "team" && column.name != "reachable_team")
+            .map(|column| RowProjection {
+                output: typed_output_field(&column.name, column.ty.clone()),
+                value: NormalizedValueRef::FrontierColumn {
+                    frontier: frontier.clone(),
+                    field: column.name.clone(),
+                },
+            }),
+    );
     nodes.insert(
         step_project_node.clone(),
         RowSetExpr::Project {
             input: step_join_node,
-            columns: vec![
-                RowProjection {
-                    output: typed_output_field("team", ColumnType::Uuid),
-                    value: NormalizedValueRef::FrontierColumn {
-                        frontier: frontier.clone(),
-                        field: "team".to_owned(),
-                    },
-                },
-                RowProjection {
-                    output: typed_output_field("reachable_team", ColumnType::Uuid),
-                    value: NormalizedValueRef::SourceField {
-                        source: edge_source.clone(),
-                        field: reachable.edge_parent_column.clone(),
-                    },
-                },
-            ],
+            columns: step_columns,
         },
     );
 
@@ -972,7 +1238,7 @@ fn reachable_frontier_columns(
             ));
         }
     };
-    Ok(vec![
+    let mut columns = vec![
         ValueSourceColumn {
             name: "team".to_owned(),
             value: value.clone(),
@@ -983,7 +1249,18 @@ fn reachable_frontier_columns(
             value,
             ty,
         },
-    ])
+    ];
+    if let Operand::Param(param) = seed
+        && param != "team"
+        && param != "reachable_team"
+    {
+        columns.push(ValueSourceColumn {
+            name: param.clone(),
+            value: NormalizedValueRef::Param(param.clone()),
+            ty: param_types.get(param).cloned().unwrap_or(ColumnType::Uuid),
+        });
+    }
+    Ok(columns)
 }
 
 fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error> {
@@ -1117,6 +1394,7 @@ fn unsupported_join_via_reason(join: &JoinVia) -> Option<String> {
     (!reasons.is_empty()).then(|| format!("unsupported join_via features: {}", reasons.join(", ")))
 }
 
+#[allow(dead_code)]
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -1377,9 +1655,11 @@ where
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request(shape, binding, tier, identity, output)?;
         let read_view = request.reads.primary.clone();
+        let policy = request.policy.clone();
         let mut resolver = CurrentQuerySourceResolver {
             node: self,
             read_view: &read_view,
+            policy: &policy,
         };
         lower_query_program(request, &mut resolver)
             .map_err(|report| Error::QueryLowering(format!("{report:?}")))
@@ -1414,6 +1694,8 @@ where
     ) -> Result<NormalizedRowSetShape, Error> {
         let query = shape.query();
         let root_source = root_source_id(&query.table);
+        let (mut auxiliary_sources, closure_paths) =
+            collect_closure_paths(self, &query.table, shape.schema_version(), &query.includes)?;
         let source_node = RowSetNodeId("root".to_owned());
         let mut nodes = BTreeMap::from([(
             source_node.clone(),
@@ -1423,6 +1705,7 @@ where
             },
         )]);
         let mut current = source_node;
+        let mut join_contributions = Vec::new();
 
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
         if unsupported_policy_branch.is_none() && !query.policy_branches.is_empty() {
@@ -1471,6 +1754,7 @@ where
             }
 
             let join_source = join_source_id(join, index);
+            auxiliary_sources.insert(join_source.clone());
             let source_node = RowSetNodeId(format!("join_via:{index}:source"));
             nodes.insert(
                 source_node.clone(),
@@ -1491,6 +1775,12 @@ where
                 );
                 right = filter_node;
             }
+            join_contributions.push(JoinContribution {
+                id: format!("join_via:{index}"),
+                source: join_source.clone(),
+                input: right.clone(),
+                root_ref_field: join.on_column.clone(),
+            });
             let join_node = RowSetNodeId(format!("join_via:{index}:join"));
             nodes.insert(
                 join_node.clone(),
@@ -1595,6 +1885,9 @@ where
                 table: query.table.clone(),
                 row: ResultRowRef::Source(root_source),
             },
+            auxiliary_sources,
+            closure_paths,
+            join_contributions,
             nodes,
         })
     }
@@ -1806,12 +2099,9 @@ where
         let deltas_result = match plan {
             None => self
                 .database
-                .query_graph(
-                    program
-                        .expect("program is compiled when no prepared plan is supplied")
-                        .lowered
-                        .graph,
-                )
+                .query_graph(lowered_app_rows_graph(
+                    &program.expect("program is compiled when no prepared plan is supplied"),
+                )?)
                 .map_err(Error::Groove),
             Some(PreparedQueryPlan::Prepared {
                 shape,
@@ -1823,7 +2113,12 @@ where
                     .bind_shape(shape, &values)
                     .map_err(Error::Groove)
                     .and_then(|subscription| {
-                        subscription.recv().map_err(|_| Error::SubscriptionClosed)
+                        subscription
+                            .recv()
+                            .map_err(|_| Error::SubscriptionClosed)
+                            .and_then(|deltas| {
+                                take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK)
+                            })
                     })
             }
             Some(PreparedQueryPlan::Graph(graph)) => {
@@ -2038,11 +2333,12 @@ where
         &mut self,
         binding: &Binding,
         plan: &PreparedQueryPlan,
-    ) -> Result<Option<Subscription>, Error> {
+    ) -> Result<Option<MultisinkSubscription>, Error> {
         let subscription = match plan.clone() {
-            PreparedQueryPlan::Graph(graph) => {
-                self.database.subscribe(graph).map_err(Error::Groove)?
-            }
+            PreparedQueryPlan::Graph(graph) => self
+                .database
+                .subscribe([(JAZZ_APP_ROWS_SINK, graph)])
+                .map_err(Error::Groove)?,
             PreparedQueryPlan::Prepared {
                 shape,
                 param_names,
@@ -2054,7 +2350,10 @@ where
                     .map_err(Error::Groove)?
             }
         };
-        let _initial = subscription.recv().map_err(|_| Error::SubscriptionClosed)?;
+        let _initial = subscription
+            .recv()
+            .map_err(|_| Error::SubscriptionClosed)
+            .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))?;
         Ok(Some(subscription))
     }
 
@@ -2088,8 +2387,9 @@ where
         loop {
             match local.subscription.try_recv() {
                 Ok(deltas) => {
-                    let transitions = local.maintained.apply_tagged_deltas(
-                        &deltas,
+                    let transitions = apply_maintained_multisink_deltas(
+                        &mut local.maintained,
+                        deltas,
                         &local.tables,
                         &self.node_aliases,
                     )?;
@@ -2234,13 +2534,7 @@ where
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let (shape, binding) = self.policy_composed_shape_binding(shape, binding, identity)?;
-        self.query_rows_with_prepared_plan_for_identity(
-            &shape,
-            &binding,
-            tier,
-            None,
-            AuthorId::SYSTEM,
-        )
+        self.query_rows_with_prepared_plan_for_identity(&shape, &binding, tier, None, identity)
     }
 
     /// Evaluate a query plus its array-subquery relation payload against local
@@ -3314,7 +3608,8 @@ where
             identity,
             CurrentQueryProgramOutput::AppRows,
         )?;
-        let graph = program.lowered.graph;
+        let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
+        let graph = lowered_app_rows_graph(&program)?;
         let parameters = program.lowered.parameters;
         let param_names = parameters.user_params.keys().cloned().collect::<Vec<_>>();
         let param_types = param_names
@@ -3338,10 +3633,14 @@ where
             PreparedQueryPlan::Graph(graph)
         } else {
             let prepared = self.database.prepare(
-                graph,
+                [groove::ivm::RoutedMultisinkTerminal::new(
+                    JAZZ_APP_ROWS_SINK,
+                    graph,
+                    param_names.iter().cloned(),
+                    app_row_fields,
+                )],
                 query_binding_source_shape(shape),
                 binding_descriptor,
-                param_names.iter().cloned(),
             )?;
             PreparedQueryPlan::Prepared {
                 shape: prepared.id(),
@@ -4485,7 +4784,7 @@ where
         tier: DurabilityTier,
     ) -> Result<
         (
-            groove::ivm::Subscription,
+            MultisinkSubscription,
             MaintainedSubscriptionView,
             super::maintained_subscription_view::ResultTransitions,
             BTreeMap<String, TableSchema>,
@@ -4501,36 +4800,39 @@ where
             ParamBindingMode::InlineAllReachableSeeds,
         )?;
         self.ensure_maintained_view_query_slice(shape.query())?;
+        let tables = self.maintained_view_terminal_tables(&shape)?;
         let program = self.compile_current_query_program(
             &shape,
             &composed_binding,
             tier,
-            AuthorId::SYSTEM,
-            CurrentQueryProgramOutput::AppRowsWithSyncFacts,
+            identity,
+            CurrentQueryProgramOutput::MaintainedView,
         )?;
-        let tables = self.maintained_view_terminal_tables(&shape)?;
-        let result_table = self.table(&shape.query().table)?.clone();
-        let graph = maintained_view_program_tagged_graph(
-            program.lowered.graph,
-            &result_table,
-            tables.values(),
-        );
+        let sinks = lowered_program_sinks(&program);
         self.database.flush().map_err(Error::Groove)?;
-        let subscription = self.database.subscribe(graph).map_err(Error::Groove)?;
+        let subscription = self.database.subscribe(sinks).map_err(Error::Groove)?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
         let snapshot = subscription
             .recv()
             .map_err(|_| Error::InvalidStoredValue("cold snapshot subscription disconnected"))?;
-        let snapshot_transitions =
-            maintained.apply_tagged_deltas(&snapshot, &tables, &self.node_aliases)?;
+        let snapshot_transitions = apply_maintained_multisink_deltas(
+            &mut maintained,
+            snapshot,
+            &tables,
+            &self.node_aliases,
+        )?;
         transitions.adds.extend(snapshot_transitions.adds);
         transitions.removes.extend(snapshot_transitions.removes);
         loop {
             match subscription.try_recv() {
                 Ok(deltas) => {
-                    let delta_transitions =
-                        maintained.apply_tagged_deltas(&deltas, &tables, &self.node_aliases)?;
+                    let delta_transitions = apply_maintained_multisink_deltas(
+                        &mut maintained,
+                        deltas,
+                        &tables,
+                        &self.node_aliases,
+                    )?;
                     transitions.adds.extend(delta_transitions.adds);
                     transitions.removes.extend(delta_transitions.removes);
                 }
@@ -4568,6 +4870,33 @@ where
             tier,
         )?;
         let mut graphs = vec![result_current];
+        graphs.extend(
+            self.maintained_view_tagged_fact_sinks_for_shape(
+                shape,
+                identity,
+                policy_param_binding_mode,
+                tier,
+            )?
+            .into_iter()
+            .map(|(_, graph)| graph),
+        );
+        Ok(GraphBuilder::union(graphs))
+    }
+
+    fn maintained_view_tagged_fact_sinks_for_shape(
+        &self,
+        shape: &ValidatedQuery,
+        identity: AuthorId,
+        policy_param_binding_mode: ParamBindingMode,
+        tier: DurabilityTier,
+    ) -> Result<Vec<(String, GraphBuilder)>, Error> {
+        let terminal_tables = self.maintained_view_terminal_tables(shape)?;
+        let hidden_param_types = self.maintained_view_hidden_param_types_for_shape(
+            shape,
+            identity,
+            policy_param_binding_mode,
+        )?;
+        let mut sinks = Vec::new();
         for table in terminal_tables.values() {
             let policy_shape = self.maintained_view_table_policy_shape_with_mode(
                 table,
@@ -4592,11 +4921,23 @@ where
                     &hidden_param_types,
                     tier,
                 )?;
-            graphs.extend([
-                version_content,
-                version_deletion,
-                replacement_content,
-                replacement_deletion,
+            sinks.extend([
+                (
+                    maintained_fact_sink("version_content", &table.name),
+                    version_content,
+                ),
+                (
+                    maintained_fact_sink("version_deletion", &table.name),
+                    version_deletion,
+                ),
+                (
+                    maintained_fact_sink("replacement_content", &table.name),
+                    replacement_content,
+                ),
+                (
+                    maintained_fact_sink("replacement_deletion", &table.name),
+                    replacement_deletion,
+                ),
             ]);
         }
         for reachable in &shape.query().reachable {
@@ -4624,15 +4965,27 @@ where
                         &hidden_param_types,
                         tier,
                     )?;
-                graphs.extend([
-                    version_content,
-                    version_deletion,
-                    replacement_content,
-                    replacement_deletion,
+                sinks.extend([
+                    (
+                        maintained_reachable_fact_sink("version_content", table_name),
+                        version_content,
+                    ),
+                    (
+                        maintained_reachable_fact_sink("version_deletion", table_name),
+                        version_deletion,
+                    ),
+                    (
+                        maintained_reachable_fact_sink("replacement_content", table_name),
+                        replacement_content,
+                    ),
+                    (
+                        maintained_reachable_fact_sink("replacement_deletion", table_name),
+                        replacement_deletion,
+                    ),
                 ]);
             }
         }
-        Ok(GraphBuilder::union(graphs))
+        Ok(sinks)
     }
 
     pub(crate) fn maintained_view_terminal_tables(
@@ -4727,7 +5080,6 @@ where
         )
     }
 
-    #[cfg(test)]
     fn maintained_view_table_policy_shape_with_mode(
         &self,
         table: &TableSchema,
@@ -4754,7 +5106,6 @@ where
         Ok(policy_shape)
     }
 
-    #[cfg(test)]
     fn maintained_view_hidden_param_types_for_shape(
         &self,
         shape: &ValidatedQuery,
@@ -4784,7 +5135,6 @@ where
         Ok(param_types)
     }
 
-    #[cfg(test)]
     fn maintained_view_policy_readable_version_tagged_graphs<'a>(
         &self,
         table: &TableSchema,
@@ -4849,7 +5199,6 @@ where
         Ok((content, deletion))
     }
 
-    #[cfg(test)]
     fn maintained_view_result_closure_graph(
         &self,
         shape: &ValidatedQuery,
@@ -4983,7 +5332,6 @@ where
         Ok(GraphBuilder::union(graphs))
     }
 
-    #[cfg(test)]
     fn maintained_view_filter_result_current_by_include_modes(
         &self,
         root: GraphBuilder,
@@ -5008,7 +5356,6 @@ where
         )
     }
 
-    #[cfg(test)]
     fn filter_root_current_by_required_include_modes(
         &self,
         root: GraphBuilder,
@@ -5039,7 +5386,6 @@ where
         Ok(graph)
     }
 
-    #[cfg(test)]
     fn filter_root_current_by_required_include_path(
         &self,
         root: GraphBuilder,
@@ -5119,7 +5465,6 @@ where
         )
     }
 
-    #[cfg(test)]
     fn maintained_view_bound_query_current_graph(
         &self,
         shape: &ValidatedQuery,
@@ -5136,7 +5481,6 @@ where
         )
     }
 
-    #[cfg(test)]
     fn maintained_view_policy_readable_current_graph(
         &self,
         table: &TableSchema,
@@ -5156,7 +5500,6 @@ where
         )
     }
 
-    #[cfg(test)]
     fn include_policy_hidden_param_types(
         &self,
         root_table: &TableSchema,
@@ -5196,7 +5539,6 @@ where
         Ok(param_types)
     }
 
-    #[cfg(test)]
     fn maintained_view_reference_result_graph(
         &self,
         source: GraphBuilder,
@@ -5260,7 +5602,6 @@ where
         )))
     }
 
-    #[cfg(test)]
     fn maintained_view_include_result_graphs(
         &self,
         root: GraphBuilder,
@@ -5334,7 +5675,6 @@ where
         Ok(graphs)
     }
 
-    #[cfg(test)]
     fn maintained_view_join_closure_current_graph(
         &self,
         root: GraphBuilder,
@@ -5476,7 +5816,6 @@ where
         Ok(joined)
     }
 
-    #[cfg(test)]
     fn maintained_view_bind_filter_literals_for_empty_binding_with_mode(
         &self,
         shape: &ValidatedQuery,
@@ -5499,7 +5838,6 @@ where
         )
     }
 
-    #[cfg(test)]
     fn apply_maintained_view_policy_to_current_graph(
         &self,
         graph: GraphBuilder,
@@ -5529,7 +5867,6 @@ where
         self.apply_maintained_view_filters(graph, &policy_shape, table, output_fields, tier)
     }
 
-    #[cfg(test)]
     fn maintained_view_replacement_tagged_graphs<'a>(
         &self,
         table: &TableSchema,
@@ -5602,7 +5939,6 @@ where
         Ok((content, deletion))
     }
 
-    #[cfg(test)]
     pub(crate) fn reachable_edge_constituent_current_graph(
         &self,
         shape: &ValidatedQuery,
@@ -5685,7 +6021,6 @@ where
         ))
     }
 
-    #[cfg(test)]
     pub(crate) fn reachable_access_constituent_current_graph(
         &self,
         shape: &ValidatedQuery,
@@ -5766,7 +6101,6 @@ where
         ))
     }
 
-    #[cfg(test)]
     pub(crate) fn reachable_policy_readable_version_tagged_graphs<'a>(
         &self,
         shape: &ValidatedQuery,
@@ -5834,7 +6168,6 @@ where
         Ok((content, deletion))
     }
 
-    #[cfg(test)]
     pub(crate) fn reachable_replacement_tagged_graphs<'a>(
         &self,
         shape: &ValidatedQuery,
@@ -5893,7 +6226,6 @@ where
         Ok((content, deletion))
     }
 
-    #[cfg(test)]
     fn ensure_reachable_constituent_table(
         &self,
         reachable: &crate::query::ReachableVia,
@@ -5989,21 +6321,24 @@ where
             ["row_uuid", "tx_time", "tx_node_id"],
         )
         .project_fields(
-            current_row_fields(table)
-                .into_iter()
-                .map(|field| ProjectField::renamed(format!("left.{field}"), field))
+            std::iter::once(ProjectField::renamed("left.row_uuid", "row_uuid"))
+                .chain(table.columns.iter().map(|column| {
+                    let field = format!("user_{}", column.name);
+                    ProjectField::renamed(format!("left.{field}"), field)
+                }))
                 .chain([
                     ProjectField::renamed("left.$createdBy", "created_by"),
                     ProjectField::renamed("left.$createdAt", "created_at"),
                     ProjectField::renamed("left.$updatedBy", "updated_by"),
                     ProjectField::renamed("left.$updatedAt", "updated_at"),
+                    ProjectField::renamed("left.tx_time", "tx_time"),
+                    ProjectField::renamed("left.tx_node_id", "tx_node_id"),
                     ProjectField::renamed("right.schema_version", "schema_version"),
                     ProjectField::renamed("right.parents", "parents"),
                 ]),
         ))
     }
 
-    #[cfg(test)]
     fn apply_maintained_view_filters(
         &self,
         graph: GraphBuilder,
@@ -6111,7 +6446,6 @@ where
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn lower_reachable_graph_parts(
         &self,
         shape: &ValidatedQuery,
@@ -6423,10 +6757,10 @@ fn maintained_view_window_supported(query: &crate::query::Query) -> bool {
 // supported unbounded ordered suffix (`ORDER BY ... OFFSET n` with no LIMIT).
 // Keep the sentinel named so this does not look like an accidental finite
 // capability.
-#[cfg(test)]
+#[allow(dead_code)]
 const UNBOUNDED_ORDERED_WINDOW_LIMIT: usize = usize::MAX;
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn apply_maintained_view_result_limit(
     graph: GraphBuilder,
     query: &crate::query::Query,
@@ -7349,7 +7683,7 @@ pub(crate) enum ParamBindingMode {
     RetainAllParams,
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn hidden_maintained_view_param_types(
     param_types: &BTreeMap<String, groove::schema::ColumnType>,
     mode: ParamBindingMode,
@@ -7752,7 +8086,7 @@ fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bo
     }
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn maintained_view_has_binding_dependent_reachable(shape: &ValidatedQuery) -> bool {
     fn query_has_binding_dependent_reachable(query: &crate::query::Query) -> bool {
         query.reachable.iter().any(|reachable| {
@@ -7790,7 +8124,6 @@ fn maintained_view_bind_operand(
     })
 }
 
-#[cfg(test)]
 fn graph_param_types(
     shape: &ValidatedQuery,
     schema: &JazzSchema,
@@ -7801,7 +8134,6 @@ fn graph_param_types(
     Ok(param_types)
 }
 
-#[cfg(test)]
 fn collect_query_nullable_param_types_from_schema(
     query: &crate::query::Query,
     schema: &JazzSchema,
@@ -7848,7 +8180,6 @@ fn collect_query_nullable_param_types_from_schema(
     Ok(())
 }
 
-#[cfg(test)]
 fn collect_join_nullable_param_types_from_schema(
     join: &JoinVia,
     schema: &JazzSchema,
@@ -7885,39 +8216,18 @@ fn include_deleted_query_binding_source_shape(
     )
 }
 
-#[cfg(test)]
 fn maintained_view_binding_source_shape(shape: &ValidatedQuery) -> String {
     format!("jazz-maintained-query:{}", shape.shape_id().0)
 }
 
-fn maintained_view_program_tagged_graph<'a>(
-    graph: GraphBuilder,
-    result_table: &TableSchema,
-    terminal_tables: impl IntoIterator<Item = &'a TableSchema> + Clone,
-) -> GraphBuilder {
-    let param_types = BTreeMap::new();
-    GraphBuilder::union([
-        graph
-            .clone()
-            .project_fields(maintained_view_tagged_content_fields(
-                result_table,
-                "result_current",
-                "",
-                terminal_tables.clone(),
-                &param_types,
-                &param_types,
-                "",
-            )),
-        graph.project_fields(maintained_view_tagged_content_fields(
-            result_table,
-            "version_content",
-            "",
-            terminal_tables,
-            &param_types,
-            &param_types,
-            "",
-        )),
-    ])
+#[allow(dead_code)]
+fn maintained_fact_sink(event_kind: &str, table: &str) -> String {
+    format!("maintained.{event_kind}.{table}")
+}
+
+#[allow(dead_code)]
+fn maintained_reachable_fact_sink(event_kind: &str, table: &str) -> String {
+    format!("maintained.reachable.{event_kind}.{table}")
 }
 
 fn collect_nullable_param_types(
@@ -8346,7 +8656,6 @@ fn current_row_fields(table: &TableSchema) -> Vec<String> {
     fields
 }
 
-#[cfg(test)]
 fn global_current_storage_fields(table: &TableSchema) -> Vec<String> {
     let mut fields = vec!["row_uuid".to_owned()];
     fields.extend(
@@ -8516,7 +8825,7 @@ fn current_source_graph(
         .unwrap_or_else(|| visible_current_graph(table, tier))
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn maintained_view_content_current_keys(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {
     maintained_view_current_keys(
         global_current_table_name(&table.name),
@@ -8525,7 +8834,7 @@ fn maintained_view_content_current_keys(table: &TableSchema, tier: DurabilityTie
     )
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn maintained_view_register_current_keys(
     table: &TableSchema,
     tier: DurabilityTier,
@@ -8537,7 +8846,7 @@ fn maintained_view_register_current_keys(
     )
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn maintained_view_current_keys(
     global_table: String,
     ahead_table: String,
@@ -8729,7 +9038,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     GraphBuilder::union([undeleted, deleted])
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<String> {
     let mut fields = vec![
         "row_uuid".to_owned(),
@@ -8751,7 +9060,7 @@ fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<Strin
     fields
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn maintained_view_history_storage_fields(table: &TableSchema, prefix: &str) -> Vec<ProjectField> {
     maintained_view_history_storage_field_names(table)
         .into_iter()
@@ -8759,7 +9068,7 @@ fn maintained_view_history_storage_fields(table: &TableSchema, prefix: &str) -> 
         .collect()
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn maintained_view_register_storage_fields(prefix: &str) -> Vec<ProjectField> {
     [
         "row_uuid",
@@ -8778,13 +9087,14 @@ fn maintained_view_register_storage_fields(prefix: &str) -> Vec<ProjectField> {
     .collect()
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn maintained_view_version_fields(table: &TableSchema) -> Vec<String> {
     let mut fields = global_current_storage_fields(table);
     fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
     fields
 }
 
+#[allow(dead_code)]
 fn maintained_view_nullable_deletion_type() -> ValueType {
     ValueType::Nullable(Box::new(ValueType::Enum(
         EnumSchema::new("jazz_deletion", ["deleted", "restored"]).expect("valid deletion enum"),
@@ -8865,6 +9175,7 @@ fn maintained_view_policy_deletion_fields(table: &TableSchema) -> Vec<ProjectFie
     fields
 }
 
+#[allow(dead_code)]
 fn maintained_view_tagged_content_fields<'a>(
     table: &TableSchema,
     event_kind: &str,
@@ -8916,7 +9227,7 @@ fn maintained_view_tagged_content_fields<'a>(
     fields
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn maintained_view_tagged_deletion_fields<'a>(
     table: &TableSchema,
     event_kind: &str,
@@ -8962,6 +9273,7 @@ fn maintained_view_tagged_deletion_fields<'a>(
     fields
 }
 
+#[allow(dead_code)]
 fn append_maintained_view_param_fields(
     fields: &mut Vec<ProjectField>,
     param_types: &BTreeMap<String, groove::schema::ColumnType>,
@@ -8980,6 +9292,7 @@ fn append_maintained_view_param_fields(
     }));
 }
 
+#[allow(dead_code)]
 fn maintained_view_hidden_param_value_type(column_type: &groove::schema::ColumnType) -> ValueType {
     match column_type.value_type() {
         ValueType::Nullable(_) => column_type.value_type(),
@@ -8987,7 +9300,6 @@ fn maintained_view_hidden_param_value_type(column_type: &groove::schema::ColumnT
     }
 }
 
-#[cfg(test)]
 fn maintained_view_hidden_param_column_types(
     param_types: &BTreeMap<String, groove::schema::ColumnType>,
 ) -> BTreeMap<String, groove::schema::ColumnType> {
@@ -9003,6 +9315,7 @@ fn maintained_view_hidden_param_column_types(
         .collect()
 }
 
+#[allow(dead_code)]
 fn maintained_view_terminal_user_columns<'a>(
     terminal_tables: impl IntoIterator<Item = &'a TableSchema>,
 ) -> BTreeMap<(String, String), groove::schema::ColumnType> {

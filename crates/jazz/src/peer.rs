@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::TryRecvError;
 
-use groove::ivm::{RecordDeltas, Subscription};
+use groove::ivm::{MultisinkSubscription, RecordDeltas};
 use groove::storage::OrderedKvStorage;
 
 use crate::ids::{AuthorId, RowUuid};
@@ -17,7 +17,10 @@ use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionView,
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
 };
-use crate::node::{Error, NodeState, PreparedQueryPlan};
+use crate::node::{
+    Error, JAZZ_APP_ROWS_SINK, NodeState, PreparedQueryPlan, apply_maintained_multisink_deltas,
+    take_optional_sink_deltas,
+};
 use crate::protocol::{
     ContentExtent, LargeValueOwnerRef, PeerPayloadInventory, RegisterShapeOptions,
     ResultMemberEntry, ResultRowEntry, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
@@ -86,7 +89,7 @@ struct PeerSubscriptionState {
     closure_contributions_complete: bool,
     result_member_set: BTreeSet<ResultMemberEntry>,
     member_index: BTreeMap<MemberIndexKey, MemberSlot>,
-    query_subscription: Option<Subscription>,
+    query_subscription: Option<MultisinkSubscription>,
     maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
     prepared_query: Option<CachedPeerQueryPlan>,
     groove_runtime_token: Option<u64>,
@@ -103,7 +106,7 @@ impl PeerSubscriptionState {
 
 #[derive(Debug)]
 struct MaintainedSubscriptionViewSubscription {
-    subscription: Subscription,
+    subscription: MultisinkSubscription,
     maintained: MaintainedSubscriptionView,
     tables: BTreeMap<String, TableSchema>,
 }
@@ -607,6 +610,10 @@ impl PeerState {
             loop {
                 match receiver.try_recv() {
                     Ok(deltas) => {
+                        let Some(deltas) = take_optional_sink_deltas(deltas, JAZZ_APP_ROWS_SINK)
+                        else {
+                            continue;
+                        };
                         if !deltas.is_empty() {
                             drained.push(deltas);
                         }
@@ -776,13 +783,12 @@ impl PeerState {
                 match maintained_subscription_view.subscription.try_recv() {
                     Ok(deltas) => {
                         self.metrics.maintained_subscription_view.delta_batches_in += 1;
-                        let transitions = maintained_subscription_view
-                            .maintained
-                            .apply_tagged_deltas(
-                                &deltas,
-                                &maintained_subscription_view.tables,
-                                &node.node_aliases,
-                            )?;
+                        let transitions = apply_maintained_multisink_deltas(
+                            &mut maintained_subscription_view.maintained,
+                            deltas,
+                            &maintained_subscription_view.tables,
+                            &node.node_aliases,
+                        )?;
                         for member in transitions.adds {
                             let before = previous_member_result_set.contains(&member);
                             states
@@ -1079,8 +1085,9 @@ impl PeerState {
             .collect::<BTreeSet<_>>();
         let previous_tx_ids = previous_tx_ids(previous_row_result_set.iter());
         self.forget_subscription_with_node(node, subscription);
-        let (prepared_shape, prepared_binding, plan) =
-            node.prepare_query_binding_for_link(shape, binding, opts.tier, self.identity())?;
+        let (prepared_shape, prepared_binding, plan) = node
+            .prepare_query_binding_for_link(shape, binding, opts.tier, self.identity())
+            .map_err(normalize_maintained_subscription_unsupported_error)?;
         let cached = CachedPeerQueryPlan {
             shape: prepared_shape,
             binding: prepared_binding,
@@ -2208,6 +2215,17 @@ fn previous_tx_ids<'a>(rows: impl IntoIterator<Item = &'a ResultRowEntry>) -> BT
     rows.into_iter().map(|(_, _, tx_id)| *tx_id).collect()
 }
 
+fn normalize_maintained_subscription_unsupported_error(error: Error) -> Error {
+    match error {
+        Error::QueryLowering(message) if message.starts_with("CapabilityReport") => {
+            Error::InvalidStoredValue(
+                "maintained subscription view subscription does not support this query shape",
+            )
+        }
+        other => other,
+    }
+}
+
 fn previous_member_tx_ids<'a>(
     members: impl IntoIterator<Item = &'a ResultMemberEntry>,
 ) -> BTreeSet<TxId> {
@@ -2258,7 +2276,7 @@ fn filter_view_update_to_result_table(update: &mut SyncMessage, table: &str) {
     });
 }
 
-fn drain_initial_subscription_snapshot(receiver: &Subscription) {
+fn drain_initial_subscription_snapshot(receiver: &MultisinkSubscription) {
     while receiver.try_recv().is_ok() {}
 }
 
@@ -2898,7 +2916,7 @@ mod tests {
     fn query_subscription(
         peer: &PeerState,
         subscription: SubscriptionKey,
-    ) -> Option<&Subscription> {
+    ) -> Option<&MultisinkSubscription> {
         peer.subscriptions
             .get(&subscription)
             .and_then(|state| state.query_subscription.as_ref())
@@ -5163,6 +5181,8 @@ mod tests {
         let real_deltas = receiver
             .try_recv()
             .expect("exclusive commit should produce a query delta");
+        let real_deltas = take_optional_sink_deltas(real_deltas, JAZZ_APP_ROWS_SINK)
+            .expect("exclusive commit should produce an app rows sink delta");
         let one_positive = real_deltas
             .deltas
             .iter()
@@ -5706,6 +5726,8 @@ mod tests {
         accept_global(&mut core, second_tx, 2);
         let receiver = query_subscription(&peer, subscription).unwrap();
         let real_deltas = receiver.try_recv().unwrap();
+        let real_deltas = take_optional_sink_deltas(real_deltas, JAZZ_APP_ROWS_SINK)
+            .expect("rewrite should produce an app rows sink delta");
         let real_delta = real_deltas
             .deltas
             .iter()

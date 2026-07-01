@@ -79,7 +79,7 @@ fn run_subscribe_unsubscribe(iterations: usize) -> String {
             .filter(PredicateExpr::eq("artist_id", Value::U64((i % 128) as u64)))
             .project(["title"]);
         let start = Instant::now();
-        let subscription = db.subscribe(graph).expect("subscribe");
+        let subscription = db.subscribe_one_sink(graph).expect("subscribe");
         let _initial = subscription.recv().expect("initial");
         db.unsubscribe(subscription.id());
         hist.record(duration_nanos(start.elapsed()))

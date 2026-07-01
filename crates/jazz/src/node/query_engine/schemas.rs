@@ -61,6 +61,8 @@ pub(crate) enum ProgramFactSchema {
     /// Content/deletion/replacement version witnesses needed for payload
     /// shipping and removal/change replacement.
     VersionWitnesses(VersionWitnessSchemas),
+    /// Replacement candidates for maintained-view removals.
+    ReplacementWitnesses(VersionWitnessSchemas),
     /// Tri-state dry-run policy decision.
     PolicyDecision(PolicyDecisionSchema),
     /// Policy dependency witnesses that can grant or revoke visibility.

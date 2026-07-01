@@ -56,9 +56,54 @@ pub(crate) struct NormalizedRowSetShape {
     pub(crate) root: RowSetNodeId,
     /// App/result identity emitted by the root node.
     pub(crate) result: ResultId,
+    /// Extra sources that do not affect app-row membership directly but are
+    /// part of maintained/sync payload closure.
+    pub(crate) auxiliary_sources: BTreeSet<SourceId>,
+    /// Reference/include closure paths that contribute maintained result
+    /// membership and may gate root membership.
+    pub(crate) closure_paths: Vec<ClosurePath>,
+    /// Join-side rows that are part of the materialized maintained/sync
+    /// payload when they contribute to a visible root result.
+    pub(crate) join_contributions: Vec<JoinContribution>,
     /// Normalized expression DAG. Public query and relation surfaces both
     /// normalize here before lowering.
     pub(crate) nodes: BTreeMap<RowSetNodeId, RowSetExpr>,
+}
+
+/// One maintained/sync closure path rooted at the app result rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClosurePath {
+    /// Stable path name for diagnostics/sinks.
+    pub(crate) id: String,
+    /// Ordered reference hops.
+    pub(crate) segments: Vec<ClosurePathSegment>,
+    /// Whether this path must be readable/resolvable for the root row to stay
+    /// in the result set.
+    pub(crate) gates_root: bool,
+}
+
+/// One reference hop inside a closure path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClosurePathSegment {
+    /// Source occurrence containing the reference column.
+    pub(crate) parent: SourceId,
+    /// Target occurrence reached by the reference column.
+    pub(crate) target: SourceId,
+    /// Public source column name, without the internal `user_` prefix.
+    pub(crate) source_field: String,
+}
+
+/// One join-side contribution payload rooted at the app result rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JoinContribution {
+    /// Stable contribution name for diagnostics/sinks.
+    pub(crate) id: String,
+    /// Source occurrence for the contributing join rows.
+    pub(crate) source: SourceId,
+    /// Normalized node for the contributing join rows, including join filters.
+    pub(crate) input: RowSetNodeId,
+    /// Public join-row column that references the root result row id.
+    pub(crate) root_ref_field: String,
 }
 
 /// Derived identity for a normalized row-set shape.

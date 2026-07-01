@@ -186,6 +186,8 @@ pub(crate) enum ProgramFactKey {
     },
     /// Content/deletion/replacement version witnesses.
     VersionWitnesses,
+    /// Replacement candidates for rows removed from a maintained result set.
+    ReplacementWitnesses,
     /// Tri-state dry-run policy decision facts.
     PolicyDecision {
         /// Decision identity within the normalized row-set program.

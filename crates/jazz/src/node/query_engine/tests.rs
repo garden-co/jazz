@@ -74,6 +74,9 @@ fn normalized_shape(byte: u8) -> NormalizedRowSetShape {
             table: "todos".to_owned(),
             row: ResultRowRef::Source(root_source.clone()),
         },
+        auxiliary_sources: BTreeSet::new(),
+        closure_paths: Vec::new(),
+        join_contributions: Vec::new(),
         nodes: BTreeMap::from([(
             root,
             RowSetExpr::Source {
@@ -111,6 +114,9 @@ fn chained_row_set_input(byte: u8, binding_values: BTreeMap<String, Value>) -> R
                 table: "todos".to_owned(),
                 row: ResultRowRef::Source(root_source.clone()),
             },
+            auxiliary_sources: BTreeSet::new(),
+            closure_paths: Vec::new(),
+            join_contributions: Vec::new(),
             nodes: BTreeMap::from([
                 (
                     root.clone(),
@@ -424,7 +430,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 .contains(&SourceMetadataRequirement::Coverage)
         );
         assert!(matches!(
-            program.lowered.graph,
+            program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
             GraphBuilder::Table { ref table } if table == "resolved_todos"
         ));
         assert_eq!(program.lowered.parameters, ParameterDomain::default());
@@ -438,7 +444,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
         );
 
         let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
-        assert_eq!(terminals.len(), 4);
+        assert_eq!(terminals.len(), 5);
         assert!(terminals.iter().any(|terminal| {
             matches!(
                 terminal,
@@ -519,12 +525,15 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
         FieldRequirement::Fields(BTreeSet::from(["title".to_owned()]))
     );
     assert!(matches!(
-        program.lowered.graph,
+        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
+        GraphBuilder::Project { input, .. }
+        if matches!(
+            input.as_ref(),
         GraphBuilder::TopBy {
-            ref input,
-            ref group_cols,
-            ref order_cols,
-            ref tie_cols,
+            input,
+            group_cols,
+            order_cols,
+            tie_cols,
             offset: 1,
             limit: 2,
         } if group_cols.is_empty()
@@ -545,6 +554,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
                 ) && field == "user_title"
                     && value == &groove::ivm::LiteralValue::String("ship".to_owned())
             )
+        )
     ));
     assert_eq!(program.lowered.parameters, ParameterDomain::default());
     assert!(
@@ -575,6 +585,9 @@ fn current_source_select_projection_and_unordered_slice_lower() {
                     table: "todos".to_owned(),
                     row: ResultRowRef::Source(root_source.clone()),
                 },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         root.clone(),
@@ -625,7 +638,7 @@ fn current_source_select_projection_and_unordered_slice_lower() {
         FieldRequirement::Fields(BTreeSet::from(["title".to_owned()]))
     );
     assert!(matches!(
-        program.lowered.graph,
+        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
         GraphBuilder::TopBy {
             ref input,
             ref group_cols,
@@ -663,6 +676,9 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                     table: "todos".to_owned(),
                     row: ResultRowRef::Source(root_source.clone()),
                 },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         root.clone(),
@@ -736,7 +752,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                 == FieldRequirement::Fields(BTreeSet::from(["tag".to_owned(), "todo".to_owned()]))
     }));
     assert!(matches!(
-        program.lowered.graph,
+        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
         GraphBuilder::Project { ref input, ref fields }
             if fields.iter().any(|field| field.output_name == "row_uuid")
                 && matches!(
@@ -796,6 +812,9 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
                     table: "todos".to_owned(),
                     row: ResultRowRef::Source(parent_source.clone()),
                 },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         parent_node.clone(),
@@ -858,7 +877,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
             .contains(&SourceMetadataRequirement::VersionWitnesses)
     }));
     assert!(matches!(
-        program.lowered.graph,
+        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
         GraphBuilder::Join {
             ref left_on,
             ref right_on,
@@ -922,6 +941,9 @@ fn correlated_path_request(
                     table: "todos".to_owned(),
                     row: ResultRowRef::Source(parent_source.clone()),
                 },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         parent_node.clone(),
@@ -981,7 +1003,7 @@ fn correlated_path_optional_app_rows_materialize_parent_rows() {
         lower_query_program(request, &mut resolver).expect("optional path app rows should lower");
 
     assert!(matches!(
-        program.lowered.graph,
+        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
         GraphBuilder::Table { ref table } if table == "resolved_todos"
     ));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
@@ -1007,7 +1029,7 @@ fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_row
         lower_query_program(request, &mut resolver).expect("required path app rows should lower");
 
     assert!(matches!(
-        program.lowered.graph,
+        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
         GraphBuilder::ArgMinBy {
             ref input,
             ref group_cols,
@@ -1138,6 +1160,9 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
                         field: "reachable_team".to_owned(),
                     }],
                 },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
                         seed_node.clone(),
@@ -1277,7 +1302,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     }
 
     assert!(matches!(
-        program.lowered.graph,
+        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
         GraphBuilder::Recursive {
             ref seed,
             ref step,
