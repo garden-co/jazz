@@ -425,6 +425,16 @@ mod tests {
                 global_seq: Some(GlobalSeq(7)),
                 durability: Some(DurabilityTier::Global),
             },
+            SyncMessage::FetchRowVersions {
+                requests: vec![crate::protocol::RowVersionRef::new(
+                    "todos",
+                    RowUuid::from_bytes([0x77; 16]),
+                    tx_id,
+                )],
+            },
+            SyncMessage::RowVersionPayloads {
+                versions: Vec::new(),
+            },
         ];
 
         for message in messages {

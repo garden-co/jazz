@@ -4,7 +4,7 @@
 //! semantic requests recoverable. Server shells may eventually surface these as
 //! configuration, but the core owns the default contract.
 
-use crate::protocol::{ContentExtent, ShapeAst, SyncMessage, VersionRecord};
+use crate::protocol::{ContentExtent, RowVersionRef, ShapeAst, SyncMessage, VersionRecord};
 
 /// Maximum encoded `WireFrame` bytes accepted before postcard decode.
 ///
@@ -40,6 +40,12 @@ pub const MAX_COMMIT_UNIT_VERSIONS: usize = 4096;
 /// split into multiple mergeable commits or rejected as malformed.
 pub const MAX_COMMIT_UNIT_BYTES: usize = MAX_SYNC_MESSAGE_BYTES;
 
+/// Maximum row-version repair refs in one `FetchRowVersions` request.
+///
+/// Source: matches the first known-state repair tier; large reconnect holes
+/// should batch exact requests instead of creating unbounded semantic vectors.
+pub const MAX_FETCH_ROW_VERSIONS: usize = 1024;
+
 /// Maximum bytes in one `ContentExtent` response payload.
 ///
 /// Source: ch. 12's content lane has 64 KiB blob chunk targets and 64 MiB bundle
@@ -72,6 +78,18 @@ pub fn validate_content_extents(extents: &[ContentExtent]) -> Result<(), String>
             extent.bytes.len(),
             MAX_CONTENT_EXTENT_BYTES,
         )?;
+    }
+    Ok(())
+}
+
+/// Validate row-version repair request size after sync-message decode.
+pub fn validate_fetch_row_versions(requests: &[RowVersionRef]) -> Result<(), String> {
+    if requests.len() > MAX_FETCH_ROW_VERSIONS {
+        return Err(format!(
+            "row-version repair request count {} exceeds max {}",
+            requests.len(),
+            MAX_FETCH_ROW_VERSIONS
+        ));
     }
     Ok(())
 }
