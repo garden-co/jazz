@@ -1138,6 +1138,7 @@ fn high_fan_out_hydration_summary(
             )]))
             .expect("child binding");
         register_binding(&mut ctx, &mut core, "cold", &child_shape, &binding);
+        apply_binding(&mut cold, &child_shape, &binding);
         let update = peer
             .rehydrate_query(&mut core, &child_shape, &binding)
             .expect("child rehydrate");
