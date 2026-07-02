@@ -490,7 +490,9 @@ where
                 {
                     continue;
                 }
-                return current_row_from_version_projection(table, &parent_version).map(Some);
+                return self
+                    .current_row_from_materialized_version(table, &parent_version)
+                    .map(Some);
             }
         }
 
@@ -739,7 +741,7 @@ where
             else {
                 continue;
             };
-            rows.push(current_row_from_version_projection(table_schema, &content)?);
+            rows.push(self.current_row_from_materialized_version(table_schema, &content)?);
         }
         sort_current_rows(&mut rows);
         Ok(rows)

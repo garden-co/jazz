@@ -4091,11 +4091,7 @@ where
                     &content_descriptor,
                 )?
                 .ok_or(Error::MissingTransaction(tx_id))?;
-            rows.push(current_row_from_cells(
-                &table_schema,
-                version.row_uuid(),
-                &version.cells(&table_schema)?,
-            )?);
+            rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
         }
         Ok(rows)
     }

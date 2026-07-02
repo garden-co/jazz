@@ -1557,6 +1557,12 @@ pub(super) fn sort_current_rows(rows: &mut [CurrentRow]) {
     });
 }
 
+/// Build a current row from cells that are already app-facing values.
+///
+/// Stored version cells for large-value columns contain operation payloads, not
+/// materialized bytes. App-facing rows built from `VersionRow` must go through
+/// `NodeState::current_row_from_materialized_version` or materialize the cells
+/// before calling this helper.
 pub(super) fn current_row_from_cells(
     table: &TableSchema,
     row_uuid: RowUuid,
