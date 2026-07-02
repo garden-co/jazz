@@ -111,6 +111,8 @@ pub mod oracle;
 pub mod peer;
 /// Simulation-first sync and local event messages.
 pub mod protocol;
+/// Protocol admission and semantic size limits.
+pub mod protocol_limits;
 /// Pure query AST, validation, canonicalization, and ids.
 pub mod query;
 /// Jazz schema and storage lowering.
