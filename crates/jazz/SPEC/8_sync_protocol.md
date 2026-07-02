@@ -67,6 +67,7 @@ The message variants and their payloads are:
 | `FateUpdate`                                                               | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                 |
 | `RegisterShape`                                                            | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                            |
 | `Subscribe`                                                                | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                    |
+| `SubscribeRejected`                                                        | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                                   |
 | `Unsubscribe`                                                              | up             | `{ subscription: SubscriptionKey }`                                                                                                  |
 | `ViewUpdate`                                                               | down           | `{ subscription, reset_result_set, version_bundles, peer_payload_inventory, result_member_adds/removes, program_fact_adds/removes }` |
 | `FetchContentExtent` / `ContentExtents`                                    | bulk lane      | `{ owner: LargeValueOwnerRef, extent }` / `{ extents: Vec<ContentExtent> }`                                                          |
@@ -168,6 +169,17 @@ subscription always receives a complete replacement response with
 response clears the receiver's settled subscription result set before applying
 the replacement rows (`INV-SYNC-10`), because removals against a discarded
 server-side result set are no longer expressible.
+
+If a `Subscribe` request cannot be served because the registered shape/read-view
+has a permanent maintained-subscription capability gap, the serving peer replies
+with `SyncMessage::SubscribeRejected { subscription, reason }` addressed to the
+same `SubscriptionKey`. The initial reason vocabulary is
+`SubscribeRejectReason::UnsupportedShapeCapability { detail }`; `detail` is
+human-readable diagnostic text mapped at the serving boundary, not the internal
+lowering `CapabilityReport`. After `SubscribeRejected`, that subscription is not
+active, the requester must not expect `ViewUpdate`s for it, and `Unsubscribe`
+for the same key is a no-op. The connection and any other subscriptions on it
+remain live (`INV-SYNC-23`).
 
 `Unsubscribe` detaches one usage-site subscription. When the last usage-site
 subscription for a canonical program instance detaches, the serving side may drop
