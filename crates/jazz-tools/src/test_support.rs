@@ -26,6 +26,19 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(feature = "test-utils")]
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
+#[cfg(feature = "test-utils")]
+const DEFAULT_WAIT_TIMEOUT_MULTIPLIER: u32 = 4;
+
+#[cfg(feature = "test-utils")]
+fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
+    let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_WAIT_TIMEOUT_MULTIPLIER);
+    timeout.checked_mul(multiplier).unwrap_or(timeout)
+}
+
 /// Re-runs a query until its rows satisfy the provided matcher or the timeout
 /// expires.
 ///
@@ -44,7 +57,7 @@ where
     F: FnMut(QueryRows) -> Option<T>,
 {
     let description = description.into();
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + load_tolerant_wait_timeout(timeout);
 
     let mut last_error: Option<String> = None;
     let mut last_rows: Option<QueryRows> = None;
