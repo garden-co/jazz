@@ -4752,12 +4752,17 @@ fn content_extent_visibility_requires_referencing_readable_version_row() {
         .expect("large-value commit must reference a content extent");
     let mut owner_peer = PeerState::edge_client(owner);
     core.reset_query_engine_read_metrics();
-    assert!(matches!(
-        owner_peer
-            .serve_content_extents(&mut core, row_uuid, [extent.clone()])
-            .unwrap(),
-        SyncMessage::ContentExtents { extents } if extents.len() == 1 && extents[0].bytes == b"secret"
-    ));
+    let delivered = owner_peer
+        .serve_content_extents(&mut core, row_uuid, [extent.clone()])
+        .unwrap();
+    let SyncMessage::ContentExtents {
+        extents: delivered_extents,
+    } = &delivered
+    else {
+        panic!("expected content extents");
+    };
+    assert_eq!(delivered_extents.len(), 1);
+    assert_eq!(delivered_extents[0].bytes, b"secret");
     let owner_metrics = core.query_engine_read_metrics();
     assert!(owner_metrics.policy_authorization_graphs > 0);
     assert!(owner_metrics.policy_authorized_source_joins > 0);
@@ -4770,6 +4775,33 @@ fn content_extent_visibility_requires_referencing_readable_version_row() {
             "content extent is not visible for row"
         ))
     ));
+
+    let revocation = core
+        .commit_mergeable(
+            MergeableCommit::new("docs", row_uuid, 11)
+                .made_by(other)
+                .parents(vec![tx])
+                .cells(BTreeMap::from([
+                    ("body".to_owned(), Value::Bytes(b"secret".to_vec())),
+                    ("owner".to_owned(), Value::Uuid(other.0)),
+                ])),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        revocation,
+        Fate::Accepted,
+        Some(GlobalSeq(2)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    assert!(matches!(
+        owner_peer.serve_content_extents(&mut core, row_uuid, [extent.clone()]),
+        Err(Error::UnsupportedSyncMessage(
+            "content extent is not visible for row"
+        ))
+    ));
+    assert_eq!(delivered_extents[0].bytes, b"secret");
+
     let other_metrics = core.query_engine_read_metrics();
     assert!(other_metrics.policy_authorization_graphs > 0);
     assert!(other_metrics.policy_authorized_source_joins > 0);
