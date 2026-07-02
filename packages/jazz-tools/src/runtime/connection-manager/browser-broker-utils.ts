@@ -7,6 +7,7 @@ import {
   createRuntimeSourceIdentity,
   type BrowserBrokerVisibility,
 } from "../browser-broker-protocol.js";
+import { resolveBrokerWorkerUrl } from "../browser-broker-client.js";
 
 export const BROKER_STORAGE_DELETE_MAX_RETRIES = 8;
 const BROKER_STORAGE_DELETE_RETRY_BASE_MS = 50;
@@ -106,6 +107,17 @@ export function createBrokerFingerprint(config: DbConfig, primaryDbName: string)
     serverUrl: config.serverUrl ?? null,
     schemaHash: null,
     authClass: resolveBrokerAuthClass(config),
-    runtimeSourceIdentity: createRuntimeSourceIdentity(config.runtimeSources),
+    // Key *only* on the resolved broker worker URL, not the rest of the raw
+    // config.runtimeSources shape: baseUrl/workerUrl/wasmUrl/wasmModule/
+    // wasmSource don't affect which SharedWorker gets constructed (baseUrl's
+    // effect is already folded into the resolved URL), so including them here
+    // would fingerprint two clients differently even though they load the same
+    // broker. This is also why the inspector overlay (a separate bundle that
+    // forwards only `brokerWorkerUrl`, none of the other runtimeSources fields)
+    // can join the host's broker: both resolve to "default" unless the host set
+    // one explicitly.
+    runtimeSourceIdentity: createRuntimeSourceIdentity({
+      brokerWorkerUrl: resolveBrokerWorkerUrl(config.runtimeSources),
+    }),
   });
 }

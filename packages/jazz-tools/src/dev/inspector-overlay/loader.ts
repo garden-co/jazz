@@ -1,5 +1,5 @@
-import { createRelay } from "./relay.js";
-import { attachDevTools } from "../../dev-tools/dev-tools.js";
+import { installInspectorHost } from "./host-bridge.js";
+import type { Db } from "../../runtime/db.js";
 
 const ELEMENT_NAME = "jazz-inspector-overlay";
 
@@ -223,6 +223,24 @@ function overlayStyleSheet(): CSSStyleSheet {
   return sheet;
 }
 
+// The host app's Db, set by startInspectorOverlay() before the element mounts,
+// so connectedCallback can publish the host handle for the iframe.
+let hostDb: Db | undefined;
+// The overlay iframe's window, captured once by connectedCallback, and the
+// disposer for the handle currently bound to it. Rebinding (see bindHost())
+// lets a later startInspectorOverlay() call — e.g. after the host recreates
+// its Db on login/logout — repoint the published handle at the new Db instead
+// of leaving the overlay bound to a shut-down one forever.
+let hostIframeWindow: Window | undefined;
+let disposeHost: (() => void) | undefined;
+
+function bindHost(): void {
+  disposeHost?.();
+  disposeHost = undefined;
+  if (!hostDb || !hostIframeWindow) return;
+  disposeHost = installInspectorHost(hostDb, hostIframeWindow, window.location.origin);
+}
+
 // The overlay chrome: a floating toggle + a bottom dock hosting the inspector
 // iframe, isolated from the host page by its shadow root. All listeners are
 // registered against #ac.signal so disconnectedCallback() removes them at once.
@@ -386,25 +404,31 @@ class JazzInspectorOverlay extends HTMLElement {
 
     apply();
 
-    // Relay wired regardless of dock visibility: the iframe announces/subscribes on load.
-    const relay = createRelay({
-      topWindow: window,
-      iframeWindow: iframe.contentWindow!,
-      origin: window.location.origin,
-    });
+    // Publish the host handle + push the active-subscription list to the iframe.
+    // The overlay reads the config off window.__jazzInspectorHost and opens its
+    // own worker connection; we only push the stack-less subscription list.
+    hostIframeWindow = iframe.contentWindow ?? undefined;
+    bindHost();
+    signal.addEventListener(
+      "abort",
+      () => {
+        disposeHost?.();
+        disposeHost = undefined;
+        hostIframeWindow = undefined;
+      },
+      { once: true },
+    );
+
+    // The in-iframe Close button posts up here (same-origin).
     window.addEventListener(
       "message",
       (event) => {
-        // The in-iframe Close button posts up here (same-origin). Handle that
-        // before the relay, which only cares about devtools-bridge messages.
         if (
           event.origin === window.location.origin &&
           (event.data as { type?: unknown } | null)?.type === CLOSE_MESSAGE_TYPE
         ) {
           setOpen(false);
-          return;
         }
-        relay.handle(event);
       },
       { signal },
     );
@@ -425,14 +449,25 @@ function mount(): void {
 }
 
 /**
- * Start the inspector for an app db: mount the overlay UI (floating toggle +
- * bottom dock + bridge relay) and attach the devtools bridge. Idempotent. No-op
- * at module load — the framework providers call this from a dev-only dynamic
- * import, so nothing runs unless explicitly started and the whole module is
- * absent from prod builds. The schema is resolved from the live runtime at
- * announce time, so none is passed here.
+ * Start the inspector for an app db: record the db and mount the overlay UI
+ * (floating toggle + bottom dock + iframe). The first call's mount() triggers
+ * connectedCallback, which publishes the host handle (window.__jazzInspectorHost)
+ * and pushes the active subscription list to the iframe; the overlay opens its
+ * own worker connection from the published config. Safe to call again with a
+ * new db (e.g. the host recreated its client on login/logout) — bindHost()
+ * rebinds the already-mounted iframe to it. No-op at module load — providers
+ * call this from a dev-only dynamic import, so it's absent from prod builds.
  */
 export function startInspectorOverlay(db: object): void {
+  hostDb = db as Db;
+  // If the element isn't mounted yet, mount() appends it, which synchronously
+  // fires connectedCallback() — and that already calls bindHost(), so a second
+  // call here would immediately dispose and reinstall the handle it just
+  // installed. Only rebind ourselves when the element was already mounted
+  // (connectedCallback won't rerun), e.g. a db swap on login/logout.
+  const alreadyMounted = document.querySelector(ELEMENT_NAME) !== null;
   mount();
-  void attachDevTools({ db } as Parameters<typeof attachDevTools>[0]);
+  if (alreadyMounted) {
+    bindHost();
+  }
 }

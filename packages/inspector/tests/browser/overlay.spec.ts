@@ -26,7 +26,7 @@ function extOf(path: string): string {
   return i === -1 ? "" : path.slice(i);
 }
 
-test.describe("inspector overlay (embedded + relay end-to-end)", () => {
+test.describe("inspector overlay (embedded, own worker connection end-to-end)", () => {
   test.beforeAll(() => {
     // The embedded entry is a separate Vite build. Build it on demand so
     // `pnpm test:browser` works from a clean checkout; rebuild manually with
@@ -39,7 +39,7 @@ test.describe("inspector overlay (embedded + relay end-to-end)", () => {
     }
   });
 
-  test("embedded inspector connects to a host attachDevTools client via the overlay relay", async ({
+  test("embedded inspector opens its own worker connection from the published host handle", async ({
     page,
   }) => {
     // Serve dist-embedded/ to the iframe at the path it expects. The embedded
@@ -63,19 +63,40 @@ test.describe("inspector overlay (embedded + relay end-to-end)", () => {
 
     await page.goto("/tests/browser/overlay-host.html");
 
-    // Host app stands up its real Jazz client and attaches devtools.
+    // Host app stands up its real Jazz client and publishes the host handle.
     await expect(page.getByText("Host ready")).toBeVisible({ timeout: 20_000 });
 
     const inspector = page.frameLocator('iframe[title="jazz-inspector"]');
 
-    // The embedded inspector starts in its waiting state and must leave it once
-    // the runtime announces over the bridge.
-    await expect(inspector.getByText("Waiting for runtime devtools connection...")).toBeHidden({
+    // The host publishes a resolved broker-worker URL, so the overlay's
+    // persistent driver joins the host's SharedWorker/OPFS store (same url+name)
+    // instead of spinning up an empty one. Without this it would default to its
+    // own broker and never see the host's local data offline.
+    const brokerWorkerUrl = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __jazzInspectorHost?: { getConnectionConfig(): { brokerWorkerUrl?: string } };
+          }
+        ).__jazzInspectorHost?.getConnectionConfig().brokerWorkerUrl,
+    );
+    expect(brokerWorkerUrl).toBeTruthy();
+
+    // The overlay reads the handle, opens its connection joining that store, and
+    // leaves the connecting state.
+    await expect(inspector.getByText("Connecting…")).toBeHidden({ timeout: 30_000 });
+
+    // It renders its real UI driven by the injected schema.
+    await expect(inspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(inspector.getByRole("link", { name: "View todos data" })).toBeVisible({
       timeout: 30_000,
     });
 
-    // ...and render its real UI (InspectorLayout nav).
-    await expect(inspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+    // The host's `useAll(app.todos)` subscription is pushed to Live Query.
+    await inspector.getByRole("link", { name: "Live Query" }).click();
+    await expect(inspector.getByRole("cell", { name: "todos", exact: true })).toBeVisible({
       timeout: 30_000,
     });
   });

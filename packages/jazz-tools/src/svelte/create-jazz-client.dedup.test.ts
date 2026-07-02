@@ -37,10 +37,6 @@ vi.mock("../subscriptions-orchestrator.js", () => ({
   trackPromise: mocks.trackPromise,
 }));
 
-vi.mock("../dev-tools/index.js", () => ({
-  createDbFromInspectedPage: vi.fn(),
-}));
-
 import { createJazzClient } from "./create-jazz-client.js";
 
 function mockDb(appId: string) {

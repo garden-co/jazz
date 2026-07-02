@@ -227,4 +227,5 @@ export * from "./runtime/index.js";
 
 // Permissions DSL
 export * from "./permissions/index.js";
-export * from "./dev-tools/index.js";
+export * from "./dev/inspector-overlay/inspector-host-types.js";
+export { installInspectorHost } from "./dev/inspector-overlay/host-bridge.js";

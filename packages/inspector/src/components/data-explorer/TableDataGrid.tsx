@@ -585,7 +585,7 @@ export function TableDataGrid() {
     return <Navigate to="/data-explorer" replace />;
   }
 
-  const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
+  const { wasmSchema: schema, runtime } = useDevtoolsContext();
   const db = useDb();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -710,14 +710,17 @@ export function TableDataGrid() {
     return builder.orderBy(sortColumn, sortDirection).limit(queryLimit).offset(queryOffset);
   }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);
   const builtQuery = useMemo(() => queryBuilder._build(), [queryBuilder]);
+  // Standalone always has a server; the overlay may be fully offline (its
+  // whole point is to show the host's local — possibly unsynced — data), so it
+  // must not wait for an edge ack or force a server round-trip on reads.
   const mutationDurabilityTier = runtime === "standalone" ? "edge" : "local";
   const queryOptions = useMemo(
     () =>
       ({
-        propagation: queryPropagation,
+        propagation: runtime === "standalone" ? "full" : "local-only",
         visibility: "hidden_from_live_query_list",
       }) as const,
-    [queryPropagation],
+    [runtime],
   );
 
   // `undefined` means the live query hasn't resolved yet (loading); `[]` means

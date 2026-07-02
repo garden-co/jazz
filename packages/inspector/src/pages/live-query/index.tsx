@@ -1,11 +1,7 @@
-import {
-  fetchServerSubscriptions,
-  getActiveQuerySubscriptions,
-  onActiveQuerySubscriptionsChange,
-} from "jazz-tools";
+import { fetchServerSubscriptions } from "jazz-tools";
 import type {
-  ActiveQuerySubscriptionTrace,
   DurabilityTier,
+  InspectorSubscription,
   IntrospectionSubscriptionGroup,
 } from "jazz-tools";
 import {
@@ -87,16 +83,6 @@ function buildExplorerUrl(table: string, queryJson: string): string {
   return base;
 }
 
-function getUserStackSummary(stack: string | undefined): string {
-  if (!stack) {
-    return "n/a";
-  }
-
-  const lines = stack.split("\n").slice(1);
-  const firstUserFrame = lines.find((line) => line.includes("/src/"));
-  return firstUserFrame?.trim() ?? lines[0]?.trim() ?? "n/a";
-}
-
 function formatTime(value: string | number): string {
   return new Date(value).toLocaleTimeString();
 }
@@ -112,33 +98,15 @@ function tierRank(tier: DurabilityTier): number {
   }
 }
 
-function useActiveSubscriptions(runtime: "standalone" | "extension") {
-  const [subscriptions, setSubscriptions] = useState(() => getActiveQuerySubscriptions());
-
-  useEffect(() => {
-    if (runtime !== "extension") {
-      setSubscriptions([]);
-      return;
-    }
-
-    setSubscriptions(getActiveQuerySubscriptions());
-    return onActiveQuerySubscriptionsChange((nextSubscriptions) => {
-      setSubscriptions([...nextSubscriptions]);
-    });
-  }, [runtime]);
-
-  return subscriptions;
-}
-
-function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
+function useServerSubscriptionTelemetry() {
   const standaloneContext = useStandaloneContext();
   const [queries, setQueries] = useState<IntrospectionSubscriptionGroup[]>([]);
   const [generatedAt, setGeneratedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(runtime === "standalone");
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    if (runtime !== "standalone" || !standaloneContext) {
+    if (!standaloneContext) {
       setQueries([]);
       setGeneratedAt(null);
       setError(null);
@@ -186,7 +154,6 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
       window.clearInterval(intervalId);
     };
   }, [
-    runtime,
     standaloneContext?.connection.adminSecret,
     standaloneContext?.connection.appId,
     standaloneContext?.connection.serverUrl,
@@ -195,9 +162,8 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
   return { queries, generatedAt, error, isLoading };
 }
 
-function ExtensionLiveQuery() {
-  const { runtime, wasmSchema } = useDevtoolsContext();
-  const subscriptions = useActiveSubscriptions(runtime);
+function OverlayLiveQuery() {
+  const { hostSubscriptions: subscriptions, wasmSchema } = useDevtoolsContext();
   const [selectedTable, setSelectedTable] = useState("");
   const [selectedTier, setSelectedTier] = useState("");
   const [sorting, setSorting] = useState<SortingState>([
@@ -218,7 +184,7 @@ function ExtensionLiveQuery() {
     });
   }, [selectedTable, selectedTier, subscriptions]);
 
-  const columns = useMemo<ColumnDef<ActiveQuerySubscriptionTrace>[]>(
+  const columns = useMemo<ColumnDef<InspectorSubscription>[]>(
     () => [
       {
         accessorKey: "table",
@@ -261,19 +227,6 @@ function ExtensionLiveQuery() {
         header: "Query",
         enableSorting: false,
         cell: ({ row }) => <pre className={styles.codeBlock}>{row.original.query}</pre>,
-      },
-      {
-        id: "stack",
-        header: "Stack",
-        enableSorting: false,
-        cell: ({ row }) => (
-          <details className={styles.stackDetails}>
-            <summary className={styles.stackSummary}>
-              {getUserStackSummary(row.original.stack)}
-            </summary>
-            <pre className={styles.codeBlock}>{row.original.stack ?? "n/a"}</pre>
-          </details>
-        ),
       },
     ],
     [],
@@ -357,7 +310,7 @@ function ExtensionLiveQuery() {
 }
 
 function StandaloneLiveQuery() {
-  const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry("standalone");
+  const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry();
   const [selectedTable, setSelectedTable] = useState("");
 
   const availableTables = useMemo(() => {
@@ -454,5 +407,5 @@ export function LiveQuery() {
     return <StandaloneLiveQuery />;
   }
 
-  return <ExtensionLiveQuery />;
+  return <OverlayLiveQuery />;
 }
