@@ -972,13 +972,21 @@ pub struct Subscribe {
     pub known_state: Option<KnownStateDeclaration>,
 }
 
-/// Fast known-state declaration echoed by a subscriber on resubscribe.
+/// Known-state declaration echoed by a subscriber on resubscribe.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct KnownStateDeclaration {
-    /// Completeness class this declaration claims.
-    pub completeness: KnownStateCompleteness,
-    /// Server-stamped settled-through position being echoed.
-    pub position: GlobalSeq,
+pub enum KnownStateDeclaration {
+    /// Fast optimistic declaration for the current-membership view.
+    Fast {
+        /// Completeness class this declaration claims.
+        completeness: KnownStateCompleteness,
+        /// Server-stamped settled-through position being echoed.
+        position: GlobalSeq,
+    },
+    /// Exact declaration of row-version payloads currently held by the receiver.
+    ExactVersionSet {
+        /// Explicit version refs the receiver can satisfy without a body.
+        versions: Vec<RowVersionRef>,
+    },
 }
 
 /// Known-state declaration completeness class.

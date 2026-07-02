@@ -297,16 +297,18 @@ A subscriber declares its known state per usage-site query in one of two forms:
   "I have contiguously applied the stream you served me for this query through
   global position `p`, and none of it has been locally evicted." In the current
   implementation `p` is the exact `settled_through` stamp previously emitted by
-  the serving node for the same canonical binding view. The client records this
-  cursor in memory when applying `ViewUpdate`s and echoes it on in-process
-  resubscribe. Persisting this fact across restarts remains target work; any
-  local eviction touching the query's scope invalidates it (`INV-SYNC-27`).
+  the serving node for the same canonical binding view. The client records and
+  persists this cursor when applying `ViewUpdate`s and echoes it on resubscribe.
+  Any local eviction touching stored row-version bodies invalidates persisted
+  fast facts before another declaration can be made (`INV-SYNC-27`).
 - **Slow declaration** — an explicit set of row-version identities
   `(row_uuid, tx_time, tx_node_id)`: used when no valid fast fact exists
   (fresh store, eviction, corruption). The client evaluates the query locally
-  and declares exactly the versions it holds. Slow declarations remain target
-  work. Version identities use the wire `TxId` form (`INV-SYNC-21`); unfated
-  versions are declarable because `TxId`s exist before fate.
+  and declares exactly the versions it holds. Oversized exact declarations
+  degrade to no declaration and a full ship; they are never truncated because a
+  partial exact declaration would silently overclaim. Version identities use the
+  wire `TxId` form (`INV-SYNC-21`); unfated versions are declarable because
+  `TxId`s exist before fate.
 
 Every `ViewUpdate` carries `settled_through`, the serving node's applied global
 watermark when the update was assembled. Its meaning is per binding view: this
@@ -349,11 +351,13 @@ coverage (§8.4, §8.7): the complete-tx inventory remains the implemented
 mechanism for non-declared streams, and it is retired rather than extended as
 known-state coverage grows.
 
-_Further invariants._ `INV-SYNC-24` — the fast skip rule is implemented for
-in-memory resubscribe declarations; `INV-SYNC-25` — dedup + repairs converge to
-the undeduped stream; `INV-SYNC-26` — repair requests are exact and
-policy-checked; `INV-SYNC-27` — persisted fast declarations require contiguous
-application and no eviction; eviction invalidates the persisted fact (target).
+_Further invariants._ `INV-SYNC-24` — fast and slow declarations omit only
+eligible version bodies; `INV-SYNC-25` — dedup + repairs converge to the
+undeduped stream; `INV-SYNC-26` — repair requests are exact and policy-checked;
+`INV-SYNC-27` — persisted fast declarations require contiguous application and
+no eviction; eviction invalidates the persisted fact. Persisting slow exact
+declarations is intentionally not part of v1; they are derived from the
+receiver's current local store when needed.
 
 ## Open questions
 

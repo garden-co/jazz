@@ -128,6 +128,13 @@ where
             }
         }
         self.database.commit_batch(batch)?;
+        if report.row_versions_evictable > 0 {
+            // INV-SYNC-27: once local row-version bodies are removed, no
+            // persisted fast known-state cursor may survive. This coarse
+            // invalidation is conservative until eviction tracks affected
+            // binding views directly.
+            self.clear_all_known_state_facts()?;
+        }
 
         Ok(report)
     }

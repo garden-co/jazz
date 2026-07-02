@@ -28,6 +28,8 @@ pub const CONTENT_EXTENTS_STORE: &str = "jazz_content_extents";
 pub const CONTENT_META_STORE: &str = "jazz_content_meta";
 /// Direct groove record store used for local large-value checkpoints.
 pub const CONTENT_CHECKPOINTS_STORE: &str = "jazz_content_checkpoints";
+/// Direct groove record store used for persisted fast known-state facts.
+pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
 
 /// Complete logical Jazz schema.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -293,6 +295,15 @@ impl JazzSchema {
                     ("version_node", ValueType::Uuid),
                 ]),
                 RecordDescriptor::new([("bytes", ValueType::Bytes)]),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                KNOWN_STATE_FACTS_STORE,
+                RecordDescriptor::new([
+                    ("shape_id", ValueType::Uuid),
+                    ("binding_id", ValueType::Uuid),
+                    ("read_view_id", ValueType::Uuid),
+                ]),
+                RecordDescriptor::new([("settled_through", ValueType::U64)]),
             ))
     }
 }

@@ -48,6 +48,18 @@ type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
 #[cfg(feature = "rocksdb")]
 type CoreRocksDb = CoreDb<CoreRocksDbStorage>;
 
+const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
+
+fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
+    let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER);
+    timeout.checked_mul(multiplier).unwrap_or(timeout)
+}
+
 enum StorageBundle {
     Memory(CoreMemoryStorage),
     #[cfg(feature = "rocksdb")]
@@ -1016,7 +1028,8 @@ impl ClientDbInner {
         if inner.borrow().db.query_attachment_is_covered(attachment) {
             return Ok(());
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline =
+            tokio::time::Instant::now() + load_tolerant_test_timeout(QUERY_COVERAGE_TIMEOUT);
         loop {
             if inner.borrow().db.query_attachment_is_covered(attachment) {
                 return Ok(());
