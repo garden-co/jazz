@@ -9,6 +9,8 @@ import {
  */
 export class DirectConnectionManager extends ConnectionManager {
   protected readonly hasDurablePeer = false;
+  private isDisconnected = false;
+  private reconnectWaiters: Array<() => void> = [];
 
   constructor(host: DbForConnection) {
     super(host);
@@ -17,6 +19,11 @@ export class DirectConnectionManager extends ConnectionManager {
   async start(): Promise<void> {}
 
   protected override onClientCreated({ client }: ConnectionManagerClientInput): void {
+    if (this.isDisconnected) return;
+    this.connectClient(client);
+  }
+
+  private connectClient(client: ConnectionManagerClientInput["client"]): void {
     const { config } = this.host;
     if (!config.serverUrl) return;
     client.connectTransport(config.serverUrl, {
@@ -25,7 +32,36 @@ export class DirectConnectionManager extends ConnectionManager {
     });
   }
 
-  async ensureReady(): Promise<void> {}
+  async ensureReady(): Promise<void> {
+    if (!this.isDisconnected) return;
+    await new Promise<void>((resolve) => {
+      this.reconnectWaiters.push(resolve);
+    });
+  }
+
+  async disconnect(): Promise<void> {
+    if (!this.host.config.serverUrl) {
+      throw new Error("Db.disconnect() requires a configured serverUrl.");
+    }
+
+    this.isDisconnected = true;
+    this.clientEntry?.client.disconnectTransport();
+  }
+
+  async reconnect(): Promise<void> {
+    if (!this.host.config.serverUrl) {
+      throw new Error("Db.reconnect() requires a configured serverUrl.");
+    }
+
+    this.isDisconnected = false;
+    const client = this.clientEntry?.client;
+    if (client) {
+      this.connectClient(client);
+    }
+    for (const resolve of this.reconnectWaiters.splice(0)) {
+      resolve();
+    }
+  }
 
   sendLifecycleHint(): void {}
 

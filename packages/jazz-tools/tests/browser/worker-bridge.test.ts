@@ -2069,7 +2069,7 @@ describe("Worker Bridge with OPFS", () => {
     // Disconnect the WS transport so the block takes effect immediately.
     // Playwright route blocking only intercepts new connections; the existing
     // WebSocket must be closed explicitly for the offline simulation to hold.
-    getActiveRoleBridge(dbA)?.disconnectUpstream?.();
+    await dbA.disconnect();
     await sleep(250);
 
     const offlineTitle = `offline-worker-row-${Date.now()}`;
@@ -2098,7 +2098,7 @@ describe("Worker Bridge with OPFS", () => {
 
     await unblockJazzServerNetwork(serverUrl);
     // Re-establish the worker's upstream WebSocket now that the network is live again.
-    getActiveRoleBridge(dbA)?.reconnectUpstream?.();
+    await dbA.reconnect();
     await sleep(250);
 
     getBrowserConnection(dbA)?.sendLifecycleHint?.("freeze");

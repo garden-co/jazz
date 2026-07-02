@@ -17,6 +17,7 @@ interface LeaderWorkerBridgeCallbacks {
 export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
   private workerBridge: WorkerBridge | null = null;
   private bridgeReady: Promise<void> | null = null;
+  private shouldBeConnected = true;
   private readonly pendingFollowerPorts = new Map<
     string,
     { followerTabId: string; leadershipId: number; port: MessagePort }
@@ -61,6 +62,9 @@ export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
       .init(this.buildWorkerBridgeOptions(schemaJson))
       .then(() => {
         if (this.workerBridge !== bridge) return;
+        if (!this.shouldBeConnected) {
+          bridge.disconnectUpstream();
+        }
         this.flushPendingFollowerPorts();
         this.callbacks.onReady(this.leadershipId);
       })
@@ -116,6 +120,28 @@ export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
     await this.bridgeReady;
     if (!this.workerBridge || !this.host.config.serverUrl) return;
     if (!tier || tier === "local") return;
+    await this.workerBridge.waitForUpstreamServerConnection();
+  }
+
+  async disconnect(): Promise<void> {
+    if (!this.host.config.serverUrl) {
+      throw new Error("Db.disconnect() requires a configured serverUrl.");
+    }
+
+    this.shouldBeConnected = false;
+    await this.bridgeReady;
+    this.workerBridge?.disconnectUpstream();
+  }
+
+  async reconnect(): Promise<void> {
+    if (!this.host.config.serverUrl) {
+      throw new Error("Db.reconnect() requires a configured serverUrl.");
+    }
+
+    this.shouldBeConnected = true;
+    await this.bridgeReady;
+    if (!this.workerBridge) return;
+    this.workerBridge.reconnectUpstream();
     await this.workerBridge.waitForUpstreamServerConnection();
   }
 
