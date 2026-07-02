@@ -2765,6 +2765,32 @@ pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
+    /// Pull the next inbound message with transport-local metadata when available.
+    fn try_recv_received(&mut self) -> Option<ReceivedSyncMessage> {
+        self.try_recv().map(ReceivedSyncMessage::without_metadata)
+    }
+}
+
+/// Sync message plus metadata known by the transport before semantic ingest.
+pub struct ReceivedSyncMessage {
+    message: SyncMessage,
+    encoded_len: Option<usize>,
+}
+
+impl ReceivedSyncMessage {
+    fn without_metadata(message: SyncMessage) -> Self {
+        Self {
+            message,
+            encoded_len: None,
+        }
+    }
+
+    fn with_encoded_len(message: SyncMessage, encoded_len: usize) -> Self {
+        Self {
+            message,
+            encoded_len: Some(encoded_len),
+        }
+    }
 }
 
 /// Adapter from postcard wire frames to the internal sync-message transport.
@@ -2900,6 +2926,10 @@ where
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.try_recv_received().map(|received| received.message)
+    }
+
+    fn try_recv_received(&mut self) -> Option<ReceivedSyncMessage> {
         while let Some(bytes) = self.inner.try_recv_frame() {
             if let Err(message) = validate_wire_frame_len(bytes.len()) {
                 self.send_wire_error(WireError::new(
@@ -2934,8 +2964,14 @@ where
                         ));
                         continue;
                     }
+                    let payload_len = envelope.payload.len();
                     match decode_sync_message(&envelope.payload) {
-                        Ok(message) => return Some(message),
+                        Ok(message) => {
+                            return Some(ReceivedSyncMessage::with_encoded_len(
+                                message,
+                                payload_len,
+                            ));
+                        }
                         Err(err) => self.send_wire_error(WireError::new(
                             WireErrorCode::MalformedFrame,
                             WireRetry::Never,
@@ -3183,9 +3219,15 @@ where
                     uploaded.insert(tx_id);
                 }
                 let mut applied = false;
-                while let Some(message) = self.transport.try_recv() {
-                    let write_state_tx_id = write_state_update_tx_id(&message);
-                    self.node.borrow_mut().apply_sync_message(message)?;
+                while let Some(received) = self.transport.try_recv_received() {
+                    let write_state_tx_id = write_state_update_tx_id(&received.message);
+                    self.node
+                        .borrow_mut()
+                        .apply_sync_message_with_ingest_context_and_encoded_len(
+                            received.message,
+                            None,
+                            received.encoded_len,
+                        )?;
                     if let Some(tx_id) = write_state_tx_id {
                         notify_write_state_waiters(&self.write_state_waiters, tx_id);
                     }
@@ -3209,9 +3251,9 @@ where
             } => {
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
-                while let Some(message) = self.transport.try_recv() {
+                while let Some(received) = self.transport.try_recv_received() {
                     applied_inbound = true;
-                    match message {
+                    match received.message {
                         SyncMessage::RegisterShape {
                             shape_id,
                             opts,
@@ -3386,9 +3428,10 @@ where
                             let responses = self
                                 .node
                                 .borrow_mut()
-                                .apply_sync_message_with_ingest_context(
+                                .apply_sync_message_with_ingest_context_and_encoded_len(
                                     other,
                                     Some(*ingest_context),
+                                    received.encoded_len,
                                 )?;
                             if let Some(tx_id) = write_state_tx_id {
                                 notify_write_state_waiters(&self.write_state_waiters, tx_id);

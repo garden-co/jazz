@@ -26,9 +26,9 @@ abstraction before a second concrete use exists. Cross-node concepts travel
 through exhaustive, serializable message enums with a wire version field from
 day one (ch. 8), and every concept is reachable through a protocol message,
 node storage, or both (`INV-DISC-2`). The `SyncMessage` set is `CommitUnit`,
-`FateUpdate`, `RegisterShape`, `Subscribe`, `Unsubscribe`, `PublishSchema`,
-`PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`, `ViewUpdate`,
-`FetchContentExtent`, and `ContentExtents`.
+`FateUpdate`, `RegisterShape`, `Subscribe`, `SubscribeRejected`, `Unsubscribe`,
+`PublishSchema`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`,
+`ViewUpdate`, `FetchContentExtent`, and `ContentExtents`.
 
 ## A.3 Roles, not separate implementations
 
@@ -87,7 +87,36 @@ report deterministic counters plus timing ratios as discipline gates
 results. Metrics are _not_ one unified struct: they are split across
 `SyncMetrics`, `PeerMetrics`, and benchmark-computed values.
 
-## A.8 Structural discipline
+## A.8 Canonical gates
+
+The canonical Rust gate set is part of implementation discipline. A branch that
+changes Rust/core behavior should be able to pass:
+
+- `cargo test -p jazz -j 2`
+- `cargo test -p groove -j 2`
+- `cargo test -p jazz-tools --features test -j 2` (the public API gate named in
+  `crates/jazz-tools/TESTING_GUIDELINES.md`)
+- `cargo test -p jazz-server -j 2`
+- `cargo check -p jazz-sim --benches`
+
+`cargo check -p jazz-sim --benches` is always in the set because it is cheap and
+catches public enum/API drift in benchmarks before smoke or release work. Run
+`dev/benchmarks/smoke.sh` for any change touching protocol, engine, storage, or
+benchmark harnesses. A change to a public `jazz` type additionally gates the
+full workspace, including examples, because public type changes can break
+downstream crates without changing core tests.
+
+This discipline was added after four concrete misses:
+
+- `four_tier_topology_relays_pending_units_and_core_fates` rode born-red for
+  roughly nine commits.
+- `large_blob_values_follow_ordinary_row_permissions` was born-red at
+  `e03780d70`.
+- `jazz-server`'s `cli_dry_run` target rotted after a core API evolution.
+- Adding `SyncMessage::SubscribeRejected` broke jazz-sim bench compilation and
+  was caught two steps late.
+
+## A.9 Structural discipline
 
 Structure should make the design easy to audit. Large implementation concepts
 should be immediately findable, algorithms should read as large steps before

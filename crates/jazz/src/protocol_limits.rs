@@ -80,6 +80,7 @@ pub fn validate_content_extents(extents: &[ContentExtent]) -> Result<(), String>
 pub fn commit_unit_limit_violation(
     tx: &crate::tx::Transaction,
     versions: &[VersionRecord],
+    encoded_len: Option<usize>,
 ) -> Option<String> {
     if versions.len() > MAX_COMMIT_UNIT_VERSIONS {
         return Some(format!(
@@ -87,6 +88,14 @@ pub fn commit_unit_limit_violation(
             versions.len(),
             MAX_COMMIT_UNIT_VERSIONS
         ));
+    }
+    if let Some(len) = encoded_len {
+        return (len > MAX_COMMIT_UNIT_BYTES).then(|| {
+            format!(
+                "commit unit encoded size {} exceeds max {}",
+                len, MAX_COMMIT_UNIT_BYTES
+            )
+        });
     }
     let message = SyncMessage::CommitUnit {
         tx: tx.clone(),

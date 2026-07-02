@@ -302,8 +302,6 @@ node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
   backpressure, auth expiry, protocol-version mismatch, or resume-cursor
   rejection. Define the protocol state machine here and expose the ergonomic
   binding surface in ch. 13.
-- 🔶 **Content-extent fetch authorization** (`INV-SYNC-19`) has implementation but
-  no direct test found — `untested` until covered.
 - 🔶 **Client/edge/core rollout.** The protocol design is the same message
   vocabulary across UI ↔ worker, worker ↔ edge, and edge ↔ core. Current
   implementation and simulation are staged toward client ↔ edge ↔ core: the

@@ -109,6 +109,18 @@ where
     where
         S: ReopenableStorage,
     {
+        self.apply_sync_message_with_ingest_context_and_encoded_len(message, ingest_context, None)
+    }
+
+    pub(crate) fn apply_sync_message_with_ingest_context_and_encoded_len(
+        &mut self,
+        message: SyncMessage,
+        ingest_context: Option<CommitUnitIngestContext>,
+        encoded_len: Option<usize>,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
         match message {
             SyncMessage::SessionClaims { identity, claims } => {
                 if let Some(context) = ingest_context
@@ -123,6 +135,7 @@ where
                 versions,
                 u64::MAX - SKEW_TOLERANCE_MS,
                 ingest_context,
+                encoded_len,
             ),
             SyncMessage::FateUpdate {
                 tx_id,
@@ -415,7 +428,7 @@ where
         versions: Vec<VersionRecord>,
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error> {
-        self.ingest_commit_unit_with_context(tx, versions, now_ms, None)
+        self.ingest_commit_unit_with_context(tx, versions, now_ms, None, None)
     }
 
     /// Ingest a commit unit as fate authority with an optional authenticated
@@ -427,8 +440,9 @@ where
         versions: Vec<VersionRecord>,
         now_ms: u64,
         ingest_context: Option<CommitUnitIngestContext>,
+        encoded_len: Option<usize>,
     ) -> Result<Vec<SyncMessage>, Error> {
-        if let Some(reason) = commit_unit_limit_violation(&tx, &versions) {
+        if let Some(reason) = commit_unit_limit_violation(&tx, &versions, encoded_len) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -596,7 +610,7 @@ where
                 "edge-accepted finalization is mergeable-only",
             ));
         }
-        if let Some(reason) = commit_unit_limit_violation(&tx, &versions) {
+        if let Some(reason) = commit_unit_limit_violation(&tx, &versions, None) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -1035,7 +1049,7 @@ where
                 "edge authority only supports mergeable commit units",
             ));
         }
-        if let Some(reason) = commit_unit_limit_violation(&tx, &versions) {
+        if let Some(reason) = commit_unit_limit_violation(&tx, &versions, None) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {

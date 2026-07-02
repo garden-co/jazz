@@ -134,7 +134,7 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
                 match block_on(subscription.next_event()) {
                     Some(SubscriptionEvent::Opened { current, .. }) => {
-                        assert_eq!(current.len(), scale);
+                        assert_eq!(current.rows.len(), scale);
                     }
                     other => panic!("expected opened subscription event, got {other:?}"),
                 }
