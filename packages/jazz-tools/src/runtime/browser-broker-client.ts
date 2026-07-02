@@ -27,14 +27,11 @@ const DEFAULT_STORAGE_RESET_TIMEOUT_MS = 5_000;
  * must forward the result and pass it back via `runtimeSources.brokerWorkerUrl`.
  */
 export function resolveBrokerWorkerUrl(runtimeSources?: RuntimeSourcesConfig): string {
-  if (runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl) {
-    return resolveRuntimeConfigBrokerWorkerUrl(
-      import.meta.url,
-      typeof location !== "undefined" ? location.href : undefined,
-      runtimeSources,
-    );
-  }
-  return new URL("../worker/jazz-broker-worker.js", import.meta.url).href;
+  return resolveRuntimeConfigBrokerWorkerUrl(
+    import.meta.url,
+    typeof location !== "undefined" ? location.href : undefined,
+    runtimeSources,
+  );
 }
 
 export interface BrowserBrokerClientSnapshot {

@@ -107,13 +107,16 @@ export function createBrokerFingerprint(config: DbConfig, primaryDbName: string)
     serverUrl: config.serverUrl ?? null,
     schemaHash: null,
     authClass: resolveBrokerAuthClass(config),
-    // Key on the *resolved* broker worker URL, not the raw config shape, so two
-    // clients that load the same worker are compatible regardless of how they
-    // named it. This lets the inspector overlay (a separate bundle that must
-    // pass an explicit `brokerWorkerUrl`) join the host's broker, whose own
-    // config left it unset (resolved from its bundle to the same URL).
+    // Key *only* on the resolved broker worker URL, not the rest of the raw
+    // config.runtimeSources shape: baseUrl/workerUrl/wasmUrl/wasmModule/
+    // wasmSource don't affect which SharedWorker gets constructed (baseUrl's
+    // effect is already folded into the resolved URL), so including them here
+    // would fingerprint two clients differently even though they load the same
+    // broker. This is also why the inspector overlay (a separate bundle that
+    // forwards only `brokerWorkerUrl`, none of the other runtimeSources fields)
+    // can join the host's broker: both resolve to "default" unless the host set
+    // one explicitly.
     runtimeSourceIdentity: createRuntimeSourceIdentity({
-      ...config.runtimeSources,
       brokerWorkerUrl: resolveBrokerWorkerUrl(config.runtimeSources),
     }),
   });

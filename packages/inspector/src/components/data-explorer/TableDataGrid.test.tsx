@@ -254,13 +254,13 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("subscribes with full propagation", () => {
+  it("subscribes with local-only propagation in overlay mode", () => {
     renderGrid();
 
     expect(mockUseAll).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({
-        propagation: "full",
+        propagation: "local-only",
         visibility: "hidden_from_live_query_list",
       }),
     );
@@ -306,7 +306,7 @@ describe("TableDataGrid", () => {
           title: "zeta updated",
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "edge" });
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
@@ -446,7 +446,7 @@ describe("TableDataGrid", () => {
           meta: null,
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "edge" });
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
@@ -473,7 +473,7 @@ describe("TableDataGrid", () => {
           title: "zeta queued",
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "edge" });
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
 
     expect(screen.queryByText(/queued change across/i)).toBeNull();
@@ -501,7 +501,7 @@ describe("TableDataGrid", () => {
           done: true,
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "edge" });
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
@@ -686,7 +686,7 @@ describe("TableDataGrid", () => {
           owner_id: null,
         }),
       );
-      expect(mockInsertWait).toHaveBeenCalledWith({ tier: "edge" });
+      expect(mockInsertWait).toHaveBeenCalledWith({ tier: "local" });
     });
 
     expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("status");
@@ -850,7 +850,7 @@ describe("TableDataGrid", () => {
         expect.objectContaining({ _table: "todos" }),
         "row-2",
       );
-      expect(mockDeleteWait).toHaveBeenCalledWith({ tier: "edge" });
+      expect(mockDeleteWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
