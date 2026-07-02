@@ -4,8 +4,8 @@ use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::node::content_store::Extent;
 use jazz::protocol::{
     CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp, MigrationLens,
-    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, SchemaVersion, ShapeAst, Subscribe,
-    SubscribeRejectReason, SubscriptionKey, SyncMessage, TableLens,
+    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaVersion,
+    ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, TableLens,
 };
 use jazz::query::{BindingId, Query, ShapeId};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
@@ -215,6 +215,20 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     extent: content_extent,
                     bytes: b"hello world!".to_vec(),
                 }],
+            },
+        ),
+        (
+            "fetch_row_versions_todos",
+            "FetchRowVersions",
+            SyncMessage::FetchRowVersions {
+                requests: vec![RowVersionRef::new("todos", row, tx_id)],
+            },
+        ),
+        (
+            "row_version_payloads_empty",
+            "RowVersionPayloads",
+            SyncMessage::RowVersionPayloads {
+                versions: Vec::new(),
             },
         ),
     ]

@@ -29,8 +29,8 @@ use crate::ids::{
 };
 use crate::protocol::{
     BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ReadViewKey, ResultMemberEntry,
-    ResultRowEntry, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
-    VersionBundle, VersionRecord, ViewFactEntry,
+    ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
+    SyncMessage, VersionBundle, VersionRecord, ViewFactEntry,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, MergeStrategy, TableSchema, registered_column_transform};
@@ -2398,6 +2398,113 @@ where
             ))?;
         let table = self.table_in_schema(version.table(), schema_version)?;
         VersionRecord::from_stored(version, &table, schema_version)
+    }
+
+    pub(crate) fn row_version_payloads_for_refs(
+        &mut self,
+        requests: &[RowVersionRef],
+        identity: AuthorId,
+    ) -> Result<Vec<VersionRecord>, Error> {
+        let mut out = Vec::new();
+        for request in requests {
+            if !self.dry_run_read_current_allows(&request.table, request.row_uuid, identity)? {
+                continue;
+            }
+            let tx_id = request.tx_id();
+            for version in self.query_versions_for_tx(tx_id)? {
+                if version.table() == request.table.as_str()
+                    && version.row_uuid() == request.row_uuid
+                    && version.tx_time() == request.tx_time
+                    && self.node_for_alias(version.tx_node_alias()) == Some(request.tx_node_id)
+                {
+                    out.push(self.version_record_from_row(&version)?);
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn apply_row_version_payloads_for_requests(
+        &mut self,
+        requests: &[RowVersionRef],
+        versions: Vec<VersionRecord>,
+    ) -> Result<(), Error> {
+        let mut by_request = versions
+            .into_iter()
+            .map(|version| {
+                let candidates = requests
+                    .iter()
+                    .filter(|request| {
+                        request.table.as_str() == version.table()
+                            && request.row_uuid == version.row_uuid()
+                    })
+                    .collect::<Vec<_>>();
+                let key = match candidates.as_slice() {
+                    [request] => *request,
+                    many => many
+                        .iter()
+                        .copied()
+                        .find(|request| request.tx_time == version.updated_at())
+                        .ok_or(Error::MalformedViewUpdate(
+                            "row-version repair payload did not match an outstanding request",
+                        ))?,
+                };
+                Ok((key.clone(), version))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()?;
+        let mut grouped = BTreeMap::<TxId, Vec<VersionRecord>>::new();
+        for request in requests {
+            if let Some(version) = by_request.remove(request) {
+                grouped.entry(request.tx_id()).or_default().push(version);
+            }
+        }
+        for (tx_id, versions) in grouped {
+            let stored = self
+                .query_transaction(tx_id)?
+                .ok_or(Error::MissingTransaction(tx_id))?;
+            self.ingest_known_transaction(
+                stored.tx,
+                versions,
+                stored.fate,
+                stored.global_seq,
+                stored.durability,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn missing_known_state_row_version_refs(
+        &mut self,
+        message: &SyncMessage,
+    ) -> Result<Vec<RowVersionRef>, Error> {
+        let SyncMessage::ViewUpdate {
+            result_member_adds, ..
+        } = message
+        else {
+            return Ok(Vec::new());
+        };
+        let mut missing = BTreeSet::new();
+        for (table, row_uuid, tx_id) in result_member_adds
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+        {
+            let has_body = self
+                .query_versions_for_tx(tx_id)?
+                .into_iter()
+                .any(|version| {
+                    version.table() == table.as_str()
+                        && version.row_uuid() == row_uuid
+                        && version.tx_time() == tx_id.time
+                        && self.node_for_alias(version.tx_node_alias()) == Some(tx_id.node)
+                });
+            if !has_body {
+                missing.insert(RowVersionRef::new(table.to_string(), row_uuid, tx_id));
+            }
+        }
+        Ok(missing.into_iter().collect())
     }
 
     fn mint_tx_time(&mut self, now_ms: u64) -> TxTime {

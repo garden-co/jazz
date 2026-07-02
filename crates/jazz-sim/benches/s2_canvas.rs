@@ -2561,7 +2561,9 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         | SyncMessage::FetchContentExtent { .. }
         | SyncMessage::SessionClaims { .. }
         | SyncMessage::SubscribeRejected { .. }
-        | SyncMessage::Unsubscribe { .. } => 0,
+        | SyncMessage::Unsubscribe { .. }
+        | SyncMessage::FetchRowVersions { .. }
+        | SyncMessage::RowVersionPayloads { .. } => 0,
     }
 }
 

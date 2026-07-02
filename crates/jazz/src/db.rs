@@ -32,8 +32,8 @@ use crate::protocol::{
     SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
 use crate::protocol_limits::{
-    validate_content_extents, validate_shape_ast_size, validate_sync_message_len,
-    validate_wire_frame_len,
+    validate_content_extents, validate_fetch_row_versions, validate_shape_ast_size,
+    validate_sync_message_len, validate_wire_frame_len,
 };
 use crate::query::{Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, TableSchema};
@@ -3443,6 +3443,18 @@ where
                                         );
                                     }
                                 }
+                            }
+                        }
+                        SyncMessage::FetchRowVersions { requests } => {
+                            if let Err(message) = validate_fetch_row_versions(&requests) {
+                                return Err(Error::new(ErrorCode::Protocol, message));
+                            }
+                            let responses = {
+                                let mut node = self.node.borrow_mut();
+                                peer.serve_row_versions(&mut node, &requests)?
+                            };
+                            for response in responses {
+                                self.transport.send(response).map_err(transport_error)?;
                             }
                         }
                         other => {

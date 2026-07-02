@@ -178,6 +178,12 @@ where
                 self.register_shape(shape_id, ast)?;
                 Ok(Vec::new())
             }
+            SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(
+                "row-version repair fetch must be served by peer state",
+            )),
+            SyncMessage::RowVersionPayloads { .. } => Err(Error::UnsupportedSyncMessage(
+                "row-version repair payload requires outstanding request context",
+            )),
             SyncMessage::Subscribe(subscribe) => {
                 self.apply_subscribe(subscribe)?;
                 Ok(Vec::new())
