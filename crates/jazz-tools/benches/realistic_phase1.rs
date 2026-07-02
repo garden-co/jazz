@@ -366,6 +366,7 @@ fn global_subscribe_opts() -> ReadOpts {
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
         include_deleted: false,
+        ..ReadOpts::default()
     }
 }
 
@@ -932,7 +933,7 @@ fn drain_permission_resume_delta(event: Option<SubscriptionEvent>) -> (usize, us
 fn drain_optional_permission_rows(event: Option<SubscriptionEvent>) -> usize {
     match event {
         Some(SubscriptionEvent::Delta { added, updated, .. }) => added.len() + updated.len(),
-        Some(SubscriptionEvent::Reset { current, .. }) => current.len(),
+        Some(SubscriptionEvent::Reset { current, .. }) => current.rows.len(),
         None => 0,
         other => panic!("unexpected permission snapshot subscription event {other:?}"),
     }
@@ -940,7 +941,7 @@ fn drain_optional_permission_rows(event: Option<SubscriptionEvent>) -> usize {
 
 fn drain_opened(event: Option<SubscriptionEvent>, name: &str) -> usize {
     match event {
-        Some(SubscriptionEvent::Opened { current, .. }) => current.len(),
+        Some(SubscriptionEvent::Opened { current, .. }) => current.rows.len(),
         other => panic!("expected opened {name} subscription event, got {other:?}"),
     }
 }
@@ -1180,7 +1181,7 @@ fn r9_subscribed_write(c: &mut Criterion) {
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe board");
                 match block_on(subscription.next_event()) {
                     Some(SubscriptionEvent::Opened { current, .. }) => {
-                        assert!(!current.is_empty());
+                        assert!(!current.rows.is_empty());
                     }
                     other => panic!("expected opened subscription event, got {other:?}"),
                 }
@@ -1443,16 +1444,16 @@ fn r12_recursive_permissions(c: &mut Criterion) {
         let read_opts = ReadOpts::default();
 
         b.iter(|| {
-            let rows = block_on(db.all_for_identity(&query, read_opts, READER_AUTHOR))
+            let rows = block_on(db.all_for_identity(&query, read_opts.clone(), READER_AUTHOR))
                 .expect("read recursive docs for reader");
             assert_recursive_docs_visible(&rows);
 
             let mut subscription =
-                block_on(db.subscribe_for_identity(&query, read_opts, READER_AUTHOR))
+                block_on(db.subscribe_for_identity(&query, read_opts.clone(), READER_AUTHOR))
                     .expect("subscribe recursive docs for reader");
             match block_on(subscription.next_event()) {
                 Some(SubscriptionEvent::Opened { current, .. }) => {
-                    assert_recursive_docs_visible(&current);
+                    assert_recursive_docs_visible(&current.rows);
                 }
                 other => panic!("expected recursive docs opened event, got {other:?}"),
             }
