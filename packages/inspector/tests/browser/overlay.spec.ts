@@ -76,9 +76,11 @@ test.describe("inspector overlay (embedded, own worker connection end-to-end)", 
       () =>
         (
           window as unknown as {
-            __jazzInspectorHost?: { getConnectionConfig(): { brokerWorkerUrl?: string } };
+            __jazzInspectorHost?: {
+              getConnectionConfig(): { runtimeSources?: { brokerWorkerUrl?: string } };
+            };
           }
-        ).__jazzInspectorHost?.getConnectionConfig().brokerWorkerUrl,
+        ).__jazzInspectorHost?.getConnectionConfig().runtimeSources?.brokerWorkerUrl,
     );
     expect(brokerWorkerUrl).toBeTruthy();
 

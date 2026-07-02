@@ -233,12 +233,23 @@ let hostDb: Db | undefined;
 // of leaving the overlay bound to a shut-down one forever.
 let hostIframeWindow: Window | undefined;
 let disposeHost: (() => void) | undefined;
+// The pair the installed handle was built from, so bindHost() is idempotent:
+// providers call startInspectorOnce(db) on every effect run (StrictMode remounts
+// included), and repeat calls with an unchanged db must not tear down and
+// reinstall the handle they just installed.
+let boundDb: Db | undefined;
+let boundIframeWindow: Window | undefined;
 
 function bindHost(): void {
+  if (disposeHost && boundDb === hostDb && boundIframeWindow === hostIframeWindow) return;
   disposeHost?.();
   disposeHost = undefined;
+  boundDb = undefined;
+  boundIframeWindow = undefined;
   if (!hostDb || !hostIframeWindow) return;
   disposeHost = installInspectorHost(hostDb, hostIframeWindow, window.location.origin);
+  boundDb = hostDb;
+  boundIframeWindow = hostIframeWindow;
 }
 
 // The overlay chrome: a floating toggle + a bottom dock hosting the inspector
@@ -453,21 +464,14 @@ function mount(): void {
  * (floating toggle + bottom dock + iframe). The first call's mount() triggers
  * connectedCallback, which publishes the host handle (window.__jazzInspectorHost)
  * and pushes the active subscription list to the iframe; the overlay opens its
- * own worker connection from the published config. Safe to call again with a
- * new db (e.g. the host recreated its client on login/logout) — bindHost()
- * rebinds the already-mounted iframe to it. No-op at module load — providers
- * call this from a dev-only dynamic import, so it's absent from prod builds.
+ * own worker connection from the published config. Safe to call again — with an
+ * unchanged db bindHost() is a no-op, and with a new db (e.g. the host recreated
+ * its client on login/logout) it rebinds the already-mounted iframe. No-op at
+ * module load — providers call this from a dev-only dynamic import, so it's
+ * absent from prod builds.
  */
-export function startInspectorOverlay(db: object): void {
-  hostDb = db as Db;
-  // If the element isn't mounted yet, mount() appends it, which synchronously
-  // fires connectedCallback() — and that already calls bindHost(), so a second
-  // call here would immediately dispose and reinstall the handle it just
-  // installed. Only rebind ourselves when the element was already mounted
-  // (connectedCallback won't rerun), e.g. a db swap on login/logout.
-  const alreadyMounted = document.querySelector(ELEMENT_NAME) !== null;
+export function startInspectorOverlay(db: Db): void {
+  hostDb = db;
   mount();
-  if (alreadyMounted) {
-    bindHost();
-  }
+  bindHost();
 }

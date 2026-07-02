@@ -6,6 +6,7 @@ import { LiveQuery } from "./index";
 const mockFetchServerSubscriptions = vi.fn();
 const mockUseDevtoolsContext = vi.fn();
 const mockUseStandaloneContext = vi.fn();
+const mockUseHostSubscriptions = vi.fn();
 
 vi.mock("jazz-tools", () => ({
   fetchServerSubscriptions: (...args: unknown[]) => mockFetchServerSubscriptions(...args),
@@ -19,15 +20,18 @@ vi.mock("../../contexts/standalone-context.js", () => ({
   useStandaloneContext: () => mockUseStandaloneContext(),
 }));
 
-// Overlay subscriptions arrive (stack-less) via the host push, surfaced on the
-// devtools context as `hostSubscriptions`.
-function overlayContext(hostSubscriptions: unknown[], extraTables: string[] = []) {
+// Overlay subscriptions arrive (stack-less) via the host push, read by the
+// overlay page through the useHostSubscriptions hook.
+vi.mock("../../contexts/host-link.js", () => ({
+  useHostSubscriptions: () => mockUseHostSubscriptions(),
+}));
+
+function overlayContext(extraTables: string[] = []) {
   return {
     runtime: "overlay",
     wasmSchema: Object.fromEntries(
       ["projects", "todos", ...extraTables].map((t) => [t, { columns: [] }]),
     ),
-    hostSubscriptions,
   };
 }
 
@@ -40,7 +44,9 @@ describe("LiveQuery", () => {
     mockFetchServerSubscriptions.mockReset();
     mockUseDevtoolsContext.mockReset();
     mockUseStandaloneContext.mockReset();
-    mockUseDevtoolsContext.mockReturnValue(overlayContext([]));
+    mockUseHostSubscriptions.mockReset();
+    mockUseHostSubscriptions.mockReturnValue([]);
+    mockUseDevtoolsContext.mockReturnValue(overlayContext());
     mockUseStandaloneContext.mockReturnValue({
       connection: {
         serverUrl: "http://localhost:1625",
@@ -66,19 +72,17 @@ describe("LiveQuery", () => {
   });
 
   it("renders subscriptions pushed from the host (no stack column)", async () => {
-    mockUseDevtoolsContext.mockReturnValue(
-      overlayContext([
-        {
-          id: "sub-1",
-          table: "todos",
-          tier: "edge",
-          propagation: "full",
-          branches: ["main"],
-          createdAt: "2026-03-10T10:00:00.000Z",
-          query: '{"table":"todos"}',
-        },
-      ]),
-    );
+    mockUseHostSubscriptions.mockReturnValue([
+      {
+        id: "sub-1",
+        table: "todos",
+        tier: "edge",
+        propagation: "full",
+        branches: ["main"],
+        createdAt: "2026-03-10T10:00:00.000Z",
+        query: '{"table":"todos"}',
+      },
+    ]);
 
     render(
       <MemoryRouter>
@@ -94,28 +98,26 @@ describe("LiveQuery", () => {
   });
 
   it("filters overlay rows by table and tier", () => {
-    mockUseDevtoolsContext.mockReturnValue(
-      overlayContext([
-        {
-          id: "sub-1",
-          table: "todos",
-          tier: "local",
-          propagation: "full",
-          branches: ["main"],
-          createdAt: "2026-03-10T10:00:00.000Z",
-          query: '{"table":"todos"}',
-        },
-        {
-          id: "sub-2",
-          table: "projects",
-          tier: "edge",
-          propagation: "local-only",
-          branches: ["main"],
-          createdAt: "2026-03-10T11:00:00.000Z",
-          query: '{"table":"projects"}',
-        },
-      ]),
-    );
+    mockUseHostSubscriptions.mockReturnValue([
+      {
+        id: "sub-1",
+        table: "todos",
+        tier: "local",
+        propagation: "full",
+        branches: ["main"],
+        createdAt: "2026-03-10T10:00:00.000Z",
+        query: '{"table":"todos"}',
+      },
+      {
+        id: "sub-2",
+        table: "projects",
+        tier: "edge",
+        propagation: "local-only",
+        branches: ["main"],
+        createdAt: "2026-03-10T11:00:00.000Z",
+        query: '{"table":"projects"}',
+      },
+    ]);
 
     render(
       <MemoryRouter>
@@ -132,40 +134,36 @@ describe("LiveQuery", () => {
   });
 
   it("sorts overlay rows by started date and tier, and toggles started order", () => {
-    mockUseDevtoolsContext.mockReturnValue(
-      overlayContext(
-        [
-          {
-            id: "sub-1",
-            table: "todos",
-            tier: "global",
-            propagation: "full",
-            branches: ["main"],
-            createdAt: "2026-03-10T10:00:00.000Z",
-            query: '{"table":"todos"}',
-          },
-          {
-            id: "sub-2",
-            table: "projects",
-            tier: "edge",
-            propagation: "local-only",
-            branches: ["main"],
-            createdAt: "2026-03-10T11:00:00.000Z",
-            query: '{"table":"projects"}',
-          },
-          {
-            id: "sub-3",
-            table: "users",
-            tier: "local",
-            propagation: "full",
-            branches: ["main"],
-            createdAt: "2026-03-10T11:00:00.000Z",
-            query: '{"table":"users"}',
-          },
-        ],
-        ["users"],
-      ),
-    );
+    mockUseDevtoolsContext.mockReturnValue(overlayContext(["users"]));
+    mockUseHostSubscriptions.mockReturnValue([
+      {
+        id: "sub-1",
+        table: "todos",
+        tier: "global",
+        propagation: "full",
+        branches: ["main"],
+        createdAt: "2026-03-10T10:00:00.000Z",
+        query: '{"table":"todos"}',
+      },
+      {
+        id: "sub-2",
+        table: "projects",
+        tier: "edge",
+        propagation: "local-only",
+        branches: ["main"],
+        createdAt: "2026-03-10T11:00:00.000Z",
+        query: '{"table":"projects"}',
+      },
+      {
+        id: "sub-3",
+        table: "users",
+        tier: "local",
+        propagation: "full",
+        branches: ["main"],
+        createdAt: "2026-03-10T11:00:00.000Z",
+        query: '{"table":"users"}',
+      },
+    ]);
 
     render(
       <MemoryRouter>

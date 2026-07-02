@@ -20,6 +20,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
+import { useHostSubscriptions } from "../../contexts/host-link.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import { LiveQueryFilters } from "./LiveQueryFilters.js";
 import styles from "./index.module.css";
@@ -358,7 +359,10 @@ function ExtensionLiveQuery() {
 }
 
 function OverlayLiveQuery() {
-  const { hostSubscriptions: subscriptions, wasmSchema } = useDevtoolsContext();
+  const { wasmSchema } = useDevtoolsContext();
+  // The host pushes on every active-query change; subscribing here (the only
+  // consumer) keeps those pushes from re-rendering the rest of the inspector.
+  const subscriptions = useHostSubscriptions();
   const [selectedTable, setSelectedTable] = useState("");
   const [selectedTier, setSelectedTier] = useState("");
   const [sorting, setSorting] = useState<SortingState>([

@@ -1,10 +1,5 @@
-import type {
-  InspectorSubscription,
-  QueryPropagation,
-  StoredPermissionsResponse,
-  WasmSchema,
-} from "jazz-tools";
-import { createContext, useContext, type PropsWithChildren } from "react";
+import type { QueryPropagation, StoredPermissionsResponse, WasmSchema } from "jazz-tools";
+import { createContext, useContext, useMemo, type PropsWithChildren } from "react";
 
 export type InspectorRuntime = "standalone" | "extension" | "overlay";
 
@@ -17,11 +12,6 @@ interface DevtoolsContextValue {
    * Gates overlay-specific UI (Close button, launcher-hide setting).
    */
   isOverlay: boolean;
-  /**
-   * The host app's active subscriptions (overlay only), pushed from the host
-   * window. Empty for the standalone build, which polls server introspection.
-   */
-  hostSubscriptions: InspectorSubscription[];
   /** Both runtimes are server-backed, so propagation is always "full". */
   queryPropagation: QueryPropagation;
   setQueryPropagation: (value: QueryPropagation) => void;
@@ -35,29 +25,24 @@ export function DevtoolsProvider({
   storedPermissions = null,
   runtime,
   isOverlay = false,
-  hostSubscriptions = [],
 }: PropsWithChildren<{
   wasmSchema: WasmSchema;
   storedPermissions?: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
   isOverlay?: boolean;
-  hostSubscriptions?: InspectorSubscription[];
 }>) {
-  return (
-    <DevtoolsContext.Provider
-      value={{
-        wasmSchema,
-        storedPermissions,
-        runtime,
-        isOverlay,
-        hostSubscriptions,
-        queryPropagation: "full",
-        setQueryPropagation: () => {},
-      }}
-    >
-      {children}
-    </DevtoolsContext.Provider>
+  const value = useMemo(
+    () => ({
+      wasmSchema,
+      storedPermissions,
+      runtime,
+      isOverlay,
+      queryPropagation: "full" as const,
+      setQueryPropagation: () => {},
+    }),
+    [wasmSchema, storedPermissions, runtime, isOverlay],
   );
+  return <DevtoolsContext.Provider value={value}>{children}</DevtoolsContext.Provider>;
 }
 
 export function useDevtoolsContext(): DevtoolsContextValue {
