@@ -9,7 +9,8 @@
 use super::*;
 use crate::protocol::{CatalogueAck, ContentExtent, LensOp, VersionBundle};
 use crate::protocol_limits::{
-    commit_unit_limit_violation, validate_content_extents, validate_shape_ast_size,
+    commit_unit_limit_violation, validate_content_extents, validate_known_state_declaration,
+    validate_shape_ast_size,
 };
 use crate::schema::ColumnSchema;
 use crate::time::TxTimeSortKey;
@@ -187,6 +188,9 @@ where
                 "row-version repair payload requires outstanding request context",
             )),
             SyncMessage::Subscribe(subscribe) => {
+                validate_known_state_declaration(&subscribe.known_state).map_err(|_| {
+                    Error::UnsupportedSyncMessage("known-state declaration exceeds limit")
+                })?;
                 self.apply_subscribe(subscribe)?;
                 Ok(Vec::new())
             }

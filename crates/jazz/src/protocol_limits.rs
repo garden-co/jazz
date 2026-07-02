@@ -4,7 +4,9 @@
 //! semantic requests recoverable. Server shells may eventually surface these as
 //! configuration, but the core owns the default contract.
 
-use crate::protocol::{ContentExtent, RowVersionRef, ShapeAst, SyncMessage, VersionRecord};
+use crate::protocol::{
+    ContentExtent, KnownStateDeclaration, RowVersionRef, ShapeAst, SyncMessage, VersionRecord,
+};
 
 /// Maximum encoded `WireFrame` bytes accepted before postcard decode.
 ///
@@ -45,6 +47,13 @@ pub const MAX_COMMIT_UNIT_BYTES: usize = MAX_SYNC_MESSAGE_BYTES;
 /// Source: matches the first known-state repair tier; large reconnect holes
 /// should batch exact requests instead of creating unbounded semantic vectors.
 pub const MAX_FETCH_ROW_VERSIONS: usize = 1024;
+
+/// Maximum exact row-version refs in one slow known-state declaration.
+///
+/// Source: same count tier as `FetchRowVersions`; larger local holdings should
+/// degrade to no declaration and full ship. Truncation is forbidden because it
+/// would silently overclaim.
+pub const MAX_KNOWN_STATE_EXACT_REFS: usize = MAX_FETCH_ROW_VERSIONS;
 
 /// Maximum bytes in one `ContentExtent` response payload.
 ///
@@ -89,6 +98,23 @@ pub fn validate_fetch_row_versions(requests: &[RowVersionRef]) -> Result<(), Str
             "row-version repair request count {} exceeds max {}",
             requests.len(),
             MAX_FETCH_ROW_VERSIONS
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an optional known-state declaration after sync-message decode.
+pub fn validate_known_state_declaration(
+    declaration: &Option<KnownStateDeclaration>,
+) -> Result<(), String> {
+    let Some(KnownStateDeclaration::ExactVersionSet { versions }) = declaration else {
+        return Ok(());
+    };
+    if versions.len() > MAX_KNOWN_STATE_EXACT_REFS {
+        return Err(format!(
+            "known-state exact declaration count {} exceeds max {}",
+            versions.len(),
+            MAX_KNOWN_STATE_EXACT_REFS
         ));
     }
     Ok(())

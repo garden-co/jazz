@@ -33,7 +33,9 @@ use crate::protocol::{
     SyncMessage, VersionBundle, VersionRecord, ViewFactEntry,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
-use crate::schema::{JazzSchema, MergeStrategy, TableSchema, registered_column_transform};
+use crate::schema::{
+    JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy, TableSchema, registered_column_transform,
+};
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::{
     AbsentRead, DeletionEvent, DurabilityTier, Fate, HistoryEntry, PredicateRead,
@@ -505,6 +507,7 @@ where
             session_claims: BTreeMap::new(),
         };
         node.recover_from_storage()?;
+        node.recover_known_state_facts()?;
         node.rebuild_ahead_current_keys()?;
         let self_node_alias = node.ensure_node_alias(node_uuid)?;
         node.self_node_alias = Some(self_node_alias);
@@ -613,6 +616,7 @@ where
         self.parking.parked_shape_registrations.clear();
         self.parking.parked_binding_deltas.clear();
         self.recover_from_storage()?;
+        self.recover_known_state_facts()?;
         let self_node_alias = self.ensure_node_alias(self.node_uuid)?;
         self.self_node_alias = Some(self_node_alias);
         let schema_alias =
@@ -1833,6 +1837,96 @@ where
         Some(TxId::new(time, self.resolve_node_alias(alias).ok()??))
     }
 
+    pub(crate) fn persist_known_state_fact(
+        &self,
+        binding_view_key: BindingViewKey,
+        settled_through: GlobalSeq,
+    ) -> Result<(), Error> {
+        self.database
+            .direct_record_store(KNOWN_STATE_FACTS_STORE)?
+            .set(
+                &known_state_fact_key(binding_view_key),
+                &[Value::U64(settled_through.0)],
+            )?;
+        Ok(())
+    }
+
+    pub(crate) fn clear_known_state_fact(
+        &mut self,
+        binding_view_key: BindingViewKey,
+    ) -> Result<(), Error> {
+        self.database
+            .direct_record_store(KNOWN_STATE_FACTS_STORE)?
+            .delete(&known_state_fact_key(binding_view_key))?;
+        self.query
+            .settled_through_by_binding_view
+            .remove(&binding_view_key);
+        Ok(())
+    }
+
+    pub(crate) fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {
+        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
+        let keys = store
+            .prefix_entries(&[])?
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect::<Vec<_>>();
+        for key in keys {
+            store.delete(&key)?;
+        }
+        self.query.settled_through_by_binding_view.clear();
+        Ok(())
+    }
+
+    fn recover_known_state_facts(&mut self) -> Result<(), Error> {
+        self.query.settled_through_by_binding_view.clear();
+        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
+        for entry in store.prefix_entries(&[])? {
+            if entry.key.len() != 3 {
+                return Err(Error::InvalidStoredValue(
+                    "known-state fact key must have three columns",
+                ));
+            }
+            let shape_id = match &entry.key[0] {
+                Value::Uuid(uuid) => ShapeId(*uuid),
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "known-state shape id must be uuid",
+                    ));
+                }
+            };
+            let binding_id = match &entry.key[1] {
+                Value::Uuid(uuid) => BindingId(*uuid),
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "known-state binding id must be uuid",
+                    ));
+                }
+            };
+            let read_view = match &entry.key[2] {
+                Value::Uuid(uuid) => ReadViewKey { id: *uuid },
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "known-state read view must be uuid",
+                    ));
+                }
+            };
+            let settled_through = match entry.value.get_idx(0)? {
+                Value::U64(value) => GlobalSeq(value),
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "known-state settled-through must be u64",
+                    ));
+                }
+            };
+            self.query.settled_through_by_binding_view.insert(
+                BindingViewKey::new(shape_id, binding_id, read_view),
+                settled_through,
+            );
+        }
+        Ok(())
+    }
+
     /// Return locally-originated rejected transactions retained for retry.
     pub fn rejected_transactions(&self) -> Vec<TxId> {
         self.rejections
@@ -2493,16 +2587,34 @@ where
         message: &SyncMessage,
     ) -> Result<Vec<RowVersionRef>, Error> {
         let SyncMessage::ViewUpdate {
-            result_member_adds, ..
+            result_member_adds,
+            version_bundles,
+            ..
         } = message
         else {
             return Ok(Vec::new());
         };
+        let incoming = version_bundles
+            .iter()
+            .flat_map(|bundle| {
+                bundle.versions.iter().map(|version| {
+                    RowVersionRef::new(
+                        version.table().to_owned(),
+                        version.row_uuid(),
+                        bundle.tx.tx_id,
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
         let mut missing = BTreeSet::new();
         for (table, row_uuid, tx_id) in result_member_adds
             .iter()
             .filter_map(ResultMemberEntry::as_row)
         {
+            let version_ref = RowVersionRef::new(table.to_string(), row_uuid, tx_id);
+            if incoming.contains(&version_ref) {
+                continue;
+            }
             let has_body = self
                 .query_versions_for_tx(tx_id)?
                 .into_iter()
@@ -2513,7 +2625,7 @@ where
                         && self.node_for_alias(version.tx_node_alias()) == Some(tx_id.node)
                 });
             if !has_body {
-                missing.insert(RowVersionRef::new(table.to_string(), row_uuid, tx_id));
+                missing.insert(version_ref);
             }
         }
         Ok(missing.into_iter().collect())
@@ -3364,6 +3476,14 @@ fn select_all(table: &str) -> Query {
     Query::Select(Box::new(
         Select::new([SelectItem::Wildcard]).from([TableRef::named(table)]),
     ))
+}
+
+fn known_state_fact_key(binding_view_key: BindingViewKey) -> [Value; 3] {
+    [
+        Value::Uuid(binding_view_key.shape_id.0),
+        Value::Uuid(binding_view_key.binding_id.0),
+        Value::Uuid(binding_view_key.read_view.id),
+    ]
 }
 
 /// Error type returned by the storage-backed node API.

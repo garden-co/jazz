@@ -32,8 +32,8 @@ use crate::protocol::{
     SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
 use crate::protocol_limits::{
-    validate_content_extents, validate_fetch_row_versions, validate_shape_ast_size,
-    validate_sync_message_len, validate_wire_frame_len,
+    validate_content_extents, validate_fetch_row_versions, validate_known_state_declaration,
+    validate_shape_ast_size, validate_sync_message_len, validate_wire_frame_len,
 };
 use crate::query::{Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, TableSchema};
@@ -129,6 +129,7 @@ struct PendingUpstreamSubscription {
     shape: ValidatedQuery,
     binding: Binding,
     opts: RegisterShapeOptions,
+    identity: AuthorId,
 }
 
 struct CoverageGroup {
@@ -704,6 +705,7 @@ where
                 &prepared.shape,
                 &prepared.binding,
                 upstream_opts,
+                self.identity.author,
             )?],
         })
     }
@@ -730,6 +732,7 @@ where
                 &shape,
                 &binding,
                 upstream_opts,
+                author,
             )?],
         })
     }
@@ -739,6 +742,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
+        identity: AuthorId,
     ) -> Result<SubscriptionKey, Error> {
         let subscription = self.node.next_subscription_key(shape, opts.read_view_key());
         self.node
@@ -750,6 +754,7 @@ where
                     shape: shape.clone(),
                     binding: binding.clone(),
                     opts: opts.clone(),
+                    identity,
                 },
             ));
         self.node
@@ -833,7 +838,7 @@ where
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
             let upstream_subscriptions =
-                self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts)?;
+                self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts, author)?;
             cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
@@ -894,10 +899,11 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
+        identity: AuthorId,
     ) -> Result<Vec<SubscriptionKey>, Error> {
         ensure_supported_subscription_shape(shape)?;
         Ok(vec![self.attach_query_shape_binding_with_opts(
-            shape, binding, opts,
+            shape, binding, opts, identity,
         )?])
     }
 
@@ -2527,6 +2533,7 @@ where
                         shape: shape.clone(),
                         binding: binding.clone(),
                         opts,
+                        identity: state.author,
                     },
                 ));
             }
@@ -3213,15 +3220,16 @@ where
                                 }
                             }
                             let values = binding_values_in_param_order(shape, binding);
-                            let binding_view_key = BindingViewKey {
-                                shape_id: shape.shape_id(),
-                                binding_id: binding.binding_id(),
-                                read_view: pending_subscription.opts.read_view_key(),
-                            };
                             let known_state = self
                                 .node
-                                .borrow()
-                                .known_state_declaration_for_binding_view(binding_view_key);
+                                .borrow_mut()
+                                .known_state_declaration_for_subscription(
+                                    shape,
+                                    binding,
+                                    pending_subscription.subscription,
+                                    &values,
+                                    pending_subscription.identity,
+                                )?;
                             let subscribe = Subscribe {
                                 shape_id: shape.shape_id(),
                                 subscription: pending_subscription.subscription,
@@ -3390,6 +3398,11 @@ where
                             )?;
                         }
                         SyncMessage::Subscribe(subscribe) => {
+                            if let Err(message) =
+                                validate_known_state_declaration(&subscribe.known_state)
+                            {
+                                return Err(Error::new(ErrorCode::Protocol, message));
+                            }
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
                             let values = subscribe.values.clone();
@@ -3489,6 +3502,7 @@ where
                                             shape: shape.clone(),
                                             binding,
                                             opts,
+                                            identity: peer.link_identity(),
                                         },
                                     ),
                                 );
