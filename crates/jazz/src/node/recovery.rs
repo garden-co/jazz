@@ -93,6 +93,7 @@ where
             ));
         }
         for table in self.catalogue.schema.tables.clone() {
+            self.validate_current_row_storage_layout(&table)?;
             if let Some(raw) =
                 self.database
                     .index_last_raw(&history_table_name(&table.name), "by_tx", &[])?
@@ -204,6 +205,51 @@ where
             self.rejections
                 .rejected_transactions
                 .insert(tx_id, RejectedTransaction::new(tx_id, record, versions));
+        }
+        Ok(())
+    }
+
+    fn validate_current_row_storage_layout(&self, table: &TableSchema) -> Result<(), Error> {
+        let storage_tables = table.global_current_storage_tables();
+        self.validate_content_current_rows(&storage_tables[0])?;
+        self.validate_register_current_rows(&storage_tables[1])?;
+
+        let storage_tables = table.ahead_current_storage_tables();
+        self.validate_content_current_rows(&storage_tables[0])?;
+        self.validate_register_current_rows(&storage_tables[1])?;
+        Ok(())
+    }
+
+    fn validate_content_current_rows(
+        &self,
+        storage_table: &groove::schema::TableSchema,
+    ) -> Result<(), Error> {
+        let descriptor = storage_table.record_schema();
+        for raw in self
+            .database
+            .primary_key_scan_raw(&storage_table.name, &[])?
+        {
+            let record = BorrowedRecord::new(raw.raw(), &descriptor);
+            record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
+            record.get_idx(GlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
+            record.get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
+        }
+        Ok(())
+    }
+
+    fn validate_register_current_rows(
+        &self,
+        storage_table: &groove::schema::TableSchema,
+    ) -> Result<(), Error> {
+        let descriptor = storage_table.record_schema();
+        for raw in self
+            .database
+            .primary_key_scan_raw(&storage_table.name, &[])?
+        {
+            let record = BorrowedRecord::new(raw.raw(), &descriptor);
+            record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
+            record.get_idx(RegisterGlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
+            record.get_nullable_u64(RegisterGlobalCurrentRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
         }
         Ok(())
     }

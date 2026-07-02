@@ -2648,7 +2648,8 @@ where
                     global_current_primary_key(version.row_uuid()),
                     owned_record_from_storage_values(
                         &table.global_current_storage_tables()[0],
-                        global_current_values(table, version).expect("valid global current values"),
+                        global_current_values(table, version, Some(global_seq))
+                            .expect("valid global current values"),
                     )
                     .expect("valid global current row")
                     .raw()
@@ -2663,7 +2664,7 @@ where
                         .table(version.table())
                         .expect("known table")
                         .global_current_storage_tables()[1],
-                    register_global_current_values(version),
+                    register_global_current_values(version, Some(global_seq)),
                 )
                 .expect("valid register global current row")
                 .raw()
@@ -2689,7 +2690,8 @@ where
                     history_primary_key(version),
                     owned_record_from_storage_values(
                         &table.ahead_current_storage_tables()[0],
-                        global_current_values(table, version).expect("valid ahead current values"),
+                        global_current_values(table, version, None)
+                            .expect("valid ahead current values"),
                     )
                     .expect("valid ahead current row")
                     .raw()
@@ -2704,7 +2706,7 @@ where
                         .table(version.table())
                         .expect("known table")
                         .ahead_current_storage_tables()[1],
-                    register_global_current_values(version),
+                    register_global_current_values(version, None),
                 )
                 .expect("valid register ahead current row")
                 .raw()

@@ -710,10 +710,13 @@ impl TableSchema {
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
+            column("schema_version", GrooveColumnType::U64),
+            column("parents", tx_id_column().array_of()),
             column("created_by", GrooveColumnType::Uuid),
             column("created_at", GrooveColumnType::U64),
             column("updated_by", GrooveColumnType::Uuid),
             column("updated_at", GrooveColumnType::U64),
+            column("global_seq", GrooveColumnType::U64.nullable()),
         ];
         // Carry every user column (not only indexed ones) so the global-current
         // table is a self-sufficient current-row index: whole-table current
@@ -745,10 +748,13 @@ impl TableSchema {
                     column("row_uuid", GrooveColumnType::Uuid),
                     column("tx_time", GrooveColumnType::U64),
                     column("tx_node_id", GrooveColumnType::U64),
+                    column("schema_version", GrooveColumnType::U64),
+                    column("parents", tx_id_column().array_of()),
                     column("created_by", GrooveColumnType::Uuid),
                     column("created_at", GrooveColumnType::U64),
                     column("updated_by", GrooveColumnType::Uuid),
                     column("updated_at", GrooveColumnType::U64),
+                    column("global_seq", GrooveColumnType::U64.nullable()),
                     column("_deletion", deletion_column()),
                 ],
             )
@@ -762,10 +768,13 @@ impl TableSchema {
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
+            column("schema_version", GrooveColumnType::U64),
+            column("parents", tx_id_column().array_of()),
             column("created_by", GrooveColumnType::Uuid),
             column("created_at", GrooveColumnType::U64),
             column("updated_by", GrooveColumnType::Uuid),
             column("updated_at", GrooveColumnType::U64),
+            column("global_seq", GrooveColumnType::U64.nullable()),
         ];
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
@@ -790,10 +799,13 @@ impl TableSchema {
                     column("row_uuid", GrooveColumnType::Uuid),
                     column("tx_time", GrooveColumnType::U64),
                     column("tx_node_id", GrooveColumnType::U64),
+                    column("schema_version", GrooveColumnType::U64),
+                    column("parents", tx_id_column().array_of()),
                     column("created_by", GrooveColumnType::Uuid),
                     column("created_at", GrooveColumnType::U64),
                     column("updated_by", GrooveColumnType::Uuid),
                     column("updated_at", GrooveColumnType::U64),
+                    column("global_seq", GrooveColumnType::U64.nullable()),
                     column("_deletion", deletion_column()),
                 ],
             )

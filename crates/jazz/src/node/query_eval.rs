@@ -967,25 +967,13 @@ fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> 
 }
 
 fn content_version_current_source_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {
-    let current_keys = content_version_current_keys_graph(&table.name, tier);
-    GraphBuilder::join(
-        GraphBuilder::table(history_table_name(&table.name))
-            .project(maintained_view_history_storage_field_names(table)),
-        current_keys,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .project_fields(history_storage_fields_for_query_engine(table, "left."))
-}
-
-fn content_version_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
-    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
+    let fields = maintained_view_history_storage_field_names(table);
     if tier == DurabilityTier::Global {
-        return GraphBuilder::table(global_current_table_name(table)).project(key_fields);
+        return GraphBuilder::table(global_current_table_name(&table.name)).project(fields);
     }
     let ahead = if tier == DurabilityTier::Edge {
         GraphBuilder::join(
-            GraphBuilder::table(ahead_current_table_name(table)).project(key_fields),
+            GraphBuilder::table(ahead_current_table_name(&table.name)).project(fields.clone()),
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::Or(vec![
@@ -999,22 +987,23 @@ fn content_version_current_keys_graph(table: &str, tier: DurabilityTier) -> Grap
             ["time", "node_id"],
         )
         .project_fields(
-            key_fields
-                .into_iter()
+            fields
+                .iter()
+                .cloned()
                 .map(|field| ProjectField::renamed(left_field(&field), field)),
         )
     } else {
-        GraphBuilder::table(ahead_current_table_name(table)).project(key_fields)
+        GraphBuilder::table(ahead_current_table_name(&table.name)).project(fields.clone())
     };
     GraphBuilder::arg_max_by(
         GraphBuilder::union([
-            GraphBuilder::table(global_current_table_name(table)).project(key_fields),
+            GraphBuilder::table(global_current_table_name(&table.name)).project(fields.clone()),
             ahead,
         ]),
         ["row_uuid"],
         ["tx_time", "tx_node_id"],
     )
-    .project(key_fields)
+    .project(fields)
 }
 
 fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
@@ -1054,13 +1043,6 @@ fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> Gr
         ["tx_time", "tx_node_id"],
     )
     .project(key_fields)
-}
-
-fn history_storage_fields_for_query_engine(table: &TableSchema, prefix: &str) -> Vec<ProjectField> {
-    maintained_view_history_storage_field_names(table)
-        .into_iter()
-        .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
-        .collect()
 }
 
 fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<ProjectField> {
@@ -1198,10 +1180,7 @@ where
                 binding_source_shape.clone(),
                 binding_user_params.clone(),
             )?;
-            let mut output_fields = global_current_storage_fields(table);
-            if needs_version_witnesses {
-                output_fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
-            }
+            let output_fields = global_current_storage_fields(table, needs_version_witnesses);
             let base = node.maintained_view_content_current_with_version(table, tier)?;
             let storage_graph = node.policy_filtered_current_source_graph_via_query_engine(
                 policy_request,
@@ -5573,7 +5552,7 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
-        let history = GraphBuilder::table(history_table_name(&table.name)).project([
+        let payload = content_version_current_source_graph(table, tier).project([
             "row_uuid",
             "tx_time",
             "tx_node_id",
@@ -5582,7 +5561,7 @@ where
         ]);
         Ok(GraphBuilder::join(
             visible_current_graph(table, tier),
-            history,
+            payload,
             ["row_uuid", "tx_time", "tx_node_id"],
             ["row_uuid", "tx_time", "tx_node_id"],
         )
@@ -6598,8 +6577,11 @@ fn current_row_fields(table: &TableSchema) -> Vec<String> {
     fields
 }
 
-fn global_current_storage_fields(table: &TableSchema) -> Vec<String> {
+fn global_current_storage_fields(table: &TableSchema, include_version: bool) -> Vec<String> {
     let mut fields = vec!["row_uuid".to_owned()];
+    if include_version {
+        fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
+    }
     fields.extend(
         table
             .columns
@@ -6989,7 +6971,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
                     .project(content_storage_fields.clone()),
             )
         };
-        let ahead_deletion_fields = vec![
+        let deletion_fields = vec![
             "row_uuid".to_owned(),
             "tx_time".to_owned(),
             "tx_node_id".to_owned(),
@@ -7002,10 +6984,11 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         let ahead_deletion = if tier == DurabilityTier::Edge {
             edge_visible_ahead(
                 register_ahead_current_table_name(&table.name),
-                ahead_deletion_fields,
+                deletion_fields.clone(),
             )
         } else {
             GraphBuilder::table(register_ahead_current_table_name(&table.name))
+                .project(deletion_fields.clone())
         };
         (
             GraphBuilder::arg_max_by(
@@ -7022,7 +7005,8 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
             .project(current_row_fields(table)),
             GraphBuilder::arg_max_by(
                 GraphBuilder::union([
-                    GraphBuilder::table(register_global_current_table_name(&table.name)),
+                    GraphBuilder::table(register_global_current_table_name(&table.name))
+                        .project(deletion_fields),
                     ahead_deletion,
                 ]),
                 ["row_uuid"],
@@ -7264,6 +7248,84 @@ mod tests {
         )
         .expect("accept row");
         tx_id
+    }
+
+    #[test]
+    fn denormalized_current_content_witness_matches_history_payload_bytes() {
+        let (_dir, mut node) = open_node();
+        let first = commit_global_cells(
+            &mut node,
+            "issues",
+            row(11),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("first".to_owned())),
+                ("state".to_owned(), Value::String("open".to_owned())),
+                ("assignee".to_owned(), Value::Uuid(author(1).0)),
+                ("priority".to_owned(), Value::U64(1)),
+            ]),
+            1_000,
+            1,
+        );
+        let second = node
+            .commit_mergeable(
+                MergeableCommit::new("issues", row(11), 1_100)
+                    .made_by(AuthorId::SYSTEM)
+                    .parents(vec![first])
+                    .cells(BTreeMap::from([
+                        ("title".to_owned(), Value::String("second".to_owned())),
+                        ("state".to_owned(), Value::String("closed".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(2).0)),
+                        ("priority".to_owned(), Value::U64(2)),
+                    ])),
+            )
+            .expect("commit second version");
+        node.apply_fate_update(
+            second,
+            Fate::Accepted,
+            Some(GlobalSeq(2)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("accept second version");
+
+        let table = node.table("issues").expect("issues table").clone();
+        let current_deltas = node
+            .database
+            .query_graph(content_version_current_source_graph(
+                &table,
+                DurabilityTier::Global,
+            ))
+            .expect("query denormalized current payload");
+        let current_rows = current_deltas
+            .iter()
+            .filter(|(_, weight)| *weight > 0)
+            .map(|(record, _)| record.raw().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(current_rows.len(), 1);
+
+        let history_deltas = node
+            .database
+            .query_graph(
+                GraphBuilder::table(history_table_name("issues"))
+                    .project(maintained_view_history_storage_field_names(&table))
+                    .filter(
+                        PredicateExpr::And(vec![
+                            PredicateExpr::eq("row_uuid", Value::Uuid(row(11).0)),
+                            PredicateExpr::eq("tx_time", Value::U64(second.time.0)),
+                        ])
+                        .canonicalize(),
+                    ),
+            )
+            .expect("query canonical history payload");
+        let history_rows = history_deltas
+            .iter()
+            .filter(|(_, weight)| *weight > 0)
+            .map(|(record, _)| record.raw().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(history_rows.len(), 1);
+        assert_eq!(
+            current_rows[0], history_rows[0],
+            "denormalized current witness payload must byte-match canonical history payload"
+        );
     }
 
     fn delete_global(
