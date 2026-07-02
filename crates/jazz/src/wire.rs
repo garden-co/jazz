@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::AuthorId;
 use crate::protocol::SyncMessage;
+use crate::protocol_limits::{validate_sync_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
 pub const WIRE_PROTOCOL_VERSION: u16 = 1;
@@ -189,6 +190,9 @@ pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, postcard::Error> {
 
 /// Decode a wire frame serialized by [`encode_frame`].
 pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+    if validate_wire_frame_len(bytes.len()).is_err() {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
     from_bytes(bytes)
 }
 
@@ -199,6 +203,9 @@ pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::E
 
 /// Decode a semantic sync message serialized by [`encode_sync_message`].
 pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    if validate_sync_message_len(bytes.len()).is_err() {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
     from_bytes(bytes)
 }
 
@@ -263,6 +270,7 @@ mod tests {
         RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason,
         SubscriptionKey,
     };
+    use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES};
     use crate::query::{BindingId, Query, ShapeId};
     use crate::time::{GlobalSeq, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
@@ -322,6 +330,20 @@ mod tests {
         let decoded = decode_frame(&encoded).unwrap();
 
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn oversized_wire_frame_rejects_before_postcard_decode() {
+        let oversized = vec![0_u8; MAX_WIRE_FRAME_BYTES + 1];
+
+        assert!(decode_frame(&oversized).is_err());
+    }
+
+    #[test]
+    fn oversized_sync_payload_rejects_before_message_decode() {
+        let oversized = vec![0_u8; MAX_SYNC_MESSAGE_BYTES + 1];
+
+        assert!(decode_sync_message(&oversized).is_err());
     }
 
     #[test]
