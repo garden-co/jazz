@@ -48,16 +48,7 @@ afterEach(() => {
   }
 });
 
-describe("runtime/createDb driver mode", () => {
-  it("throws when memory driver is used without serverUrl", async () => {
-    await expect(
-      createDb({
-        appId: "driver-mode-no-server",
-        driver: { type: "memory" },
-      }),
-    ).rejects.toThrow("driver.type='memory' requires serverUrl.");
-  });
-
+describe("createDb browser mode", () => {
   it("uses worker-backed path in browser when driver is persistent", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).Worker = class {};
@@ -87,7 +78,6 @@ describe("runtime/createDb driver mode", () => {
     const result = await createDb({
       appId: "driver-mode-memory",
       driver: { type: "memory" },
-      serverUrl: "http://localhost:1625",
     });
 
     expect(result).toBe(directDb);

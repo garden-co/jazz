@@ -903,7 +903,7 @@ export class Db {
 
   /**
    * Create a Db instance with a loaded runtime module.
-   * @internal Use createDb() instead.
+   * @internal Use {@link createDb()} instead.
    */
   static create(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Db {
     return new Db(config, runtimeModule);
@@ -1806,10 +1806,6 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);
-
-  if (driver.type === "memory" && !resolvedConfig.serverUrl) {
-    throw new Error("driver.type='memory' requires serverUrl.");
-  }
 
   let db: Db;
   if (
