@@ -27,7 +27,7 @@ use jazz_sim::fixture::{
 };
 use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PauseMode, PeerProfile, SimulatorTransportCodec,
-    ThreadedDriver, Topology, bench_profile, emit_json_line, metadata_fields,
+    ThreadedDriver, Topology, bench_profile, emit_json_line, metadata_fields, profiling,
     scenario_transport_codec_env,
 };
 use serde_json::{Value as JsonValue, json};
@@ -161,9 +161,13 @@ pub fn smoke() {
     let topology = topology(&config, profile.clone());
     let mut deterministic = DeterministicDriver::new(topology, config.seed)
         .with_transport_codec(config.transport_codec);
-    let _summary = execute(&mut deterministic, &config);
+    let _summary = profiling::maybe_profile_phase("s1_saas", "deterministic_execute", || {
+        execute(&mut deterministic, &config)
+    });
     assert_wire_frame_metrics(deterministic.metrics_json_fields());
-    let reconnect = reconnect_summaries(&config, profile);
+    let reconnect = profiling::maybe_profile_phase("s1_saas", "reconnect", || {
+        reconnect_summaries(&config, profile)
+    });
     assert_eq!(reconnect.len(), 1);
     assert_wire_frame_metrics(reconnect[0].transport_metrics.clone());
 }

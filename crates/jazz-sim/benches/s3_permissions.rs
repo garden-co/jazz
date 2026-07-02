@@ -28,7 +28,7 @@ use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::TransportError;
 use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PeerProfile, ThreadedDriver, Topology,
-    bench_profile, emit_json_line, metadata_fields,
+    bench_profile, emit_json_line, metadata_fields, profiling,
 };
 use serde_json::{Value as JsonValue, json};
 
@@ -106,7 +106,9 @@ pub fn smoke() {
     let profile = PeerProfile::new(config.profile.clone(), 1, 0, 0);
     let topology = topology(&config, profile);
     let mut deterministic = DeterministicDriver::new(topology, config.seed);
-    let summary = run(&mut deterministic, &config);
+    let summary = profiling::maybe_profile_phase("s3_permissions", "deterministic_run", || {
+        run(&mut deterministic, &config)
+    });
     assert_eq!(summary.forbidden_deliveries, 0);
 }
 
