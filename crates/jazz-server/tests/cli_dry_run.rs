@@ -219,7 +219,7 @@ fn subscription_fields(
             SubscriptionEvent::Opened { current, .. }
             | SubscriptionEvent::Reset { current, .. } => {
                 rows.clear();
-                ingest_current_rows(&mut rows, table, current);
+                ingest_current_rows(&mut rows, table, &current.rows);
             }
             SubscriptionEvent::Delta {
                 added,
@@ -230,8 +230,8 @@ fn subscription_fields(
                 for removed in removed {
                     rows.remove(&removed.row_uuid);
                 }
-                ingest_current_rows(&mut rows, table, added);
-                ingest_current_rows(&mut rows, table, updated);
+                ingest_current_rows(&mut rows, table, &added);
+                ingest_current_rows(&mut rows, table, &updated);
             }
             SubscriptionEvent::Closed => break,
         }
@@ -244,7 +244,7 @@ fn subscription_fields(
 fn ingest_current_rows(
     rows: &mut BTreeMap<RowUuid, (String, bool)>,
     table: &TableSchema,
-    current: Vec<jazz::node::CurrentRow>,
+    current: &[jazz::node::CurrentRow],
 ) {
     for row in current {
         let Some(Value::String(title)) = row.cell(table, "title") else {
@@ -253,7 +253,7 @@ fn ingest_current_rows(
         let Some(Value::Bool(done)) = row.cell(table, "done") else {
             panic!("expected done");
         };
-        rows.insert(row.row_uuid(), (title, done));
+        rows.insert(row.row_uuid(), (title.clone(), done));
     }
 }
 
