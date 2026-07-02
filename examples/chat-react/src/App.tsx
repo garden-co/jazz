@@ -14,6 +14,10 @@ import Router from "@/components/Router";
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
 
+type AppConfig = Partial<DbConfig> & {
+  authSecretStorageKey?: string;
+};
+
 function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   return {
     appId,
@@ -25,12 +29,11 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
   };
 }
 
-export function App({ config }: { config?: Partial<DbConfig> } = {}) {
-  return <AppInner config={config} />;
-}
-
-function AppInner({ config }: { config?: Partial<DbConfig> }) {
-  const { secret, isLoading } = useLocalFirstAuth();
+export function App({ config }: { config?: AppConfig } = {}) {
+  const { authSecretStorageKey, ...dbConfig } = config ?? {};
+  const { secret, isLoading } = useLocalFirstAuth(
+    authSecretStorageKey ? { authSecretStorageKey: authSecretStorageKey } : undefined,
+  );
 
   if (isLoading || !secret) {
     return <p id="joining-chat">Loading...</p>;
@@ -38,7 +41,7 @@ function AppInner({ config }: { config?: Partial<DbConfig> }) {
 
   return (
     <JazzProvider
-      config={defaultConfig(secret, config)}
+      config={defaultConfig(secret, dbConfig)}
       fallback={<p id="joining-chat">Loading...</p>}
     >
       <AppContent />

@@ -1,5 +1,9 @@
-import { createUseLocalFirstAuth } from "../react-core/use-local-first-auth.js";
+import { useLocalFirstAuthWithStore } from "../react-core/use-local-first-auth.js";
+import type { LocalFirstAuth } from "../react-core/use-local-first-auth.js";
 import { expoAuthSecretStore } from "./auth-secret-store.js";
 
-export const useLocalFirstAuth = createUseLocalFirstAuth(expoAuthSecretStore);
+export function useLocalFirstAuth(): LocalFirstAuth {
+  return useLocalFirstAuthWithStore(expoAuthSecretStore);
+}
+
 export type { LocalFirstAuth } from "../react-core/use-local-first-auth.js";
