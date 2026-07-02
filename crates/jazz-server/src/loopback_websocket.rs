@@ -19,6 +19,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use jazz::db::DbIdentity;
 use jazz::ids::{AuthorId, NodeUuid};
+use jazz::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::schema::JazzSchema;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::sync::Mutex as TokioMutex;
@@ -569,10 +570,17 @@ async fn service_connection(
                         }
                         match shell.take_frames(session) {
                             Ok(frames) if !frames.is_empty() => {
-                                let Ok(batch) = encode_frame_batch(&frames) else {
+                                let Ok(batches) = encode_frame_batches(&frames) else {
                                     break;
                                 };
-                                if socket.send(Message::Binary(batch.into())).await.is_err() {
+                                let mut send_failed = false;
+                                for batch in batches {
+                                    if socket.send(Message::Binary(batch.into())).await.is_err() {
+                                        send_failed = true;
+                                        break;
+                                    }
+                                }
+                                if send_failed {
                                     break;
                                 }
                             }
@@ -603,10 +611,17 @@ async fn service_connection(
                     }
                 };
                 if !frames.is_empty() {
-                    let Ok(batch) = encode_frame_batch(&frames) else {
+                    let Ok(batches) = encode_frame_batches(&frames) else {
                         break;
                     };
-                    if socket.send(Message::Binary(batch.into())).await.is_err() {
+                    let mut send_failed = false;
+                    for batch in batches {
+                        if socket.send(Message::Binary(batch.into())).await.is_err() {
+                            send_failed = true;
+                            break;
+                        }
+                    }
+                    if send_failed {
                         break;
                     }
                 }
@@ -618,10 +633,40 @@ async fn service_connection(
     let _ = socket.close(None).await;
 }
 
-fn encode_frame_batch(frames: &[Vec<u8>]) -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(frames)
+fn encode_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    for frame in frames {
+        if validate_wire_frame_len(frame.len()).is_err() {
+            return Err(postcard::Error::SerializeBufferFull);
+        }
+        let mut candidate = current.clone();
+        candidate.push(frame.clone());
+        let encoded = postcard::to_allocvec(&candidate)?;
+        if encoded.len() > MAX_WIRE_FRAME_BYTES && !current.is_empty() {
+            batches.push(postcard::to_allocvec(&current)?);
+            current.clear();
+        } else if encoded.len() > MAX_WIRE_FRAME_BYTES {
+            return Err(postcard::Error::SerializeBufferFull);
+        }
+        current.push(frame.clone());
+    }
+    if !current.is_empty() {
+        batches.push(postcard::to_allocvec(&current)?);
+    }
+    Ok(batches)
 }
 
 fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    postcard::from_bytes(bytes)
+    if bytes.len() > MAX_WIRE_FRAME_BYTES {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+    let frames: Vec<Vec<u8>> = postcard::from_bytes(bytes)?;
+    if frames
+        .iter()
+        .any(|frame| validate_wire_frame_len(frame.len()).is_err())
+    {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+    Ok(frames)
 }

@@ -11,6 +11,7 @@ use crate::protocol::{
     CatalogueAck, LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ShapeAst,
     Subscribe, SubscribeRejectReason, TableLens,
 };
+use crate::protocol_limits::{MAX_CONTENT_EXTENT_BYTES, MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES};
 use crate::query::{
     ArraySubquery, Include, JoinMode, all_of, any_of, claim, col, contains, eq, gt, in_list,
     is_null, lit, lte, ne, not,
@@ -804,6 +805,55 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
     let snapshot =
         doctest_support::block_on(db.all_relation_snapshot(&prepared_query, opts.clone())).unwrap();
     assert_eq!(row_ids(&snapshot.rows), vec![row(0x42)]);
+}
+
+#[test]
+fn oversized_register_shape_is_rejected_at_admission() {
+    let schema = schema();
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let huge_table = "t".repeat(MAX_SHAPE_AST_BYTES + 1);
+    let ast = ShapeAst::new(Query::from(huge_table), schema.version_id());
+    let error = server
+        .node()
+        .borrow_mut()
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([0x99; 16])),
+            ast,
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::node::Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
+    ));
+}
+
+#[test]
+fn oversized_content_extent_is_rejected_at_admission() {
+    let schema = schema();
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let extent = crate::node::content_store::Extent {
+        writer: AuthorId::from_bytes([0xa1; 16]),
+        row: row(0x42),
+        column: "body".to_owned(),
+        offset: 0,
+        len: (MAX_CONTENT_EXTENT_BYTES + 1) as u64,
+    };
+    let error = server
+        .node()
+        .borrow_mut()
+        .apply_sync_message(SyncMessage::ContentExtents {
+            extents: vec![crate::protocol::ContentExtent {
+                owner: LargeValueOwnerRef::current_row(row(0x42)),
+                extent,
+                bytes: vec![0_u8; MAX_CONTENT_EXTENT_BYTES + 1],
+            }],
+        })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::node::Error::UnsupportedSyncMessage("content extent exceeds byte limit")
+    ));
 }
 
 #[test]
@@ -1866,6 +1916,28 @@ fn wire_transport_adapter_reports_malformed_frames() {
             ..
         })
     ));
+}
+
+#[test]
+fn wire_transport_adapter_reports_oversized_frame_without_decoding() {
+    let (left, mut right) = byte_duplex_raw();
+    left.inbound
+        .borrow_mut()
+        .push_back(vec![0_u8; MAX_WIRE_FRAME_BYTES + 1]);
+
+    let mut adapter = WireTransportAdapter::current(left);
+    assert!(adapter.try_recv().is_none());
+
+    let error = right.try_recv_frame().expect("structured wire error");
+    let frame = decode_frame(&error).unwrap();
+    let WireFrame::Error(WireError { code, message, .. }) = frame else {
+        panic!("expected error frame");
+    };
+    assert_eq!(code, WireErrorCode::MalformedFrame);
+    assert!(
+        message.contains("wire frame size"),
+        "unexpected error message: {message}"
+    );
 }
 
 #[test]

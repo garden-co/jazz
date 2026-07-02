@@ -31,6 +31,10 @@ use crate::protocol::{
     MigrationLens, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
     SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
+use crate::protocol_limits::{
+    validate_content_extents, validate_shape_ast_size, validate_sync_message_len,
+    validate_wire_frame_len,
+};
 use crate::query::{Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
@@ -2870,12 +2874,20 @@ where
                 return Ok(());
             }
         };
+        if let Err(message) = validate_sync_message_len(payload.len()) {
+            return Err(TransportError::Failed(message));
+        }
         let mut envelope = WireEnvelope::new(self.protocol_version, self.features, payload);
         if let Some(session) = self.session.clone() {
             envelope = envelope.with_session(session);
         }
         match encode_frame(&WireFrame::Message(envelope)) {
-            Ok(frame) => self.inner.send_frame(frame),
+            Ok(frame) => {
+                if let Err(message) = validate_wire_frame_len(frame.len()) {
+                    return Err(TransportError::Failed(message));
+                }
+                self.inner.send_frame(frame)
+            }
             Err(err) => {
                 self.send_wire_error(WireError::new(
                     WireErrorCode::Internal,
@@ -2889,6 +2901,14 @@ where
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
         while let Some(bytes) = self.inner.try_recv_frame() {
+            if let Err(message) = validate_wire_frame_len(bytes.len()) {
+                self.send_wire_error(WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    message,
+                ));
+                continue;
+            }
             let frame = match decode_frame(&bytes) {
                 Ok(frame) => frame,
                 Err(err) => {
@@ -2904,6 +2924,14 @@ where
                 WireFrame::Message(envelope) => {
                     if let Err(error) = self.validate_inbound_session(&envelope) {
                         self.send_wire_error(error);
+                        continue;
+                    }
+                    if let Err(message) = validate_sync_message_len(envelope.payload.len()) {
+                        self.send_wire_error(WireError::new(
+                            WireErrorCode::MalformedFrame,
+                            WireRetry::Never,
+                            message,
+                        ));
                         continue;
                     }
                     match decode_sync_message(&envelope.payload) {
@@ -3189,6 +3217,9 @@ where
                             opts,
                             ast,
                         } => {
+                            if let Err(message) = validate_shape_ast_size(&ast) {
+                                return Err(Error::new(ErrorCode::Protocol, message));
+                            }
                             ensure_supported_register_shape_options(&opts)?;
                             if let Some(query) = ast.query() {
                                 ensure_supported_maintained_coverage_query_shape(query)?;
@@ -3336,6 +3367,11 @@ where
                             }
                         }
                         other => {
+                            if let SyncMessage::ContentExtents { extents } = &other
+                                && let Err(message) = validate_content_extents(extents)
+                            {
+                                return Err(Error::new(ErrorCode::Protocol, message));
+                            }
                             let relay_upload = match &other {
                                 SyncMessage::CommitUnit { tx, .. } => {
                                     Some((tx.tx_id, other.clone()))

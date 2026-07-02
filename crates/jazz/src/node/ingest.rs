@@ -8,6 +8,9 @@
 
 use super::*;
 use crate::protocol::{CatalogueAck, ContentExtent, LensOp, VersionBundle};
+use crate::protocol_limits::{
+    commit_unit_limit_violation, validate_content_extents, validate_shape_ast_size,
+};
 use crate::schema::ColumnSchema;
 use crate::time::TxTimeSortKey;
 
@@ -32,6 +35,11 @@ where
         S: ReopenableStorage,
     {
         for content in extents {
+            if content.bytes.len() > crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES {
+                return Err(Error::UnsupportedSyncMessage(
+                    "content extent exceeds byte limit",
+                ));
+            }
             self.content_store()
                 .put_extent(&content.extent, &content.bytes)?;
         }
@@ -152,6 +160,8 @@ where
                 ast,
                 opts: _,
             } => {
+                validate_shape_ast_size(&ast)
+                    .map_err(|_| Error::UnsupportedSyncMessage("shape AST exceeds byte limit"))?;
                 self.register_shape(shape_id, ast)?;
                 Ok(Vec::new())
             }
@@ -175,7 +185,12 @@ where
             SyncMessage::FetchContentExtent { .. } => {
                 Err(Error::UnsupportedSyncMessage("content extent fetch"))
             }
-            SyncMessage::ContentExtents { extents } => self.apply_content_extents(extents),
+            SyncMessage::ContentExtents { extents } => {
+                validate_content_extents(&extents).map_err(|_| {
+                    Error::UnsupportedSyncMessage("content extent exceeds byte limit")
+                })?;
+                self.apply_content_extents(extents)
+            }
         }
     }
 
@@ -413,6 +428,18 @@ where
         now_ms: u64,
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<Vec<SyncMessage>, Error> {
+        if let Some(reason) = commit_unit_limit_violation(&tx, &versions) {
+            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
+            self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
+            let mut updates = vec![SyncMessage::FateUpdate {
+                tx_id: tx.tx_id,
+                fate,
+                global_seq: None,
+                durability: None,
+            }];
+            updates.extend(self.cascade_rejections_from(tx.tx_id)?);
+            return Ok(updates);
+        }
         let mut updates = self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context)?;
         updates.extend(self.drain_parked_commit_units()?);
         Ok(updates)
@@ -568,6 +595,18 @@ where
             return Err(Error::UnsupportedCommitUnit(
                 "edge-accepted finalization is mergeable-only",
             ));
+        }
+        if let Some(reason) = commit_unit_limit_violation(&tx, &versions) {
+            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
+            self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
+            let mut updates = vec![SyncMessage::FateUpdate {
+                tx_id: tx.tx_id,
+                fate,
+                global_seq: None,
+                durability: None,
+            }];
+            updates.extend(self.cascade_rejections_from(tx.tx_id)?);
+            return Ok(updates);
         }
         if !commit_unit_write_count_matches(&tx, versions.len()) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(
@@ -995,6 +1034,18 @@ where
             return Err(Error::UnsupportedCommitUnit(
                 "edge authority only supports mergeable commit units",
             ));
+        }
+        if let Some(reason) = commit_unit_limit_violation(&tx, &versions) {
+            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
+            self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
+            let mut updates = vec![SyncMessage::FateUpdate {
+                tx_id: tx.tx_id,
+                fate,
+                global_seq: None,
+                durability: None,
+            }];
+            updates.extend(self.cascade_rejections_from(tx.tx_id)?);
+            return Ok(updates);
         }
         if !commit_unit_write_count_matches(&tx, versions.len()) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(

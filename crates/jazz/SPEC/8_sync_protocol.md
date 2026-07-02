@@ -216,7 +216,38 @@ meanings.
 The postcard `WireFrame`/`WireEnvelope` format and groove row `Record` encoding
 do not change when future inventory fields are added.
 
-## 8.8 Edge mergeable fate deferral and permission-scope subscriptions
+## 8.8 Protocol size limits
+
+Protocol size limits are enforced at the layer that can recover correctly:
+
+- An encoded `WireFrame` is capped at 2 MiB and an encoded
+  `WireEnvelope.payload` / `SyncMessage` is capped at 2 MiB. These are
+  wire-admission limits: an over-limit frame or payload is rejected before
+  postcard decodes the bytes and produces a structured
+  `WireError { code: MalformedFrame, retry: Never, ... }`. The connection-level
+  admission failure closes or resumes according to the binding's normal
+  structured-error handling; no semantic message is applied.
+- A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
+  admission limit for the shape-registration request; the connection may
+  continue after the rejected request. Server shells may expose this as
+  configuration later for unusually large generated query shapes.
+- A `CommitUnit` is capped at 4096 row-version records and 2 MiB encoded. These
+  are transaction semantic limits: an over-limit commit unit is rejected as
+  `Fate::Rejected(MalformedCommit(_))`, the connection remains live, and later
+  well-formed commit units may still settle.
+- A `ContentExtent` response is capped at 1 MiB of bytes per extent. This is a
+  bulk-lane semantic admission limit: it is comfortably above ch. 12's current
+  ~64 KiB blob chunk target while preventing one content response from becoming
+  an unbounded allocation. The content lane may split larger values into
+  multiple extents.
+
+Outbound websocket batching is byte-budgeted by the same 2 MiB encoded-frame
+limit: senders split batches across multiple binary messages instead of relying
+on the historical count-only batch limit. If a single encoded `WireFrame` cannot
+fit the budget, the sender must fail loudly rather than truncate or silently
+drop it.
+
+## 8.9 Edge mergeable fate deferral and permission-scope subscriptions
 
 An edge that acts as mergeable fate authority needs the relevant policy data
 before it can decide a write's fate. It therefore must defer fate assignment
@@ -239,7 +270,7 @@ covering relation says it does. This is the same per-peer payload dedup machiner
 (§8.4) applied to the edge's own upstream reads. The full edge-tier semantics —
 staleness horizon, rehydration, eviction — are chapter 9.
 
-## 8.9 Content extents and catalogue lanes
+## 8.10 Content extents and catalogue lanes
 
 Large-value content uses a bulk lane rather than being forced through ordinary
 view payloads. A `FetchContentExtent` request is authorized against row context

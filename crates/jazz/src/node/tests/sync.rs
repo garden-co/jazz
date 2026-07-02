@@ -318,6 +318,64 @@ fn malformed_commit_unit_rejects_write_count_mismatch() {
     );
     assert!(core.row_history("todos", row(1)).unwrap().is_empty());
 }
+
+#[test]
+fn over_limit_commit_unit_rejects_as_malformed_and_next_unit_still_applies() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("oversized")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        mut versions,
+    } = unit
+    else {
+        panic!("expected commit unit");
+    };
+    versions = vec![versions[0].clone(); crate::protocol_limits::MAX_COMMIT_UNIT_VERSIONS + 1];
+    tx.n_total_writes = versions.len() as u32;
+
+    let [fate] = core
+        .apply_sync_message(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions,
+        })
+        .unwrap()
+        .try_into()
+        .unwrap();
+    match fate {
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+            global_seq: None,
+            durability: None,
+        } => {
+            assert_eq!(tx_id, tx.tx_id);
+            assert!(
+                reason.contains("exceeds max"),
+                "unexpected malformed reason: {reason}"
+            );
+        }
+        other => panic!("expected malformed fate update, got {other:?}"),
+    }
+    assert!(core.row_history("todos", row(1)).unwrap().is_empty());
+
+    let (good_tx, good_unit) = writer
+        .commit_mergeable_unit(MergeableCommit::new("todos", row(2), 11).cells(title_cells("ok")))
+        .unwrap();
+    let [good_fate] = core.apply_sync_message(good_unit).unwrap().try_into().unwrap();
+    assert!(matches!(
+        good_fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            ..
+        } if tx_id == good_tx
+    ));
+}
 #[test]
 fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
