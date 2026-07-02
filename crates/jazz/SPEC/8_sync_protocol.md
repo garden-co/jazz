@@ -208,10 +208,8 @@ remains stored but invisible for that view (`INV-SYNC-15`, ch. 3, ch. 7).
 The implemented peer payload inventory is deliberately narrow:
 `peer_payload_inventory.complete_tx_payloads: Vec<TxId>` names only complete
 transaction payload coverage, not broad "known versions" and not partial row
-payload coverage. If partial payload dedup becomes necessary, extend the
-inventory with explicit row-version coverage and maintained-view-complete
-exclusive coverage facts instead of reusing `complete_tx_payloads` for those
-meanings.
+payload coverage. Partial and version-level dedup is the committed known-state
+design (§8.11), which retires this inventory rather than extending it.
 
 The postcard `WireFrame`/`WireEnvelope` format and groove row `Record` encoding
 do not change when future inventory fields are added.
@@ -282,6 +280,71 @@ this protocol lane; their semantics are chapter 10.
 _Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
 node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
 
+## 8.11 Known state: reconnect declarations and payload dedup (target)
+
+Steady-state and reconnect payload dedup is built on three properties the
+protocol already has: the **client is the sole authority on what it durably
+holds**; every `ViewUpdate` is **self-auditing** because it references the row
+versions it treats as in scope, so a receiver structurally detects
+"referenced without body" at apply time; and the serving side may therefore
+model receiver knowledge **optimistically**, updating its model at emission
+time with no acknowledgement traffic. There is no durable-apply ack and the
+`Hello` handshake does not carry knowledge state; declarations ride per query.
+
+A subscriber declares its known state per usage-site query in one of two forms:
+
+- **Fast declaration** — `(shape, binding, completeness class, position p)`:
+  "I have contiguously applied the stream you served me for this query through
+  global position `p`, and none of it has been locally evicted." A client MAY
+  persist this fact across restarts; any local eviction touching the query's
+  scope invalidates it (`INV-SYNC-27`).
+- **Slow declaration** — an explicit set of row-version identities
+  `(row_uuid, tx_time, tx_node_id)`: used when no valid fast fact exists
+  (fresh store, eviction, corruption). The client evaluates the query locally
+  and declares exactly the versions it holds. Version identities use the wire
+  `TxId` form (`INV-SYNC-21`); unfated versions are declarable because `TxId`s
+  exist before fate.
+
+The serving side's skip rule is one comparison (`INV-SYNC-24`): a version body
+may be omitted iff the receiver's membership in it is believed — "row in the
+query's scope now" under a fast declaration, exact set membership under a slow
+declaration — and, for fast declarations, the version settled at or before
+`p`. Not-yet-fated versions are always shipped under a fast declaration.
+Result membership, program facts, and inventory refs are never omitted — only
+payload bodies.
+
+The optimism is bounded by two nets. First, the structural integrity check: a
+receiver that encounters a referenced version without holding its body treats
+this as a **known-state miss**, not an error. Second, the precise repair
+request: the receiver requests exactly the missing `(row_uuid, tx_time,
+tx_node_id)` payloads, and the server MUST serve them subject to ordinary read
+policy (`INV-SYNC-26`). Convergence is preserved: a stream served under
+known-state dedup followed by its repairs MUST be observationally equivalent
+to the same stream served without dedup (`INV-SYNC-25`, cf. `INV-SYNC-20`).
+The canonical repair-carrying case is visibility gained without a new version
+being minted — a policy/membership change admitting rows whose versions settled
+at or before `p` (ch. 7); version-minting scope entry is self-consistent
+because the entering version settles above `p`.
+
+Holdings from point-in-time reads dedup conservatively: a version is assumed
+held only for rows **unchanged since the declared cut** (current version
+settled at or before the cut). The serving side never reconstructs historical
+winners for dedup — that is a per-row history walk (O(history) reads), and for
+current-view serving it buys nothing: a row changed since the cut must ship
+its current version regardless.
+
+This section is the committed replacement for extending
+`peer_payload_inventory.complete_tx_payloads` toward partial or version-level
+coverage (§8.4, §8.7): the complete-tx inventory remains the implemented
+mechanism until known state lands, and it is retired rather than extended when
+it does.
+
+_Further invariants (all `target`)._ `INV-SYNC-24` — the skip rule;
+`INV-SYNC-25` — dedup + repairs converge to the undeduped stream;
+`INV-SYNC-26` — repair requests are exact and policy-checked;
+`INV-SYNC-27` — fast declarations require contiguous application and no
+eviction; eviction invalidates the persisted fact.
+
 ## Open questions
 
 - 🔶 **Cross-language wire envelope completion.** `WireFrame`/`WireEnvelope`
@@ -290,6 +353,11 @@ node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
   `SyncMessage` payload. Before TS/WASM/NAPI/server integration treats this as
   frozen, the remaining envelope work is trace/replay ids, portable resume
   cursor acceptance/rejection, auth expiry, and unsupported-feature diagnostics.
+  **Alpha compatibility policy (decided 2026-07-02):** alpha releases make no
+  cross-version protocol or storage compatibility promise; version tags exist so
+  mismatch is a clean, diagnosable refusal, never corruption or silent
+  misbehavior. Breaking is permitted but best-effort avoided; compatibility
+  windows are a beta-era policy.
 - 🔶 **Canonical fixtures.** The wire contract needs golden encode/decode
   fixtures for every message family, including `CommitUnit`, `FateUpdate`,
   `RegisterShape`/`Subscribe`/`Unsubscribe`, `ViewUpdate`, content extents, and
@@ -312,13 +380,11 @@ node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
   client retry after restart; persisted parked units are not implemented. Decide
   whether ch. 8 states this as an implementation limitation or defers to
   durability/topology.
-- 🔶 **View options & payload-inventory resubscribe.** `RegisterShapeOptions`
-  currently carries serving tier plus semantic read-view request. Richer row and
-  history materialization options (`rows full`, `history shallow`,
-  `history full`) and delta-resubscribe from a peer payload inventory are
-  reserved vocabulary, not an implemented wire contract. This should be
-  specified independently from snapshot refs, which are read frontiers rather
-  than peer payload inventories. Decide how much to pin now.
+- 🔶 **View options.** `RegisterShapeOptions` currently carries serving tier
+  plus semantic read-view request. Richer row and history materialization
+  options (`rows full`, `history shallow`, `history full`) are reserved
+  vocabulary, not an implemented wire contract. (Delta-resubscribe is no longer
+  open: it is the known-state design, §8.11.)
 - 🔶 **Relay upstream aggregation** onto coarser covering shapes is the design;
   implementation does not make it a MUST yet (ch. 6, ch. 9).
 - 🔶 **Covering-scope subsumption** is the design for broader permission scopes

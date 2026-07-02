@@ -195,9 +195,22 @@ a trigger without the pin set is not.
 - 🔶 **Restart/rehydration** (`INV-EDGE-9`) — decided in prose (after restart, a
   scope no longer satisfies the gate until it rehydrates; validation defers until
   then) but untested.
-- 🔶 **Eviction trigger** — the pin set and refetch path (§9.8) are built, but the
-  policy that decides _when_ to evict cold state (size, LRU, age) is deferred to a
-  later milestone.
+- 🔶 **Eviction trigger** — decided (2026-07-02): the v1 trigger is a **storage
+  size budget with LRU order** — an edge evicts least-recently-read unpinned
+  state when over budget. Age/idle horizons are explicitly not v1 triggers
+  (silent age-based disappearance is surprising); richer policies stay future
+  work. The pin set and refetch path (§9.8) are built; the budget config type
+  and enforcement point are not — that implementation is the remaining open
+  work item.
+- 🔶 **Serving while disconnected** — decided (2026-07-02): a disconnected edge
+  **keeps serving edge-tier state**, including accepting mergeable
+  transactions where it is the fate authority for the scope — edge-tier
+  durability and mergeable semantics are eventually-consistent by design, so
+  upstream connectivity is not a serving precondition for them. Claims at
+  `Global` tier (reads or durability waits requiring global settlement) are
+  what a disconnected edge cannot satisfy: those defer or carry an explicit
+  staleness/unsettled marker rather than being served as fresh. This narrows
+  the staleness-horizon knob above to global-tier claims.
 - 🔶 **Topology and edge role completion** — the design is a star of clients and
   edges around core (`INV-EDGE-12`, target), with the first upstream trusted edge
   as mergeable fate authority and `Edge` as a durability tier. The implementation
