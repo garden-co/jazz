@@ -69,23 +69,39 @@ fn main() {
 
         let mut deterministic = DeterministicDriver::new(topology.clone(), config.seed)
             .with_transport_codec(config.transport_codec);
-        let deterministic_summary = execute(&mut deterministic, &config);
+        let deterministic_summary =
+            profiling::maybe_profile_phase("s1_saas", "deterministic_execute", || {
+                execute(&mut deterministic, &config)
+            });
         emit_summary("deterministic", &config, &deterministic_summary);
 
         let mut threaded =
             ThreadedDriver::new(topology, config.seed).with_transport_codec(config.transport_codec);
-        let threaded_summary = execute(&mut threaded, &config);
+        let threaded_summary =
+            profiling::maybe_profile_phase("s1_saas", "threaded_execute", || {
+                execute(&mut threaded, &config)
+            });
         emit_summary("threaded", &config, &threaded_summary);
 
-        for summary in reconnect_summaries(&config, profile.clone()) {
+        let reconnect = profiling::maybe_profile_phase("s1_saas", "reconnect", || {
+            reconnect_summaries(&config, profile.clone())
+        });
+        for summary in reconnect {
             emit_reconnect_summary(&config, &summary);
         }
-        for summary in subscriber_sweep_summaries(&config) {
+        let subscriber_sweep =
+            profiling::maybe_profile_phase("s1_saas", "subscriber_sweep", || {
+                subscriber_sweep_summaries(&config)
+            });
+        for summary in subscriber_sweep {
             emit_sweep_summary(&config, &summary);
         }
     }
     if phase_selection.should_run("high_fan_out_hydration") {
-        for summary in high_fan_out_hydration_summaries(&config, profile) {
+        let summaries = profiling::maybe_profile_phase("s1_saas", "high_fan_out_hydration", || {
+            high_fan_out_hydration_summaries(&config, profile)
+        });
+        for summary in summaries {
             emit_high_fan_out_summary(&config, &summary);
         }
     }

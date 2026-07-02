@@ -41,15 +41,20 @@ pub fn maybe_profile_phase<T>(scenario: &str, phase: &str, work: impl FnOnce() -
     let result = work();
     let elapsed = started.elapsed();
 
-    if let Ok(report) = guard.report().build() {
-        let file = File::create(&svg_path).expect("create flamegraph SVG");
-        report.flamegraph(file).expect("write flamegraph SVG");
-        write_top_table(&report, &top_path, elapsed);
-        eprintln!(
-            "wrote profile scenario={scenario} phase={phase} svg={} top={}",
-            svg_path.display(),
-            top_path.display()
-        );
+    match guard.report().build() {
+        Ok(report) => {
+            let file = File::create(&svg_path).expect("create flamegraph SVG");
+            report.flamegraph(file).expect("write flamegraph SVG");
+            write_top_table(&report, &top_path, elapsed);
+            eprintln!(
+                "wrote profile scenario={scenario} phase={phase} svg={} top={}",
+                svg_path.display(),
+                top_path.display()
+            );
+        }
+        Err(error) => {
+            eprintln!("profile report unavailable scenario={scenario} phase={phase}: {error}");
+        }
     }
 
     result
