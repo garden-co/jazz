@@ -668,6 +668,7 @@ jobs:
           esac
 
           node packages/jazz-tools/scripts/verify-packed-runtime-bootstrap.mjs "${EXTRACT_DIR}/package"
+          node packages/jazz-tools/scripts/verify-packed-broker-worker.mjs "${EXTRACT_DIR}/package"
 
       - name: Verify packed jazz-rn manifest
         run: |

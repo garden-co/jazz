@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
   "crates/jazz-tools",
+  "crates/jazz-browser-broker",
+  "crates/jazz-broker-wasm",
   "crates/jazz-wasm",
   "crates/jazz-napi",
   "crates/jazz-rn/rust",

@@ -7,15 +7,22 @@
 // copy the file verbatim. The shipped tsc output keeps bare ../runtime/*.js
 // imports, which 404 in the worker context and crash the page. Inlining them
 // here fixes every consumer (Next, Vite/SvelteKit, plain bundlers, CDN) at once.
-// The broker is pure, wasm-free coordination logic, so the bundle is fully
-// self-contained.
+// The broker now uses a tiny wasm state machine, so this bundle embeds the
+// wasm bytes as base64 and instantiates them from memory instead of fetching a
+// sibling .wasm file that those bundlers would fail to copy.
 import { build } from "esbuild";
 import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const entry = fileURLToPath(new URL("../src/worker/jazz-broker-worker.ts", import.meta.url));
 const outfile = fileURLToPath(new URL("../dist/worker/jazz-broker-worker.js", import.meta.url));
+const wasmBytesModule = fileURLToPath(
+  new URL("../src/worker/jazz-broker-wasm-bytes.ts", import.meta.url),
+);
+const brokerWasm = fileURLToPath(
+  new URL("../../../crates/jazz-broker-wasm/pkg/jazz_broker_wasm_bg.wasm", import.meta.url),
+);
 
 await build({
   entryPoints: [entry],
@@ -25,6 +32,21 @@ await build({
   platform: "browser",
   target: "es2022",
   legalComments: "none",
+  plugins: [
+    {
+      name: "embed-jazz-broker-wasm",
+      setup(build) {
+        build.onLoad({ filter: /jazz-broker-wasm-bytes\.ts$/ }, async (args) => {
+          if (args.path !== wasmBytesModule) return undefined;
+          const wasmBase64 = (await readFile(brokerWasm)).toString("base64");
+          return {
+            contents: `export const JAZZ_BROKER_WASM_BASE64 = ${JSON.stringify(wasmBase64)};`,
+            loader: "ts",
+          };
+        });
+      },
+    },
+  ],
 });
 
 // The bundle carries no source map and no longer needs the copied .ts source;
