@@ -122,20 +122,21 @@ merge-back and discard have graduated:
 - 🔶 **Branch-dimensioned subscriptions** (`INV-BRANCH-16`, target). Subscription identity
   gains `BranchId` — `(ShapeId, BindingId, BranchId)` — sharing parent-side
   prepared-graph work so per-branch cost is overlay-only.
-- 🔶 **Rebase** (target). Moving a branch's frozen base from its creation cut to a
-  newer parent `GlobalSeq` has two candidate semantics, unresolved: **(a) recompute**
-  — re-evaluate each overlay write as if newly applied on the new base (cherry-pick
-  shape), minting fresh `TxId`s; or **(b) reconcile** — a three-way merge between the
-  old base, the new base, and the overlay, reusing the §4.3 per-column merge
-  strategies (rebase-as-merge). Implications to settle: (i) conflict surface is
-  exactly the overlay rows whose parent winner changed between old and new base —
-  per-column merge (incl. the large-value op-merge strategy) should apply there, the
-  same engine merge-back uses; (ii) **identity** — recompute mints new overlay
-  `TxId`s (breaking any external references and changing dedup), reconcile can
-  preserve them; (iii) **cost** — recompute is O(overlay writes), reconcile also
-  needs the parent diff between the two base cuts; (iv) interaction with merge-back —
-  whether rebase-then-merge and merge-directly must converge (they should, under the
-  same merge oracle as S8). Pick (a) or (b) before pinning a contract.
+- **Rebase** (`INV-BRANCH-19`, `INV-BRANCH-20`, `INV-BRANCH-21`; target,
+  committed design, unimplemented). Moving a branch's frozen base from its
+  creation cut to a newer parent `GlobalSeq` uses **reconcile / rebase-as-merge**.
+  The operation compares the old base, the new base, and the branch overlay using
+  the same three-way per-column merge engine and merge strategies as merge-back
+  (§4.3), including large-value op-merge. The conflict surface is exactly the
+  overlay rows whose parent winner changed between old and new base.
+  Rebase moves the branch's frozen base and adjusts the branch view by
+  reconciliation; it does **not** replay overlay writes and does **not** remint
+  overlay `TxId`s. Overlay provenance remains historically honest: original
+  write times and authors remain the provenance of the overlay versions, and the
+  rebase event does not make those writes "newer." Rebase-then-merge-back MUST
+  converge with merge-directly under the same merge oracle and strategies. The
+  implementation is gated on the per-table change watermark, which makes the
+  parent diff between the two base cuts cheap enough to compute.
 - 🔶 **Branch-of-branch depth** (target). A branch whose `parent` is itself a branch
   is unbounded by construction. Implications: (i) **reads** resolve overlay-first up
   the _chain_ of bases, so read cost is O(depth) base-cut resolutions — measure
