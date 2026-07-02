@@ -389,6 +389,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
     };
     let empty = SyncMessage::ViewUpdate {
         subscription,
+        settled_through: crate::time::GlobalSeq(0),
         reset_result_set: false,
         version_bundles: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -401,6 +402,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
 
     let fact_only = SyncMessage::ViewUpdate {
         subscription,
+        settled_through: crate::time::GlobalSeq(0),
         reset_result_set: false,
         version_bundles: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -2778,6 +2780,7 @@ fn subscriber_connection_serves_single_branch_read_view_subscription() {
             shape_id: shape.shape_id(),
             subscription,
             values: Vec::new(),
+            known_state: None,
         }))
         .unwrap();
 
@@ -2840,6 +2843,7 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
             shape_id: shape.shape_id(),
             subscription: supported_subscription,
             values: Vec::new(),
+            known_state: None,
         }))
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
@@ -2862,6 +2866,7 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
             shape_id: shape.shape_id(),
             subscription: branch_subscription,
             values: Vec::new(),
+            known_state: None,
         }))
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
@@ -2943,6 +2948,7 @@ fn subscriber_connection_rejects_subscribe_without_link_shape_options() {
                 read_view: RegisterShapeOptions::default().read_view_key(),
             },
             values: Vec::new(),
+            known_state: None,
         }))
         .unwrap();
 

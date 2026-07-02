@@ -22,8 +22,8 @@ use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
 #[cfg(any(test, debug_assertions))]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
-    ContentExtent, LargeValueOwnerRef, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
-    RowVersionRef, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    ContentExtent, KnownStateDeclaration, LargeValueOwnerRef, ReadViewSpec, RegisterShapeOptions,
+    ResultMemberEntry, RowVersionRef, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
 };
 use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, validate_fetch_row_versions};
 use crate::query::{Binding, ValidatedQuery};
@@ -88,6 +88,7 @@ struct PeerSubscriptionState {
     maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
     prepared_query: Option<CachedPeerQueryPlan>,
     groove_runtime_token: Option<u64>,
+    known_state: Option<KnownStateDeclaration>,
 }
 
 impl PeerSubscriptionState {
@@ -421,6 +422,7 @@ impl PeerState {
         let Some(state) = self.subscriptions.get(&subscription) else {
             return Ok(SyncMessage::ViewUpdate {
                 subscription,
+                settled_through: node.applied_global_watermark(),
                 reset_result_set: false,
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -465,6 +467,7 @@ impl PeerState {
         if result_member_adds.is_empty() && result_member_removes.is_empty() {
             return Ok(SyncMessage::ViewUpdate {
                 subscription,
+                settled_through: node.applied_global_watermark(),
                 reset_result_set: false,
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -493,6 +496,10 @@ impl PeerState {
                 "maintained subscription view is missing prepared state",
             ))?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
+        let known_state = self
+            .subscriptions
+            .get(&subscription)
+            .and_then(|state| state.known_state.clone());
         let update = {
             let maintained = &self
                 .subscriptions
@@ -506,6 +513,7 @@ impl PeerState {
                 crate::node::MaintainedViewBundleInputs {
                     subscription,
                     peer_complete_tx_payloads,
+                    known_state,
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                     previous_result_set: previous_result_tx_ids,
                     result_member_adds,
@@ -651,10 +659,15 @@ impl PeerState {
             .cloned()
             .collect::<Vec<_>>();
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
+        let known_state = self
+            .subscriptions
+            .get(&subscription)
+            .and_then(|state| state.known_state.clone());
         let update = node.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
                 subscription,
                 peer_complete_tx_payloads,
+                known_state,
                 complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                 previous_result_set: BTreeSet::new(),
                 result_member_adds,
@@ -752,6 +765,10 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
+        let known_state = self
+            .subscriptions
+            .get(&subscription)
+            .and_then(|state| state.known_state.clone());
         self.forget_subscription_with_node(node, subscription);
         let (_prepared_shape, _prepared_binding, plan) =
             node.prepare_query_binding_for_link(shape, binding, opts.tier, self.identity())?;
@@ -762,6 +779,7 @@ impl PeerState {
         let state = self.subscriptions.entry(subscription).or_default();
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
+        state.known_state = known_state;
         self.rehydrate_query_maintained_subscription_view(
             node,
             MaintainedRehydrateRequest {
@@ -799,6 +817,7 @@ impl PeerState {
         if !source_adds.is_empty() || !source_removes.is_empty() {
             self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate {
                 subscription: maintained_subscription,
+                settled_through: node.applied_global_watermark(),
                 reset_result_set: false,
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -826,6 +845,10 @@ impl PeerState {
                 "coverage group subscription is missing prepared state",
             ))?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
+        let known_state = self
+            .subscriptions
+            .get(&target_subscription)
+            .and_then(|state| state.known_state.clone());
         let update = {
             let maintained = &self
                 .subscriptions
@@ -839,6 +862,7 @@ impl PeerState {
                 crate::node::MaintainedViewBundleInputs {
                     subscription: target_subscription,
                     peer_complete_tx_payloads,
+                    known_state,
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                     previous_result_set: BTreeSet::new(),
                     result_member_adds,
@@ -873,6 +897,18 @@ impl PeerState {
     /// is per-peer and survives subscription rehydration.
     pub fn forget_subscription(&mut self, subscription: SubscriptionKey) {
         self.subscriptions.remove(&subscription);
+    }
+
+    /// Record a downstream known-state declaration for a usage-site subscription.
+    pub fn declare_known_state(
+        &mut self,
+        subscription: SubscriptionKey,
+        declaration: Option<KnownStateDeclaration>,
+    ) {
+        self.subscriptions
+            .entry(subscription)
+            .or_default()
+            .known_state = declaration;
     }
 
     /// Drop one subscription and eagerly unregister any maintained Groove
@@ -1974,6 +2010,7 @@ mod tests {
             shape_id: shape.shape_id(),
             subscription: subscription_key_with_opts(shape, binding, &opts),
             values,
+            known_state: None,
         }))
         .unwrap();
     }
@@ -3039,6 +3076,7 @@ mod tests {
             stale_tick,
             SyncMessage::ViewUpdate {
                 subscription,
+                settled_through: crate::time::GlobalSeq(1),
                 reset_result_set: false,
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),

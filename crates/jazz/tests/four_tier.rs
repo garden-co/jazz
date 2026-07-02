@@ -816,6 +816,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
             binding_id: binding.binding_id(),
             read_view: Default::default(),
         },
+        settled_through: jazz::time::GlobalSeq(0),
         reset_result_set: false,
         version_bundles: vec![VersionBundle {
             tx,

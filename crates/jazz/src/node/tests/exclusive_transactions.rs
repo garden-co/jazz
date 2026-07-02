@@ -950,6 +950,7 @@ fn register_shape_binding_for_receiver(
             read_view: Default::default(),
         },
         values,
+        known_state: None,
     }))
     .unwrap();
 }
@@ -986,6 +987,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate {
         subscription,
+        settled_through,
         mut version_bundles,
         result_member_adds,
         ..
@@ -1006,6 +1008,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
+            settled_through,
             reset_result_set: false,
             version_bundles: vec![bundle],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -1063,6 +1066,7 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate {
         subscription,
+        settled_through,
         version_bundles,
         ..
     } = update
@@ -1077,6 +1081,7 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
     let err = reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
+            settled_through,
             reset_result_set: false,
             version_bundles,
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),

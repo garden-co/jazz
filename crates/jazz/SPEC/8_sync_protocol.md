@@ -280,7 +280,7 @@ this protocol lane; their semantics are chapter 10.
 _Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
 node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
 
-## 8.11 Known state: reconnect declarations and payload dedup (target)
+## 8.11 Known state: reconnect declarations and payload dedup
 
 Steady-state and reconnect payload dedup is built on three properties the
 protocol already has: the **client is the sole authority on what it durably
@@ -295,15 +295,25 @@ A subscriber declares its known state per usage-site query in one of two forms:
 
 - **Fast declaration** — `(shape, binding, completeness class, position p)`:
   "I have contiguously applied the stream you served me for this query through
-  global position `p`, and none of it has been locally evicted." A client MAY
-  persist this fact across restarts; any local eviction touching the query's
-  scope invalidates it (`INV-SYNC-27`).
+  global position `p`, and none of it has been locally evicted." In the current
+  implementation `p` is the exact `settled_through` stamp previously emitted by
+  the serving node for the same canonical binding view. The client records this
+  cursor in memory when applying `ViewUpdate`s and echoes it on in-process
+  resubscribe. Persisting this fact across restarts remains target work; any
+  local eviction touching the query's scope invalidates it (`INV-SYNC-27`).
 - **Slow declaration** — an explicit set of row-version identities
   `(row_uuid, tx_time, tx_node_id)`: used when no valid fast fact exists
   (fresh store, eviction, corruption). The client evaluates the query locally
-  and declares exactly the versions it holds. Version identities use the wire
-  `TxId` form (`INV-SYNC-21`); unfated versions are declarable because `TxId`s
-  exist before fate.
+  and declares exactly the versions it holds. Slow declarations remain target
+  work. Version identities use the wire `TxId` form (`INV-SYNC-21`); unfated
+  versions are declarable because `TxId`s exist before fate.
+
+Every `ViewUpdate` carries `settled_through`, the serving node's applied global
+watermark when the update was assembled. Its meaning is per binding view: this
+update reflects every global change at or before that position for the served
+view. A stale cursor can under-claim knowledge and cause extra bodies to ship;
+it cannot over-claim because rows entering the view after `p` have membership
+settle positions after `p`, and therefore do not satisfy the skip rule below.
 
 The serving side's skip rule is one comparison (`INV-SYNC-24`): a version body
 may be omitted iff the receiver's membership in it is believed — "row in the
@@ -336,14 +346,14 @@ its current version regardless.
 This section is the committed replacement for extending
 `peer_payload_inventory.complete_tx_payloads` toward partial or version-level
 coverage (§8.4, §8.7): the complete-tx inventory remains the implemented
-mechanism until known state lands, and it is retired rather than extended when
-it does.
+mechanism for non-declared streams, and it is retired rather than extended as
+known-state coverage grows.
 
-_Further invariants (all `target`)._ `INV-SYNC-24` — the skip rule;
-`INV-SYNC-25` — dedup + repairs converge to the undeduped stream;
-`INV-SYNC-26` — repair requests are exact and policy-checked;
-`INV-SYNC-27` — fast declarations require contiguous application and no
-eviction; eviction invalidates the persisted fact.
+_Further invariants._ `INV-SYNC-24` — the fast skip rule is implemented for
+in-memory resubscribe declarations; `INV-SYNC-25` — dedup + repairs converge to
+the undeduped stream; `INV-SYNC-26` — repair requests are exact and
+policy-checked; `INV-SYNC-27` — persisted fast declarations require contiguous
+application and no eviction; eviction invalidates the persisted fact (target).
 
 ## Open questions
 

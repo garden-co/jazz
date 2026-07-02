@@ -62,6 +62,8 @@ pub(crate) struct SourceRequirements {
 pub(crate) enum SourceMetadataRequirement {
     /// Include version identity fields on source rows.
     VersionWitnesses,
+    /// Include nullable global settle position for current winners.
+    SettlePosition,
     /// Provide canonical content-version payload rows for witness terminals.
     VersionPayloads,
     /// Include deletion-register/deletion-marker state.
@@ -163,6 +165,11 @@ pub(crate) enum SourceMetadataFields {
         tx_node_field: String,
         /// Branch/prefix identity field, when present.
         branch_or_prefix_field: Option<String>,
+    },
+    /// Nullable global settle position field.
+    SettlePosition {
+        /// Field containing the global sequence where the member settled.
+        settle_position_field: String,
     },
     /// Deletion-register/deletion-marker fields.
     DeletionMarkers {

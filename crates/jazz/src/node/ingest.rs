@@ -148,6 +148,7 @@ where
             }
             SyncMessage::ViewUpdate {
                 subscription,
+                settled_through,
                 reset_result_set,
                 version_bundles,
                 peer_payload_inventory,
@@ -158,6 +159,7 @@ where
             } => {
                 self.apply_view_update(ViewUpdateParts {
                     subscription,
+                    settled_through,
                     reset_result_set,
                     version_bundles,
                     peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,

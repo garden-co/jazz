@@ -5,7 +5,7 @@
 //! [`crate::peer`]. In the layer map this is the top `Db` facade over the node.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
@@ -2544,6 +2544,7 @@ where
                 announced_shapes: BTreeSet::new(),
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
+                pending_row_version_repairs: VecDeque::new(),
             },
             last_resume_bytes: None,
         }));
@@ -3084,6 +3085,8 @@ enum ConnectionLink {
         outbox: Outbox,
         /// Transactions already shipped on this connection (dedup across ticks).
         uploaded: BTreeSet<TxId>,
+        /// Declared known-state ViewUpdates parked until missing row bodies arrive.
+        pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
     },
     /// Serving one subscriber: apply their subscribe requests, ship view
     /// updates under their identity.
@@ -3103,6 +3106,11 @@ enum ConnectionLink {
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
     },
+}
+
+struct PendingRowVersionRepair {
+    requests: Vec<crate::protocol::RowVersionRef>,
+    update: SyncMessage,
 }
 
 /// Per-connection resume state for a served subscriber.
@@ -3174,6 +3182,7 @@ where
                 announced_shapes,
                 outbox,
                 uploaded,
+                pending_row_version_repairs,
             } => {
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let pending_index = 0;
@@ -3204,10 +3213,20 @@ where
                                 }
                             }
                             let values = binding_values_in_param_order(shape, binding);
+                            let binding_view_key = BindingViewKey {
+                                shape_id: shape.shape_id(),
+                                binding_id: binding.binding_id(),
+                                read_view: pending_subscription.opts.read_view_key(),
+                            };
+                            let known_state = self
+                                .node
+                                .borrow()
+                                .known_state_declaration_for_binding_view(binding_view_key);
                             let subscribe = Subscribe {
                                 shape_id: shape.shape_id(),
                                 subscription: pending_subscription.subscription,
                                 values,
+                                known_state,
                             };
                             self.node
                                 .borrow_mut()
@@ -3258,13 +3277,62 @@ where
                 let mut applied = false;
                 while let Some(received) = self.transport.try_recv_received() {
                     let write_state_tx_id = write_state_update_tx_id(&received.message);
-                    self.node
-                        .borrow_mut()
-                        .apply_sync_message_with_ingest_context_and_encoded_len(
-                            received.message,
-                            None,
-                            received.encoded_len,
-                        )?;
+                    match received.message {
+                        SyncMessage::RowVersionPayloads { versions } => {
+                            let Some(repair) = pending_row_version_repairs.pop_front() else {
+                                return Err(Error::new(
+                                    ErrorCode::Protocol,
+                                    "row-version repair payload arrived without pending request",
+                                ));
+                            };
+                            {
+                                let mut node = self.node.borrow_mut();
+                                node.apply_row_version_payloads_for_requests(
+                                    &repair.requests,
+                                    versions,
+                                )?;
+                                node.apply_sync_message(repair.update)?;
+                            }
+                        }
+                        message @ SyncMessage::ViewUpdate { subscription, .. } => {
+                            let missing = {
+                                let mut node = self.node.borrow_mut();
+                                if node.subscription_is_known_state_declared(subscription)? {
+                                    node.missing_known_state_row_version_refs(&message)?
+                                } else {
+                                    Vec::new()
+                                }
+                            };
+                            if missing.is_empty() {
+                                self.node
+                                    .borrow_mut()
+                                    .apply_sync_message_with_ingest_context_and_encoded_len(
+                                        message,
+                                        None,
+                                        received.encoded_len,
+                                    )?;
+                            } else {
+                                self.transport
+                                    .send(SyncMessage::FetchRowVersions {
+                                        requests: missing.clone(),
+                                    })
+                                    .map_err(transport_error)?;
+                                pending_row_version_repairs.push_back(PendingRowVersionRepair {
+                                    requests: missing,
+                                    update: message,
+                                });
+                            }
+                        }
+                        message => {
+                            self.node
+                                .borrow_mut()
+                                .apply_sync_message_with_ingest_context_and_encoded_len(
+                                    message,
+                                    None,
+                                    received.encoded_len,
+                                )?;
+                        }
+                    }
                     if let Some(tx_id) = write_state_tx_id {
                         notify_write_state_waiters(&self.write_state_waiters, tx_id);
                     }
@@ -3325,6 +3393,7 @@ where
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
                             let values = subscribe.values.clone();
+                            let known_state = subscribe.known_state.clone();
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 continue;
                             };
@@ -3356,6 +3425,7 @@ where
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
                             let update = if first_subscriber {
+                                peer.declare_known_state(group_subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
                                 let update_result = peer
                                     .rehydrate_query_for_subscription_with_opts(
@@ -3382,6 +3452,7 @@ where
                                 };
                                 retarget_view_update(update, subscription)
                             } else {
+                                peer.declare_known_state(subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
                                 peer.rehydrate_query_for_subscription_from_maintained_subscription(
                                     &mut node,

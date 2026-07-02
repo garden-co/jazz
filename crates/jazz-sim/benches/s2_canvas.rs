@@ -1436,6 +1436,7 @@ fn apply_core_binding(
             read_view: RegisterShapeOptions::default().read_view_key(),
         },
         values,
+        known_state: None,
     }))
     .unwrap();
 }
@@ -2226,6 +2227,7 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
             read_view: RegisterShapeOptions::default().read_view_key(),
         },
         values,
+        known_state: None,
     }))
     .unwrap();
 }
@@ -2256,6 +2258,7 @@ fn register_binding(
             read_view: RegisterShapeOptions::default().read_view_key(),
         },
         values,
+        known_state: None,
     }))
     .unwrap();
     ctx.record_counter(&format!("s2_registered_{client}"), 1);
