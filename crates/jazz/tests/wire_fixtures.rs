@@ -5,7 +5,7 @@ use jazz::node::content_store::Extent;
 use jazz::protocol::{
     CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp, MigrationLens,
     PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, SchemaVersion, ShapeAst, Subscribe,
-    SubscriptionKey, SyncMessage, TableLens,
+    SubscribeRejectReason, SubscriptionKey, SyncMessage, TableLens,
 };
 use jazz::query::{BindingId, Query, ShapeId};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
@@ -91,6 +91,16 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 subscription,
                 values: Vec::new(),
             }),
+        ),
+        (
+            "subscribe_rejected_unsupported_shape",
+            "SubscribeRejected",
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                    detail: "SourceGap::BranchOverlay".to_owned(),
+                },
+            },
         ),
         (
             "view_update_reset_with_row_add",

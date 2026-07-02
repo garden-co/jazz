@@ -159,6 +159,7 @@ where
                 self.apply_subscribe(subscribe)?;
                 Ok(Vec::new())
             }
+            SyncMessage::SubscribeRejected { .. } => Ok(Vec::new()),
             SyncMessage::Unsubscribe { subscription } => {
                 self.apply_unsubscribe(subscription);
                 Ok(Vec::new())

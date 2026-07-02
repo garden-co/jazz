@@ -291,14 +291,12 @@ impl PeerState {
             .and_then(|state| state.prepared_query.as_ref())
             .is_none();
         if needs_prepare {
-            let (_prepared_shape, _prepared_binding, _plan) = node
-                .prepare_query_binding_for_link(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Global,
-                    self.identity(),
-                )
-                .map_err(normalize_maintained_subscription_unsupported_error)?;
+            let (_prepared_shape, _prepared_binding, _plan) = node.prepare_query_binding_for_link(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                self.identity(),
+            )?;
             let cached = CachedPeerQueryPlan {
                 tier: DurabilityTier::Global,
             };
@@ -621,8 +619,7 @@ impl PeerState {
                 self.identity(),
                 tier,
                 read_view,
-            )
-            .map_err(normalize_maintained_subscription_unsupported_error)?;
+            )?;
         let output_tables = tables.clone();
         let result_member_adds = transitions
             .adds
@@ -743,9 +740,8 @@ impl PeerState {
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
         self.forget_subscription_with_node(node, subscription);
-        let (_prepared_shape, _prepared_binding, _plan) = node
-            .prepare_query_binding_for_link(shape, binding, opts.tier, self.identity())
-            .map_err(normalize_maintained_subscription_unsupported_error)?;
+        let (_prepared_shape, _prepared_binding, _plan) =
+            node.prepare_query_binding_for_link(shape, binding, opts.tier, self.identity())?;
         let cached = CachedPeerQueryPlan { tier: opts.tier };
         let state = self.subscriptions.entry(subscription).or_default();
         state.prepared_query = Some(cached);
@@ -1479,19 +1475,6 @@ fn duplicate_row_result_set(
     None
 }
 
-fn normalize_maintained_subscription_unsupported_error(error: Error) -> Error {
-    match error {
-        Error::QueryCapability(_) => unsupported_maintained_subscription_shape_error(),
-        other => other,
-    }
-}
-
-pub(crate) fn unsupported_maintained_subscription_shape_error() -> Error {
-    Error::InvalidStoredValue(
-        "maintained subscription view subscription does not support this query shape",
-    )
-}
-
 fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> bool {
     usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len())
 }
@@ -1962,9 +1945,10 @@ mod tests {
 
     fn assert_unsupported_maintained_subscription_error(result: Result<SyncMessage, Error>) {
         match result {
-            Err(Error::InvalidStoredValue(
-                "maintained subscription view subscription does not support this query shape",
-            )) => {}
+            Err(Error::QueryCapability(detail)) => assert!(
+                detail.contains("CapabilityReport") || detail.contains("UnsupportedReason"),
+                "unexpected capability detail: {detail}"
+            ),
             other => panic!("expected unsupported maintained subscription error, got {other:?}"),
         }
     }

@@ -9,7 +9,7 @@ use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
     CatalogueAck, LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ShapeAst,
-    Subscribe, TableLens,
+    Subscribe, SubscribeRejectReason, TableLens,
 };
 use crate::query::{
     ArraySubquery, Include, JoinMode, all_of, any_of, claim, col, contains, eq, gt, in_list,
@@ -138,13 +138,41 @@ fn assert_unsupported_branch_deletion_witness(error: Error) {
         error.code
     );
     assert!(
-        error.message.contains("BranchOverlay")
-            || error.message.contains(
-                "maintained subscription view subscription does not support this query shape"
-            ),
+        error.message.contains("BranchOverlay"),
         "unexpected error message: {}",
         error.message
     );
+}
+
+fn assert_subscribe_rejected_branch_overlay(
+    message: SyncMessage,
+    expected_subscription: SubscriptionKey,
+) {
+    match message {
+        SyncMessage::SubscribeRejected {
+            subscription,
+            reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+        } => {
+            assert_eq!(subscription, expected_subscription);
+            assert!(
+                detail.contains("BranchOverlay"),
+                "unexpected rejection detail: {detail}"
+            );
+        }
+        other => panic!("expected SubscribeRejected, got {other:?}"),
+    }
+}
+
+fn assert_view_update_for_subscription(
+    message: SyncMessage,
+    expected_subscription: SubscriptionKey,
+) {
+    match message {
+        SyncMessage::ViewUpdate { subscription, .. } => {
+            assert_eq!(subscription, expected_subscription);
+        }
+        other => panic!("expected ViewUpdate, got {other:?}"),
+    }
 }
 
 fn expect_error<T>(result: Result<T, Error>) -> Error {
@@ -2681,7 +2709,106 @@ fn subscriber_connection_serves_single_branch_read_view_subscription() {
         }))
         .unwrap();
 
-    assert_unsupported_branch_deletion_witness(subscriber.borrow_mut().tick().unwrap_err());
+    subscriber.borrow_mut().tick().unwrap();
+    assert_subscribe_rejected_branch_overlay(
+        client_transport
+            .try_recv()
+            .expect("expected subscription rejection"),
+        subscription,
+    );
+    subscriber.borrow_mut().tick().unwrap();
+    client_transport
+        .send(SyncMessage::Unsubscribe { subscription })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+}
+
+#[test]
+fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_others() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    server
+        .node()
+        .borrow_mut()
+        .create_branch(branch)
+        .expect("create branch");
+    seed(&server, "todos", cells("first", false, owner));
+
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let supported_subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let branch_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        read_view: branch_read_opts().read_view,
+    };
+    let branch_subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: branch_opts.read_view_key(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: supported_subscription,
+            values: Vec::new(),
+        }))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("expected initial supported view update"),
+        supported_subscription,
+    );
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: branch_opts,
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: branch_subscription,
+            values: Vec::new(),
+        }))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_subscribe_rejected_branch_overlay(
+        client_transport
+            .try_recv()
+            .expect("expected branch subscription rejection"),
+        branch_subscription,
+    );
+    subscriber.borrow_mut().tick().unwrap();
+
+    seed(&server, "todos", cells("second", false, owner));
+    subscriber.borrow_mut().tick().unwrap();
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("expected supported update after rejection"),
+        supported_subscription,
+    );
 }
 
 #[test]

@@ -29,7 +29,7 @@ use crate::peer::PeerState;
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
     MigrationLens, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
+    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
 use crate::query::{Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, TableSchema};
@@ -3215,9 +3215,6 @@ where
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
                             let values = subscribe.values.clone();
-                            self.node
-                                .borrow_mut()
-                                .apply_sync_message(SyncMessage::Subscribe(subscribe))?;
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 continue;
                             };
@@ -3245,24 +3242,34 @@ where
                                 binding_id: coverage.binding_id,
                                 read_view: coverage.opts.read_view_key(),
                             };
-                            let group =
-                                coverage_groups.entry(coverage.clone()).or_insert_with(|| {
-                                    CoverageGroup {
-                                        shape: shape.clone(),
-                                        binding: binding.clone(),
-                                        subscribers: BTreeSet::new(),
-                                    }
-                                });
-                            let first_subscriber = group.subscribers.is_empty();
+                            let first_subscriber = coverage_groups
+                                .get(&coverage)
+                                .is_none_or(|group| group.subscribers.is_empty());
                             let update = if first_subscriber {
                                 let mut node = self.node.borrow_mut();
-                                let update = peer.rehydrate_query_for_subscription_with_opts(
-                                    &mut node,
-                                    group_subscription,
-                                    &shape,
-                                    &binding,
-                                    opts.clone(),
-                                )?;
+                                let update_result = peer
+                                    .rehydrate_query_for_subscription_with_opts(
+                                        &mut node,
+                                        group_subscription,
+                                        &shape,
+                                        &binding,
+                                        opts.clone(),
+                                    );
+                                let update = match update_result {
+                                    Ok(update) => update,
+                                    Err(crate::node::Error::QueryCapability(detail)) => {
+                                        self.transport
+                                            .send(SyncMessage::SubscribeRejected {
+                                                subscription,
+                                                reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                                                    detail,
+                                                },
+                                            })
+                                            .map_err(transport_error)?;
+                                        continue;
+                                    }
+                                    Err(error) => return Err(error.into()),
+                                };
                                 retarget_view_update(update, subscription)
                             } else {
                                 let mut node = self.node.borrow_mut();
@@ -3273,6 +3280,9 @@ where
                                     &shape,
                                 )?
                             };
+                            self.node
+                                .borrow_mut()
+                                .apply_sync_message(SyncMessage::Subscribe(subscribe))?;
                             self.last_resume_bytes = Some(serialized_sync_message_len(&update));
                             send_with_content_extents(
                                 &self.node,
@@ -3280,6 +3290,14 @@ where
                                 self.transport.as_mut(),
                                 update,
                             )?;
+                            let group =
+                                coverage_groups.entry(coverage.clone()).or_insert_with(|| {
+                                    CoverageGroup {
+                                        shape: shape.clone(),
+                                        binding: binding.clone(),
+                                        subscribers: BTreeSet::new(),
+                                    }
+                                });
                             group.subscribers.insert(subscription);
                             served.insert(subscription, coverage);
                             if first_subscriber {

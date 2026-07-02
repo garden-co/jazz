@@ -57,6 +57,13 @@ pub enum SyncMessage {
     },
     /// Attach a usage-site subscription to a registered query shape.
     Subscribe(Subscribe),
+    /// Reject one usage-site subscription without closing the peer connection.
+    SubscribeRejected {
+        /// Usage-site subscription that was not accepted.
+        subscription: SubscriptionKey,
+        /// Stable rejection class plus diagnostic detail.
+        reason: SubscribeRejectReason,
+    },
     /// Detach a usage-site subscription.
     Unsubscribe {
         /// Usage-site subscription to detach.
@@ -917,6 +924,16 @@ pub struct Subscribe {
     pub subscription: SubscriptionKey,
     /// Binding values in shape parameter order.
     pub values: Vec<Value>,
+}
+
+/// Reason a serving peer rejected one subscription attach.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum SubscribeRejectReason {
+    /// The shape/read-view cannot currently be maintained by the serving peer.
+    UnsupportedShapeCapability {
+        /// Human-readable diagnostic. Not part of semantic compatibility.
+        detail: String,
+    },
 }
 
 /// Legacy-compatible table-qualified current content row entry:
