@@ -258,7 +258,6 @@ function makePolicyTodoByIdQuery(schema: WasmSchema, id: string): QueryBuilder<P
   };
 }
 
-const BASIC_SCHEMA_DIR = fileURLToPath(new URL("../testing/fixtures/basic", import.meta.url));
 const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
   new URL("../../../../examples/todo-server-ts", import.meta.url),
 );
@@ -429,13 +428,14 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
+      const todoServerProject = await loadTodoServerProject();
       await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
-        schemaDir: TODO_SERVER_SCHEMA_DIR,
+        schema: todoServerProject.wasmSchema,
+        permissions: todoServerProject.permissions,
       });
-      const todoServerProject = await loadTodoServerProject();
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
 
@@ -573,13 +573,14 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
+      const todoServerProject = await loadTodoServerProject();
       await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
-        schemaDir: TODO_SERVER_SCHEMA_DIR,
+        schema: todoServerProject.wasmSchema,
+        permissions: todoServerProject.permissions,
       });
-      const todoServerProject = await loadTodoServerProject();
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
 
@@ -661,7 +662,7 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         appId,
         adminSecret,
-        schemaDir: BASIC_SCHEMA_DIR,
+        schema: TEST_SCHEMA,
       });
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");

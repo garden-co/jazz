@@ -1,12 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CompiledPermissions, schema as s } from "../../src/";
+import { schema as s } from "../../src/";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import {
-  fetchPermissionsHead,
-  publishStoredPermissions,
-  publishStoredSchema,
-} from "../../src/runtime/schema-fetch.js";
+import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, sleep, uniqueDbName, waitForQuery, withTimeout } from "./support.js";
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 
@@ -463,31 +459,15 @@ async function expectStillPending<T>(
   throw new Error(`${label} ${result.state}${reason}`);
 }
 
-async function publishSyncServerSchemaAndPermissions(appId: string): Promise<JazzServerInfo> {
-  const testingServer = await getJazzServerInfo(appId);
-  await publishPermissionsForServer(testingServer, allowAllPermissions);
-  return testingServer;
-}
-
-async function publishPermissionsForServer(
-  testingServer: JazzServerInfo,
-  permissions: CompiledPermissions,
-): Promise<void> {
+async function publishSyncServerSchemaAndPermissions(_appId: string): Promise<JazzServerInfo> {
+  const testingServer = await getJazzServerInfo(_appId);
   const { appId, serverUrl, adminSecret } = testingServer;
-  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+  await deploy({
     appId,
+    serverUrl,
     adminSecret,
-    schema: app.wasmSchema,
+    schema: app,
+    permissions: allowAllPermissions,
   });
-  const { head } = await fetchPermissionsHead(serverUrl, {
-    appId,
-    adminSecret,
-  });
-  await publishStoredPermissions(serverUrl, {
-    appId,
-    adminSecret,
-    schemaHash,
-    permissions,
-    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
-  });
+  return testingServer;
 }

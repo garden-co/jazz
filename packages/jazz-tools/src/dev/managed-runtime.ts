@@ -348,7 +348,7 @@ export class ManagedDevRuntime {
           console.log(`${LOG_PREFIX} telemetry collector: ${telemetryCollectorUrl}`);
         }
 
-        const { deploy } = await import("./dev-server.js");
+        const { deploy } = await import("./catalogue-project.js");
         try {
           const initialDeploy = await deploy({
             serverUrl,

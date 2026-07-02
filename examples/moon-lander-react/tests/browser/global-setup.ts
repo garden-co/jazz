@@ -5,8 +5,9 @@
  * The schema is pushed explicitly so clients don't need adminSecret.
  */
 
-import { join } from "node:path";
 import { startLocalJazzServer, deploy, type LocalJazzServerHandle } from "jazz-tools/testing";
+import permissions from "../../permissions.js";
+import { app } from "../../schema.js";
 
 const TEST_PORT = parseInt(process.env.TEST_PORT!, 10);
 const ADMIN_SECRET = "test-admin-secret-for-moon-lander-tests";
@@ -28,12 +29,12 @@ export async function setup(): Promise<void> {
 
   const handle = await server;
 
-  const schemaDir = join(import.meta.dirname, "../..");
   await deploy({
     serverUrl: handle.url,
     appId: APP_ID,
     adminSecret: ADMIN_SECRET,
-    schemaDir,
+    schema: app,
+    permissions,
   });
 }
 

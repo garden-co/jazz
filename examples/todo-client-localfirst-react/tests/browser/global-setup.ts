@@ -1,5 +1,6 @@
-import { join } from "node:path";
 import { startLocalJazzServer, deploy } from "jazz-tools/testing";
+import permissions from "../../permissions.js";
+import { app } from "../../schema.js";
 import {
   EDGE_TEST_PORT,
   CORE_TEST_PORT,
@@ -88,7 +89,8 @@ export async function setup(): Promise<void> {
         serverUrl: coreServer.url,
         appId: coreServer.appId,
         adminSecret: coreServer.adminSecret!,
-        schemaDir: join(import.meta.dirname, "../.."),
+        schema: app,
+        permissions,
       });
 
       await waitForCatalogueOnEdge(edgeServer, result.schema.hash);

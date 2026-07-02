@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { jazzPlugin } from "./vite.js";
 import * as devServer from "./dev-server.js";
+import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 
@@ -241,7 +242,7 @@ describe("jazzPlugin", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
     let capturedOnPush: ((hash: string) => void) | undefined;
     vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
       capturedOnPush = opts.onPush;
@@ -290,7 +291,7 @@ describe("jazzPlugin", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const schemaDir = await tempRoots.create("jazz-vite-top-level-telemetry-test-");
@@ -374,7 +375,7 @@ describe("jazzPlugin", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     process.env.VITE_JAZZ_SERVER_URL = "http://localhost:4242";
     process.env.VITE_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000090";
-    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
     vi.spyOn(devServer, "startLocalJazzServer");
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
