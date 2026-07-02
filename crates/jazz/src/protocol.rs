@@ -135,6 +135,46 @@ pub enum SyncMessage {
         /// Shipped extent payloads.
         extents: Vec<ContentExtent>,
     },
+    /// Repair-lane request for exact row-version payloads referenced by known-state dedup.
+    FetchRowVersions {
+        /// Exact version identities requested by the receiver.
+        requests: Vec<RowVersionRef>,
+    },
+    /// Repair-lane response carrying canonical row-version payloads.
+    RowVersionPayloads {
+        /// Versions visible to the requesting link identity.
+        versions: Vec<VersionRecord>,
+    },
+}
+
+/// Exact row-version identity used by known-state repair requests.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct RowVersionRef {
+    /// Table containing the row.
+    pub table: groove::Intern<String>,
+    /// Stable row id.
+    pub row_uuid: RowUuid,
+    /// Transaction HLC time.
+    pub tx_time: TxTime,
+    /// Transaction node id in wire form.
+    pub tx_node_id: NodeUuid,
+}
+
+impl RowVersionRef {
+    /// Construct an exact row-version reference.
+    pub fn new(table: impl Into<String>, row_uuid: RowUuid, tx_id: TxId) -> Self {
+        Self {
+            table: groove::Intern::new(table.into()),
+            row_uuid,
+            tx_time: tx_id.time,
+            tx_node_id: tx_id.node,
+        }
+    }
+
+    /// Transaction id addressed by this row-version reference.
+    pub fn tx_id(&self) -> TxId {
+        TxId::new(self.tx_time, self.tx_node_id)
+    }
 }
 
 /// Payload coverage that the sender believes the peer already has.

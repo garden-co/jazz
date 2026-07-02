@@ -99,6 +99,22 @@
       "frame_base64": "AQEBAFwNAQAQd3d3d3d3d3d3d3d3d3d3dwAQAAAAAAAAAAAAAAAAAAAAABBVVVVVVVVVVVVVVVVVVVVVEHd3d3d3d3d3d3d3d3d3d3cEYm9keRAMDGhlbGxvIHdvcmxkIQ==",
       "payload_hex": "0d010010777777777777777777777777777777770010000000000000000000000000000000001055555555555555555555555555555555107777777777777777777777777777777704626f6479100c0c68656c6c6f20776f726c6421",
       "decoded_debug": "ContentExtents { extents: [ContentExtent { owner: LargeValueOwnerRef { table: None, row: RowUuid(77777777-7777-7777-7777-777777777777), version: CurrentVisible, read_view: ReadViewKey { id: 00000000-0000-0000-0000-000000000000 } }, extent: Extent { writer: AuthorId(55555555-5555-5555-5555-555555555555), row: RowUuid(77777777-7777-7777-7777-777777777777), column: \"body\", offset: 16, len: 12 }, bytes: [104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 33] }] }"
+    },
+    {
+      "name": "fetch_row_versions_todos",
+      "message_family": "FetchRowVersions",
+      "frame_hex": "010101002b0e0105746f646f7310777777777777777777777777777777770c1011111111111111111111111111111111",
+      "frame_base64": "AQEBACsOAQV0b2RvcxB3d3d3d3d3d3d3d3d3d3d3DBARERERERERERERERERERER",
+      "payload_hex": "0e0105746f646f7310777777777777777777777777777777770c1011111111111111111111111111111111",
+      "decoded_debug": "FetchRowVersions { requests: [RowVersionRef { table: \"todos\", row_uuid: RowUuid(77777777-7777-7777-7777-777777777777), tx_time: TxTime(12), tx_node_id: NodeUuid(11111111-1111-1111-1111-111111111111) }] }"
+    },
+    {
+      "name": "row_version_payloads_empty",
+      "message_family": "RowVersionPayloads",
+      "frame_hex": "01010100020f00",
+      "frame_base64": "AQEBAAIPAA==",
+      "payload_hex": "0f00",
+      "decoded_debug": "RowVersionPayloads { versions: [] }"
     }
   ]
 }

@@ -1010,6 +1010,148 @@ fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
 }
 
 #[test]
+fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    let alice_row = row(7);
+    let bob_row = row(8);
+
+    let alice_tx = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", alice_row, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "alice")),
+    );
+    let bob_tx = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", bob_row, 11)
+            .made_by(bob)
+            .cells(owner_cells(bob, "bob")),
+    );
+    let requests = vec![
+        crate::protocol::RowVersionRef::new("todos", alice_row, alice_tx),
+        crate::protocol::RowVersionRef::new("todos", bob_row, bob_tx),
+    ];
+
+    let mut alice_peer = PeerState::for_author(alice);
+    let messages = alice_peer
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: requests.clone(),
+            },
+        )
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { versions }] = messages.as_slice() else {
+        panic!("expected one row-version payload response");
+    };
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].row_uuid(), alice_row);
+
+    let mut too_many = Vec::new();
+    for _ in 0..=crate::protocol_limits::MAX_FETCH_ROW_VERSIONS {
+        too_many.push(crate::protocol::RowVersionRef::new("todos", alice_row, alice_tx));
+    }
+    assert!(matches!(
+        alice_peer.handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions { requests: too_many },
+        ),
+        Err(Error::UnsupportedSyncMessage(
+            "row-version repair request exceeds limit"
+        ))
+    ));
+}
+
+#[test]
+fn declared_known_state_view_update_repairs_withheld_row_version_body() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(7);
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+
+    let (tx_id, commit_unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("repair me")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
+        panic!("expected commit unit");
+    };
+    core.ingest_commit_unit(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    reader
+        .ingest_known_transaction(
+            tx,
+            Vec::new(),
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+
+    let mut update = core.view_update_for_current_rows("todos").unwrap();
+    let SyncMessage::ViewUpdate {
+        version_bundles,
+        result_member_adds,
+        ..
+    } = &mut update
+    else {
+        panic!("expected view update");
+    };
+    version_bundles.clear();
+    assert_eq!(
+        result_member_adds,
+        &vec![("todos".to_owned().into(), row_uuid, tx_id)]
+    );
+
+    let missing = reader
+        .missing_known_state_row_version_refs(&update)
+        .unwrap();
+    assert_eq!(
+        missing,
+        vec![crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)]
+    );
+    let mut peer = PeerState::relay();
+    let messages = peer
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: missing.clone(),
+            },
+        )
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { versions }] = messages.as_slice()
+    else {
+        panic!("expected row-version payloads");
+    };
+    reader
+        .apply_row_version_payloads_for_requests(&missing, versions.clone())
+        .unwrap();
+    assert!(reader
+        .missing_known_state_row_version_refs(&update)
+        .unwrap()
+        .is_empty());
+    reader.apply_sync_message(update).unwrap();
+    assert_eq!(
+        reader
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("repair me"))])
+    );
+}
+
+#[test]
 fn view_updates_ship_current_versions_to_downstream_nodes() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));

@@ -23,8 +23,9 @@ use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     ContentExtent, LargeValueOwnerRef, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    RowVersionRef, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
 };
+use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, validate_fetch_row_versions};
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
 use crate::tx::{DurabilityTier, Transaction, TxId, TxKind};
@@ -1034,6 +1035,39 @@ impl PeerState {
         self.serve_content_extents(node, row, [extent])
     }
 
+    /// Serve exact row-version repair fetches for this peer.
+    pub fn handle_row_versions_fetch<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        message: SyncMessage,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        let SyncMessage::FetchRowVersions { requests } = message else {
+            return Err(Error::UnsupportedSyncMessage(
+                "non-row-version-fetch peer request",
+            ));
+        };
+        validate_fetch_row_versions(&requests).map_err(|_| {
+            Error::UnsupportedSyncMessage("row-version repair request exceeds limit")
+        })?;
+        self.serve_row_versions(node, &requests)
+    }
+
+    /// Build repair-lane responses for visible requested row-version payloads.
+    pub fn serve_row_versions<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        requests: &[RowVersionRef],
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        let versions = node.row_version_payloads_for_refs(requests, self.identity())?;
+        split_row_version_payloads(versions)
+    }
+
     /// Build a bulk-lane response for extents that belong to one row.
     pub fn serve_content_extents<S>(
         &mut self,
@@ -1492,6 +1526,42 @@ fn duplicate_row_result_set(
 
 fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> bool {
     usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len())
+}
+
+fn split_row_version_payloads(versions: Vec<VersionRecord>) -> Result<Vec<SyncMessage>, Error> {
+    let mut messages = Vec::new();
+    let mut current = Vec::new();
+    for version in versions {
+        let single_encoded = postcard::to_allocvec(&SyncMessage::RowVersionPayloads {
+            versions: vec![version.clone()],
+        })
+        .map_err(|_| Error::UnsupportedSyncMessage("failed to measure row-version payload"))?;
+        if single_encoded.len() > MAX_SYNC_MESSAGE_BYTES {
+            return Err(Error::UnsupportedSyncMessage(
+                "row-version payload exceeds sync message limit",
+            ));
+        }
+        if current.is_empty() {
+            current.push(version);
+            continue;
+        }
+        let mut candidate = current.clone();
+        candidate.push(version.clone());
+        let encoded = postcard::to_allocvec(&SyncMessage::RowVersionPayloads {
+            versions: candidate,
+        })
+        .map_err(|_| Error::UnsupportedSyncMessage("failed to measure row-version payload"))?;
+        if encoded.len() > MAX_SYNC_MESSAGE_BYTES {
+            messages.push(SyncMessage::RowVersionPayloads { versions: current });
+            current = vec![version];
+        } else {
+            current.push(version);
+        }
+    }
+    if !current.is_empty() {
+        messages.push(SyncMessage::RowVersionPayloads { versions: current });
+    }
+    Ok(messages)
 }
 
 fn view_update_reset_result_set(update: &mut SyncMessage) {
