@@ -218,7 +218,7 @@ fn admin_schema_api_rejects_unsupported_schema_type() {
         "schema": {
             "todos": {
                 "columns": [
-                    { "name": "metadata", "column_type": "Json" }
+                    { "name": "metadata", "column_type": "Row" }
                 ]
             }
         }
@@ -237,7 +237,7 @@ fn admin_schema_api_rejects_unsupported_schema_type() {
         rejected.json()["message"]
             .as_str()
             .expect("message")
-            .contains("Json")
+            .contains("Row")
     );
 
     server.shutdown();
