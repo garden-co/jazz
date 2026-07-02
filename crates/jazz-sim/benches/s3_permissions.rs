@@ -20,7 +20,10 @@ use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
-use jazz::protocol::{ResultRowEntry, SyncMessage, VersionRecord};
+use jazz::protocol::{
+    RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
+    VersionRecord,
+};
 use jazz::query::{Binding, Query, ValidatedQuery, claim, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::time::TxTime;
@@ -416,6 +419,7 @@ struct Client {
     node: NodeState<RocksDbStorage>,
     _dir: tempfile::TempDir,
     peer: PeerState,
+    registered_subscriptions: BTreeSet<SubscriptionKey>,
     visible_rows: BTreeSet<RowUuid>,
 }
 
@@ -1000,6 +1004,7 @@ fn revoke_phase(
     let delivered = ctx.recv(&client.name);
     let send_recv_us = send_start.elapsed().as_micros() as u64;
     let apply_start = Instant::now();
+    ensure_client_subscription_registered(client, shape, binding);
     apply_client_update(client, delivered.message);
     let apply_us = apply_start.elapsed().as_micros() as u64;
     let mut disappearance = Histogram::new(3).unwrap();
@@ -1055,6 +1060,7 @@ fn forbidden_write_phase(
     let forbidden = result_rows(&update).len() as u64;
     ctx.send(&edge.name, &spy.name, update);
     let delivered = ctx.recv(&spy.name);
+    ensure_client_subscription_registered(spy, shape, binding);
     apply_client_update(spy, delivered.message);
     for tick in 0..env_usize("JAZZ_S3_SPY_TICKS", 3) {
         commit_global(
@@ -1341,6 +1347,7 @@ fn run_block_tree_cold_headline(config: &Config, profile: PeerProfile) -> BlockT
         client_recv_us,
     );
     let apply_start = Instant::now();
+    ensure_client_subscription_registered(&mut cold, &shape, &binding);
     cold.node.apply_sync_message(delivered.message).unwrap();
     let client_apply_sync_us = apply_start.elapsed().as_micros() as u64;
     let client_storage_writes = cold
@@ -1916,6 +1923,7 @@ fn hydrate(
     let output_rows = result_rows(&update).len();
     ctx.send(&edge.name, &client.name, update);
     let delivered = ctx.recv(&client.name);
+    ensure_client_subscription_registered(client, shape, binding);
     apply_client_update(client, delivered.message);
     HydrateSummary {
         latency_us: (ctx.now_ms() - start) * 1_000,
@@ -1943,6 +1951,7 @@ fn hydrate_direct(
     let output_rows = result_rows(&update).len();
     ctx.send("core", &client.name, update);
     let delivered = ctx.recv(&client.name);
+    ensure_client_subscription_registered(client, shape, binding);
     apply_client_update(client, delivered.message);
     HydrateSummary {
         latency_us: (ctx.now_ms() - start) * 1_000,
@@ -1975,6 +1984,7 @@ fn deliver_update(
         .unwrap();
     ctx.send(&edge.name, &client.name, update);
     let delivered = ctx.recv(&client.name);
+    ensure_client_subscription_registered(client, shape, binding);
     apply_client_update(client, delivered.message);
 }
 
@@ -2001,6 +2011,43 @@ fn apply_client_update(client: &mut Client, message: SyncMessage) {
         }
     }
     client.node.apply_sync_message(message).unwrap();
+}
+
+fn ensure_client_subscription_registered(
+    client: &mut Client,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+) {
+    let opts = RegisterShapeOptions::default();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+    if !client.registered_subscriptions.insert(subscription) {
+        return;
+    }
+    client
+        .node
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(shape),
+            opts: opts.clone(),
+        })
+        .expect("client registers query shape before view updates");
+    let values = shape
+        .params()
+        .keys()
+        .map(|name| binding.values().get(name).cloned().unwrap())
+        .collect();
+    client
+        .node
+        .apply_sync_message(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values,
+        }))
+        .expect("client registers query binding before view updates");
 }
 
 fn seed_fixture(
@@ -2532,6 +2579,7 @@ fn open_client(name: &str, node_uuid: NodeUuid, schema: JazzSchema, author: Auth
         node,
         _dir: dir,
         peer: PeerState::edge_client(author),
+        registered_subscriptions: BTreeSet::new(),
         visible_rows: BTreeSet::new(),
     }
 }

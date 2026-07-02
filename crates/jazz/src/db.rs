@@ -704,7 +704,7 @@ where
                 &prepared.shape,
                 &prepared.binding,
                 upstream_opts,
-            )],
+            )?],
         })
     }
 
@@ -730,7 +730,7 @@ where
                 &shape,
                 &binding,
                 upstream_opts,
-            )],
+            )?],
         })
     }
 
@@ -739,7 +739,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
-    ) -> SubscriptionKey {
+    ) -> Result<SubscriptionKey, Error> {
         let subscription = self.node.next_subscription_key(shape, opts.read_view_key());
         self.node
             .upstream_subscriptions
@@ -757,7 +757,7 @@ where
             .borrow_mut()
             .insert(coverage_key(shape, binding, opts), subscription);
         self.node.schedule_tick(TickUrgency::Immediate);
-        subscription
+        Ok(subscription)
     }
 
     /// Attach a one-shot usage-site query coverage request at the default tier.
@@ -817,22 +817,43 @@ where
             Some(subscription),
             subscription_snapshot_for_rows(&prepared.shape, rows),
         );
+        let mut state_shape = prepared.shape.clone();
+        let mut state_binding = prepared.binding.clone();
+        let mut remote_read_tier = None;
+        let mut cleanup = None;
+        if opts.propagation == Propagation::Full {
+            let upstream_opts =
+                upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
+            let (shape, binding) = self
+                .node
+                .node
+                .borrow()
+                .query_binding_for_link(&prepared.shape, &prepared.binding)?;
+            state_shape = shape.clone();
+            state_binding = binding.clone();
+            remote_read_tier = Some(upstream_opts.tier);
+            let upstream_subscriptions =
+                self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts)?;
+            cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
+        }
+        let settled_tier = remote_read_tier.unwrap_or(read_tier);
         let settled = subscription_is_settled(
             &self.node.node.borrow(),
-            &prepared.shape,
-            &prepared.binding,
-            read_tier,
+            &state_shape,
+            &state_binding,
+            settled_tier,
             opts.read_view.clone(),
         );
         let (sender, receiver) = unbounded();
         let state = Rc::new(RefCell::new(SubscriptionState {
             kind: SubscriptionKind::Prepared {
-                shape: prepared.shape.clone(),
-                binding: prepared.binding.clone(),
+                shape: state_shape,
+                binding: state_binding,
                 maintained_subscription,
             },
             author,
             read_tier,
+            remote_read_tier,
             read_view: opts.read_view.clone(),
             snapshot: snapshot.clone(),
             settled,
@@ -851,17 +872,6 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
-        let mut cleanup = None;
-        if opts.propagation == Propagation::Full {
-            // If this Db is attached to upstreams, ask them to carry this shape so
-            // the subscription fills from synced rows, not just local writes. The consumer
-            // sees only the handle; the request flows out on the next `tick`.
-            let upstream_opts =
-                upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
-            let upstream_subscriptions =
-                self.open_subscription_upstream_coverage(prepared, upstream_opts.clone())?;
-            cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
-        }
         Ok(SubscriptionStream {
             receiver,
             _state: state,
@@ -881,15 +891,14 @@ where
 
     fn open_subscription_upstream_coverage(
         &self,
-        prepared: &PreparedQuery,
+        shape: &ValidatedQuery,
+        binding: &Binding,
         opts: RegisterShapeOptions,
     ) -> Result<Vec<SubscriptionKey>, Error> {
-        ensure_supported_subscription_shape(&prepared.shape)?;
+        ensure_supported_subscription_shape(shape)?;
         Ok(vec![self.attach_query_shape_binding_with_opts(
-            &prepared.shape,
-            &prepared.binding,
-            opts,
-        )])
+            shape, binding, opts,
+        )?])
     }
 
     fn upstream_subscription_cleanup(
@@ -2679,17 +2688,18 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (read_tier, read_view, previous, previous_settled, author) = {
+        let (read_tier, remote_read_tier, read_view, previous, previous_settled, author) = {
             let state = state.borrow();
             (
                 state.read_tier,
+                state.remote_read_tier,
                 state.read_view.clone(),
                 state.snapshot.clone(),
                 state.settled,
                 state.author,
             )
         };
-        let (snapshot, settled) = {
+        let (snapshot, settled, snapshot_tier) = {
             let mut state_ref = state.borrow_mut();
             match &mut state_ref.kind {
                 SubscriptionKind::Prepared {
@@ -2697,7 +2707,26 @@ where
                     binding,
                     maintained_subscription,
                 } => {
-                    let snapshot = if let Some(maintained) = maintained_subscription.as_mut() {
+                    let remote_settled_tier = remote_read_tier.filter(|tier| {
+                        node.borrow().has_settled_result_set(BindingViewKey {
+                            shape_id: shape.shape_id(),
+                            binding_id: binding.binding_id(),
+                            read_view: RegisterShapeOptions {
+                                tier: *tier,
+                                read_view: read_view.clone(),
+                            }
+                            .read_view_key(),
+                        })
+                    });
+                    let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
+                    let snapshot = if remote_settled_tier.is_some() {
+                        node.borrow_mut().subscription_snapshot_for_link(
+                            shape,
+                            binding,
+                            snapshot_tier,
+                            author,
+                        )?
+                    } else if let Some(maintained) = maintained_subscription.as_mut() {
                         let update = {
                             node.borrow_mut()
                                 .drain_local_maintained_view_subscription(maintained)?
@@ -2733,20 +2762,21 @@ where
                         node.borrow_mut()
                             .subscription_snapshot_for_link(shape, binding, read_tier, author)?
                     };
+                    let settled_tier = remote_read_tier.unwrap_or(read_tier);
                     let settled = subscription_is_settled(
                         &node.borrow(),
                         shape,
                         binding,
-                        read_tier,
+                        settled_tier,
                         read_view,
                     );
-                    (snapshot, settled)
+                    (snapshot, settled, snapshot_tier)
                 }
             }
         };
         if snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
-            let event = subscription_delta_event(read_tier, settled, &previous, &snapshot);
+            let event = subscription_delta_event(snapshot_tier, settled, &previous, &snapshot);
             state.snapshot = snapshot;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
@@ -4614,6 +4644,7 @@ struct SubscriptionState {
     kind: SubscriptionKind,
     author: AuthorId,
     read_tier: DurabilityTier,
+    remote_read_tier: Option<DurabilityTier>,
     read_view: ReadViewSpec,
     snapshot: RelationSnapshot,
     settled: bool,
