@@ -18,7 +18,7 @@ use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
     MaintainedTerminalSchemas,
 };
-use crate::node::{Error, NodeState};
+use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
 #[cfg(any(test, debug_assertions))]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
@@ -127,6 +127,17 @@ enum MemberIndexKey {
 #[derive(Debug)]
 struct CachedPeerQueryPlan {
     tier: DurabilityTier,
+    plan: PreparedQueryPlanHandle,
+}
+
+impl CachedPeerQueryPlan {
+    fn tier(&self) -> DurabilityTier {
+        // Keep the app-row prepared plan live for the same invalidation lifetime
+        // as the subscription state; maintained-view bundling currently needs
+        // only the tier from this cached record.
+        let _retained_plan = &self.plan;
+        self.tier
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -291,7 +302,7 @@ impl PeerState {
             .and_then(|state| state.prepared_query.as_ref())
             .is_none();
         if needs_prepare {
-            let (_prepared_shape, _prepared_binding, _plan) = node.prepare_query_binding_for_link(
+            let (_prepared_shape, _prepared_binding, plan) = node.prepare_query_binding_for_link(
                 &shape,
                 &binding,
                 DurabilityTier::Global,
@@ -299,6 +310,7 @@ impl PeerState {
             )?;
             let cached = CachedPeerQueryPlan {
                 tier: DurabilityTier::Global,
+                plan,
             };
             let state = self.subscriptions.entry(subscription).or_default();
             state.prepared_query = Some(cached);
@@ -475,7 +487,7 @@ impl PeerState {
             .subscriptions
             .get(&subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .map(|prepared| prepared.tier)
+            .map(CachedPeerQueryPlan::tier)
             .ok_or(Error::InvalidStoredValue(
                 "maintained subscription view is missing prepared state",
             ))?;
@@ -740,9 +752,12 @@ impl PeerState {
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
         self.forget_subscription_with_node(node, subscription);
-        let (_prepared_shape, _prepared_binding, _plan) =
+        let (_prepared_shape, _prepared_binding, plan) =
             node.prepare_query_binding_for_link(shape, binding, opts.tier, self.identity())?;
-        let cached = CachedPeerQueryPlan { tier: opts.tier };
+        let cached = CachedPeerQueryPlan {
+            tier: opts.tier,
+            plan,
+        };
         let state = self.subscriptions.entry(subscription).or_default();
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
@@ -805,7 +820,7 @@ impl PeerState {
             .subscriptions
             .get(&maintained_subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .map(|prepared| prepared.tier)
+            .map(CachedPeerQueryPlan::tier)
             .ok_or(Error::InvalidStoredValue(
                 "coverage group subscription is missing prepared state",
             ))?;

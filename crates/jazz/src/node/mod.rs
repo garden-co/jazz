@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use groove::db::{
@@ -257,7 +258,8 @@ struct QueryServing {
     current_row_graphs: BTreeMap<(String, DurabilityTier), GraphBuilder>,
     /// Prepared query plans keyed by shape, durability tier, and parameter
     /// descriptor signature.
-    query_shape_cache: BTreeMap<(crate::query::ShapeId, DurabilityTier, String), PreparedQueryPlan>,
+    query_shape_cache:
+        BTreeMap<(crate::query::ShapeId, DurabilityTier, String), PreparedQueryPlanHandle>,
     /// Logical tables that have history rows for a stored transaction.
     tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Approximate insertion order for bounding `tx_version_tables_cache`.
@@ -3117,6 +3119,8 @@ pub(crate) enum PreparedQueryPlan {
         params: Vec<PreparedQueryParam>,
     },
 }
+
+pub(crate) type PreparedQueryPlanHandle = Arc<PreparedQueryPlan>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedQueryParam {
