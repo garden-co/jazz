@@ -75,7 +75,7 @@ where
                     "history schema version alias must exist",
                 ))?;
             let source_table = self.table_in_schema(version.table(), source_schema)?;
-            let mut cells = version.cells(&source_table)?;
+            let mut cells = self.materialized_cells_for_version(&source_table, &version)?;
             let projected_table = self.translate_cells(
                 source_schema,
                 read_schema_version,
@@ -145,7 +145,7 @@ where
                     "history schema version alias must exist",
                 ))?;
             let source_table = self.table_in_schema(content.table(), source_schema)?;
-            let mut cells = content.cells(&source_table)?;
+            let mut cells = self.materialized_cells_for_version(&source_table, &content)?;
             let projected_table = self.translate_cells(
                 source_schema,
                 read_schema_version,
