@@ -50,23 +50,26 @@ WASM or NAPI against a server shell without semantic forks.**
 
 ### 17.2.1 NAPI status and next practical step
 
-There is no `jazz-napi` crate or Node package in the workspace yet. The future
-native Node binding should live as a sibling to `jazz-wasm` (for example a
-workspace `jazz-napi` crate, with package metadata beside it or inside it, once
-packaging is chosen) because it is another host binding over the same Rust ABI,
-not part of the core `jazz` crate and not a fork of the TypeScript harness.
+`jazz-napi` exists as a workspace `cdylib` crate and Node package sibling to
+`jazz-wasm`. It is built with napi-rs for Linux x64 gnu, Windows x64 MSVC, macOS
+x64, and macOS arm64 targets. Release workflows build the per-platform `.node`
+artifacts, stage napi-rs platform packages under `crates/jazz-napi/npm/*`, wire
+them into the root loader as optional dependencies, verify scoped
+`@garden-co/*` package names, and publish the loader plus platform packages in
+lockstep with `jazz-tools`, `jazz-wasm`, and `create-jazz` alpha versions.
+Preview builds reuse the same assembled package artifact.
 
-The NAPI wrapper should follow the same shape as WASM: idiomatic host objects
+The binding shape remains the same contract as WASM: idiomatic host objects
 around the real Rust `Db`, transactions, subscriptions, and transports. It must
 reuse core payloads such as `ReadOpts`, `Error`, and `WireError`, and call
-postcard directly where a byte payload is useful; it should not recreate a
+postcard directly where a byte payload is useful; it must not recreate a
 command/event runtime inside Rust.
 
-The smallest credible first NAPI milestone is a memory-only native package that
-opens a `Db`, runs create/update/delete/query flows, exposes one subscription as
-a host stream/callback, and proves the row-record decoder shape used by WASM
-examples. Transport, worker ownership, durable storage, browser parity, and
-package publishing should follow only after that direct object canary is green.
+The next useful NAPI milestone is no longer "create the package"; it is a
+package-level conformance canary that opens a native `Db`, runs
+create/update/delete/query flows, exposes one subscription as a host
+stream/callback, proves the row-record decoder shape used by WASM examples, and
+exercises the same WebSocket/server boundary as the browser worker gate.
 
 ## 17.3 P1 — harden deployability
 

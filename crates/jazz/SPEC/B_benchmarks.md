@@ -121,14 +121,27 @@ the full `client↔edge↔core` path through the `Db` facade with full client `D
 `edge_permission_scope_hydration` phases. The per-row notes below predate that
 conversion and describe _phase_ coverage, not topology.
 
-**Latest default-size run (2026-06-15, git `6ff5f2e`).** Canary (smoke) then
-default sizes. Clean at default: groove (`micro`, `scenario`), jazz (`sync`,
-`validation`, `cold_subscription`, `large_value_checkpointing`), and jazz-sim S1,
-S2, S3, S5, S7, S9. **Two scenarios fail at default** (both pass smoke; both
-touched by the edge conversion): **S4** — the settlement vs propagation-inclusive
-throughput runs no longer accept an identical schedule under edge routing
-(assertion in `s4_order_processing.rs`); **S6** — `MissingTransaction` panic in
-`read_doc` after the edge-routed ~2000-edit replay. Both have tracked fixes.
+**Canonical alpha topology (Plan 1).** The conformance and benchmark topology is
+client main thread (**in-memory**) ↔ client worker relay (**OPFS**) ↔ edge
+(**RocksDB**) ↔ core (**RocksDB**). The same sync protocol and `Db` facade are
+used at every client hop; edge/core roles are topology configuration, not a
+parallel product API. Scenario smoke runs currently exercise the client↔edge↔core
+shape in-process; browser OPFS and worker ownership remain integrability gates
+(ch. 9 and ch. 17).
+
+**Latest Plan-1 smoke baseline (2026-07-02, ledger run
+`20260702T005632Z`, git `48e6a65aa`, dirty tree).** All smoke scenarios are
+green: jazz (`cold_subscription`, `sync`, `validation`, `merge_back_cost`,
+`large_value_checkpointing`) and jazz-sim (`micro`, S1–S7, S9). S2's historical
+load phase is not counted as a hidden pass: it emits visible gated rows with
+`needs: "historical-implicit-include-source-coverage"` for the known
+`Source(Coverage)` capability gap. Earlier Plan-1 ledger runs record the repaired
+historical S4/S6 failures: the former S4 edge-routing assertion and the former S6
+`MissingTransaction` failure at the ~2500-edit failure size no longer reproduce,
+and the S4 retained line now reports settlement and propagation-inclusive
+throughput separately. The first artifact-backed smoke run is
+`20260702T002815Z`; the first warm execution-only run after JSONL artifacts is
+`20260702T003434Z`; the profile baseline run is `20260702T005457Z`.
 
 **Interactive fast/canary helper.** `scripts/bench_jazz_sim_fast.sh --all-fast`
 runs the implemented jazz-sim scenarios that fit `JAZZ_BENCH_PROFILE=fast`,

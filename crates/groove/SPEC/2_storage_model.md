@@ -10,6 +10,12 @@ Rust names in this chapter (`OrderedKvStorage`, `RecordStore`,
 `RocksDbStorage`, …) identify the reference implementation surface. The
 normative contract is the behavior specified here.
 
+The storage contract owner declares its own build requirements. For the RocksDB
+reference backend, groove declares the compression features it relies on
+(`lz4`, `zstd`) in its own crate metadata rather than inheriting them indirectly
+from a consumer such as `jazz-tools`; this keeps standalone groove builds aligned
+with the production workspace feature set.
+
 ## 2.1 The storage interface: `OrderedKvStorage`
 
 The storage layer supplies exactly the ordered byte map groove needs. It is

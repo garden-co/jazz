@@ -42,21 +42,7 @@ prebuild_benches() {
   (
     cd "$ROOT"
     cargo bench -p jazz --no-run -j 2
-    # Package-wide jazz-sim --no-run currently also builds stale lib-test ABI
-    # code; prebuild the actual smoke bench binaries until that cleanup lands.
-    for bench in \
-      micro \
-      s1_saas \
-      s2_canvas \
-      s3_permissions \
-      s4_order_processing \
-      s5_durable_stream \
-      s6_text_traces \
-      s7_migrations \
-      s9_durable_execution
-    do
-      cargo bench -p jazz-sim --bench "$bench" --no-run -j 2
-    done
+    cargo bench -p jazz-sim --no-run -j 2
   ) >"$log" 2>&1
   status=$?
   end="$(perl -MTime::HiRes=time -e 'print time')"
@@ -71,10 +57,7 @@ prebuild_benches() {
     profile_start="$(perl -MTime::HiRes=time -e 'print time')"
     (
       cd "$ROOT"
-      for bench in s1_saas s3_permissions s4_order_processing
-      do
-        cargo bench -p jazz-sim --bench "$bench" --no-run -j 2 --features profiling
-      done
+      cargo bench -p jazz-sim --no-run -j 2 --features profiling
     ) >>"$log" 2>&1
     profile_status=$?
     profile_end="$(perl -MTime::HiRes=time -e 'print time')"
