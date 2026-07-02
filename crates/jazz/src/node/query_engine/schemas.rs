@@ -120,6 +120,8 @@ pub(crate) struct ResultMembershipSchema {
     pub(crate) branch_or_prefix_field: Option<String>,
     /// Version fields that identify the result row in the maintained set.
     pub(crate) version: ResultMembershipVersionSchema,
+    /// Nullable global settle position for the member's visible current winner.
+    pub(crate) settle_position_field: Option<String>,
     /// Retained binding/routing parameter fields.
     pub(crate) routing_param_fields: BTreeSet<String>,
 }

@@ -90,6 +90,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 shape_id,
                 subscription,
                 values: Vec::new(),
+                known_state: None,
             }),
         ),
         (
@@ -107,6 +108,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "ViewUpdate",
             SyncMessage::ViewUpdate {
                 subscription,
+                settled_through: GlobalSeq(7),
                 reset_result_set: true,
                 version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {

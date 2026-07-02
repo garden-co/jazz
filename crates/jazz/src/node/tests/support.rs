@@ -1003,6 +1003,7 @@ fn register_shape_binding(
         read_view: Default::default(),
 },
         values,
+        known_state: None,
     }))
     .unwrap();
 }

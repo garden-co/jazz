@@ -9,7 +9,7 @@
 use super::policy::ViewEvaluationContext;
 use super::*;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
-use crate::protocol::{PeerPayloadInventory, ResultMemberEntry};
+use crate::protocol::{KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry};
 
 fn maintained_view_tx_versions_contain_winner(
     tx_versions: &[VersionRow],
@@ -61,6 +61,8 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     /// already shipped on this link. Partial payload coverage is not recorded
     /// here, even when it is enough for a subscription-scoped exclusive result.
     pub(crate) peer_complete_tx_payloads: BTreeSet<TxId>,
+    /// Optional fast known-state declaration for this served subscription.
+    pub(crate) known_state: Option<KnownStateDeclaration>,
     /// Ship complete accepted exclusive transaction payloads so the receiver can
     /// use refreshed rows as a write base for later exclusive transactions.
     pub(crate) complete_exclusive_payloads: bool,
@@ -227,6 +229,7 @@ where
             result_member_adds,
             result_member_removes,
             peer_complete_tx_payloads,
+            known_state: None,
             complete_exclusive_payloads: false,
             previous_result_set,
             identity,
@@ -244,6 +247,7 @@ where
         let MaintainedViewBundleInputs {
             subscription,
             peer_complete_tx_payloads,
+            known_state,
             complete_exclusive_payloads,
             previous_result_set: _previous_result_set,
             result_member_adds,
@@ -262,6 +266,16 @@ where
             "real row result member removal is missing content transaction for replacement shipping",
         )?;
         let mut tx_versions_cache = BTreeMap::<TxId, Vec<VersionRow>>::new();
+        let known_state_position = known_state.map(|declaration| declaration.position);
+        let skipped_known_state_rows = result_member_adds
+            .iter()
+            .filter_map(|member| {
+                let row = member.as_real_row()?;
+                let position = row.settle_position?;
+                let declared = known_state_position?;
+                (position <= declared).then_some((row.table.to_string(), row.row_uuid))
+            })
+            .collect::<BTreeSet<_>>();
         let wanted_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (*tx_id, (table.to_string(), *row_uuid)))
@@ -313,8 +327,15 @@ where
                             || wanted_rows
                                 .contains(&(version.table().to_owned(), version.row_uuid()))
                     })
+                    .filter(|version| {
+                        !skipped_known_state_rows
+                            .contains(&(version.table().to_owned(), version.row_uuid()))
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
+                if filtered_tx_versions.is_empty() {
+                    continue;
+                }
                 let bundle = self.version_bundle_for_maintained_view_versions_with_tx(
                     &stored_tx,
                     &filtered_tx_versions,
@@ -421,6 +442,7 @@ where
         }
         Ok(SyncMessage::ViewUpdate {
             subscription,
+            settled_through: self.clock.applied_global_watermark,
             reset_result_set: false,
             version_bundles,
             peer_payload_inventory: PeerPayloadInventory {
@@ -437,6 +459,7 @@ where
     pub(super) fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         let ViewUpdateParts {
             subscription,
+            settled_through,
             reset_result_set,
             version_bundles,
             peer_complete_tx_payload_refs,
@@ -492,6 +515,9 @@ where
         if reset_result_set {
             self.query.settled_result_sets.remove(&binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
+            self.query
+                .settled_through_by_binding_view
+                .remove(&binding_view_key);
         }
         let row_result_set = self
             .query
@@ -511,6 +537,9 @@ where
             program_facts.remove(&fact);
         }
         program_facts.extend(program_fact_adds);
+        self.query
+            .settled_through_by_binding_view
+            .insert(binding_view_key, settled_through);
         // Diagnostic-only: the duplicate-content-version scan feeds a
         // debug_assert, so it is wasted work in release. Gate to debug builds.
         #[cfg(debug_assertions)]

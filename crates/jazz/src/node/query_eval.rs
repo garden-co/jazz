@@ -196,6 +196,7 @@ fn fact_public_fields(
             let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
             fields.extend(schema.branch_or_prefix_field.clone());
             fields.extend(result_membership_version_fields(&schema.version));
+            fields.extend(schema.settle_position_field.clone());
             fields.extend(schema.routing_param_fields.iter().cloned());
             Ok(fields)
         }
@@ -556,7 +557,35 @@ where
                     SourceGap::HistoricalStorageCut,
                 ));
             }
+            let needs_settle_position = request
+                .requirements
+                .metadata
+                .contains(&SourceMetadataRequirement::SettlePosition);
+            let mut metadata = BTreeMap::new();
+            if needs_settle_position {
+                metadata.insert(
+                    SourceMetadataRequirement::SettlePosition,
+                    SourceMetadataFields::SettlePosition {
+                        settle_position_field: "settle_position".to_owned(),
+                    },
+                );
+            }
+            let descriptor = current_row_descriptor_with_hidden_source_fields(&table, &metadata);
             let base = self.projected_historical_source_graph(request, &table, position)?;
+            let base = if needs_settle_position {
+                base.project_fields(
+                    current_row_fields(&table)
+                        .into_iter()
+                        .map(ProjectField::named)
+                        .chain([ProjectField::null_typed(
+                            "settle_position",
+                            ValueType::Nullable(Box::new(ValueType::U64)),
+                        )])
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                base
+            };
             let graph = match &request.authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -590,7 +619,9 @@ where
                         .policy_filtered_current_source_graph_via_query_engine(
                             policy_request,
                             base,
-                            &current_row_fields(&table),
+                            &descriptor_field_names(&descriptor).map_err(|_| {
+                                source_resolution_error(request, SourceGap::HistoricalStorageCut)
+                            })?,
                         )
                         .map_err(|_| {
                             source_resolution_error(request, SourceGap::HistoricalStorageCut)
@@ -598,12 +629,7 @@ where
                         .graph
                 }
             };
-            (
-                graph,
-                current_row_descriptor(&table),
-                BTreeMap::new(),
-                BTreeSet::new(),
-            )
+            (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(branch_id) = branch_data {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
@@ -897,7 +923,7 @@ where
             return Err(source_resolution_error(request, SourceGap::BranchOverlay));
         }
         Ok(Some(ContentVersionSource {
-            graph: content_version_current_source_graph(table, tier),
+            graph: content_version_current_source_graph(table, tier, false),
             row_uuid_field: "row_uuid".to_owned(),
         }))
     }
@@ -966,8 +992,15 @@ fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> 
     .project_fields(register_storage_fields_for_query_engine("left."))
 }
 
-fn content_version_current_source_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {
-    let fields = maintained_view_history_storage_field_names(table);
+fn content_version_current_source_graph(
+    table: &TableSchema,
+    tier: DurabilityTier,
+    include_global_seq: bool,
+) -> GraphBuilder {
+    let mut fields = maintained_view_history_storage_field_names(table);
+    if include_global_seq {
+        fields.push("global_seq".to_owned());
+    }
     if tier == DurabilityTier::Global {
         return GraphBuilder::table(global_current_table_name(&table.name)).project(fields);
     }
@@ -1097,6 +1130,9 @@ where
     let needs_version_witnesses = requirements
         .metadata
         .contains(&SourceMetadataRequirement::VersionWitnesses);
+    let needs_settle_position = requirements
+        .metadata
+        .contains(&SourceMetadataRequirement::SettlePosition);
 
     if needs_version_witnesses {
         fields.extend([
@@ -1116,6 +1152,15 @@ where
                 tx_time_field: "tx_time".to_owned(),
                 tx_node_field: "tx_node_id".to_owned(),
                 branch_or_prefix_field: None,
+            },
+        );
+    }
+    if needs_settle_position {
+        fields.push(ProjectField::named("settle_position"));
+        metadata.insert(
+            SourceMetadataRequirement::SettlePosition,
+            SourceMetadataFields::SettlePosition {
+                settle_position_field: "settle_position".to_owned(),
             },
         );
     }
@@ -1150,7 +1195,11 @@ where
         SourceAuthorizationRequest::System => {
             let graph = if needs_version_witnesses {
                 node.maintained_view_content_current_with_version(table, tier)?
-                    .project_fields(storage_to_canonical_current_source_fields(table, true))
+                    .project_fields(storage_to_canonical_current_source_fields(
+                        table,
+                        true,
+                        needs_settle_position,
+                    ))
             } else {
                 visible_current_graph(table, tier)
                     .project_fields(canonical_current_source_fields(table, false))
@@ -1180,15 +1229,22 @@ where
                 binding_source_shape.clone(),
                 binding_user_params.clone(),
             )?;
-            let output_fields = global_current_storage_fields(table, needs_version_witnesses);
+            let output_fields = global_current_storage_fields(
+                table,
+                needs_version_witnesses,
+                needs_settle_position,
+            );
             let base = node.maintained_view_content_current_with_version(table, tier)?;
             let storage_graph = node.policy_filtered_current_source_graph_via_query_engine(
                 policy_request,
                 base.clone(),
                 &output_fields,
             )?;
-            let mut canonical_fields =
-                storage_to_canonical_current_source_fields(table, needs_version_witnesses);
+            let mut canonical_fields = storage_to_canonical_current_source_fields(
+                table,
+                needs_version_witnesses,
+                needs_settle_position,
+            );
             canonical_fields.extend(
                 storage_graph
                     .route_fields
@@ -1255,6 +1311,7 @@ fn source_provenance_field(field: ProvenanceField) -> &'static str {
 fn storage_to_canonical_current_source_fields(
     table: &TableSchema,
     include_version: bool,
+    include_settle_position: bool,
 ) -> Vec<ProjectField> {
     let mut fields = std::iter::once(ProjectField::named("row_uuid"))
         .chain(
@@ -1277,6 +1334,9 @@ fn storage_to_canonical_current_source_fields(
             ProjectField::named("schema_version"),
             ProjectField::named("parents"),
         ]);
+    }
+    if include_settle_position {
+        fields.push(ProjectField::renamed("global_seq", "settle_position"));
     }
     fields
 }
@@ -1313,6 +1373,12 @@ fn current_row_descriptor_with_hidden_source_fields(
     }
     if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
         fields.push(("coverage".to_owned(), ValueType::String));
+    }
+    if metadata.contains_key(&SourceMetadataRequirement::SettlePosition) {
+        fields.push((
+            "settle_position".to_owned(),
+            ValueType::Nullable(Box::new(ValueType::U64)),
+        ));
     }
     RecordDescriptor::new(fields)
 }
@@ -3007,6 +3073,20 @@ where
             .zip(subscribe.values.iter().cloned())
             .collect::<BTreeMap<_, _>>();
         let _binding = shape.bind(value_map)?;
+        let binding_view_key = BindingViewKey {
+            shape_id: subscribe.shape_id,
+            binding_id: subscribe.subscription.binding_id,
+            read_view: subscribe.subscription.read_view,
+        };
+        if subscribe.known_state.is_some() {
+            self.query
+                .known_state_declared_binding_views
+                .insert(binding_view_key);
+        } else {
+            self.query
+                .known_state_declared_binding_views
+                .remove(&binding_view_key);
+        }
         self.query
             .registered_bindings
             .entry(subscribe.shape_id)
@@ -3035,6 +3115,12 @@ where
         {
             self.query.settled_result_sets.remove(&binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
+            self.query
+                .settled_through_by_binding_view
+                .remove(&binding_view_key);
+            self.query
+                .known_state_declared_binding_views
+                .remove(&binding_view_key);
         }
     }
 
@@ -3072,6 +3158,40 @@ where
         self.query
             .settled_result_sets
             .contains_key(&binding_view_key)
+    }
+
+    pub(crate) fn settled_through_for_binding_view(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> Option<GlobalSeq> {
+        self.query
+            .settled_through_by_binding_view
+            .get(&binding_view_key)
+            .copied()
+    }
+
+    pub(crate) fn known_state_declaration_for_binding_view(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> Option<crate::protocol::KnownStateDeclaration> {
+        if !self.has_settled_result_set(binding_view_key) {
+            return None;
+        }
+        Some(crate::protocol::KnownStateDeclaration {
+            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+            position: self.settled_through_for_binding_view(binding_view_key)?,
+        })
+    }
+
+    pub(crate) fn subscription_is_known_state_declared(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Result<bool, Error> {
+        let binding_view_key = self.binding_view_key_for_subscription(subscription)?;
+        Ok(self
+            .query
+            .known_state_declared_binding_views
+            .contains(&binding_view_key))
     }
 
     pub(crate) fn binding_view_key_for_subscription(
@@ -5552,12 +5672,13 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
-        let payload = content_version_current_source_graph(table, tier).project([
+        let payload = content_version_current_source_graph(table, tier, true).project([
             "row_uuid",
             "tx_time",
             "tx_node_id",
             "schema_version",
             "parents",
+            "global_seq",
         ]);
         Ok(GraphBuilder::join(
             visible_current_graph(table, tier),
@@ -5580,6 +5701,7 @@ where
                     ProjectField::renamed("left.tx_node_id", "tx_node_id"),
                     ProjectField::renamed("right.schema_version", "schema_version"),
                     ProjectField::renamed("right.parents", "parents"),
+                    ProjectField::renamed("right.global_seq", "global_seq"),
                 ]),
         ))
     }
@@ -6577,7 +6699,11 @@ fn current_row_fields(table: &TableSchema) -> Vec<String> {
     fields
 }
 
-fn global_current_storage_fields(table: &TableSchema, include_version: bool) -> Vec<String> {
+fn global_current_storage_fields(
+    table: &TableSchema,
+    include_version: bool,
+    include_settle_position: bool,
+) -> Vec<String> {
     let mut fields = vec!["row_uuid".to_owned()];
     if include_version {
         fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
@@ -6594,6 +6720,9 @@ fn global_current_storage_fields(table: &TableSchema, include_version: bool) -> 
     fields.push("updated_at".to_owned());
     fields.push("tx_time".to_owned());
     fields.push("tx_node_id".to_owned());
+    if include_settle_position {
+        fields.push("global_seq".to_owned());
+    }
     fields
 }
 
@@ -6705,6 +6834,17 @@ fn inline_branch_current_graph(
             },
         );
     }
+    if requirements
+        .metadata
+        .contains(&SourceMetadataRequirement::SettlePosition)
+    {
+        metadata.insert(
+            SourceMetadataRequirement::SettlePosition,
+            SourceMetadataFields::SettlePosition {
+                settle_position_field: "settle_position".to_owned(),
+            },
+        );
+    }
     for requirement in &requirements.metadata {
         if let SourceMetadataRequirement::Provenance(field) = requirement {
             metadata.insert(
@@ -6774,6 +6914,9 @@ fn inline_branch_current_record(
     }
     if descriptor.field_index("coverage").is_some() {
         values.push(Value::String("branch-current".to_owned()));
+    }
+    if descriptor.field_index("settle_position").is_some() {
+        values.push(Value::Nullable(None));
     }
     Ok(descriptor.create(&values)?)
 }
@@ -7124,6 +7267,7 @@ mod tests {
                 read_view: Default::default(),
             },
             values,
+            known_state: None,
         }))
         .unwrap();
     }
@@ -7293,6 +7437,7 @@ mod tests {
             .query_graph(content_version_current_source_graph(
                 &table,
                 DurabilityTier::Global,
+                false,
             ))
             .expect("query denormalized current payload");
         let current_rows = current_deltas

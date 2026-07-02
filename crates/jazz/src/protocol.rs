@@ -96,6 +96,10 @@ pub enum SyncMessage {
     ViewUpdate {
         /// Query binding result set addressed by this update.
         subscription: SubscriptionKey,
+        /// Serving node's contiguous applied global watermark when this update
+        /// was assembled. The update reflects every global change at or below
+        /// this position for the addressed view.
+        settled_through: GlobalSeq,
         /// Whether receiver result_set should be reset first.
         reset_result_set: bool,
         /// Version bundles not previously shipped on the peer.
@@ -964,6 +968,25 @@ pub struct Subscribe {
     pub subscription: SubscriptionKey,
     /// Binding values in shape parameter order.
     pub values: Vec<Value>,
+    /// Optional fast known-state declaration for this usage-site subscription.
+    pub known_state: Option<KnownStateDeclaration>,
+}
+
+/// Fast known-state declaration echoed by a subscriber on resubscribe.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct KnownStateDeclaration {
+    /// Completeness class this declaration claims.
+    pub completeness: KnownStateCompleteness,
+    /// Server-stamped settled-through position being echoed.
+    pub position: GlobalSeq,
+}
+
+/// Known-state declaration completeness class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum KnownStateCompleteness {
+    /// The subscriber has an unevicted fast current membership view through the
+    /// declared settled position.
+    FastCurrentMembership,
 }
 
 /// Reason a serving peer rejected one subscription attach.
@@ -1055,6 +1078,11 @@ pub struct RealRowMemberEntry {
     /// Batch/transaction grouping identity for batch-centric visibility.
     #[serde(default)]
     pub batch: Option<TxId>,
+    /// Settled global position of this member's visible current winner, when
+    /// known. Unfated/local members carry `None` and are never eligible for
+    /// fast known-state body skipping.
+    #[serde(default)]
+    pub settle_position: Option<GlobalSeq>,
 }
 
 impl RealRowMemberEntry {
@@ -1073,7 +1101,14 @@ impl RealRowMemberEntry {
             branch_or_prefix: None,
             row_digest: None,
             batch: None,
+            settle_position: None,
         }
+    }
+
+    /// Attach the known global settle position for this member.
+    pub fn with_settle_position(mut self, settle_position: Option<GlobalSeq>) -> Self {
+        self.settle_position = settle_position;
+        self
     }
 
     /// Return the ordinary current-content projection when available.

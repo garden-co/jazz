@@ -1568,11 +1568,17 @@ fn source_requirements(
                 root_requirements
                     .metadata
                     .insert(SourceMetadataRequirement::VersionWitnesses);
+                root_requirements
+                    .metadata
+                    .insert(SourceMetadataRequirement::SettlePosition);
                 for contribution in &request.input.shape.join_contributions {
                     if let Some(source_requirements) = requirements.get_mut(&contribution.source) {
                         source_requirements
                             .metadata
                             .insert(SourceMetadataRequirement::VersionWitnesses);
+                        source_requirements
+                            .metadata
+                            .insert(SourceMetadataRequirement::SettlePosition);
                     }
                 }
             }
@@ -4747,6 +4753,7 @@ fn fact_output_with_terminal(
                     tx_time_field: "content_tx_time".to_owned(),
                     tx_node_field: "content_tx_node_id".to_owned(),
                 }),
+                settle_position_field: settle_position_field(&source.row_shape),
                 routing_param_fields,
             })
         }
@@ -5126,6 +5133,7 @@ fn result_membership_fields(
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<Vec<ProjectField>> {
     let version = version_witness_fields(&source.row_shape)?;
+    let settle_position = settle_position_field(&source.row_shape);
     let mut fields = vec![
         ProjectField::literal("event_kind", Value::String("result_current".to_owned())),
         ProjectField::literal(
@@ -5136,6 +5144,14 @@ fn result_membership_fields(
         ProjectField::renamed(version.tx_time_field, "content_tx_time"),
         ProjectField::renamed(version.tx_node_field, "content_tx_node_id"),
     ];
+    if let Some(field) = settle_position {
+        fields.push(ProjectField::renamed(field, "settle_position"));
+    } else {
+        fields.push(ProjectField::null_typed(
+            "settle_position",
+            ValueType::Nullable(Box::new(ValueType::U64)),
+        ));
+    }
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
     Ok(fields)
 }
@@ -5456,6 +5472,18 @@ fn version_witness_fields(row_shape: &SourceRowShape) -> CapabilityResult<Versio
     }
 }
 
+fn settle_position_field(row_shape: &SourceRowShape) -> Option<String> {
+    match row_shape
+        .metadata
+        .get(&SourceMetadataRequirement::SettlePosition)
+    {
+        Some(SourceMetadataFields::SettlePosition {
+            settle_position_field,
+        }) => Some(settle_position_field.clone()),
+        _ => None,
+    }
+}
+
 fn coverage_fields(row_shape: &SourceRowShape) -> CapabilityResult<CoverageFieldRefs> {
     match row_shape.metadata.get(&SourceMetadataRequirement::Coverage) {
         Some(SourceMetadataFields::Coverage { coverage_field }) => Ok(CoverageFieldRefs {
@@ -5507,6 +5535,11 @@ fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
             }
             SourceMetadataFields::Coverage { coverage_field } => {
                 fields.insert(coverage_field.clone());
+            }
+            SourceMetadataFields::SettlePosition {
+                settle_position_field,
+            } => {
+                fields.insert(settle_position_field.clone());
             }
             SourceMetadataFields::ValidationReads { snapshot_field } => {
                 fields.insert(snapshot_field.clone());

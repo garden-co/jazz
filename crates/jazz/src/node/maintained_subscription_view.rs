@@ -12,9 +12,9 @@ use super::query_engine::{
     ResultMembershipSchema, VersionWitnessSchema,
 };
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
-use crate::protocol::ResultMemberEntry;
+use crate::protocol::{RealRowMemberEntry, ResultMemberEntry};
 use crate::schema::TableSchema;
-use crate::time::TxTime;
+use crate::time::{GlobalSeq, TxTime};
 use crate::tx::TxId;
 
 type TableSchemas = BTreeMap<String, TableSchema>;
@@ -371,13 +371,20 @@ fn decode_typed_terminal_record(
                 .ok_or(super::Error::InvalidStoredValue(
                     "result tx node alias must exist",
                 ))?;
+            let settle_position = schema
+                .settle_position_field
+                .as_ref()
+                .map(|field| nullable_u64(record, field).map(|seq| seq.map(GlobalSeq)))
+                .transpose()?
+                .flatten();
             Ok(DecodedMaintainedEvent::ResultCurrent(
-                (
+                RealRowMemberEntry::current_content((
                     table.name.clone().into(),
                     row_uuid,
                     TxId::new(tx_time, tx_node),
-                )
-                    .into(),
+                ))
+                .with_settle_position(settle_position)
+                .into(),
             ))
         }
         MaintainedTerminalKind::VersionContent(schema) => {
@@ -494,6 +501,22 @@ fn record_u64(record: BorrowedRecord<'_>, field: &str) -> Result<u64, super::Err
     match record.get_idx(field_idx(record, field)?)? {
         Value::U64(value) => Ok(value),
         _ => Err(super::Error::InvalidStoredValue("field must be u64")),
+    }
+}
+
+fn nullable_u64(record: BorrowedRecord<'_>, field: &str) -> Result<Option<u64>, super::Error> {
+    match record.get_idx(field_idx(record, field)?)? {
+        Value::Nullable(None) => Ok(None),
+        Value::Nullable(Some(value)) => match *value {
+            Value::U64(value) => Ok(Some(value)),
+            _ => Err(super::Error::InvalidStoredValue(
+                "nullable field payload must be u64",
+            )),
+        },
+        Value::U64(value) => Ok(Some(value)),
+        _ => Err(super::Error::InvalidStoredValue(
+            "field must be nullable u64",
+        )),
     }
 }
 
