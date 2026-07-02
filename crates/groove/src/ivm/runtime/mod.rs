@@ -35,7 +35,7 @@ use join::{AntiJoinState, ArrangementState, JoinState};
 use persist::apply_persist_delta;
 use recursion::{
     RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
-    snapshot_table_deltas,
+    recursive_read_tables, snapshot_table_deltas,
 };
 
 const DEFAULT_SINK: &str = "__default";
@@ -1536,6 +1536,11 @@ impl IvmRuntime {
                         OpType::Recursive(RecursiveOp {
                             frontier: frontier.clone(),
                             max_iters: *max_iters,
+                            read_tables: recursive_read_tables(
+                                &self.graph,
+                                compiled_seed.node,
+                                compiled_step.node,
+                            )?,
                         }),
                         [compiled_seed.node, compiled_step.node],
                         output,

@@ -131,8 +131,7 @@ where
     S: OrderedKvStorage,
 {
     let has_recompute_table_delta = has_recompute_table_delta_for_recursion(&runtime, seed, step)?;
-    let has_table_delta = has_table_delta_for_recursion(&runtime, seed, step)?;
-    let has_any_table_delta = !runtime.table_deltas.is_empty();
+    let has_table_delta = has_table_delta_for_cached_tables(&runtime, recursive);
     let has_recompute_binding_delta =
         has_recompute_binding_delta_for_recursion(&runtime, seed, step)?;
     let has_binding_source = has_binding_source_for_recursion(&runtime, seed, step)?;
@@ -140,7 +139,7 @@ where
     if has_recompute_table_delta
         // Prepared/bound recursion can be embedded in larger routed graphs where
         // positive table deltas must be diffed against the whole bound closure.
-        || (has_binding_source && (has_table_delta || has_any_table_delta))
+        || (has_binding_source && has_table_delta)
         || has_recompute_binding_delta
         || (!has_binding_deltas && recursive_state.is_empty())
         || !recursive_state.step_arrangements_hydrated()
@@ -227,21 +226,17 @@ where
     Ok(consolidate_deltas(emitted))
 }
 
-fn has_table_delta_for_recursion<S>(
+fn has_table_delta_for_cached_tables<S>(
     runtime: &GraphRuntimeView<'_, S>,
-    seed: NodeId,
-    step: NodeId,
-) -> Result<bool, IvmRuntimeError>
+    recursive: &RecursiveOp,
+) -> bool
 where
     S: OrderedKvStorage,
 {
-    let mut tables = HashMap::<String, RecordDescriptor>::new();
-    collect_table_sources(runtime.graph, seed, &mut tables)?;
-    collect_table_sources(runtime.graph, step, &mut tables)?;
-    Ok(runtime
+    runtime
         .table_deltas
         .iter()
-        .any(|table_delta| tables.contains_key(&table_delta.table)))
+        .any(|table_delta| recursive.read_tables.contains(&table_delta.table))
 }
 
 fn has_recompute_table_delta_for_recursion<S>(
@@ -371,6 +366,19 @@ fn collect_table_sources(
         collect_table_sources(graph, *input, tables)?;
     }
     Ok(())
+}
+
+pub(super) fn recursive_read_tables(
+    graph: &IvmGraph,
+    seed: NodeId,
+    step: NodeId,
+) -> Result<Vec<String>, IvmRuntimeError> {
+    let mut tables = HashMap::<String, RecordDescriptor>::new();
+    collect_table_sources(graph, seed, &mut tables)?;
+    collect_table_sources(graph, step, &mut tables)?;
+    let mut tables = tables.into_keys().collect::<Vec<_>>();
+    tables.sort();
+    Ok(tables)
 }
 
 fn collect_binding_sources(

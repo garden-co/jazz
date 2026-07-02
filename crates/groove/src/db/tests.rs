@@ -4651,6 +4651,102 @@ fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete() {
 }
 
 #[test]
+fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "docs"]).unwrap();
+    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let shape = database
+        .prepare_one_sink(
+            prepared_reachability_graph(GraphBuilder::table("edges"), 16),
+            "prepared-reach",
+            RecordDescriptor::new([("seed", ColumnType::U64.value_type())]),
+            ["seed".to_owned()],
+        )
+        .unwrap();
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(1), Value::U64(1)], 1)]
+    );
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    database.commit_batch(batch).unwrap();
+    let mut initial = expect_recv_vals(&subscription);
+    sort_pairs_by_value(&mut initial);
+    assert_eq!(
+        initial,
+        [
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert("docs", vec![Value::U64(11), Value::U64(99)]);
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        database
+            .last_commit_metrics()
+            .unwrap()
+            .tick
+            .recursive_recomputes,
+        0
+    );
+    assert!(subscription.try_recv().is_err());
+}
+
+#[test]
+fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
+    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let shape = prepared_reachability_shape(&mut database);
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(1), Value::U64(1)], 1)]
+    );
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        database
+            .last_commit_metrics()
+            .unwrap()
+            .tick
+            .recursive_recomputes,
+        1
+    );
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("edges", PrimaryKeyValue::U64(1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        database
+            .last_commit_metrics()
+            .unwrap()
+            .tick
+            .recursive_recomputes,
+        1
+    );
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(1), Value::U64(2)], -1)]
+    );
+}
+
+#[test]
 fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();

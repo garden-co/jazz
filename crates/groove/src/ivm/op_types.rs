@@ -150,6 +150,8 @@ pub struct RecursiveOp {
     /// Hard stop for non-settling recursive queries, especially cyclic bag
     /// semantics where multiplicities can grow forever.
     pub max_iters: usize,
+    /// Tables read by the seed and step graphs, cached when the graph is compiled.
+    pub read_tables: Vec<String>,
 }
 
 // Aggregate.
