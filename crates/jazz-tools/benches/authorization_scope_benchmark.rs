@@ -113,7 +113,7 @@ fn subscribe_limit(db: &DirectDb, limit: usize) -> usize {
         block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe to limited items");
 
     match block_on(subscription.next_event()) {
-        Some(SubscriptionEvent::Opened { current, .. }) => current.len(),
+        Some(SubscriptionEvent::Opened { current, .. }) => current.rows.len(),
         other => panic!("expected opened subscription event, got {other:?}"),
     }
 }

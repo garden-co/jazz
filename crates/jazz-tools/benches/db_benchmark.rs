@@ -367,7 +367,7 @@ fn core_subscribed_write(c: &mut Criterion) {
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
                 match block_on(subscription.next_event()) {
                     Some(SubscriptionEvent::Opened { current, .. }) => {
-                        assert_eq!(current.len(), row_count);
+                        assert_eq!(current.rows.len(), row_count);
                     }
                     other => panic!("expected opened subscription event, got {other:?}"),
                 }
