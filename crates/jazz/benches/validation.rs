@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::time::{Duration, Instant};
 
+mod support;
+
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -13,6 +15,7 @@ use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
 use jazz::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId};
+use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters};
 
 const TABLE: &str = "items";
 
@@ -20,8 +23,8 @@ fn main() {
     let config = Config::from_env();
     let mut bench = ValidationBench::new(config);
     bench.seed();
-    bench.run();
-    bench.print_json();
+    let elapsed = bench.run();
+    bench.print_json(elapsed);
 }
 
 #[derive(Clone, Copy)]
@@ -123,7 +126,9 @@ impl ValidationBench {
         }
     }
 
-    fn run(&mut self) {
+    fn run(&mut self) -> Duration {
+        reset_phase_counters(&mut [&mut self.core]);
+        let run_start = Instant::now();
         for step in 0..self.config.commits {
             let client_idx = self.rng.usize(self.config.clients);
             let tx_id = self.clients[client_idx]
@@ -208,6 +213,7 @@ impl ValidationBench {
                 other => panic!("unexpected fate update: {other:?}"),
             }
         }
+        run_start.elapsed()
     }
 
     fn pick_row_for_operation(&mut self, client_idx: usize) -> usize {
@@ -235,35 +241,74 @@ impl ValidationBench {
             .unwrap_or_else(|| self.rng.usize(self.rows.len()))
     }
 
-    fn print_json(&self) {
-        println!(
-            "{{\"scenario\":\"exclusive_validation_throughput\",\
-             \"seed\":{},\"clients\":{},\"rows\":{},\"commits\":{},\"hot_row_pct\":{},\
-             \"core_ingest_p50_us\":{},\"core_ingest_p95_us\":{},\"core_ingest_p99_us\":{},\"core_ingest_max_us\":{},\
-             \"model_decision_only_p50_us\":{},\
-             \"accept_count\":{},\"reject_count\":{},\
-             \"reject_client_clock_too_far_ahead\":{},\"reject_authorization_denied\":{},\"reject_exclusive_conflict\":{},\"reject_cascade\":{},\"reject_malformed\":{},\"reject_causality_violation\":{},\
-             \"predicate_read_count\":{}}}",
-            self.config.seed,
-            self.config.clients,
-            self.config.rows,
-            self.config.commits,
-            self.config.hot_row_pct,
-            self.metrics.validation.value_at_quantile(0.50),
-            self.metrics.validation.value_at_quantile(0.95),
-            self.metrics.validation.value_at_quantile(0.99),
-            self.metrics.validation.max(),
-            self.metrics.baseline.value_at_quantile(0.50),
-            self.metrics.accepted,
-            self.metrics.rejected.total(),
-            self.metrics.rejected.client_clock_too_far_ahead,
-            self.metrics.rejected.authorization_denied,
-            self.metrics.rejected.exclusive_conflict,
-            self.metrics.rejected.cascade,
-            self.metrics.rejected.malformed,
-            self.metrics.rejected.causality_violation,
-            self.metrics.predicate_reads,
+    fn print_json(&self, elapsed: Duration) {
+        let mut fields = phase_fields("exclusive_validation_throughput", elapsed.as_micros());
+        fields.insert("seed".to_owned(), serde_json::json!(self.config.seed));
+        fields.insert("clients".to_owned(), serde_json::json!(self.config.clients));
+        fields.insert("rows".to_owned(), serde_json::json!(self.config.rows));
+        fields.insert("commits".to_owned(), serde_json::json!(self.config.commits));
+        fields.insert(
+            "hot_row_pct".to_owned(),
+            serde_json::json!(self.config.hot_row_pct),
         );
+        fields.insert(
+            "core_ingest_p50_us".to_owned(),
+            serde_json::json!(self.metrics.validation.value_at_quantile(0.50)),
+        );
+        fields.insert(
+            "core_ingest_p95_us".to_owned(),
+            serde_json::json!(self.metrics.validation.value_at_quantile(0.95)),
+        );
+        fields.insert(
+            "core_ingest_p99_us".to_owned(),
+            serde_json::json!(self.metrics.validation.value_at_quantile(0.99)),
+        );
+        fields.insert(
+            "core_ingest_max_us".to_owned(),
+            serde_json::json!(self.metrics.validation.max()),
+        );
+        fields.insert(
+            "model_decision_only_p50_us".to_owned(),
+            serde_json::json!(self.metrics.baseline.value_at_quantile(0.50)),
+        );
+        fields.insert(
+            "accept_count".to_owned(),
+            serde_json::json!(self.metrics.accepted),
+        );
+        fields.insert(
+            "reject_count".to_owned(),
+            serde_json::json!(self.metrics.rejected.total()),
+        );
+        fields.insert(
+            "reject_client_clock_too_far_ahead".to_owned(),
+            serde_json::json!(self.metrics.rejected.client_clock_too_far_ahead),
+        );
+        fields.insert(
+            "reject_authorization_denied".to_owned(),
+            serde_json::json!(self.metrics.rejected.authorization_denied),
+        );
+        fields.insert(
+            "reject_exclusive_conflict".to_owned(),
+            serde_json::json!(self.metrics.rejected.exclusive_conflict),
+        );
+        fields.insert(
+            "reject_cascade".to_owned(),
+            serde_json::json!(self.metrics.rejected.cascade),
+        );
+        fields.insert(
+            "reject_malformed".to_owned(),
+            serde_json::json!(self.metrics.rejected.malformed),
+        );
+        fields.insert(
+            "reject_causality_violation".to_owned(),
+            serde_json::json!(self.metrics.rejected.causality_violation),
+        );
+        fields.insert(
+            "predicate_read_count".to_owned(),
+            serde_json::json!(self.metrics.predicate_reads),
+        );
+        insert_node_metrics(&mut fields, "core", &self.core);
+        emit_json_line("validation", fields);
     }
 }
 

@@ -1,41 +1,28 @@
 use std::time::Instant;
 
+mod support;
+
 use groove::records::Value;
 use groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{LargeValueEditCommit, NodeState};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::DurabilityTier;
+use support::{
+    csv_usizes, emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters,
+};
 
 fn main() {
-    let depth = 300usize;
-    let checkpoint_interval = 64usize;
-    let checkpointed = run_case(depth, checkpoint_interval);
-    let full = run_case(depth, usize::MAX);
-
-    println!(
-        "large_value_checkpointing depth={depth} checkpoint_interval={checkpoint_interval} \
-         checkpointed_ms={} checkpointed_replayed_ops={} checkpointed_hits={} checkpointed_bytes={} \
-         full_ms={} full_replayed_ops={} full_hits={} full_bytes={}",
-        checkpointed.elapsed_ms,
-        checkpointed.replayed_ops,
-        checkpointed.checkpoint_hits,
-        checkpointed.bytes,
-        full.elapsed_ms,
-        full.replayed_ops,
-        full.checkpoint_hits,
-        full.bytes
-    );
+    let depth = support::env_usize("JAZZ_LV_DEPTH", 300);
+    for interval in csv_usizes("JAZZ_LV_INTERVALS", "64")
+        .into_iter()
+        .chain([usize::MAX])
+    {
+        run_case(depth, interval);
+    }
 }
 
-struct CaseResult {
-    elapsed_ms: u128,
-    replayed_ops: usize,
-    checkpoint_hits: u64,
-    bytes: usize,
-}
-
-fn run_case(depth: usize, checkpoint_interval: usize) -> CaseResult {
+fn run_case(depth: usize, checkpoint_interval: usize) {
     let schema = JazzSchema::new([TableSchema::new(
         "docs",
         [jazz::schema::ColumnSchema::text("body")],
@@ -63,20 +50,30 @@ fn run_case(depth: usize, checkpoint_interval: usize) -> CaseResult {
             .unwrap();
         node.finalize_local_mergeable_commit(tx_id).unwrap();
     }
-    node.reset_large_value_metrics();
+    reset_phase_counters(&mut [&mut node]);
 
     let started = Instant::now();
     let rows = node.current_rows("docs", DurabilityTier::Local).unwrap();
-    let elapsed_ms = started.elapsed().as_millis();
+    let elapsed = started.elapsed();
     let bytes = match rows[0].cell(&schema.tables[0], "body") {
         Some(Value::Bytes(bytes)) => bytes.len(),
         other => panic!("expected materialized body bytes, got {other:?}"),
     };
-    let metrics = node.large_value_metrics();
-    CaseResult {
-        elapsed_ms,
-        replayed_ops: metrics.last_replayed_ops,
-        checkpoint_hits: metrics.checkpoint_hits,
-        bytes,
-    }
+    let mut fields = phase_fields("materialize_current_rows", elapsed.as_micros());
+    fields.insert("depth".to_owned(), serde_json::json!(depth));
+    fields.insert(
+        "checkpoint_interval".to_owned(),
+        serde_json::json!(if checkpoint_interval == usize::MAX {
+            "full"
+        } else {
+            "checkpointed"
+        }),
+    );
+    fields.insert(
+        "checkpoint_interval_ops".to_owned(),
+        serde_json::json!(checkpoint_interval),
+    );
+    fields.insert("bytes".to_owned(), serde_json::json!(bytes));
+    insert_node_metrics(&mut fields, "node", &node);
+    emit_json_line("large_value_checkpointing", fields);
 }

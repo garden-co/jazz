@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::time::{Duration, Instant};
 
+mod support;
+
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -12,14 +14,15 @@ use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
+use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters};
 
 const TABLE: &str = "todos";
 
 fn main() {
     let config = Config::from_env();
     let mut bench = SyncBench::new(config);
-    bench.run();
-    bench.print_json();
+    let elapsed = bench.run();
+    bench.print_json(elapsed);
 }
 
 #[derive(Clone, Copy)]
@@ -89,7 +92,14 @@ impl SyncBench {
         }
     }
 
-    fn run(&mut self) {
+    fn run(&mut self) -> Duration {
+        reset_phase_counters(&mut [
+            &mut self.ui,
+            &mut self.worker,
+            &mut self.edge,
+            &mut self.core,
+        ]);
+        let run_start = Instant::now();
         self.seed_policy_hidden_row();
         for step in 0..self.config.commits {
             let (tx_id, unit, now_ms) = self.next_unit(step);
@@ -130,6 +140,7 @@ impl SyncBench {
         }
         self.refresh_views(true);
         self.assert_converged();
+        run_start.elapsed()
     }
 
     fn seed_policy_hidden_row(&mut self) {
@@ -303,47 +314,95 @@ impl SyncBench {
         );
     }
 
-    fn print_json(&self) {
-        println!(
-            "{{\"scenario\":\"four_tier_sync\",\
-             \"seed\":{},\"commits\":{},\"view_every\":{},\
-             \"fate_rtt_p50_us\":{},\"fate_rtt_p95_us\":{},\"fate_rtt_p99_us\":{},\
-             \"view_refresh_p50_us\":{},\"view_refresh_p95_us\":{},\
-             \"core_edge_version_bundles_out\":{},\"core_edge_complete_tx_payload_refs_out\":{},\
-             \"edge_worker_version_bundles_out\":{},\"edge_worker_complete_tx_payload_refs_out\":{},\
-             \"worker_ui_version_bundles_out\":{},\"worker_ui_complete_tx_payload_refs_out\":{},\
-             \"accept_count\":{},\"reject_count\":{},\
-             \"reject_client_clock_too_far_ahead\":{},\"reject_authorization_denied\":{},\
-             \"reject_exclusive_conflict\":{},\"reject_cascade\":{},\"reject_malformed\":{},\"reject_causality_violation\":{},\
-             \"worker_parked_orphans\":{},\"worker_parked_orphans_resolved\":{},\
-             \"edge_parked_orphans\":{},\"edge_parked_orphans_resolved\":{}}}",
-            self.config.seed,
-            self.config.commits,
-            self.config.view_every,
-            self.metrics.fate_rtt.value_at_quantile(0.50),
-            self.metrics.fate_rtt.value_at_quantile(0.95),
-            self.metrics.fate_rtt.value_at_quantile(0.99),
-            self.metrics.view_refresh.value_at_quantile(0.50),
-            self.metrics.view_refresh.value_at_quantile(0.95),
-            self.core_to_edge.metrics.version_bundles_out,
-            self.core_to_edge.metrics.complete_tx_payload_refs_out,
-            self.edge_to_worker.metrics.version_bundles_out,
-            self.edge_to_worker.metrics.complete_tx_payload_refs_out,
-            self.worker_to_ui.metrics.version_bundles_out,
-            self.worker_to_ui.metrics.complete_tx_payload_refs_out,
-            self.metrics.accepted,
-            self.metrics.rejected.total(),
-            self.metrics.rejected.client_clock_too_far_ahead,
-            self.metrics.rejected.authorization_denied,
-            self.metrics.rejected.exclusive_conflict,
-            self.metrics.rejected.cascade,
-            self.metrics.rejected.malformed,
-            self.metrics.rejected.causality_violation,
-            self.worker.sync_metrics().parked_orphans,
-            self.worker.sync_metrics().parked_orphans_resolved,
-            self.edge.sync_metrics().parked_orphans,
-            self.edge.sync_metrics().parked_orphans_resolved,
+    fn print_json(&self, elapsed: Duration) {
+        let mut fields = phase_fields("four_tier_sync", elapsed.as_micros());
+        fields.insert("seed".to_owned(), serde_json::json!(self.config.seed));
+        fields.insert("commits".to_owned(), serde_json::json!(self.config.commits));
+        fields.insert(
+            "view_every".to_owned(),
+            serde_json::json!(self.config.view_every),
         );
+        fields.insert(
+            "fate_rtt_p50_us".to_owned(),
+            serde_json::json!(self.metrics.fate_rtt.value_at_quantile(0.50)),
+        );
+        fields.insert(
+            "fate_rtt_p95_us".to_owned(),
+            serde_json::json!(self.metrics.fate_rtt.value_at_quantile(0.95)),
+        );
+        fields.insert(
+            "fate_rtt_p99_us".to_owned(),
+            serde_json::json!(self.metrics.fate_rtt.value_at_quantile(0.99)),
+        );
+        fields.insert(
+            "view_refresh_p50_us".to_owned(),
+            serde_json::json!(self.metrics.view_refresh.value_at_quantile(0.50)),
+        );
+        fields.insert(
+            "view_refresh_p95_us".to_owned(),
+            serde_json::json!(self.metrics.view_refresh.value_at_quantile(0.95)),
+        );
+        fields.insert(
+            "core_edge_version_bundles_out".to_owned(),
+            serde_json::json!(self.core_to_edge.metrics.version_bundles_out),
+        );
+        fields.insert(
+            "core_edge_complete_tx_payload_refs_out".to_owned(),
+            serde_json::json!(self.core_to_edge.metrics.complete_tx_payload_refs_out),
+        );
+        fields.insert(
+            "edge_worker_version_bundles_out".to_owned(),
+            serde_json::json!(self.edge_to_worker.metrics.version_bundles_out),
+        );
+        fields.insert(
+            "edge_worker_complete_tx_payload_refs_out".to_owned(),
+            serde_json::json!(self.edge_to_worker.metrics.complete_tx_payload_refs_out),
+        );
+        fields.insert(
+            "worker_ui_version_bundles_out".to_owned(),
+            serde_json::json!(self.worker_to_ui.metrics.version_bundles_out),
+        );
+        fields.insert(
+            "worker_ui_complete_tx_payload_refs_out".to_owned(),
+            serde_json::json!(self.worker_to_ui.metrics.complete_tx_payload_refs_out),
+        );
+        fields.insert(
+            "accept_count".to_owned(),
+            serde_json::json!(self.metrics.accepted),
+        );
+        fields.insert(
+            "reject_count".to_owned(),
+            serde_json::json!(self.metrics.rejected.total()),
+        );
+        fields.insert(
+            "reject_client_clock_too_far_ahead".to_owned(),
+            serde_json::json!(self.metrics.rejected.client_clock_too_far_ahead),
+        );
+        fields.insert(
+            "reject_authorization_denied".to_owned(),
+            serde_json::json!(self.metrics.rejected.authorization_denied),
+        );
+        fields.insert(
+            "reject_exclusive_conflict".to_owned(),
+            serde_json::json!(self.metrics.rejected.exclusive_conflict),
+        );
+        fields.insert(
+            "reject_cascade".to_owned(),
+            serde_json::json!(self.metrics.rejected.cascade),
+        );
+        fields.insert(
+            "reject_malformed".to_owned(),
+            serde_json::json!(self.metrics.rejected.malformed),
+        );
+        fields.insert(
+            "reject_causality_violation".to_owned(),
+            serde_json::json!(self.metrics.rejected.causality_violation),
+        );
+        insert_node_metrics(&mut fields, "ui", &self.ui);
+        insert_node_metrics(&mut fields, "worker", &self.worker);
+        insert_node_metrics(&mut fields, "edge", &self.edge);
+        insert_node_metrics(&mut fields, "core", &self.core);
+        emit_json_line("sync", fields);
     }
 }
 
