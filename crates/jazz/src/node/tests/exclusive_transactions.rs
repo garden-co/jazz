@@ -151,6 +151,57 @@ fn tx_read_records_present_and_absent_snapshot_reads() {
 }
 
 #[test]
+fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_set() {
+    let (_temp_dir, mut node) = open_node();
+    let row = row(7);
+    let base = node
+        .commit_mergeable(MergeableCommit::new("todos", row, 10).cells(title_cells("base")))
+        .unwrap();
+    let tx_id = node.open_exclusive().unwrap();
+
+    assert_eq!(
+        node.tx_read(tx_id, "todos", row).unwrap(),
+        Some(title_cells("base"))
+    );
+    assert!(
+        node.open_tx(tx_id)
+            .unwrap()
+            .base_snapshot_rows
+            .contains_key(&("todos".to_owned(), row))
+    );
+
+    node.tx_write(tx_id, "todos", row, title_cells("updated"), None)
+        .unwrap();
+    assert!(
+        !node
+            .open_tx(tx_id)
+            .unwrap()
+            .base_snapshot_rows
+            .contains_key(&("todos".to_owned(), row))
+    );
+
+    let (_exclusive, unit) = node
+        .commit_exclusive(tx_id, AuthorId::SYSTEM, 11)
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected exclusive commit unit");
+    };
+    assert_eq!(
+        tx.row_read_set.as_deref(),
+        Some(
+            [RowRead {
+                table: "todos".to_owned(),
+                row_uuid: row,
+                version: base,
+            }]
+            .as_slice()
+        )
+    );
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].parents(), vec![base]);
+}
+
+#[test]
 fn exclusive_tx_snapshot_applies_deletion_register() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);

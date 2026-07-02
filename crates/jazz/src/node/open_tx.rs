@@ -31,6 +31,7 @@ where
             id,
             OpenExclusive {
                 base_snapshot,
+                base_snapshot_rows: BTreeMap::new(),
                 row_reads: Vec::new(),
                 absent_reads: Vec::new(),
                 predicate_reads: Vec::new(),
@@ -51,6 +52,9 @@ where
         let table_schema = self.table(table)?.clone();
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
+        self.open_tx_mut(tx_id)?
+            .base_snapshot_rows
+            .insert((table.to_owned(), row_uuid), snapshot_row.clone());
         let result = self
             .overlay_pending_writes(tx_id, table, row_uuid, snapshot_row.clone())?
             .map(|cells| cells_from_positional(&table_schema, &cells));
@@ -147,8 +151,18 @@ where
             .map(|(column, value)| (column, value.into()))
             .collect::<BTreeMap<_, _>>();
         validate_mergeable_write_shape(cells.is_empty(), deletion.is_some())?;
-        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-        let snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
+        let cache_key = (table.to_owned(), row_uuid);
+        let snapshot_row = if let Some(snapshot_row) = self
+            .open_tx(tx_id)?
+            .base_snapshot_rows
+            .get(&cache_key)
+            .cloned()
+        {
+            snapshot_row
+        } else {
+            let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+            self.snapshot_row(table, row_uuid, &snapshot)
+        };
         let parent = if snapshot_row.deleted {
             None
         } else {
@@ -163,6 +177,7 @@ where
             parent,
         };
         let open_tx = self.open_tx_mut(tx_id)?;
+        open_tx.base_snapshot_rows.remove(&cache_key);
         if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
             write.table == pending.table
                 && write.row_uuid == pending.row_uuid
@@ -395,6 +410,8 @@ where
 pub struct OpenExclusive {
     /// Snapshot captured when the transaction opened.
     pub base_snapshot: Snapshot,
+    /// Base snapshot row derivations observed by point reads in this transaction.
+    pub(super) base_snapshot_rows: BTreeMap<(String, RowUuid), SnapshotRow>,
     /// Point reads recorded by the transaction.
     pub row_reads: Vec<RowRead>,
     /// Absent-row reads recorded by the transaction.
