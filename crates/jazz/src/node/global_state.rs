@@ -68,37 +68,16 @@ where
         table: &str,
         global_base: GlobalSeq,
     ) -> Result<bool, Error> {
-        let Some(start) = global_base.0.checked_add(1) else {
+        let Some(raw) = self.database.index_last_raw(
+            "jazz_global_changes",
+            "by_table_global_seq",
+            &[Value::Bytes(table.as_bytes().to_vec())],
+        )?
+        else {
             return Ok(false);
         };
-        let mut changed_rows = BTreeSet::new();
-        for raw in self.database.index_scan_range_raw(
-            "jazz_global_changes",
-            "by_global_seq",
-            &[Value::U64(start)],
-            &[Value::U64(u64::MAX)],
-        )? {
-            let record = raw.record();
-            let changed_table = String::from_utf8(
-                record
-                    .get_bytes(GlobalChangeRowRecord::FIELD_TABLE_NAME_IDX)?
-                    .to_vec(),
-            )
-            .map_err(|_| Error::InvalidStoredValue("change table name must be utf8"))?;
-            if changed_table == table {
-                changed_rows.insert(RowUuid(
-                    record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?,
-                ));
-            }
-        }
-        for row_uuid in changed_rows {
-            if self.visible_global_content_tx_id_at(table, row_uuid, global_base)?
-                != self.visible_global_content_tx_id_now(table, row_uuid)
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let record = raw.record();
+        Ok(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_SEQ_IDX)? > global_base.0)
     }
 
     pub(super) fn visible_global_content_tx_id_now(

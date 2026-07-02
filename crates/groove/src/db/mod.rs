@@ -2058,7 +2058,9 @@ fn storage_index_write_destination(key: &[u8]) -> StorageWriteDestination {
     let Some((table, index)) = durable_index_table_and_name(key) else {
         return StorageWriteDestination::Other;
     };
-    if table == "jazz_global_changes" && index == "by_global_seq" {
+    if table == "jazz_global_changes"
+        && (index == "by_global_seq" || index == "by_table_global_seq")
+    {
         StorageWriteDestination::GlobalChangesIndexes
     } else if table == "jazz_transactions" && index == "by_global_seq" {
         StorageWriteDestination::TransactionsIndexes

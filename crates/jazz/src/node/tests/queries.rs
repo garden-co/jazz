@@ -1,51 +1,32 @@
 #[test]
-fn predicate_boundary_probe_matches_set_comparison_reference() {
-    let (_client_dir, mut client) = open_node_with_uuid(node(8));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let mut parents = BTreeMap::<RowUuid, TxId>::new();
+fn whole_table_predicate_probe_uses_table_change_watermark() {
+    let schema = JazzSchema::new([
+        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
+        TableSchema::new("notes", [ColumnSchema::new("title", ColumnType::String)]),
+    ]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
-    for step in 0..48_u64 {
-        let row_uuid = row((step % 8) as u8);
-        let mut commit = MergeableCommit::new("todos", row_uuid, 10 + step);
-        if let Some(parent) = parents.get(&row_uuid).copied() {
-            commit = commit.parents(vec![parent]);
-        }
-        commit = if step >= 8 && step % 11 == 5 {
-            commit.deletion(DeletionEvent::Deleted)
-        } else if step >= 8 && step % 11 == 6 {
-            commit.deletion(DeletionEvent::Restored)
-        } else {
-            commit.cells(BTreeMap::from([(
-                "title".to_owned(),
-                format!("title-{step}"),
-            )]))
-        };
-        let (tx_id, unit) = client.commit_mergeable_unit(commit).unwrap();
-        parents.insert(row_uuid, tx_id);
-        let SyncMessage::CommitUnit { tx, versions } = unit else {
-            panic!("expected commit unit");
-        };
-        let mut updates = core
-            .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-            .unwrap();
-        assert_eq!(updates.len(), 1);
-        let Some(SyncMessage::FateUpdate {
-            fate: Fate::Accepted,
-            global_seq: Some(global_seq),
-            ..
-        }) = updates.pop()
-        else {
-            panic!("expected one accepted fate");
-        };
-        for base in 0..=global_seq.0 {
-            let base = GlobalSeq(base);
-            let versions = core.query_table_versions("todos").unwrap();
-            let reference = global_visible_currency_set_at(&mut core, &versions, base)
-                != global_visible_currency_set_now(&mut core, &versions);
-            let probe = core.global_currency_changed_after("todos", base).unwrap();
-            assert_eq!(probe, reference, "step {step}, base {base:?}");
-        }
-    }
+    let base = GlobalSeq(0);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("notes", row(1), 10).cells(title_cells("other table")),
+    );
+    assert!(
+        !core.global_currency_changed_after("todos", base).unwrap(),
+        "other-table writes must not invalidate whole-table predicates"
+    );
+
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(2), 11).cells(title_cells("target table")),
+    );
+    assert!(
+        core.global_currency_changed_after("todos", base).unwrap(),
+        "same-table writes after the base snapshot invalidate whole-table predicates"
+    );
 }
 #[test]
 fn history_subscriptions_flow_through_groove() {

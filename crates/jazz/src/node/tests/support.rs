@@ -426,55 +426,6 @@ fn open_history_complete_node_with_schema(
     let node = NodeState::new_history_complete(node_uuid, schema, storage).unwrap();
     (temp_dir, node)
 }
-fn global_visible_currency_set_now(
-    node: &mut NodeState<RocksDbStorage>,
-    versions: &[VersionRow],
-) -> BTreeSet<(RowUuid, TxId)> {
-    global_visible_currency_set_at(node, versions, GlobalSeq(u64::MAX))
-}
-fn global_visible_currency_set_at(
-    node: &mut NodeState<RocksDbStorage>,
-    versions: &[VersionRow],
-    base: GlobalSeq,
-) -> BTreeSet<(RowUuid, TxId)> {
-    let mut winners = BTreeMap::<(RowUuid, VersionLayer), (TxId, Option<DeletionEvent>)>::new();
-    for version in versions {
-        let tx_id = node.version_tx_id(version).unwrap();
-        let Some(tx) = node.query_transaction(tx_id).unwrap() else {
-            continue;
-        };
-        if !matches!(tx.fate, Fate::Accepted) || tx.global_seq.is_none_or(|seq| seq > base) {
-            continue;
-        }
-        winners
-            .entry((version.row_uuid(), version.layer()))
-            .and_modify(|winner| {
-                if tx_id > winner.0 {
-                    *winner = (tx_id, version.deletion());
-                }
-            })
-            .or_insert((tx_id, version.deletion()));
-    }
-    let rows = winners
-        .keys()
-        .map(|(row_uuid, _)| *row_uuid)
-        .collect::<BTreeSet<_>>();
-    rows.into_iter()
-        .filter_map(|row_uuid| {
-            if matches!(
-                winners
-                    .get(&(row_uuid, VersionLayer::Deletion))
-                    .and_then(|(_, deletion)| *deletion),
-                Some(DeletionEvent::Deleted)
-            ) {
-                return None;
-            }
-            winners
-                .get(&(row_uuid, VersionLayer::Content))
-                .map(|(tx_id, _)| (row_uuid, *tx_id))
-        })
-        .collect()
-}
 fn two_column_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
