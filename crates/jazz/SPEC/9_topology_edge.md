@@ -47,6 +47,23 @@ identity termination, and edge fate deferral. Normal committed units outside the
 partial edge-mergeable path still rely on core as the authority until the
 remaining edge capabilities are complete.
 
+The canonical alpha-replacement conformance and benchmark topology is:
+
+```text
+client main thread (in-memory)
+  ↔ client worker relay (OPFS)
+  ↔ edge (RocksDB)
+  ↔ core (RocksDB)
+```
+
+This topology is a deployment shape over the single protocol and API surface. The
+main-thread client owns immediate UI-local state, the worker relay owns durable
+browser persistence and tab sharing, the edge terminates client identities and
+hydrates permission scopes, and core remains history-complete. Scenario smoke
+benches may collapse this into in-process nodes while preserving the same role
+boundaries; browser OPFS and worker ownership are integrability concerns, not
+alternate semantics.
+
 ## 9.3 Relays
 
 Relays provide unopinionated transport and caching. A relay link uses

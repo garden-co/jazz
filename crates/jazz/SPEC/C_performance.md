@@ -32,8 +32,10 @@ witnesses (`INV-PERF-6`).
 A **full-diff full recompute is sometimes correctness-preserving, not a failure**. For
 example, a permission change can make an old exclusive transaction newly
 visible, and the test expects exactly one `full_diff_recomputes_out`. Large reset
-rehydrates (`> LARGE_REHYDRATE_RESULT_ROWS = 1024`) deliberately avoid a
-duplicate groove hydration and full-diff from stored peer state thereafter.
+rehydrates deliberately avoid a duplicate groove hydration and full-diff from
+stored peer state thereafter. There is no `LARGE_REHYDRATE_RESULT_ROWS` constant;
+the nearby `1024` constant in code is the large-value checkpoint operation
+interval, not a result-set rehydrate threshold.
 
 ## C.3 Current-row reads
 
@@ -164,6 +166,26 @@ Two work items:
 
 ## Residuals / accepted-for-now
 
+- Plan-1 receipts (ledger `dev/benchmarks/SMOKE_LEDGER.md`): tick runtime stats
+  were split into cheap always-on counters plus explicit expensive arrangement
+  walks; the S3 permissions smoke receipt moved from **12.597s** before the split
+  to **0.893s** in the first post-cleanup smoke run (`20260702T000844Z`, dirty
+  git `18e31f13a`). After Step 8, `smoke.sh` records
+  `prebuild_s` separately; the final Plan-1 execution-only run
+  (`20260702T005632Z`) records S3 smoke at **1.262s** with
+  `prebuild_s = 280.686s`.
+- RocksDB baseline configuration landed in groove: the groove crate now declares
+  its own `lz4` and `zstd` RocksDB features; the adapter configures block-based
+  bloom filters (10 bits/key), a shared 256 MiB LRU block cache, a shared 256 MiB
+  write-buffer manager, LZ4 for upper levels, and zstd for the bottommost level.
+  This was feature alignment, not a new workspace artifact feature set.
+- The staged storage overlay now has a one-seek `last_with_prefix` fast path when
+  no staged delete exists under the prefix; reverse prefix scans stream/merge
+  staged and base entries rather than materializing the whole base prefix first.
+- The smoke CPU profile baseline (`20260702T005457Z`) is intentionally
+  smoke-sized. Its top self-time tables are useful for spotting fixed costs
+  (notably RocksDB write/open costs) but are not medium-scale hotspot claims;
+  hotspot claims still require medium-size runs under `INV-PERF-1`.
 - S2 receipt: ~8.5ms p95 vs 1ms floor (re-measured 2026-06-12 after the
   delta-fold fix d942e57; originally 12ms) — itemized in per-stage
   histograms (link timer-worker granularity ~5ms is harness; rest is

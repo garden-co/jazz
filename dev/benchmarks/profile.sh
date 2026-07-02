@@ -68,10 +68,7 @@ append_profile_ledger() {
 
 (
   cd "$ROOT"
-  for bench in s1_saas s3_permissions s4_order_processing
-  do
-    cargo bench -p jazz-sim --bench "$bench" --no-run -j 2 --features profiling
-  done
+  cargo bench -p jazz-sim --no-run -j 2 --features profiling
 ) >"$LOG_DIR/prebuild.log" 2>&1
 prebuild_status=$?
 if [[ $prebuild_status -ne 0 ]]; then

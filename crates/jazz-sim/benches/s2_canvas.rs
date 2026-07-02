@@ -1726,7 +1726,11 @@ fn run_historical_loads(
                 let rows = match core.at(position).read(&shape, &binding) {
                     Ok(rows) => rows,
                     Err(error) => {
-                        emit_historical_load_gate(coalesced, config, &error);
+                        if is_known_historical_implicit_include_coverage_gap(&error) {
+                            emit_historical_load_gate(coalesced, config, &error);
+                        } else {
+                            panic!("unexpected historical load error: {error:?}");
+                        }
                         return summaries;
                     }
                 };
@@ -2929,6 +2933,14 @@ fn emit_historical_load_gate(coalesced: bool, config: &Config, error: &impl std:
     fields.insert("coalesced_16ms".to_owned(), json!(coalesced));
     fields.insert("error".to_owned(), json!(format!("{error:?}")));
     emit_object(fields);
+}
+
+fn is_known_historical_implicit_include_coverage_gap(error: &impl std::fmt::Debug) -> bool {
+    let error = format!("{error:?}");
+    error.contains("QueryCapability(")
+        && error.contains("gaps: [Source(Coverage)]")
+        && error.contains("HistoryCut")
+        && error.contains("ImplicitRootReference")
 }
 
 fn emit_db_surface_summary(coalesced: bool, config: &Config, summary: &DbSurfaceSummary) {
