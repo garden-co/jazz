@@ -105,6 +105,17 @@ read-only API. It MUST NOT accept the live subscription and serve it by semantic
 full recomputes, skip the maintained path silently, or install a best-effort
 subscription with different semantics.
 
+On a serving sync connection, capability-gapped live subscriptions fail at the
+subscription boundary, not at the serving tick boundary. The server compiles the
+maintained view for a `Subscribe` request before registering that usage-site
+subscription as active. If the compile fails with a maintained-subscription
+capability gap, the server emits `SubscribeRejected` for that exact
+`SubscriptionKey`, leaves the subscription inactive, and continues serving every
+other subscription on the connection. The rejection reason is the stable
+protocol reason `UnsupportedShapeCapability`; detailed lowering reports stay
+internal compiler vocabulary and are mapped to human-readable diagnostics at
+the serving boundary (`INV-SYNC-23`).
+
 ## 16.5 Current known gaps
 
 The current maintained-subscription surface supports ordinary live query
@@ -255,15 +266,4 @@ sets on every tick.
 
 ## 16.8 Open questions
 
-- 🔶 **Per-subscription capability rejection.** Capability-gapped live
-  subscriptions currently fail at the serving tick boundary in some paths rather
-  than producing a targeted rejection for the offending subscription. Examples
-  include branch read-view subscriptions that require deletion witnesses and
-  array-subquery maintained views. Public DB/subscriber paths also normalize
-  `QueryCapability` gaps into the generic "maintained subscription view
-  subscription does not support this query shape" protocol error, losing the
-  precise `CapabilityReport`/`UnsupportedReason`/`SourceGap`. Desired shape: a
-  capability-gapped subscription receives a per-subscription rejection carrying
-  the specific typed gap, while the connection keeps serving other
-  subscriptions. This is a serving/protocol-boundary issue, not a lowering
-  workaround; lowering failures must stay loud capability errors.
+None at this time.

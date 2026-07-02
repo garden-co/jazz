@@ -260,7 +260,8 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscriptionKey,
+        RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason,
+        SubscriptionKey,
     };
     use crate::query::{BindingId, Query, ShapeId};
     use crate::time::{GlobalSeq, TxTime};
@@ -362,6 +363,12 @@ mod tests {
                 subscription,
                 values: Vec::new(),
             }),
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                    detail: "SourceGap::BranchOverlay".to_owned(),
+                },
+            },
             SyncMessage::ViewUpdate {
                 subscription,
                 reset_result_set: true,
