@@ -17,8 +17,8 @@ use web_time::{Duration, Instant};
 
 use crate::ivm::runtime::{durable_index_key_prefix, encode_key_part};
 use crate::ivm::{
-    IvmRuntime, PlannerError, QueryParameter, RecordDelta, RecordDeltas, TableDelta, TickMetrics,
-    plan_prepared_shape, plan_query,
+    IvmRuntime, PlannerError, QueryParameter, RecordDelta, RecordDeltas, RuntimeStats, TableDelta,
+    TickMetrics, plan_prepared_shape, plan_query,
 };
 use crate::queries::Query;
 use crate::records::{self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, Value};
@@ -98,6 +98,19 @@ where
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
+    }
+
+    /// Include arrangement and recursive-state size walks in future tick metrics.
+    ///
+    /// The default is `false` because those walks are diagnostic-only and scale
+    /// with retained runtime state rather than with the current commit.
+    pub fn set_tick_runtime_stats_enabled(&mut self, enabled: bool) {
+        self.ivm_runtime.set_tick_runtime_stats_enabled(enabled);
+    }
+
+    /// Compute full runtime stats on demand.
+    pub fn runtime_stats(&self) -> RuntimeStats {
+        self.ivm_runtime.stats()
     }
 
     fn durable_indices_store_with_storage<'a, T>(
@@ -1893,6 +1906,33 @@ where
             self.metrics.borrow_mut().record_range_row(cf, key);
             visit(key, value)
         })
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        prefix: &crate::storage::Key,
+        visit: &mut crate::storage::ScanVisitor<'_>,
+    ) -> Result<(), crate::storage::Error> {
+        self.metrics.borrow_mut().record_range(cf, prefix);
+        self.storage
+            .scan_prefix_reverse(cf, prefix, &mut |key, value| {
+                self.metrics.borrow_mut().record_range_row(cf, key);
+                visit(key, value)
+            })
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        prefix: &crate::storage::Key,
+    ) -> Result<Option<crate::storage::KeyValue>, crate::storage::Error> {
+        self.metrics.borrow_mut().record_range(cf, prefix);
+        let value = self.storage.last_with_prefix(cf, prefix)?;
+        if let Some((key, _)) = &value {
+            self.metrics.borrow_mut().record_range_row(cf, key);
+        }
+        Ok(value)
     }
 
     fn write_many(

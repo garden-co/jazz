@@ -982,6 +982,7 @@ fn commit_metrics_split_storage_and_tick_work() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
+    database.set_tick_runtime_stats_enabled(true);
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
         .unwrap();

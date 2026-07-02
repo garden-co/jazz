@@ -374,6 +374,40 @@ where
         Ok(())
     }
 
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        let mut values = self.base.prefix(cf, prefix)?;
+        overlay_values(
+            &mut values,
+            cf,
+            |key| key.starts_with(prefix),
+            self.staged_writes,
+        );
+        for (key, value) in values.into_iter().rev() {
+            visit(&key, &value)?;
+        }
+        Ok(())
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        let mut values = self.base.prefix(cf, prefix)?;
+        overlay_values(
+            &mut values,
+            cf,
+            |key| key.starts_with(prefix),
+            self.staged_writes,
+        );
+        Ok(values.pop())
+    }
+
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         for operation in operations {
             match operation {
@@ -808,6 +842,112 @@ mod tests {
                 (b"a".to_vec(), b"one".to_vec()),
                 (b"aa".to_vec(), b"one-one".to_vec())
             ]
+        );
+    }
+
+    #[test]
+    fn staged_overlay_reverse_prefix_scans_match_trait_default() {
+        struct DefaultReverse<'a, S>(&'a StagedWriteOverlay<'a, S>);
+
+        impl<S> OrderedKvStorage for DefaultReverse<'_, S>
+        where
+            S: OrderedKvStorage,
+        {
+            fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+                self.0.get(cf, key)
+            }
+
+            fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+                self.0.set(cf, key, value)
+            }
+
+            fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+                self.0.delete(cf, key)
+            }
+
+            fn scan_range(
+                &self,
+                cf: &ColumnFamilyName,
+                start: &Key,
+                end: &Key,
+                visit: &mut ScanVisitor<'_>,
+            ) -> Result<(), Error> {
+                self.0.scan_range(cf, start, end, visit)
+            }
+
+            fn scan_prefix(
+                &self,
+                cf: &ColumnFamilyName,
+                prefix: &Key,
+                visit: &mut ScanVisitor<'_>,
+            ) -> Result<(), Error> {
+                self.0.scan_prefix(cf, prefix, visit)
+            }
+
+            fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+                self.0.write_many(operations)
+            }
+        }
+
+        let storage = MemoryStorage::new(&["indices"]);
+        storage.set("indices", b"user:1", b"base-1").unwrap();
+        storage.set("indices", b"user:2", b"base-2").unwrap();
+        storage.set("indices", b"user:4", b"base-4").unwrap();
+        storage.set("indices", b"view:1", b"base-view").unwrap();
+        let staged = RefCell::new(vec![
+            OwnedWriteOperation::Set {
+                cf: "indices".to_owned(),
+                key: b"user:2".to_vec(),
+                value: b"staged-2".to_vec(),
+            },
+            OwnedWriteOperation::Delete {
+                cf: "indices".to_owned(),
+                key: b"user:4".to_vec(),
+            },
+            OwnedWriteOperation::Set {
+                cf: "indices".to_owned(),
+                key: b"user:3".to_vec(),
+                value: b"staged-3".to_vec(),
+            },
+            OwnedWriteOperation::Set {
+                cf: "indices".to_owned(),
+                key: b"view:2".to_vec(),
+                value: b"staged-view".to_vec(),
+            },
+        ]);
+        let overlay = StagedWriteOverlay::new(&storage, &staged);
+        let default_reverse = DefaultReverse(&overlay);
+
+        let mut optimized = Vec::new();
+        overlay
+            .scan_prefix_reverse("indices", b"user:", &mut |key, value| {
+                optimized.push((key.to_vec(), value.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+
+        let mut defaulted = Vec::new();
+        default_reverse
+            .scan_prefix_reverse("indices", b"user:", &mut |key, value| {
+                defaulted.push((key.to_vec(), value.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(optimized, defaulted);
+        assert_eq!(
+            optimized,
+            vec![
+                (b"user:3".to_vec(), b"staged-3".to_vec()),
+                (b"user:2".to_vec(), b"staged-2".to_vec()),
+                (b"user:1".to_vec(), b"base-1".to_vec()),
+            ]
+        );
+        assert_eq!(
+            overlay.last_with_prefix("indices", b"user:").unwrap(),
+            default_reverse
+                .last_with_prefix("indices", b"user:")
+                .unwrap()
         );
     }
 

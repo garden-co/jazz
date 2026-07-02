@@ -3907,13 +3907,6 @@ where
         binding: &Binding,
         prepared_plan: Option<&PreparedQueryPlan>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let _program = self.compile_current_query_program(
-            shape,
-            binding,
-            DurabilityTier::Local,
-            AuthorId::SYSTEM,
-            CurrentQueryProgramOutput::AppRows,
-        )?;
         self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
     }
 

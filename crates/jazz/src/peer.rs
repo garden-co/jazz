@@ -19,9 +19,11 @@ use crate::node::maintained_subscription_view::{
     MaintainedTerminalSchemas,
 };
 use crate::node::{Error, NodeState};
+#[cfg(any(test, debug_assertions))]
+use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     ContentExtent, LargeValueOwnerRef, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
-    ResultRowEntry, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
 };
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
@@ -154,13 +156,6 @@ struct MemberSlot {
 impl PeerSubscriptionState {
     fn member_result_set(&self) -> BTreeSet<ResultMemberEntry> {
         self.result_member_set.clone()
-    }
-
-    fn row_result_set(&self) -> BTreeSet<ResultRowEntry> {
-        self.result_member_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .collect()
     }
 
     fn previous_tx_ids(&self) -> BTreeSet<TxId> {
@@ -473,11 +468,11 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        let previous_row_result_set = previous_member_result_set
+        let previous_result_tx_ids = previous_member_result_set
             .iter()
             .filter_map(ResultMemberEntry::as_row)
+            .map(|(_, _, tx_id)| tx_id)
             .collect::<BTreeSet<_>>();
-        let previous_result_tx_ids = previous_tx_ids(previous_row_result_set.iter());
         let tier = self
             .subscriptions
             .get(&subscription)
@@ -1374,7 +1369,11 @@ impl PeerState {
         // (this sat under the measured record_outgoing_view_update hotspot).
         #[cfg(debug_assertions)]
         {
-            let row_result_set = state.row_result_set();
+            let row_result_set = state
+                .result_member_set
+                .iter()
+                .filter_map(ResultMemberEntry::as_row)
+                .collect::<BTreeSet<_>>();
             if let Some((table, row_uuid, first, second)) =
                 duplicate_row_result_set(&row_result_set)
             {
@@ -1478,10 +1477,6 @@ fn duplicate_row_result_set(
         }
     }
     None
-}
-
-fn previous_tx_ids<'a>(rows: impl IntoIterator<Item = &'a ResultRowEntry>) -> BTreeSet<TxId> {
-    rows.into_iter().map(|(_, _, tx_id)| *tx_id).collect()
 }
 
 fn normalize_maintained_subscription_unsupported_error(error: Error) -> Error {
@@ -1946,9 +1941,13 @@ mod tests {
         peer: &PeerState,
         subscription: SubscriptionKey,
     ) -> Option<BTreeSet<ResultRowEntry>> {
-        peer.subscriptions
-            .get(&subscription)
-            .map(PeerSubscriptionState::row_result_set)
+        peer.subscriptions.get(&subscription).map(|state| {
+            state
+                .result_member_set
+                .iter()
+                .filter_map(ResultMemberEntry::as_row)
+                .collect()
+        })
     }
 
     fn maintained_subscription_id(
