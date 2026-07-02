@@ -3862,7 +3862,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        prepared_plan: Option<&PreparedQueryPlan>,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_prepared_plan_for_identity(
             shape,
@@ -3888,7 +3888,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        prepared_plan: Option<&PreparedQueryPlan>,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_options_for_identity(
@@ -3905,7 +3905,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        prepared_plan: Option<&PreparedQueryPlan>,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
     }
@@ -3915,7 +3915,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        prepared_plan: Option<&PreparedQueryPlan>,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_options_for_identity(
@@ -3933,7 +3933,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        prepared_plan: Option<&PreparedQueryPlan>,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
         identity: AuthorId,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -3979,7 +3979,7 @@ where
             {
                 Some(self.prepared_query_plan(shape, binding, tier, identity)?)
             }
-            None if settled_binding_view.is_none() && needs_binding() => Some(
+            None if settled_binding_view.is_none() && needs_binding() => Some(std::sync::Arc::new(
                 self.prepared_query_plan_from_program(
                     program
                         .as_ref()
@@ -3987,7 +3987,7 @@ where
                     shape,
                     binding,
                 )?,
-            ),
+            )),
             None => None,
         };
         let policy = self.query_program_policy_context(identity);
@@ -3999,23 +3999,26 @@ where
                     &program.expect("program is compiled when no prepared plan is supplied"),
                 )?)
                 .map_err(Error::Groove),
-            Some(PreparedQueryPlan::Prepared { shape, params }) => {
-                let values = binding_values_for_plan(binding, &params, &policy)?;
-                self.database
-                    .bind_shape(shape, &values)
-                    .map_err(Error::Groove)
-                    .and_then(|subscription| {
-                        subscription
-                            .recv()
-                            .map_err(|_| Error::SubscriptionClosed)
-                            .and_then(|deltas| {
-                                take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK)
-                            })
-                    })
-            }
-            Some(PreparedQueryPlan::Graph(graph)) => {
-                self.database.query_graph(graph).map_err(Error::Groove)
-            }
+            Some(plan) => match plan.as_ref() {
+                PreparedQueryPlan::Prepared { shape, params } => {
+                    let values = binding_values_for_plan(binding, params, &policy)?;
+                    self.database
+                        .bind_shape(*shape, &values)
+                        .map_err(Error::Groove)
+                        .and_then(|subscription| {
+                            subscription
+                                .recv()
+                                .map_err(|_| Error::SubscriptionClosed)
+                                .and_then(|deltas| {
+                                    take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK)
+                                })
+                        })
+                }
+                PreparedQueryPlan::Graph(graph) => self
+                    .database
+                    .query_graph(graph.clone())
+                    .map_err(Error::Groove),
+            },
         };
         let deltas = deltas_result?;
         let mut rows = Vec::new();
@@ -4432,7 +4435,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
-    ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlan), Error> {
+    ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
         let shape = bind_query_params_with_mode(
             shape,
             binding,
@@ -4452,6 +4455,23 @@ where
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_prepared_plan_for_identity(shape, binding, tier, None, identity)
+    }
+
+    pub(crate) fn query_rows_for_link_with_prepared_plan(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_with_prepared_plan_for_identity(
+            shape,
+            binding,
+            tier,
+            prepared_plan,
+            identity,
+        )
     }
 
     /// Evaluate a query plus its array-subquery relation payload against local
@@ -4630,8 +4650,25 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
+        self.subscription_snapshot_for_link_with_prepared_plan(shape, binding, tier, identity, None)
+    }
+
+    pub(crate) fn subscription_snapshot_for_link_with_prepared_plan(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
+    ) -> Result<RelationSnapshot, Error> {
         if shape.query().array_subqueries.is_empty() {
-            let rows = self.query_rows_for_link(shape, binding, tier, identity)?;
+            let rows = self.query_rows_for_link_with_prepared_plan(
+                shape,
+                binding,
+                tier,
+                identity,
+                prepared_plan,
+            )?;
             return Ok(RelationSnapshot {
                 root_count: rows.len(),
                 rows,
@@ -4883,7 +4920,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
-    ) -> Result<PreparedQueryPlan, Error> {
+    ) -> Result<PreparedQueryPlanHandle, Error> {
         let key = (
             shape.shape_id(),
             tier,
@@ -4899,7 +4936,8 @@ where
             identity,
             CurrentQueryProgramOutput::AppRows,
         )?;
-        let plan = self.prepared_query_plan_from_program(&program, shape, binding)?;
+        let plan =
+            std::sync::Arc::new(self.prepared_query_plan_from_program(&program, shape, binding)?);
         self.query.query_shape_cache.insert(key, plan.clone());
         Ok(plan)
     }
@@ -7517,7 +7555,7 @@ mod tests {
                 .find(|((shape_id, tier, _), _)| {
                     *shape_id == shape.shape_id() && *tier == DurabilityTier::Global
                 })
-                .map(|(_, plan)| plan),
+                .map(|(_, plan)| plan.as_ref()),
             Some(PreparedQueryPlan::Prepared { .. })
         ));
     }

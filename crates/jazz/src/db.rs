@@ -22,7 +22,7 @@ use crate::ids::{AuthorId, NodeUuid, RowUuid};
 pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, LargeValueEditCommit, LargeValueEditOp,
-    LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlan,
+    LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlanHandle,
     RelationEdge, RelationSnapshot, RowProvenance,
 };
 use crate::peer::PeerState;
@@ -545,7 +545,13 @@ where
                 author,
             )
         } else {
-            node.query_rows_for_link(&prepared.shape, &prepared.binding, tier, author)
+            node.query_rows_for_link_with_prepared_plan(
+                &prepared.shape,
+                &prepared.binding,
+                tier,
+                author,
+                prepared.plan_for_tier(tier),
+            )
         }
         .map_err(Into::into)
     }
@@ -2218,11 +2224,12 @@ where
             .node
             .node
             .borrow_mut()
-            .query_rows_for_link(
+            .query_rows_for_link_with_prepared_plan(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
+                query.plan_for_tier(DurabilityTier::Local),
             )?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
@@ -4737,8 +4744,8 @@ impl Drop for SubscriptionStream {
 pub struct PreparedQuery {
     shape: ValidatedQuery,
     binding: Binding,
-    local_plan: Option<PreparedQueryPlan>,
-    global_plan: Option<PreparedQueryPlan>,
+    local_plan: Option<PreparedQueryPlanHandle>,
+    global_plan: Option<PreparedQueryPlanHandle>,
 }
 
 impl PreparedQuery {
@@ -4752,7 +4759,7 @@ impl PreparedQuery {
         &self.binding
     }
 
-    fn plan_for_tier(&self, tier: DurabilityTier) -> Option<&PreparedQueryPlan> {
+    fn plan_for_tier(&self, tier: DurabilityTier) -> Option<&PreparedQueryPlanHandle> {
         match tier {
             DurabilityTier::Local => self.local_plan.as_ref(),
             DurabilityTier::Global => self.global_plan.as_ref(),
