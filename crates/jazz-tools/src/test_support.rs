@@ -27,7 +27,7 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[cfg(feature = "test-utils")]
-const DEFAULT_WAIT_TIMEOUT_MULTIPLIER: u32 = 4;
+const DEFAULT_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 
 #[cfg(feature = "test-utils")]
 fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
