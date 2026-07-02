@@ -1,23 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db, type QueryBuilder } from "./db.js";
-import type { WasmSchema } from "../drivers/types.js";
+import { createDb, type Db } from "./db.js";
+import { col, defineApp } from "../index.js";
 
-const schema: WasmSchema = {
-  todos: {
-    columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-  },
-};
-
-function makeQuery(): QueryBuilder<{ id: string; title: string }> {
-  return {
-    _table: "todos",
-    _schema: schema,
-    _rowType: {} as { id: string; title: string },
-    _build() {
-      return JSON.stringify({ table: "todos", conditions: [], includes: {}, orderBy: [] });
-    },
-  };
-}
+const app = defineApp({
+  todos: { title: col.string() },
+});
 
 const dbs: Db[] = [];
 
@@ -37,19 +24,19 @@ async function makeDb(): Promise<Db> {
 }
 
 describe("Db.getRuntimeSchema", () => {
-  it("throws before any client has been created", async () => {
+  it("returns null before any client has been created", async () => {
     const db = await makeDb();
-    expect(() => db.getRuntimeSchema()).toThrow(/runtime client/);
+    expect(db.getRuntimeSchema()).toBeNull();
   });
 
   it("returns the runtime schema once a client exists", async () => {
     const db = await makeDb();
-    const unsubscribe = db.subscribeAll(makeQuery(), () => undefined);
+    const unsubscribe = db.subscribeAll(app.todos, () => undefined);
 
     const runtimeSchema = db.getRuntimeSchema();
     expect(runtimeSchema).toBeTruthy();
-    expect(runtimeSchema.todos).toBeDefined();
-    expect(runtimeSchema.todos!.columns.some((c) => c.name === "title")).toBe(true);
+    expect(runtimeSchema?.todos).toBeDefined();
+    expect(runtimeSchema?.todos?.columns.some((c) => c.name === "title")).toBe(true);
 
     unsubscribe();
   });

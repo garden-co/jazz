@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import {
   INSPECTOR_HOST_GLOBAL,
   INSPECTOR_SUBSCRIPTIONS_MESSAGE,
-  type InspectorConnectionConfig,
+  type DbConfig,
   type InspectorSubscription,
   type InspectorSubscriptionsMessage,
   type JazzInspectorHost,
@@ -23,7 +23,7 @@ function readHost(): JazzInspectorHost | null {
   }
 }
 
-export function readInspectorHostConfig(): InspectorConnectionConfig | null {
+export function readInspectorHostConfig(): DbConfig | null {
   const host = readHost();
   return host ? host.getConnectionConfig() : null;
 }
@@ -34,7 +34,8 @@ export function readInspectorHostSchema(): WasmSchema | null {
   try {
     return host.getWasmSchema();
   } catch {
-    // getRuntimeSchema throws until the host has created a client (run a query).
+    // getWasmSchema throws while no schema exists anywhere yet (no client and
+    // no defineApp) — treat that as "not ready" and let the poll retry.
     return null;
   }
 }

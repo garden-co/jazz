@@ -103,8 +103,25 @@ describe("installInspectorHost", () => {
     const handle = (window as any)[INSPECTOR_HOST_GLOBAL];
     const config = handle.getConnectionConfig();
     expect(config.serverUrl).toBeUndefined();
-    expect(config).toMatchObject({ appId: "a", dbName: "a" });
+    expect(config).toMatchObject({ appId: "a", driver: { type: "persistent", dbName: "a" } });
     // Always resolves a broker URL so the overlay can join the host's store.
-    expect(typeof config.brokerWorkerUrl).toBe("string");
+    expect(typeof config.runtimeSources.brokerWorkerUrl).toBe("string");
+  });
+
+  it("forwards exactly one identity credential plus adminSecret", () => {
+    const iframeWindow = { postMessage: () => {} } as unknown as Window;
+    const fake = makeFakeDb({
+      getConfig: () => ({
+        appId: "a",
+        secret: "seed",
+        cookieSession: { user_id: "u1" },
+        adminSecret: "adm",
+      }),
+    });
+    installInspectorHost(fake.db, iframeWindow, "http://localhost");
+    const config = (window as any)[INSPECTOR_HOST_GLOBAL].getConnectionConfig();
+    expect(config.secret).toBe("seed");
+    expect(config.cookieSession).toBeUndefined();
+    expect(config.adminSecret).toBe("adm");
   });
 });

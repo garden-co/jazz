@@ -1,13 +1,8 @@
-import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Component, useEffect, useRef, useState, type ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { JazzProvider } from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
 import { DevtoolsProvider } from "./contexts/devtools-context";
-import {
-  readInspectorHostConfig,
-  readInspectorHostSchema,
-  useHostSubscriptions,
-} from "./contexts/host-link";
+import { readInspectorHostConfig, readInspectorHostSchema } from "./contexts/host-link";
 import { InspectorRoutes } from "./routes";
 
 // How long to keep polling for the host handle before giving up and showing an
@@ -74,51 +69,7 @@ export function InspectorApp() {
     return () => clearInterval(timer);
   }, [config, wasmSchema]);
 
-  const hostSubscriptions = useHostSubscriptions();
-
-  // Pass exactly one identity credential — secret/jwtToken/cookieSession are
-  // mutually exclusive, and a local-first host carries both a secret and a
-  // derived jwtToken. Use the host's *identity* (live session → seed) so the
-  // overlay is the same user as the host and reads its local store. adminSecret
-  // is independent of identity (not mutually exclusive with it) and, when
-  // present, always wins the broker's authClass fingerprint — see
-  // resolveBrokerAuthClass — so it must always be forwarded when the host has
-  // one, regardless of which identity credential is also set.
-  //
-  // Memoized on `config` (which, once set, is a stable reference — the poll
-  // effect above stops re-setting it as soon as both config and wasmSchema are
-  // present): otherwise every render — including one triggered by every host
-  // subscription push — would rebuild this object graph and re-run
-  // JazzProvider's JSON.stringify(config) client-registry key for no reason.
-  const dbConfig: DbConfig | null = useMemo(() => {
-    if (!config) return null;
-    const identityCredential = config.jwtToken
-      ? { jwtToken: config.jwtToken }
-      : config.secret
-        ? { secret: config.secret }
-        : config.cookieSession
-          ? { cookieSession: config.cookieSession }
-          : {};
-    const credential = {
-      ...identityCredential,
-      ...(config.adminSecret ? { adminSecret: config.adminSecret } : {}),
-    };
-    return {
-      appId: config.appId,
-      serverUrl: config.serverUrl,
-      env: config.env,
-      userBranch: config.userBranch,
-      ...credential,
-      // Join the host's persistent store: the host's resolved OPFS namespace
-      // (dbName) and exact broker SharedWorker URL, so the overlay sees the
-      // host's local data — including unsynced local-only rows — and works
-      // offline.
-      driver: { type: "persistent", dbName: config.dbName },
-      runtimeSources: { brokerWorkerUrl: config.brokerWorkerUrl },
-    };
-  }, [config]);
-
-  if (!dbConfig || !wasmSchema) {
+  if (!config || !wasmSchema) {
     if (hostTimedOut) {
       return (
         <p style={{ padding: 16 }}>
@@ -132,16 +83,11 @@ export function InspectorApp() {
   return (
     <InspectorConnectionErrorBoundary>
       <JazzProvider
-        config={dbConfig}
+        config={config}
         autoAttachDevTools={false}
         fallback={<p style={{ padding: 16 }}>Connecting…</p>}
       >
-        <DevtoolsProvider
-          wasmSchema={wasmSchema}
-          runtime="overlay"
-          isOverlay
-          hostSubscriptions={hostSubscriptions}
-        >
+        <DevtoolsProvider wasmSchema={wasmSchema} runtime="overlay" isOverlay>
           <MemoryRouter>
             <InspectorRoutes />
           </MemoryRouter>

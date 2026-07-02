@@ -63,23 +63,6 @@
   padding: 8px 10px 6px;
 }
 
-.propagationSwitch {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  font-size: 11px;
-  color: #8996a8;
-}
-
-.propagationLabel {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-transform: none;
-  letter-spacing: normal;
-}
-
 .tableList {
   margin: 0;
   padding: 0 8px 8px;
