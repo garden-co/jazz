@@ -1207,7 +1207,7 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
     let mut peer = PeerState::relay();
     peer.declare_known_state(
         subscription,
-        Some(crate::protocol::KnownStateDeclaration {
+        Some(crate::protocol::KnownStateDeclaration::Fast {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
             position: GlobalSeq(1),
         }),
@@ -1281,6 +1281,259 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
 }
 
 #[test]
+fn slow_known_state_declaration_skips_exact_local_versions_only() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_a = row(21);
+    let row_b = row(22);
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    let values = Vec::new();
+
+    let (tx_a, unit_a) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_a, 10).cells(title_cells("local")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        tx: tx_a_record,
+        versions: versions_a,
+    } = unit_a
+    else {
+        panic!("expected commit unit");
+    };
+    core.ingest_commit_unit(
+        tx_a_record.clone(),
+        versions_a.clone(),
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+    reader
+        .ingest_known_transaction(
+            tx_a_record,
+            versions_a,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+    let binding_view_key = BindingViewKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    reader.query.settled_result_sets.insert(
+        binding_view_key,
+        BTreeSet::from([crate::protocol::ResultMemberEntry::row((
+            groove::Intern::from("todos".to_owned()),
+            row_a,
+            tx_a,
+        ))]),
+    );
+
+    let (tx_b, unit_b) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_b, 11).cells(title_cells("remote")),
+        )
+        .unwrap();
+    core.apply_sync_message(unit_b).unwrap();
+
+    let declaration = reader
+        .known_state_declaration_for_subscription(
+            &shape,
+            &binding,
+            subscription,
+            &values,
+            AuthorId::SYSTEM,
+        )
+        .unwrap()
+        .expect("reader should derive exact slow known-state");
+    assert_eq!(
+        declaration,
+        crate::protocol::KnownStateDeclaration::ExactVersionSet {
+            versions: vec![crate::protocol::RowVersionRef::new("todos", row_a, tx_a)]
+        }
+    );
+
+    let mut control_peer = PeerState::relay();
+    let control_update = control_peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate {
+        version_bundles: control_bundles,
+        result_member_adds: control_members,
+        ..
+    } = &control_update
+    else {
+        panic!("expected control update");
+    };
+    assert_eq!(control_members.len(), 2);
+    assert_eq!(control_bundles.len(), 2);
+
+    let mut peer = PeerState::relay();
+    peer.declare_known_state(subscription, Some(declaration));
+    let update = peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate {
+        version_bundles,
+        result_member_adds,
+        ..
+    } = &update
+    else {
+        panic!("expected declared update");
+    };
+    assert_eq!(result_member_adds, control_members);
+    assert_eq!(version_bundles.len(), 1);
+    assert_eq!(version_bundles[0].tx.tx_id, tx_b);
+    assert!(reader
+        .missing_known_state_row_version_refs(&update)
+        .unwrap()
+        .is_empty());
+    reader.apply_sync_message(update).unwrap();
+    assert_eq!(
+        reader
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            (row_a, title_cells("local")),
+            (row_b, title_cells("remote")),
+        ])
+    );
+}
+
+#[test]
+fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    let refs = (0..=crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS)
+        .map(|idx| {
+            crate::protocol::RowVersionRef::new(
+                "todos",
+                row((idx % 255) as u8),
+                TxId::new(TxTime(idx as u64 + 1), node(1)),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        crate::node::query_eval::exact_known_state_declaration_for_test(
+            shape.shape_id(),
+            subscription,
+            &[],
+            refs,
+        )
+        .is_none(),
+        "oversized exact declarations must degrade to no declaration, never truncate"
+    );
+
+    let mut writer = open_node_with_uuid(node(1)).1;
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(23), 12).cells(title_cells("full")),
+    );
+    let mut peer = PeerState::relay();
+    let update = peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate {
+        version_bundles,
+        result_member_adds,
+        ..
+    } = update
+    else {
+        panic!("expected full update");
+    };
+    assert_eq!(result_member_adds.len(), 1);
+    assert_eq!(version_bundles.len(), 1);
+    assert_eq!(version_bundles[0].tx.tx_id, tx_id);
+}
+
+#[test]
+fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(24);
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row_uuid, 13).cells(title_cells("persisted")),
+    );
+    let mut reader = reader;
+    let mut peer = PeerState::relay();
+    let update = peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap();
+    reader.apply_sync_message(update).unwrap();
+
+    let mut reopened = reader.reopen_in_place().unwrap();
+    let declaration = reopened
+        .known_state_declaration_for_subscription(
+            &shape,
+            &binding,
+            subscription,
+            &[],
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
+    assert_eq!(
+        declaration,
+        Some(crate::protocol::KnownStateDeclaration::Fast {
+            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalSeq(1),
+        })
+    );
+
+    let report = reopened.evict_cold(&PeerEvictionPins::default()).unwrap();
+    assert_eq!(report.row_versions_evictable, 1);
+    let declaration = reopened
+        .known_state_declaration_for_subscription(
+            &shape,
+            &binding,
+            subscription,
+            &[],
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
+    assert!(matches!(
+        declaration,
+        None | Some(crate::protocol::KnownStateDeclaration::ExactVersionSet { .. })
+    ));
+}
+
+#[test]
 fn known_state_declaration_never_skips_unfated_edge_members() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_edge_dir, mut edge) = open_node_with_uuid(node(7));
@@ -1309,7 +1562,7 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     let mut peer = PeerState::relay();
     peer.declare_known_state(
         subscription,
-        Some(crate::protocol::KnownStateDeclaration {
+        Some(crate::protocol::KnownStateDeclaration::Fast {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
             position: GlobalSeq(100),
         }),

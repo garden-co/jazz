@@ -38,9 +38,11 @@ use super::query_engine::{
     lower_query_program, right_field, route_param_field, user_column_field,
 };
 use crate::protocol::{
-    BindingViewKey, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, ResultMemberEntry, ShapeAst,
-    ShapeBody, Subscribe, SubscriptionKey,
+    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ReadViewKey, ReadViewSourceSpec,
+    ReadViewSpec, ResultMemberEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe,
+    SubscriptionKey, SyncMessage,
 };
+use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES};
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery, ShapeId,
@@ -3115,9 +3117,7 @@ where
         {
             self.query.settled_result_sets.remove(&binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
-            self.query
-                .settled_through_by_binding_view
-                .remove(&binding_view_key);
+            let _ = self.clear_known_state_fact(binding_view_key);
             self.query
                 .known_state_declared_binding_views
                 .remove(&binding_view_key);
@@ -3170,17 +3170,56 @@ where
             .copied()
     }
 
-    pub(crate) fn known_state_declaration_for_binding_view(
-        &self,
-        binding_view_key: BindingViewKey,
-    ) -> Option<crate::protocol::KnownStateDeclaration> {
-        if !self.has_settled_result_set(binding_view_key) {
-            return None;
+    pub(crate) fn known_state_declaration_for_subscription(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        subscription: SubscriptionKey,
+        values: &[Value],
+        identity: AuthorId,
+    ) -> Result<Option<KnownStateDeclaration>, Error> {
+        let binding_view_key = BindingViewKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: subscription.read_view,
+        };
+        if let Some(position) = self.settled_through_for_binding_view(binding_view_key) {
+            return Ok(Some(KnownStateDeclaration::Fast {
+                completeness: KnownStateCompleteness::FastCurrentMembership,
+                position,
+            }));
         }
-        Some(crate::protocol::KnownStateDeclaration {
-            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: self.settled_through_for_binding_view(binding_view_key)?,
-        })
+        if !self.has_settled_result_set(binding_view_key) {
+            // Slow exact declarations are still known-state declarations: they
+            // must describe a binding view the server has previously settled
+            // for this client. A purely local first subscription could include
+            // rows the serving peer has not observed yet; truncating that to an
+            // exact set would silently overclaim and can make stale rehydrate
+            // responses suppress local live state.
+            return Ok(None);
+        }
+        let mut refs = Vec::new();
+        for row in self.query_rows_for_link(shape, binding, DurabilityTier::Local, identity)? {
+            let Some(tx_id) = self.current_row_tx_id(&row) else {
+                continue;
+            };
+            refs.push(RowVersionRef::new(
+                row.table().to_owned(),
+                row.row_uuid(),
+                tx_id,
+            ));
+        }
+        refs.sort();
+        refs.dedup();
+        if refs.is_empty() {
+            return Ok(None);
+        }
+        Ok(exact_known_state_declaration_if_within_limits(
+            shape.shape_id(),
+            subscription,
+            values,
+            refs,
+        ))
     }
 
     pub(crate) fn subscription_is_known_state_declared(
@@ -6314,6 +6353,38 @@ fn query_binding_value_signature(binding: &Binding) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn exact_known_state_declaration_if_within_limits(
+    shape_id: ShapeId,
+    subscription: SubscriptionKey,
+    values: &[Value],
+    refs: Vec<RowVersionRef>,
+) -> Option<KnownStateDeclaration> {
+    if refs.len() > MAX_KNOWN_STATE_EXACT_REFS {
+        return None;
+    }
+    let declaration = KnownStateDeclaration::ExactVersionSet { versions: refs };
+    let subscribe = SyncMessage::Subscribe(Subscribe {
+        shape_id,
+        subscription,
+        values: values.to_vec(),
+        known_state: Some(declaration.clone()),
+    });
+    let Ok(bytes) = postcard::to_allocvec(&subscribe) else {
+        return None;
+    };
+    (bytes.len() <= MAX_SYNC_MESSAGE_BYTES).then_some(declaration)
+}
+
+#[cfg(test)]
+pub(crate) fn exact_known_state_declaration_for_test(
+    shape_id: ShapeId,
+    subscription: SubscriptionKey,
+    values: &[Value],
+    refs: Vec<RowVersionRef>,
+) -> Option<KnownStateDeclaration> {
+    exact_known_state_declaration_if_within_limits(shape_id, subscription, values, refs)
 }
 
 impl<S: OrderedKvStorage> NodeState<S> {

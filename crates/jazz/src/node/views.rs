@@ -9,7 +9,9 @@
 use super::policy::ViewEvaluationContext;
 use super::*;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
-use crate::protocol::{KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry};
+use crate::protocol::{
+    KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry, RowVersionRef,
+};
 
 fn maintained_view_tx_versions_contain_winner(
     tx_versions: &[VersionRow],
@@ -266,14 +268,34 @@ where
             "real row result member removal is missing content transaction for replacement shipping",
         )?;
         let mut tx_versions_cache = BTreeMap::<TxId, Vec<VersionRow>>::new();
-        let known_state_position = known_state.map(|declaration| declaration.position);
+        let known_state_position = match &known_state {
+            Some(KnownStateDeclaration::Fast { position, .. }) => Some(*position),
+            Some(KnownStateDeclaration::ExactVersionSet { .. }) | None => None,
+        };
+        let known_state_exact_refs = match &known_state {
+            Some(KnownStateDeclaration::ExactVersionSet { versions }) => {
+                versions.iter().cloned().collect::<BTreeSet<_>>()
+            }
+            Some(KnownStateDeclaration::Fast { .. }) | None => BTreeSet::new(),
+        };
         let skipped_known_state_rows = result_member_adds
             .iter()
             .filter_map(|member| {
                 let row = member.as_real_row()?;
-                let position = row.settle_position?;
-                let declared = known_state_position?;
-                (position <= declared).then_some((row.table.to_string(), row.row_uuid))
+                if let (Some(position), Some(declared)) =
+                    (row.settle_position, known_state_position)
+                    && position <= declared
+                {
+                    return Some((row.table.to_string(), row.row_uuid));
+                }
+                if let Some(tx_id) = row.content_tx {
+                    let version_ref =
+                        RowVersionRef::new(row.table.to_string(), row.row_uuid, tx_id);
+                    if known_state_exact_refs.contains(&version_ref) {
+                        return Some((row.table.to_string(), row.row_uuid));
+                    }
+                }
+                None
             })
             .collect::<BTreeSet<_>>();
         let wanted_add_rows_by_tx = row_result_adds
@@ -557,6 +579,7 @@ where
                 );
             }
         }
+        self.persist_known_state_fact(binding_view_key, settled_through)?;
         Ok(())
     }
 
