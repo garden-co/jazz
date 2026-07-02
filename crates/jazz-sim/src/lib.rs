@@ -3,6 +3,7 @@
 pub mod distributions;
 pub mod fixture;
 pub mod mem;
+pub mod profiling;
 
 use hdrhistogram::Histogram;
 use jazz::protocol::SyncMessage;
