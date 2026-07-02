@@ -14,7 +14,7 @@ import {
 } from "./browser-broker-protocol.js";
 import { createBrowserBrokerUnsupportedError } from "./browser-broker-errors.js";
 import type { RuntimeSourcesConfig } from "./context.js";
-import { resolveRuntimeConfigBrokerWorkerUrl } from "./runtime-config.js";
+import { resolveConfiguredUrl, resolveRuntimeConfigBrokerWorkerUrl } from "./runtime-config.js";
 
 const DEFAULT_STORAGE_RESET_TIMEOUT_MS = 5_000;
 
@@ -27,10 +27,25 @@ const DEFAULT_STORAGE_RESET_TIMEOUT_MS = 5_000;
  * must forward the result and pass it back via `runtimeSources.brokerWorkerUrl`.
  */
 export function resolveBrokerWorkerUrl(runtimeSources?: RuntimeSourcesConfig): string {
-  return resolveRuntimeConfigBrokerWorkerUrl(
-    import.meta.url,
+  if (runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl) {
+    return resolveRuntimeConfigBrokerWorkerUrl(
+      import.meta.url,
+      typeof location !== "undefined" ? location.href : undefined,
+      runtimeSources,
+    );
+  }
+  // Literal `new URL("<path>", import.meta.url)` so bundlers (Turbopack,
+  // webpack, Vite) emit the worker script as an asset and rewrite this URL.
+  // Must stay statically analyzable — do not extract into a helper.
+  const bundledUrl = new URL("../worker/jazz-broker-worker.js", import.meta.url).href;
+  // Turbopack's rewrite can yield a root-relative path (e.g. "/_next/static/…"),
+  // and the broker fingerprint compares this string across bundles: absolutize
+  // against the page exactly like the explicit-URL branch does, so a cross-bundle
+  // client (the inspector overlay) resolving the forwarded URL lands on the
+  // identical string.
+  return resolveConfiguredUrl(
+    bundledUrl,
     typeof location !== "undefined" ? location.href : undefined,
-    runtimeSources,
   );
 }
 

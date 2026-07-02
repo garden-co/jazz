@@ -17,7 +17,7 @@ function resolveBrowserAssetBase(locationHref: string): string {
   return new URL("/", locationHref).href;
 }
 
-function resolveConfiguredUrl(url: string, locationHref: string | undefined): string {
+export function resolveConfiguredUrl(url: string, locationHref: string | undefined): string {
   // If `url` is already absolute, ignore the base. Workers under some bundlers
   // (Turbopack) expose a non-URL `self.location.href`, and `new URL(absolute,
   // badBase)` still throws because the base is validated.
