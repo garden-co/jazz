@@ -632,13 +632,49 @@ pub struct PolicyBranch {
 }
 
 impl PolicyBranch {
-    /// Convert a query into a policy branch, discarding query-only output options.
-    pub fn from_query(query: Query) -> Self {
-        Self {
-            filters: query.filters,
-            joins: query.joins,
-            reachable: query.reachable,
+    /// Convert a policy query into all policy-only alternatives it represents,
+    /// discarding query-only output options.
+    ///
+    /// `Predicate::Any(Vec::new())` is the schema-converter's explicit
+    /// constant-false base used for pure disjunctions. Empty filters are a true
+    /// base and must be retained.
+    pub fn alternatives_from_query(query: Query) -> Vec<Self> {
+        let Query {
+            filters,
+            joins,
+            policy_branches,
+            reachable,
+            ..
+        } = query;
+        let base_is_converter_false = matches!(filters.as_slice(), [Predicate::Any(predicates)] if predicates.is_empty())
+            && joins.is_empty()
+            && reachable.is_empty();
+
+        let mut alternatives = Vec::new();
+        if !base_is_converter_false {
+            alternatives.push(Self {
+                filters,
+                joins,
+                reachable,
+            });
         }
+        alternatives.extend(policy_branches);
+        alternatives
+    }
+
+    /// Convert a query that is expected to represent exactly one policy
+    /// alternative. Panics if the query contains nested alternatives.
+    pub fn single_alternative_from_query(query: Query) -> Self {
+        let alternatives = Self::alternatives_from_query(query);
+        assert_eq!(
+            alternatives.len(),
+            1,
+            "expected exactly one policy alternative; use alternatives_from_query to preserve disjunctions"
+        );
+        alternatives
+            .into_iter()
+            .next()
+            .expect("length checked above")
     }
 
     pub(crate) fn as_query(&self, table: &str) -> Query {

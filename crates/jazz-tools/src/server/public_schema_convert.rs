@@ -263,7 +263,9 @@ fn convert_policy(
                     &format!("{path}.Or[{index}]"),
                     expr,
                 )?;
-                query = query.policy_branch(PolicyBranch::from_query(branch));
+                for branch in PolicyBranch::alternatives_from_query(branch) {
+                    query = query.policy_branch(branch);
+                }
             }
             Ok(query)
         }
@@ -475,14 +477,7 @@ fn append_inherited_referencing_policy_branches(
     source_query: Query,
 ) -> Result<Query, SchemaConversionError> {
     query = query.filter(Predicate::Any(Vec::new()));
-    let mut branches = Vec::new();
-    if !is_false_filter_set(&source_query.filters)
-        || !source_query.joins.is_empty()
-        || !source_query.reachable.is_empty()
-    {
-        branches.push(PolicyBranch::from_query(source_query.clone()));
-    }
-    branches.extend(source_query.policy_branches);
+    let branches = PolicyBranch::alternatives_from_query(source_query);
 
     for branch in branches {
         if !branch.reachable.is_empty() {
@@ -497,7 +492,9 @@ fn append_inherited_referencing_policy_branches(
             branch.filters,
             branch.joins,
         );
-        query = query.policy_branch(PolicyBranch::from_query(branch_query));
+        for branch in PolicyBranch::alternatives_from_query(branch_query) {
+            query = query.policy_branch(branch);
+        }
     }
     Ok(query)
 }
@@ -653,14 +650,7 @@ fn append_inherited_policy_branches(
     parent_query: Query,
 ) -> Result<Query, SchemaConversionError> {
     query = query.filter(Predicate::Any(Vec::new()));
-    let mut branches = Vec::new();
-    if !is_false_filter_set(&parent_query.filters)
-        || !parent_query.joins.is_empty()
-        || !parent_query.reachable.is_empty()
-    {
-        branches.push(PolicyBranch::from_query(parent_query.clone()));
-    }
-    branches.extend(parent_query.policy_branches);
+    let branches = PolicyBranch::alternatives_from_query(parent_query);
 
     for (index, branch) in branches.into_iter().enumerate() {
         let branch_query = inherited_parent_branch_to_child_query(
@@ -671,7 +661,9 @@ fn append_inherited_policy_branches(
             index,
             branch,
         )?;
-        query = query.policy_branch(PolicyBranch::from_query(branch_query));
+        for branch in PolicyBranch::alternatives_from_query(branch_query) {
+            query = query.policy_branch(branch);
+        }
     }
     Ok(query)
 }
@@ -777,10 +769,6 @@ fn inherited_parent_branch_to_child_query(
         };
     }
     Ok(query)
-}
-
-fn is_false_filter_set(filters: &[Predicate]) -> bool {
-    matches!(filters, [Predicate::Any(predicates)] if predicates.is_empty())
 }
 
 fn convert_policy_predicate(
