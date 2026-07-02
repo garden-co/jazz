@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 2.0.0-alpha.53
+
+### Patch Changes
+
+- f072cb0: feat: the localStorage key used by React's `useLocalFirstAuth` helper is now configurable, to support multiple Jazz apps on the same origin
+- 397f84d: Add `Db.disconnect()` and `Db.reconnect()` for temporarily pausing and resuming sync without shutting down local storage.
+- 42e77fd: Allow `createDb({ driver: { type: "memory" } })` to create a standalone in-memory database without connecting to a sync server.
+  - jazz-wasm@2.0.0-alpha.53
+  - jazz-rn@2.0.0-alpha.53
+
 ## 2.0.0-alpha.52
 
 ### Patch Changes
