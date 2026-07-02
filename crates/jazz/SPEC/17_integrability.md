@@ -149,8 +149,14 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 
 ## 17.6 Open questions
 
-- 🔶 Which storage backends are required for the first conformance matrix:
-  in-memory, browser persistent storage, RocksDB, SQLite, or all four?
+- ✅ **Conformance storage backends (decided 2026-07-02):** the alpha
+  conformance matrix covers the canonical topology's backends — in-memory
+  (client main thread), OPFS (client worker relay), and RocksDB (edge and
+  core). SQLite is conditionally in scope as the **last** alpha item, paired
+  with React Native support: it is needed only if RocksDB proves unworkable in
+  the RN environment. It is deliberately scheduled last because it is pure
+  tooling — a clean additional `OrderedKvStorage` backend behind the existing
+  storage contract, with no design decisions attached.
 - 🔶 What is the alpha replacement packaging line for the server shell: a
   dedicated crate/package with stable config types, a reference executable over
   unstable internals, or both?
