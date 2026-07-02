@@ -1,5 +1,6 @@
 #![cfg(feature = "test-utils")]
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 mod support;
@@ -11,6 +12,8 @@ use jazz_tools::{
     TableSchema, Value, WriteContext,
 };
 use support::wait_for_query;
+
+static TEST_USER_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn todo_schema() -> Schema {
     SchemaBuilder::new()
@@ -67,10 +70,17 @@ async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> Jaz
     client
 }
 
+fn unique_user_id(prefix: &str) -> String {
+    let id = TEST_USER_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{id}")
+}
+
 async fn start_two_clients(schema: Schema) -> (JazzServer, JazzClient, JazzClient) {
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let alice = connect_user(&server, schema.clone(), "alice-transactions").await;
-    let bob = connect_user(&server, schema, "bob-transactions").await;
+    let alice_id = unique_user_id("alice-transactions");
+    let bob_id = unique_user_id("bob-transactions");
+    let alice = connect_user(&server, schema.clone(), &alice_id).await;
+    let bob = connect_user(&server, schema, &bob_id).await;
     (server, alice, bob)
 }
 
@@ -414,7 +424,8 @@ local_tokio_test! {
 async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction() {
     let schema = todo_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client = connect_user(&server, schema, "transaction-update-inserted-row").await;
+    let user_id = unique_user_id("transaction-update-inserted-row");
+    let client = connect_user(&server, schema, &user_id).await;
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
@@ -465,7 +476,8 @@ local_tokio_test! {
 async fn multiple_updates_to_same_row_in_transaction_compose() {
     let schema = todo_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client = connect_user(&server, schema, "multiple-updates-compose").await;
+    let user_id = unique_user_id("multiple-updates-compose");
+    let client = connect_user(&server, schema, &user_id).await;
     let todo_id = insert_visible_todo(&client, "draft", false).await;
 
     let tx = client
@@ -519,7 +531,8 @@ local_tokio_test! {
 async fn multiple_writes_in_one_transaction_settle_as_one_batch() {
     let schema = todo_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client = connect_user(&server, schema, "multiple-writes-one-transaction").await;
+    let user_id = unique_user_id("multiple-writes-one-transaction");
+    let client = connect_user(&server, schema, &user_id).await;
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
