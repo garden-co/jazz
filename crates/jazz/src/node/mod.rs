@@ -274,6 +274,10 @@ struct QueryServing {
     settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
     /// Subscriber-side settled non-row facts by canonical query binding/view.
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
+    /// Server-stamped settled-through cursor for each canonical binding view.
+    settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalSeq>,
+    /// Binding views whose current subscription declared known-state repair.
+    known_state_declared_binding_views: BTreeSet<BindingViewKey>,
 }
 
 /// One usage-site query binding registration.
@@ -477,6 +481,8 @@ where
                 registered_bindings: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
+                settled_through_by_binding_view: BTreeMap::new(),
+                known_state_declared_binding_views: BTreeSet::new(),
             },
             open_tx: OpenTxState {
                 open_exclusive: BTreeMap::new(),
@@ -535,6 +541,10 @@ where
     /// Return the pure-storage large-value content store.
     pub fn content_store(&self) -> ContentStore<'_, S> {
         ContentStore::new(&self.database)
+    }
+
+    pub(crate) fn applied_global_watermark(&self) -> GlobalSeq {
+        self.clock.applied_global_watermark
     }
 
     /// Attach process-local auth claims to an accepted subscriber identity.
@@ -598,6 +608,8 @@ where
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.settled_result_sets.clear();
         self.query.settled_program_facts.clear();
+        self.query.settled_through_by_binding_view.clear();
+        self.query.known_state_declared_binding_views.clear();
         self.parking.parked_shape_registrations.clear();
         self.parking.parked_binding_deltas.clear();
         self.recover_from_storage()?;
@@ -3149,6 +3161,7 @@ impl MergeableCommit {
 
 struct ViewUpdateParts {
     subscription: SubscriptionKey,
+    settled_through: GlobalSeq,
     reset_result_set: bool,
     version_bundles: Vec<VersionBundle>,
     peer_complete_tx_payload_refs: Vec<TxId>,

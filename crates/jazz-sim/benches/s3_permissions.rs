@@ -2046,6 +2046,7 @@ fn ensure_client_subscription_registered(
             shape_id: shape.shape_id(),
             subscription,
             values,
+            known_state: None,
         }))
         .expect("client registers query binding before view updates");
 }

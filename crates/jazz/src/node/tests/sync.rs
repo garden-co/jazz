@@ -462,6 +462,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
+            settled_through: GlobalSeq(0),
             reset_result_set: false,
             version_bundles: vec![VersionBundle {
                 tx: tx.clone(),
@@ -494,6 +495,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,
+            settled_through: GlobalSeq(0),
             reset_result_set: false,
             version_bundles: vec![VersionBundle {
                 tx,
@@ -529,6 +531,7 @@ fn view_updates_reject_unknown_usage_site_bindings() {
     let error = reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription: unknown_usage_site,
+            settled_through: GlobalSeq(0),
             reset_result_set: false,
             version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -1152,6 +1155,191 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
 }
 
 #[test]
+fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(17);
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+
+    let (tx_id, commit_unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("known")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
+        panic!("expected commit unit");
+    };
+    core.ingest_commit_unit(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    reader
+        .ingest_known_transaction(
+            tx,
+            Vec::new(),
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+    let mut control_peer = PeerState::relay();
+    let control_update = control_peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate {
+        version_bundles: control_version_bundles,
+        result_member_adds: control_result_member_adds,
+        ..
+    } = &control_update
+    else {
+        panic!("expected control view update");
+    };
+    assert_eq!(control_result_member_adds.len(), 1);
+    assert_eq!(control_version_bundles.len(), 1);
+
+    let mut peer = PeerState::relay();
+    peer.declare_known_state(
+        subscription,
+        Some(crate::protocol::KnownStateDeclaration {
+            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalSeq(1),
+        }),
+    );
+
+    let update = peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate {
+        settled_through,
+        version_bundles,
+        result_member_adds,
+        ..
+    } = &update
+    else {
+        panic!("expected view update");
+    };
+    assert_eq!(*settled_through, GlobalSeq(1));
+    assert_eq!(result_member_adds, control_result_member_adds);
+    assert!(version_bundles.is_empty());
+    assert_eq!(
+        result_member_adds,
+        &vec![crate::protocol::ResultMemberEntry::from(
+            crate::protocol::RealRowMemberEntry::current_content((
+                groove::Intern::from("todos".to_owned()),
+                row_uuid,
+                tx_id,
+            ))
+            .with_settle_position(Some(GlobalSeq(1)))
+        )]
+    );
+
+    let missing = reader
+        .missing_known_state_row_version_refs(&update)
+        .unwrap();
+    assert_eq!(
+        missing,
+        vec![crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)]
+    );
+    let messages = peer
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: missing.clone(),
+            },
+        )
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { versions }] = messages.as_slice()
+    else {
+        panic!("expected row-version payloads");
+    };
+    reader
+        .apply_row_version_payloads_for_requests(&missing, versions.clone())
+        .unwrap();
+    reader.apply_sync_message(update).unwrap();
+    assert_eq!(
+        reader
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("known"))])
+    );
+}
+
+#[test]
+fn known_state_declaration_never_skips_unfated_edge_members() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_edge_dir, mut edge) = open_node_with_uuid(node(7));
+    let row_uuid = row(18);
+    let (shape, binding) = edge.whole_table_shape_binding("todos").unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("unfated")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    edge.ingest_known_transaction(tx, versions, Fate::Accepted, None, DurabilityTier::Edge)
+        .unwrap();
+    let mut peer = PeerState::relay();
+    peer.declare_known_state(
+        subscription,
+        Some(crate::protocol::KnownStateDeclaration {
+            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalSeq(100),
+        }),
+    );
+
+    let update = peer
+        .rehydrate_query_for_subscription_with_opts(&mut edge, subscription, &shape, &binding, opts)
+        .unwrap();
+    let SyncMessage::ViewUpdate {
+        version_bundles,
+        result_member_adds,
+        ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    assert_eq!(
+        result_member_adds,
+        vec![crate::protocol::ResultMemberEntry::from((
+            groove::Intern::from("todos".to_owned()),
+            row_uuid,
+            tx_id,
+        ))]
+    );
+    assert_eq!(version_bundles.len(), 1);
+    assert_eq!(version_bundles[0].tx.tx_id, tx_id);
+    assert_eq!(version_bundles[0].versions.len(), 1);
+}
+
+#[test]
 fn view_updates_ship_current_versions_to_downstream_nodes() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -1175,6 +1363,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
     let update = core.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate {
         subscription,
+        settled_through,
         reset_result_set,
         version_bundles,
         peer_payload_inventory:
@@ -1201,6 +1390,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
     reader
         .apply_view_update(ViewUpdateParts {
             subscription,
+            settled_through,
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
@@ -1240,6 +1430,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     let initial = core.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate {
         subscription,
+        settled_through,
         reset_result_set,
         version_bundles,
         peer_payload_inventory:
@@ -1257,6 +1448,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     reader
         .apply_view_update(ViewUpdateParts {
             subscription,
+            settled_through,
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
@@ -1278,6 +1470,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         )
         .unwrap();
     let SyncMessage::ViewUpdate {
+        settled_through,
         version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -1300,6 +1493,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     reader
         .apply_view_update(ViewUpdateParts {
             subscription: core.whole_table_subscription_key("todos").unwrap(),
+            settled_through,
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
@@ -1321,6 +1515,7 @@ fn view_updates_reject_unknown_peer_payload_inventory_refs() {
     let err = reader
         .apply_view_update(ViewUpdateParts {
             subscription: reader.whole_table_subscription_key("todos").unwrap(),
+            settled_through: GlobalSeq(0),
             reset_result_set: false,
             version_bundles: Vec::new(),
             peer_complete_tx_payload_refs: vec![missing],

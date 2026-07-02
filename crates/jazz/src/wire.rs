@@ -384,6 +384,7 @@ mod tests {
                 shape_id,
                 subscription,
                 values: Vec::new(),
+                known_state: None,
             }),
             SyncMessage::SubscribeRejected {
                 subscription,
@@ -393,6 +394,7 @@ mod tests {
             },
             SyncMessage::ViewUpdate {
                 subscription,
+                settled_through: GlobalSeq(7),
                 reset_result_set: true,
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
@@ -465,6 +467,7 @@ mod tests {
                 binding_id: BindingId(uuid::Uuid::from_bytes([0x55; 16])),
                 read_view: Default::default(),
             },
+            settled_through: GlobalSeq(7),
             reset_result_set: true,
             version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {

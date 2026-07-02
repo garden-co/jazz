@@ -1306,6 +1306,7 @@ fn register_binding(
                 read_view: RegisterShapeOptions::default().read_view_key(),
             },
             values,
+            known_state: None,
         }),
     );
     let delivered = ctx.recv("core");
@@ -1333,6 +1334,7 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
             read_view: RegisterShapeOptions::default().read_view_key(),
         },
         values,
+        known_state: None,
     }))
     .unwrap();
 }
