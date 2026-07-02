@@ -49,10 +49,13 @@ groove::define_record! {
         0 => row_uuid: RowUuid,
         1 => tx_time: TxTime,
         2 => tx_node_id: NodeAlias,
-        3 => created_by: AuthorId,
-        4 => created_at: TxTime,
-        5 => updated_by: AuthorId,
-        6 => updated_at: TxTime,
+        3 => schema_version: SchemaVersionAlias,
+        4 => parents: ParentRefs,
+        5 => created_by: AuthorId,
+        6 => created_at: TxTime,
+        7 => updated_by: AuthorId,
+        8 => updated_at: TxTime,
+        9 => global_seq: Option<GlobalSeq>,
         .. user_cells,
     }
 }
@@ -62,11 +65,14 @@ groove::define_record! {
         0 => row_uuid: RowUuid,
         1 => tx_time: TxTime,
         2 => tx_node_id: NodeAlias,
-        3 => created_by: AuthorId,
-        4 => created_at: TxTime,
-        5 => updated_by: AuthorId,
-        6 => updated_at: TxTime,
-        7 => _deletion: DeletionEvent,
+        3 => schema_version: SchemaVersionAlias,
+        4 => parents: ParentRefs,
+        5 => created_by: AuthorId,
+        6 => created_at: TxTime,
+        7 => updated_by: AuthorId,
+        8 => updated_at: TxTime,
+        9 => global_seq: Option<GlobalSeq>,
+        10 => _deletion: DeletionEvent,
     }
 }
 
@@ -1319,19 +1325,35 @@ pub(super) fn global_current_primary_key(row_uuid: RowUuid) -> PrimaryKeyValue {
     PrimaryKeyValue::Composite(vec![PrimaryKeyValue::Uuid(row_uuid.0)])
 }
 
-pub(super) fn global_current_values(
-    table: &TableSchema,
-    version: &VersionRow,
-) -> Result<Vec<Value>, Error> {
-    let mut values = vec![
+fn stored_version_prefix_values(version: &VersionRow) -> Vec<Value> {
+    vec![
         Value::Uuid(version.row_uuid().0),
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),
+        Value::U64(version.schema_version_alias().0),
+        Value::Array(
+            version
+                .parents()
+                .iter()
+                .map(|parent| tx_id_value(*parent))
+                .collect(),
+        ),
         Value::Uuid(version.created_by().0),
         Value::U64(version.created_at().0),
         Value::Uuid(version.updated_by().0),
         Value::U64(version.updated_at().0),
-    ];
+    ]
+}
+
+pub(super) fn global_current_values(
+    table: &TableSchema,
+    version: &VersionRow,
+    global_seq: Option<GlobalSeq>,
+) -> Result<Vec<Value>, Error> {
+    let mut values = stored_version_prefix_values(version);
+    values.push(Value::Nullable(
+        global_seq.map(|seq| Box::new(Value::U64(seq.0))),
+    ));
     for (idx, _column) in table.columns.iter().enumerate() {
         let field = HistoryRowRecord::USER_CELLS + idx;
         values.push(Value::Nullable(
@@ -1341,21 +1363,20 @@ pub(super) fn global_current_values(
     Ok(values)
 }
 
-pub(super) fn register_global_current_values(version: &VersionRow) -> Vec<Value> {
-    vec![
-        Value::Uuid(version.row_uuid().0),
-        Value::U64(version.tx_time().0),
-        Value::U64(version.tx_node_alias().0),
-        Value::Uuid(version.created_by().0),
-        Value::U64(version.created_at().0),
-        Value::Uuid(version.updated_by().0),
-        Value::U64(version.updated_at().0),
-        deletion_event_value(
-            version
-                .deletion()
-                .expect("register global-current row requires deletion"),
-        ),
-    ]
+pub(super) fn register_global_current_values(
+    version: &VersionRow,
+    global_seq: Option<GlobalSeq>,
+) -> Vec<Value> {
+    let mut values = stored_version_prefix_values(version);
+    values.push(Value::Nullable(
+        global_seq.map(|seq| Box::new(Value::U64(seq.0))),
+    ));
+    values.push(deletion_event_value(
+        version
+            .deletion()
+            .expect("register global-current row requires deletion"),
+    ));
+    values
 }
 
 pub(super) fn global_change_values(version: &VersionRow, global_seq: GlobalSeq) -> Vec<Value> {
@@ -1465,22 +1486,24 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
             GraphBuilder::table(ahead_current_table_name(&table.name))
                 .project(content_fields.clone())
         };
+        let deletion_fields = vec![
+            "row_uuid".to_owned(),
+            "tx_time".to_owned(),
+            "tx_node_id".to_owned(),
+            "created_by".to_owned(),
+            "created_at".to_owned(),
+            "updated_by".to_owned(),
+            "updated_at".to_owned(),
+            "_deletion".to_owned(),
+        ];
         let ahead_deleted = if settled == DurabilityTier::Edge {
             edge_visible_ahead(
                 register_ahead_current_table_name(&table.name),
-                vec![
-                    "row_uuid".to_owned(),
-                    "tx_time".to_owned(),
-                    "tx_node_id".to_owned(),
-                    "created_by".to_owned(),
-                    "created_at".to_owned(),
-                    "updated_by".to_owned(),
-                    "updated_at".to_owned(),
-                    "_deletion".to_owned(),
-                ],
+                deletion_fields.clone(),
             )
         } else {
             GraphBuilder::table(register_ahead_current_table_name(&table.name))
+                .project(deletion_fields.clone())
         };
         let content = GraphBuilder::arg_max_by(
             GraphBuilder::union([
@@ -1494,7 +1517,8 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
         .project(content_fields);
         let deleted = GraphBuilder::arg_max_by(
             GraphBuilder::union([
-                GraphBuilder::table(register_global_current_table_name(&table.name)),
+                GraphBuilder::table(register_global_current_table_name(&table.name))
+                    .project(deletion_fields),
                 ahead_deleted,
             ]),
             ["row_uuid"],
