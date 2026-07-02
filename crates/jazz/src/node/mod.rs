@@ -1643,6 +1643,22 @@ where
         {
             return current_row_from_version_projection(table, version);
         }
+        let cells = self.materialized_cells_for_version(table, version)?;
+        current_row_from_materialized_cells(table, version, &cells)
+    }
+
+    fn materialized_cells_for_version(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRow,
+    ) -> Result<BTreeMap<String, Value>, Error> {
+        if !table
+            .columns
+            .iter()
+            .any(|column| column.large_value.is_some())
+        {
+            return version.cells(table);
+        }
         let mut cells = BTreeMap::new();
         for column in &table.columns {
             let value = if column.large_value.is_some() {
@@ -1658,7 +1674,7 @@ where
                 cells.insert(column.name.clone(), value);
             }
         }
-        current_row_from_materialized_cells(table, version, &cells)
+        Ok(cells)
     }
 
     /// Subscribe to the raw history storage table.
@@ -1767,11 +1783,7 @@ where
                             &content_descriptor,
                         )?
                         .ok_or(Error::MissingTransaction(tx_id))?;
-                    rows.push(current_row_from_cells(
-                        &table_schema,
-                        version.row_uuid(),
-                        &version.cells(&table_schema)?,
-                    )?);
+                    rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
                 }
                 sort_current_rows(&mut rows);
                 Ok(rows)
