@@ -2229,27 +2229,6 @@ impl DbS1Oracle {
             .extend(patch);
     }
 
-    fn apply_upsert(&mut self, table: &str, row_uuid: RowUuid, cells: RowCells) {
-        self.tables
-            .entry(table.to_owned())
-            .or_default()
-            .insert(row_uuid, cells);
-    }
-
-    fn apply_delete(&mut self, table: &str, row_uuid: RowUuid) {
-        if let Some(rows) = self.tables.get_mut(table) {
-            rows.remove(&row_uuid);
-        }
-    }
-
-    fn apply_restore(&mut self, table: &str, row_uuid: RowUuid, cells: RowCells) {
-        self.apply_upsert(table, row_uuid, cells);
-    }
-
-    fn row_cells(&self, table: &str, row_uuid: RowUuid) -> Option<&RowCells> {
-        self.tables.get(table)?.get(&row_uuid)
-    }
-
     fn query1(&self, plan: &ClientPlan) -> BTreeSet<(String, RowUuid)> {
         self.table_rows(ISSUES)
             .filter(|(_, cells)| cell_uuid_from_cells(cells, "assignee") == Some(plan.user))
