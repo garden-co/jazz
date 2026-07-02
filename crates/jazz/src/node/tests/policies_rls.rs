@@ -552,7 +552,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     let policy = Policy::shape(
         Query::from("canvases")
             .filter(eq(col("isPublic"), lit(true)))
-            .policy_branch(PolicyBranch::from_query(Query::from("canvases").join_via(
+            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("canvases").join_via(
                 "canvasInvites",
                 "canvas",
                 [eq(col("userID"), claim("sub"))],
@@ -672,7 +672,7 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
     let policy = Policy::shape(
         Query::from("chats")
             .filter(eq(col("isPublic"), lit(true)))
-            .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via(
+            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via(
                 "chatMembers",
                 "chatId",
                 [eq(col("userId"), claim("user_id"))],
@@ -762,7 +762,7 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
     let policy = Policy::shape(
         Query::from("messages")
             .join_via_row_id("chats", "chat_id", [eq(col("visibility"), lit("public"))])
-            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_column(
+            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
                 "chat_members",
                 "chat_id",
                 "chat_id",
@@ -780,7 +780,7 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
         .with_read_policy(Policy::shape(
             Query::from("chats")
                 .filter(eq(col("visibility"), lit("public")))
-                .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via_column(
+                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via_column(
                     "chat_members",
                     "chat_id",
                     "id",
@@ -799,10 +799,10 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
         .with_read_policy(Policy::shape(
             Query::from("chat_members")
                 .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::from_query(
+                .policy_branch(PolicyBranch::single_alternative_from_query(
                     Query::from("chat_members").filter(eq(col("user_id"), claim("user_id"))),
                 ))
-                .policy_branch(PolicyBranch::from_query(Query::from("chat_members").join_via_column(
+                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chat_members").join_via_column(
                     "chat_members",
                     "chat_id",
                     "chat_id",
@@ -925,12 +925,12 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     let policy = Policy::shape(
         Query::from("messages")
             .filter(Predicate::Any(Vec::new()))
-            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_row_id(
+            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_row_id(
                 "chats",
                 "chatId",
                 [eq(col("isPublic"), lit(true))],
             )))
-            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_column(
+            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
                 "chatMembers",
                 "chatId",
                 "chatId",
@@ -948,10 +948,10 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         .with_read_policy(Policy::shape(
             Query::from("chats")
                 .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::from_query(
+                .policy_branch(PolicyBranch::single_alternative_from_query(
                     Query::from("chats").filter(eq(col("isPublic"), lit(true))),
                 ))
-                .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via_column(
+                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via_column(
                     "chatMembers",
                     "chatId",
                     "id",
@@ -970,10 +970,10 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         .with_read_policy(Policy::shape(
             Query::from("chatMembers")
                 .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::from_query(
+                .policy_branch(PolicyBranch::single_alternative_from_query(
                     Query::from("chatMembers").filter(eq(col("userId"), claim("user_id"))),
                 ))
-                .policy_branch(PolicyBranch::from_query(Query::from("chatMembers").join_via_column(
+                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chatMembers").join_via_column(
                     "chatMembers",
                     "chatId",
                     "chatId",
@@ -1101,7 +1101,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
     let policy = Policy::shape(
         Query::from("messages")
             .join_via_row_id("chats", "chat_id", [eq(col("visibility"), lit("public"))])
-            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_column(
+            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
                 "chat_members",
                 "chat_id",
                 "chat_id",
@@ -1128,7 +1128,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         .with_read_policy(Policy::shape(
             Query::from("chats")
                 .filter(eq(col("visibility"), lit("public")))
-                .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via_column(
+                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via_column(
                     "chat_members",
                     "chat_id",
                     "id",
@@ -1278,7 +1278,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     let policy = Policy::shape(
         Query::from("messages")
             .filter(Predicate::Any(Vec::new()))
-            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_column(
+            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
                 "chatMembers",
                 "chatId",
                 "chatId",
@@ -1297,10 +1297,10 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         .with_read_policy(Policy::shape(
             Query::from("chatMembers")
                 .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::from_query(
+                .policy_branch(PolicyBranch::single_alternative_from_query(
                     Query::from("chatMembers").filter(eq(col("userId"), claim("user_id"))),
                 ))
-                .policy_branch(PolicyBranch::from_query(Query::from("chatMembers").join_via_column(
+                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chatMembers").join_via_column(
                     "chatMembers",
                     "chatId",
                     "chatId",
@@ -1427,7 +1427,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let policy = Policy::shape(
         Query::from("messages")
             .filter(Predicate::Any(Vec::new()))
-            .policy_branch(PolicyBranch::from_query(Query::from("messages").join_via_column(
+            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("messages").join_via_column(
                 "chatMembers",
                 "chatId",
                 "chatId",
@@ -1446,10 +1446,10 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .with_read_policy(Policy::shape(
             Query::from("chatMembers")
                 .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::from_query(
+                .policy_branch(PolicyBranch::single_alternative_from_query(
                     Query::from("chatMembers").filter(eq(col("userId"), claim("user_id"))),
                 ))
-                .policy_branch(PolicyBranch::from_query(Query::from("chatMembers").join_via_column(
+                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chatMembers").join_via_column(
                     "chatMembers",
                     "chatId",
                     "chatId",
@@ -1896,7 +1896,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
         .with_read_policy(Policy::shape(
             Query::from("chats")
                 .filter(eq(col("visibility"), lit("public")))
-                .policy_branch(PolicyBranch::from_query(
+                .policy_branch(PolicyBranch::single_alternative_from_query(
                     Query::from("chats").filter(eq(col("owner_id"), claim("user_id"))),
                 )),
         ))
@@ -2038,10 +2038,10 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
         .with_read_policy(Policy::shape(
             Query::from("chats")
                 .filter(eq(lit(true), lit(false)))
-                .policy_branch(PolicyBranch::from_query(
+                .policy_branch(PolicyBranch::single_alternative_from_query(
                     Query::from("chats").filter(eq(col("visibility"), lit("public"))),
                 ))
-                .policy_branch(PolicyBranch::from_query(Query::from("chats").join_via_column(
+                .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").join_via_column(
                     "chat_members",
                     "chat_id",
                     "id",
@@ -2110,7 +2110,7 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
     .with_read_policy(Policy::shape(
         Query::from("chats")
             .filter(eq(lit(true), lit(false)))
-            .policy_branch(PolicyBranch::from_query(Query::from("chats").filter(any_of([
+            .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").filter(any_of([
                 eq(col("joinCode"), claim("join_code")),
             ])))),
     ))
@@ -2185,7 +2185,7 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
         .with_read_policy(Policy::shape(
             Query::from("chats")
                 .filter(eq(col("visibility"), lit("public")))
-                .policy_branch(PolicyBranch::from_query(
+                .policy_branch(PolicyBranch::single_alternative_from_query(
                     Query::from("chats").filter(eq(col("owner_id"), claim("user_id"))),
                 )),
         ))
@@ -4217,7 +4217,7 @@ fn nullable_claim_equality_policy_branch_allows_matching_row() {
         .with_read_policy(Policy::shape(
             Query::from("chats")
                 .filter(Predicate::Any(Vec::new()))
-                .policy_branch(PolicyBranch::from_query(
+                .policy_branch(PolicyBranch::single_alternative_from_query(
                     Query::from("chats").filter(eq(col("joinCode"), claim("join_code"))),
                 )),
         ))
