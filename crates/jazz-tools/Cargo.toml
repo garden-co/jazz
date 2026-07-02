@@ -192,6 +192,10 @@ name = "branch_claims_integration"
 required-features = ["test"]
 
 [[test]]
+name = "inherited_policies"
+required-features = ["test"]
+
+[[test]]
 name = "transactions"
 required-features = ["test-utils"]
 
