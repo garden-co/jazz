@@ -114,6 +114,8 @@ pub(crate) fn lower_query_program(
     parameters.routing_params.retain(|field| {
         route_param_from_field(field)
             .is_some_and(|param| parameters.user_params.contains_key(param))
+            || claim_path_from_param_field(field)
+                .is_some_and(|_| parameters.claim_params.contains_key(field))
     });
 
     let terminals = lowered_terminals(
@@ -123,7 +125,9 @@ pub(crate) fn lower_query_program(
         &resolved_root,
         &resolved_sources,
         &parameters.routing_params,
+        &lowered.fields,
     )?;
+    verify_routed_terminal_outputs(&terminals, &parameters, &request, &explain)?;
     let output = ProgramOutputSchemas::RowSet(
         terminals
             .iter()
@@ -137,7 +141,10 @@ pub(crate) fn lower_query_program(
     parameters.routing_params.retain(|field| {
         route_param_from_field(field)
             .is_some_and(|param| parameters.user_params.contains_key(param))
+            || claim_path_from_param_field(field)
+                .is_some_and(|_| parameters.claim_params.contains_key(field))
     });
+    verify_routed_terminal_outputs(&terminals, &parameters, &request, &explain)?;
 
     Ok(QueryProgram {
         lowered: LoweredGraph {
@@ -157,6 +164,119 @@ pub(crate) fn lower_query_program(
         request,
         explain,
     })
+}
+
+fn verify_routed_terminal_outputs(
+    terminals: &[LoweredTerminal],
+    parameters: &ParameterDomain,
+    request: &QueryProgramRequest,
+    explain: &ExplainPlan,
+) -> CapabilityResult<()> {
+    for terminal in terminals {
+        let expected = terminal_schema_routing_fields(&terminal.output, &parameters.routing_params);
+        if expected.is_empty() {
+            continue;
+        }
+        let Some(actual) = graph_declared_output_fields(&terminal.graph) else {
+            return Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Runtime(format!(
+                    "routed terminal '{}' output fields could not be verified",
+                    terminal.sink
+                ))],
+                explain: explain_with_request(request, explain.clone()),
+            }));
+        };
+        for field in expected {
+            if !actual.contains(&field) {
+                return Err(Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Runtime(format!(
+                        "routed terminal '{}' is missing route field '{}'",
+                        terminal.sink, field
+                    ))],
+                    explain: explain_with_request(request, explain.clone()),
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn terminal_schema_routing_fields(
+    output: &OutputTerminalSchema,
+    routing_params: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    match output {
+        OutputTerminalSchema::AppRows(schema) => schema
+            .hidden_fields
+            .intersection(routing_params)
+            .cloned()
+            .collect(),
+        OutputTerminalSchema::Fact(fact) => output_routing_fields(fact),
+    }
+}
+
+pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTreeSet<String>> {
+    match graph {
+        GraphBuilder::InlineRecords { output, .. }
+        | GraphBuilder::FrontierSource { output, .. }
+        | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
+        GraphBuilder::Project { fields, .. } => Some(
+            fields
+                .iter()
+                .map(|field| field.output_name.clone())
+                .collect(),
+        ),
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::AntiJoin { left: input, .. } => graph_declared_output_fields(input),
+        GraphBuilder::Unnest {
+            input,
+            element_field,
+            ..
+        } => {
+            let mut fields = graph_declared_output_fields(input)?;
+            fields.insert(element_field.clone());
+            Some(fields)
+        }
+        GraphBuilder::Recursive { seed, .. } => graph_declared_output_fields(seed),
+        GraphBuilder::Union { inputs } => {
+            let mut iter = inputs.iter();
+            let mut fields = graph_declared_output_fields(iter.next()?)?;
+            for input in iter {
+                fields = fields
+                    .intersection(&graph_declared_output_fields(input)?)
+                    .cloned()
+                    .collect();
+            }
+            Some(fields)
+        }
+        GraphBuilder::Join { left, right, .. } => {
+            let mut fields = BTreeSet::new();
+            fields.extend(
+                graph_declared_output_fields(left)?
+                    .into_iter()
+                    .map(|field| left_field(&field)),
+            );
+            fields.extend(
+                graph_declared_output_fields(right)?
+                    .into_iter()
+                    .map(|field| right_field(&field)),
+            );
+            Some(fields)
+        }
+        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => None,
+    }
+}
+
+fn descriptor_named_fields(descriptor: &RecordDescriptor) -> Option<BTreeSet<String>> {
+    descriptor
+        .fields()
+        .iter()
+        .map(|field| field.name.clone())
+        .collect()
 }
 
 fn explain_with_request(request: &QueryProgramRequest, mut explain: ExplainPlan) -> ExplainPlan {
@@ -233,6 +353,7 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
                                 ty: column.ty.clone(),
                             },
                         );
+                        domain.routing_params.insert(param);
                     }
                 }
             }
@@ -315,6 +436,7 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
                             path,
                             ty: column_type_from_value_type(&field.value_type),
                         });
+                    domain.routing_params.insert(name.to_owned());
                 } else {
                     domain
                         .user_params
@@ -2142,16 +2264,6 @@ fn lower_union_inputs(
     })
 }
 
-fn recursive_output_fields(relation: &RecursiveRelationPlan) -> BTreeSet<String> {
-    if let Some(LinearStep::Project(columns)) = relation.step.steps.last() {
-        return columns
-            .iter()
-            .map(|column| column.output.name.clone())
-            .collect();
-    }
-    linear_root_fields(&relation.seed.root)
-}
-
 fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
     match root {
         LinearRoot::Source { .. } => BTreeSet::new(),
@@ -2168,6 +2280,7 @@ fn source_fields(source: &ResolvedSource) -> impl Iterator<Item = String> + '_ {
         .fields()
         .iter()
         .filter_map(|field| field.name.clone())
+        .chain(source.routing_fields.iter().cloned())
 }
 
 fn source_nullable_fields(source: &ResolvedSource) -> BTreeSet<String> {
@@ -2225,6 +2338,12 @@ fn lower_recursive_relation(
         RecursionBound::Fixpoint => FIXPOINT_MAX_ITERS,
         RecursionBound::MaxDepth(max_depth) => max_depth.max(1),
     };
+    if seed.fields != step.fields {
+        return Err(UnsupportedReason::Operator(
+            "recursive seed and step outputs must have the same fields".to_owned(),
+        ));
+    }
+    let fields = seed.fields.clone();
     Ok(LoweredRelationInput {
         graph: GraphBuilder::recursive(
             seed.graph,
@@ -2233,7 +2352,7 @@ fn lower_recursive_relation(
             max_iters,
         ),
         root_source: Some(root_source.clone()),
-        fields: recursive_output_fields(relation),
+        fields,
         nullable_fields: BTreeSet::new(),
     })
 }
@@ -2268,8 +2387,12 @@ fn lower_linear_plan_steps(
         BTreeSet::new()
     };
     let mut pending_order: Option<Vec<OrderKey>> = None;
-    let mut last_join_right: Option<(RelationInputPlan, BTreeSet<String>)> = None;
-    let mut available_route_fields = BTreeSet::new();
+    let mut last_join_right: Option<(RelationInputPlan, BTreeSet<String>, BTreeSet<String>)> = None;
+    let mut available_route_fields = if matches!(plan.root, LinearRoot::Source { .. }) {
+        root_source.routing_fields.clone()
+    } else {
+        BTreeSet::new()
+    };
     let route_fields = parameter_domain(&request.input.shape).routing_params;
 
     for (step_index, step) in plan.steps.iter().enumerate() {
@@ -2330,7 +2453,8 @@ fn lower_linear_plan_steps(
                     }
                 }
                 graph = GraphBuilder::join(graph, right_graph, left_keys, right_keys);
-                last_join_right = Some(((**right).clone(), right_nullable_fields));
+                let right_fields = lowered_right.fields.clone();
+                last_join_right = Some(((**right).clone(), right_nullable_fields, right_fields));
                 let next_is_project =
                     matches!(plan.steps.get(step_index + 1), Some(LinearStep::Project(_)));
                 if matches!(&plan.root, LinearRoot::Source { .. }) && !next_is_project {
@@ -2371,12 +2495,49 @@ fn lower_linear_plan_steps(
                 for field in unwrap_fields {
                     graph = graph.unwrap_nullable(field);
                 }
+                let mut project_fields = project_fields;
+                let mut retained_route_fields = BTreeSet::new();
+                let projected_outputs = project_fields
+                    .iter()
+                    .map(|field| field.output_name.clone())
+                    .collect::<BTreeSet<_>>();
+                match last_join_right.as_ref() {
+                    Some((_, _, right_fields)) => {
+                        for field in &available_route_fields {
+                            if !projected_outputs.contains(field) {
+                                project_fields
+                                    .push(ProjectField::renamed(left_field(field), field.clone()));
+                            }
+                            retained_route_fields.insert(field.clone());
+                        }
+                        for field in route_fields
+                            .iter()
+                            .filter(|field| right_fields.contains(*field))
+                        {
+                            if !projected_outputs.contains(field) {
+                                project_fields
+                                    .push(ProjectField::renamed(right_field(field), field.clone()));
+                            }
+                            retained_route_fields.insert(field.clone());
+                        }
+                    }
+                    None => {
+                        for field in &available_route_fields {
+                            if !projected_outputs.contains(field) {
+                                project_fields.push(ProjectField::named(field.clone()));
+                            }
+                            retained_route_fields.insert(field.clone());
+                        }
+                    }
+                }
                 graph = graph.project_fields(project_fields);
                 fields = columns
                     .iter()
                     .map(|column| column.output.name.clone())
                     .collect();
+                fields.extend(retained_route_fields.iter().cloned());
                 nullable_fields = BTreeSet::new();
+                available_route_fields = retained_route_fields;
                 last_join_right = None;
             }
             LinearStep::OrderBy(keys) => {
@@ -2568,6 +2729,12 @@ fn lower_value_source(
                     (!projected.contains(&route_field))
                         .then(|| ProjectField::renamed(param.clone(), route_field))
                 })
+                .chain(domain.claim_params.keys().filter_map(|param| {
+                    source_user_params
+                        .contains(param)
+                        .then(|| (!projected.contains(param)).then(|| ProjectField::named(param)))
+                        .flatten()
+                }))
                 .collect::<Vec<_>>();
             Ok(
                 GraphBuilder::binding_source(shape.to_owned(), input_descriptor).project_fields(
@@ -2960,7 +3127,7 @@ fn lower_projection_field(
     column: &RowProjection,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
-    last_join_right: Option<&(RelationInputPlan, BTreeSet<String>)>,
+    last_join_right: Option<&(RelationInputPlan, BTreeSet<String>, BTreeSet<String>)>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionFieldPlan, UnsupportedReason> {
     let mut unwrap_before_project = BTreeSet::new();
@@ -2998,7 +3165,7 @@ fn lower_projection_source(
     value: &NormalizedValueRef,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
-    last_join_right: Option<&(RelationInputPlan, BTreeSet<String>)>,
+    last_join_right: Option<&(RelationInputPlan, BTreeSet<String>, BTreeSet<String>)>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionSource, UnsupportedReason> {
     if let Ok(field) = lower_linear_root_key_ref(value, &plan.root, source, request) {
@@ -3013,7 +3180,7 @@ fn lower_projection_source(
         });
     }
 
-    if let Some((right, nullable_fields)) = last_join_right {
+    if let Some((right, nullable_fields, _)) = last_join_right {
         if let Some(field) = lower_relation_projection_ref(value, right, request)? {
             let nullable = nullable_fields.contains(&field);
             return Ok(ProjectionSource::Field {
@@ -3837,6 +4004,7 @@ fn lowered_terminals(
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     routing_param_fields: &BTreeSet<String>,
+    available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Vec<LoweredTerminal>> {
     let mut terminals = Vec::new();
     let closure = lower_closure_membership(
@@ -3846,13 +4014,36 @@ fn lowered_terminals(
         resolved_sources,
         routing_param_fields,
     )?;
+    let root_route_fields = routing_param_fields
+        .intersection(available_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let visible_root_with_routes = if root_route_fields.is_empty() {
+        closure.visible_root.clone()
+    } else {
+        closure
+            .visible_root
+            .clone()
+            .project_fields(project_source_fields_with_routes(
+                source,
+                &root_route_fields,
+            ))
+    };
     if request.output.app_rows.is_some() {
+        let graph = if root_route_fields.is_empty() {
+            closure.visible_root.clone()
+        } else {
+            visible_root_with_routes.clone()
+        };
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
-            graph: closure.visible_root.clone(),
+            graph,
             output: OutputTerminalSchema::AppRows(AppRowSchema {
                 descriptor: source.row_shape.descriptor,
-                hidden_fields: hidden_source_fields(&source.row_shape),
+                hidden_fields: hidden_source_fields(&source.row_shape)
+                    .into_iter()
+                    .chain(root_route_fields.clone())
+                    .collect(),
             }),
         });
     }
@@ -3868,7 +4059,7 @@ fn lowered_terminals(
             )?;
             let result_graph = fact_terminal_graph(
                 fact,
-                closure.visible_root.clone(),
+                visible_root_with_routes.clone(),
                 plan,
                 source,
                 resolved_sources,
@@ -4023,7 +4214,18 @@ fn lowered_terminals(
                 });
             }
         } else {
-            let output = fact_output(fact, plan, source, resolved_sources, BTreeSet::new())?;
+            let terminal_route_fields = if matches!(fact, ProgramFactKey::AuthorizedRows) {
+                root_route_fields.clone()
+            } else {
+                BTreeSet::new()
+            };
+            let output = fact_output(
+                fact,
+                plan,
+                source,
+                resolved_sources,
+                terminal_route_fields.clone(),
+            )?;
             let terminal_graph =
                 fact_input_graph(fact, graph.clone(), plan, source, resolved_sources, request)?;
             let graph = fact_terminal_graph(
@@ -4033,7 +4235,7 @@ fn lowered_terminals(
                 source,
                 resolved_sources,
                 request,
-                BTreeSet::new(),
+                terminal_route_fields,
             )?;
             terminals.push(LoweredTerminal {
                 sink: fact_sink_name(fact),
@@ -4136,8 +4338,10 @@ fn lower_closure_membership(
             let Some(resolved_source) = resolved_sources.get(&source) else {
                 continue;
             };
-            let graph =
-                graph.project_fields(project_source_fields_from_prefix(resolved_source, ""));
+            let graph = graph.project_fields(project_source_fields_with_routes(
+                resolved_source,
+                route_fields,
+            ));
             result_members
                 .entry(source)
                 .and_modify(|existing| {
@@ -4503,33 +4707,6 @@ fn project_source_fields_with_routes_from_prefix(
     fields
 }
 
-fn output_terminals(
-    request: &RowSetOutputRequest,
-    plan: &AnalyzedQueryPlan,
-    source: &ResolvedSource,
-    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-) -> CapabilityResult<Vec<OutputTerminalSchema>> {
-    let mut terminals = Vec::new();
-    if request.app_rows.is_some() {
-        terminals.push(OutputTerminalSchema::AppRows(AppRowSchema {
-            descriptor: source.row_shape.descriptor,
-            hidden_fields: hidden_source_fields(&source.row_shape),
-        }));
-    }
-
-    for fact in &request.facts {
-        terminals.push(OutputTerminalSchema::Fact(fact_output(
-            fact,
-            plan,
-            source,
-            resolved_sources,
-            BTreeSet::new(),
-        )?));
-    }
-
-    Ok(terminals)
-}
-
 fn fact_output(
     key: &ProgramFactKey,
     plan: &AnalyzedQueryPlan,
@@ -4558,6 +4735,7 @@ fn fact_output_with_terminal(
     let schema = match key {
         ProgramFactKey::AuthorizedRows => ProgramFactSchema::AuthorizedRows(AuthorizedRowsSchema {
             row_field: source.row_shape.row_uuid_field.clone(),
+            routing_param_fields,
         }),
         ProgramFactKey::ResultMembership => {
             let version = version_witness_fields(&source.row_shape)?;
@@ -4626,6 +4804,7 @@ fn fact_output_with_terminal(
 
 fn output_routing_fields(output: &ProgramFactOutput) -> BTreeSet<String> {
     match &output.schema {
+        ProgramFactSchema::AuthorizedRows(schema) => schema.routing_param_fields.clone(),
         ProgramFactSchema::ResultMembership(schema) => schema.routing_param_fields.clone(),
         ProgramFactSchema::SourceCoverage(schema) => schema.routing_param_fields.clone(),
         ProgramFactSchema::ReadFrontierSettled(schema) => schema.routing_param_fields.clone(),
@@ -4706,9 +4885,11 @@ fn fact_terminal_graph(
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     match key {
-        ProgramFactKey::AuthorizedRows => {
-            Ok(graph.project([source.row_shape.row_uuid_field.clone()]))
-        }
+        ProgramFactKey::AuthorizedRows => Ok(graph.project_fields(
+            std::iter::once(ProjectField::named(source.row_shape.row_uuid_field.clone()))
+                .chain(routing_param_fields.into_iter().map(ProjectField::named))
+                .collect::<Vec<_>>(),
+        )),
         ProgramFactKey::ResultMembership => {
             Ok(graph.project_fields(result_membership_fields(source, routing_param_fields)?))
         }

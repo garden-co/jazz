@@ -108,6 +108,9 @@ pub(crate) struct ResolvedSource {
     pub(crate) graph: GraphBuilder,
     /// Canonical row shape emitted by the source graph.
     pub(crate) row_shape: SourceRowShape,
+    /// Hidden routing fields emitted by the source graph outside the app row
+    /// descriptor.
+    pub(crate) routing_fields: BTreeSet<String>,
     /// Content version rows for the same source, when version witnesses are
     /// requested explicitly.
     pub(crate) content_version: Option<ContentVersionSource>,

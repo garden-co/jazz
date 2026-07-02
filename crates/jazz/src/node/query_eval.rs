@@ -17,17 +17,17 @@ use groove::schema::ColumnType;
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
 use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
-    AppProjectionTree, AppRowOutputRequest, ClaimPath, ClosurePath, ClosurePathSegment,
-    ClosureRootGate, ComparisonOp as NormalizedComparisonOp, ContentVersionSource,
-    CorrelationRequirement, DataSource, DeletionRegisterSource, FieldProjection, FrontierId,
-    JoinContribution, JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape,
-    NormalizedShapeIdentity, NormalizedValueRef, OrderKey as NormalizedOrderKey,
-    OutputTerminalSchema, OverlayRef, OverlayStack, PayloadProjection, PolicyContext,
-    PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
-    ProgramBinding, ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField,
-    QueryProgram, QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView,
-    RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
-    ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    AppProjectionTree, AppRowOutputRequest, AppRowSchema, ClaimPath, ClosurePath,
+    ClosurePathSegment, ClosureRootGate, ComparisonOp as NormalizedComparisonOp,
+    ContentVersionSource, CorrelationRequirement, DataSource, DeletionRegisterSource,
+    FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
+    NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
+    OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
+    PayloadProjection, PolicyContext, PolicyDecisionRole, PolicyEnforcementMode,
+    PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProgramOutputSchemas,
+    ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet,
+    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
+    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
@@ -69,8 +69,32 @@ pub(crate) fn take_required_sink_deltas(
 }
 
 fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>, Error> {
+    app_row_terminal_schema(output).and_then(|app_rows| {
+        app_rows
+            .descriptor
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "app row terminal field must be named",
+                ))
+            })
+            .collect()
+    })
+}
+
+fn app_row_terminal_route_eligible_fields(
+    output: &ProgramOutputSchemas,
+) -> Result<Vec<String>, Error> {
+    let app_rows = app_row_terminal_schema(output)?;
+    let mut fields = app_row_terminal_fields(output)?;
+    fields.extend(app_rows.hidden_fields.iter().cloned());
+    Ok(fields)
+}
+
+fn app_row_terminal_schema(output: &ProgramOutputSchemas) -> Result<&AppRowSchema, Error> {
     let ProgramOutputSchemas::RowSet(terminals) = output;
-    let app_rows = terminals
+    terminals
         .iter()
         .find_map(|terminal| match terminal {
             OutputTerminalSchema::AppRows(rows) => Some(rows),
@@ -78,17 +102,7 @@ fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>,
         })
         .ok_or(Error::InvalidStoredValue(
             "query program did not emit app row terminal",
-        ))?;
-    app_rows
-        .descriptor
-        .fields()
-        .iter()
-        .map(|field| {
-            field.name.clone().ok_or(Error::InvalidStoredValue(
-                "app row terminal field must be named",
-            ))
-        })
-        .collect()
+        ))
 }
 
 fn lowered_terminal_graph(program: &QueryProgram, sink: &str) -> Result<GraphBuilder, Error> {
@@ -143,11 +157,11 @@ fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain)
     parameters.routing_params.iter().cloned().collect()
 }
 
-fn terminal_route_fields(route_params: &[String], public_fields: &[String]) -> Vec<String> {
-    let public_fields = public_fields.iter().collect::<BTreeSet<_>>();
+fn terminal_route_fields(route_params: &[String], route_eligible_fields: &[String]) -> Vec<String> {
+    let route_eligible_fields = route_eligible_fields.iter().collect::<BTreeSet<_>>();
     route_params
         .iter()
-        .filter(|param| public_fields.contains(param))
+        .filter(|param| route_eligible_fields.contains(param))
         .cloned()
         .collect()
 }
@@ -159,13 +173,25 @@ fn terminal_public_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>
     }
 }
 
+fn terminal_route_eligible_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>, Error> {
+    let mut fields = terminal_public_fields(terminal)?;
+    if let OutputTerminalSchema::AppRows(rows) = terminal {
+        fields.extend(rows.hidden_fields.iter().cloned());
+    }
+    Ok(fields)
+}
+
 fn fact_public_fields(
     schema: &super::query_engine::ProgramFactSchema,
 ) -> Result<Vec<String>, Error> {
     use super::query_engine::ProgramFactSchema;
 
     match schema {
-        ProgramFactSchema::AuthorizedRows(schema) => Ok(vec![schema.row_field.clone()]),
+        ProgramFactSchema::AuthorizedRows(schema) => {
+            let mut fields = vec![schema.row_field.clone()];
+            fields.extend(schema.routing_param_fields.iter().cloned());
+            Ok(fields)
+        }
         ProgramFactSchema::ResultMembership(schema) => {
             let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
             fields.extend(schema.branch_or_prefix_field.clone());
@@ -225,6 +251,32 @@ fn fact_public_fields(
             | ProgramFactSchema::VersionWitnesses(_)
             | ProgramFactSchema::ReplacementWitnesses(_) => unreachable!(),
         })),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PolicyAuthorizationGraph {
+    graph: GraphBuilder,
+    route_fields: BTreeSet<String>,
+}
+
+fn output_routing_fields_for_query_eval(
+    output: &super::query_engine::ProgramFactOutput,
+) -> BTreeSet<String> {
+    match &output.schema {
+        super::query_engine::ProgramFactSchema::AuthorizedRows(schema) => {
+            schema.routing_param_fields.clone()
+        }
+        super::query_engine::ProgramFactSchema::ResultMembership(schema) => {
+            schema.routing_param_fields.clone()
+        }
+        super::query_engine::ProgramFactSchema::SourceCoverage(schema) => {
+            schema.routing_param_fields.clone()
+        }
+        super::query_engine::ProgramFactSchema::ReadFrontierSettled(schema) => {
+            schema.routing_param_fields.clone()
+        }
+        _ => BTreeSet::new(),
     }
 }
 
@@ -403,6 +455,7 @@ where
                         row_uuid_field: "row_uuid".to_owned(),
                         metadata: BTreeMap::new(),
                     },
+                    routing_fields: BTreeSet::new(),
                     content_version: None,
                     deletion_register: None,
                 });
@@ -473,11 +526,12 @@ where
                     row_uuid_field: "row_uuid".to_owned(),
                     metadata: BTreeMap::new(),
                 },
+                routing_fields: BTreeSet::new(),
                 content_version: None,
                 deletion_register: None,
             });
         }
-        let (graph, descriptor, metadata) = if table.name == "jazz_branches"
+        let (graph, descriptor, metadata, routing_fields) = if table.name == "jazz_branches"
             && history_position.is_none()
             && open_tx_overlay.is_none()
         {
@@ -494,7 +548,7 @@ where
             let base = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let descriptor = current_row_descriptor(&table);
-            (base, descriptor, BTreeMap::new())
+            (base, descriptor, BTreeMap::new(), BTreeSet::new())
         } else if let Some(position) = history_position {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
@@ -541,9 +595,15 @@ where
                         .map_err(|_| {
                             source_resolution_error(request, SourceGap::HistoricalStorageCut)
                         })?
+                        .graph
                 }
             };
-            (graph, current_row_descriptor(&table), BTreeMap::new())
+            (
+                graph,
+                current_row_descriptor(&table),
+                BTreeMap::new(),
+                BTreeSet::new(),
+            )
         } else if let Some(branch_id) = branch_data {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
@@ -604,9 +664,10 @@ where
                             &output_fields,
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .graph
                 }
             };
-            (graph, descriptor, metadata)
+            (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(tx_id) = open_tx_overlay {
             if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
@@ -621,7 +682,7 @@ where
             let graph = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
             let descriptor = current_row_descriptor(&table);
-            (graph, descriptor, BTreeMap::new())
+            (graph, descriptor, BTreeMap::new(), BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
             && (self.read_view.read_schema != self.node.catalogue.current_schema_version_id
                 || self
@@ -676,9 +737,10 @@ where
                             &current_row_fields(&table),
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .graph
                 }
             };
-            (graph, source.descriptor, source.metadata)
+            (graph, source.descriptor, source.metadata, BTreeSet::new())
         } else if request.visibility == RowVisibility::IncludeDeleted {
             let tier = graph_tier.expect("visible current source has a tier");
             let base = include_deleted_current_graph(&table, tier);
@@ -714,12 +776,14 @@ where
                             &output_fields,
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .graph
                 }
             };
             (
                 graph,
                 include_deleted_current_row_descriptor(&table),
                 BTreeMap::new(),
+                BTreeSet::new(),
             )
         } else {
             resolved_current_source_graph(
@@ -757,6 +821,7 @@ where
                 row_uuid_field: "row_uuid".to_owned(),
                 metadata,
             },
+            routing_fields,
             content_version,
             deletion_register,
         })
@@ -1035,6 +1100,7 @@ fn resolved_current_source_graph<S>(
         GraphBuilder,
         RecordDescriptor,
         BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+        BTreeSet<String>,
     ),
     Error,
 >
@@ -1098,15 +1164,16 @@ where
     }
 
     let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
-    let base = match authorization {
+    let (base, routing_fields) = match authorization {
         SourceAuthorizationRequest::System => {
-            if needs_version_witnesses {
+            let graph = if needs_version_witnesses {
                 node.maintained_view_content_current_with_version(table, tier)?
                     .project_fields(storage_to_canonical_current_source_fields(table, true))
             } else {
                 visible_current_graph(table, tier)
                     .project_fields(canonical_current_source_fields(table, false))
-            }
+            };
+            (graph, BTreeSet::new())
         }
         SourceAuthorizationRequest::PolicyFiltered {
             permission_subject,
@@ -1141,18 +1208,31 @@ where
                 base.clone(),
                 &output_fields,
             )?;
-            storage_graph.project_fields(storage_to_canonical_current_source_fields(
-                table,
-                needs_version_witnesses,
-            ))
+            let mut canonical_fields =
+                storage_to_canonical_current_source_fields(table, needs_version_witnesses);
+            canonical_fields.extend(
+                storage_graph
+                    .route_fields
+                    .iter()
+                    .map(|field| ProjectField::named(field.clone())),
+            );
+            (
+                storage_graph.graph.project_fields(canonical_fields),
+                storage_graph.route_fields,
+            )
         }
     };
+    fields.extend(
+        routing_fields
+            .iter()
+            .map(|field| ProjectField::named(field.clone())),
+    );
     let graph = if metadata.is_empty() {
         base
     } else {
         base.project_fields(fields)
     };
-    Ok((graph, descriptor, metadata))
+    Ok((graph, descriptor, metadata, routing_fields))
 }
 
 fn canonical_current_source_fields(
@@ -2475,6 +2555,14 @@ fn reachable_frontier_columns(
             ty: param_types.get(param).cloned().unwrap_or(ColumnType::Uuid),
         });
     }
+    if let Operand::Claim(claim) = seed {
+        let path = ClaimPath(claim.split('.').map(str::to_owned).collect());
+        columns.push(ValueSourceColumn {
+            name: claim_param_field(&path),
+            value: NormalizedValueRef::Claim(path),
+            ty: ColumnType::Uuid,
+        });
+    }
     if let Operand::Param(param) = seed
         && param != "team"
         && param != "reachable_team"
@@ -3295,10 +3383,25 @@ where
     fn policy_authorization_row_id_graph(
         &mut self,
         request: QueryProgramRequest,
-    ) -> Result<GraphBuilder, Error> {
+    ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics.policy_authorization_graphs += 1;
         let program = self.compile_query_program_request(request)?;
-        lowered_terminal_graph(&program, "policy.authorized_rows")
+        let graph = lowered_terminal_graph(&program, "policy.authorized_rows")?;
+        let route_fields = program
+            .lowered
+            .terminals
+            .iter()
+            .find_map(|terminal| {
+                (terminal.sink == "policy.authorized_rows").then(|| match &terminal.output {
+                    OutputTerminalSchema::Fact(fact) => output_routing_fields_for_query_eval(fact),
+                    OutputTerminalSchema::AppRows(_) => BTreeSet::new(),
+                })
+            })
+            .unwrap_or_default();
+        Ok(PolicyAuthorizationGraph {
+            graph,
+            route_fields,
+        })
     }
 
     pub(super) fn branch_read_policy_authorized_branch_ids(
@@ -3362,7 +3465,7 @@ where
                 policy_shape.query(),
             ),
         };
-        let graph = self.policy_authorization_row_id_graph(request)?;
+        let graph = self.policy_authorization_row_id_graph(request)?.graph;
         let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
         let row_idx =
             deltas
@@ -4436,6 +4539,16 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
+        let (shape, binding) = self.query_binding_for_link(shape, binding)?;
+        let plan = self.prepared_query_plan(&shape, &binding, tier, identity)?;
+        Ok((shape, binding, plan))
+    }
+
+    pub(crate) fn query_binding_for_link(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<(ValidatedQuery, Binding), Error> {
         let shape = bind_query_params_with_mode(
             shape,
             binding,
@@ -4443,8 +4556,7 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
-        let plan = self.prepared_query_plan(&shape, &binding, tier, identity)?;
-        Ok((shape, binding, plan))
+        Ok((shape, binding))
     }
 
     pub(crate) fn query_rows_for_link(
@@ -4972,7 +5084,10 @@ where
                 .source_shape
                 .clone()
                 .unwrap_or_else(|| self.query_binding_source_shape_for_binding(shape, binding));
-            let route_fields = terminal_route_fields(&route_params, &app_row_fields);
+            let route_fields = terminal_route_fields(
+                &route_params,
+                &app_row_terminal_route_eligible_fields(&program.lowered.output)?,
+            );
             let prepared = self.database.prepare(
                 [groove::ivm::RoutedMultisinkTerminal::new(
                     JAZZ_APP_ROWS_SINK,
@@ -5100,7 +5215,10 @@ where
             .iter()
             .map(|terminal| {
                 let public_fields = terminal_public_fields(&terminal.output)?;
-                let route_fields = terminal_route_fields(&route_params, &public_fields);
+                let route_fields = terminal_route_fields(
+                    &route_params,
+                    &terminal_route_eligible_fields(&terminal.output)?,
+                );
                 Ok(RoutedMultisinkTerminal::new(
                     terminal.sink.clone(),
                     terminal.graph.clone(),
@@ -5123,7 +5241,7 @@ where
         policy_request: QueryProgramRequest,
         base: GraphBuilder,
         output_fields: &[String],
-    ) -> Result<GraphBuilder, Error> {
+    ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics
             .policy_authorized_source_joins += 1;
         // TODO(query-engine): replace this physical bridge with a first-class
@@ -5131,17 +5249,28 @@ where
         // query-engine request directly, so public query composition is no
         // longer part of source authorization.
         let authorized = match self.policy_authorization_row_id_graph(policy_request) {
-            Ok(graph) => graph,
-            Err(Error::QueryCapability(_)) => empty_authorized_row_id_graph(),
+            Ok(authorized) => authorized,
+            Err(Error::QueryCapability(_)) => PolicyAuthorizationGraph {
+                graph: empty_authorized_row_id_graph(),
+                route_fields: BTreeSet::new(),
+            },
             Err(err) => return Err(err),
         };
-        Ok(
-            GraphBuilder::join(base, authorized, ["row_uuid"], ["row_uuid"]).project_fields(
-                output_fields
-                    .iter()
-                    .map(|field| ProjectField::renamed(left_field(&field), field.clone())),
-            ),
-        )
+        let mut fields = output_fields
+            .iter()
+            .map(|field| ProjectField::renamed(left_field(&field), field.clone()))
+            .collect::<Vec<_>>();
+        fields.extend(
+            authorized
+                .route_fields
+                .iter()
+                .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+        );
+        Ok(PolicyAuthorizationGraph {
+            graph: GraphBuilder::join(base, authorized.graph, ["row_uuid"], ["row_uuid"])
+                .project_fields(fields),
+            route_fields: authorized.route_fields,
+        })
     }
 
     fn table_read_policy_authorization_request(
