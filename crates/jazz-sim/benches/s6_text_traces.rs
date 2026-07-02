@@ -100,6 +100,7 @@ pub fn smoke() {
             .map(|spec| spec.name.to_owned())
             .collect(),
     };
+    let profile = PeerProfile::new(config.profile.clone(), 1, 0, 0);
     for spec in trace_specs() {
         let edits = synthetic_edits(config.max_edits);
         let trace = Trace {
@@ -116,11 +117,14 @@ pub fn smoke() {
         for batch in &config.batches {
             let replay = run_replay(&config, &trace, *batch);
             assert_eq!(replay.edits, config.max_edits);
+            emit_replay(&config, &profile, &trace, *batch, &replay);
             let db_replay = run_db_surface_replay(&trace, *batch);
             assert_eq!(db_replay.edits, config.max_edits);
+            emit_db_surface_replay(&config, &profile, &trace, *batch, &db_replay);
         }
         let live = run_live_observation(&config, &trace);
         assert_eq!(live.edits, config.live_edits);
+        emit_live(&config, &profile, &trace, &live);
     }
 }
 
