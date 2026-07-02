@@ -53,6 +53,23 @@ degenerate whole-table global shapes (`INV-PERF-8`), addressing the S6 cold-load
 memory blowup by routing global current-row subscriptions through the
 global-current tables (receipt: `benches/cold_subscription.rs`).
 
+Winner metadata needed for sync payload witnesses and known-state dedup is also
+part of the compact current representation: current content/register rows carry
+the canonical version payload metadata (`schema_version`, `parents`, provenance)
+and the settle position (`global_seq` where fated). Version witnesses are sourced
+from current rows, not a current-key → history join, and the current-sourced
+payload is byte-equivalent to the canonical history projection.
+
+Receipt, dirty-tree Plan 3 denormalization run (`JAZZ_DEPTHS=100,1000
+JAZZ_PENDING_SIZES=0 cargo bench -p jazz --bench cold_subscription`): global
+current-row update wall time changed from 1.589 ms at depth 100 and 7.481 ms at
+depth 1000 to 0.986 ms and 0.945 ms. This receipt measures the current-row path,
+not historical history-read removal directly; both runs already reported zero
+history row reads in this phase. Smoke run `20260702T181821Z` records the write
+cost of the denormalized metadata: in `jazz/large_value_checkpointing`, one
+current-row write increased from 172 bytes to 217 bytes, and the total last
+commit write increased from 898 bytes to 943 bytes.
+
 ## C.4 Levers and hot spots
 
 The main performance levers are the places where repeated work still scales with
