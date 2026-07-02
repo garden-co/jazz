@@ -380,15 +380,38 @@ where
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        let mut values = self.base.prefix(cf, prefix)?;
-        overlay_values(
-            &mut values,
-            cf,
-            |key| key.starts_with(prefix),
-            self.staged_writes,
-        );
-        for (key, value) in values.into_iter().rev() {
-            visit(&key, &value)?;
+        let staged = staged_prefix_overlay_desc(cf, prefix, self.staged_writes);
+        let mut staged_index = 0;
+        self.base
+            .scan_prefix_reverse(cf, prefix, &mut |base_key, base_value| {
+                while let Some((staged_key, staged_value)) = staged.get(staged_index) {
+                    if staged_key.as_slice() <= base_key {
+                        break;
+                    }
+                    if let Some(value) = staged_value {
+                        visit(staged_key, value)?;
+                    }
+                    staged_index += 1;
+                }
+
+                if let Some((staged_key, staged_value)) = staged.get(staged_index)
+                    && staged_key.as_slice() == base_key
+                {
+                    if let Some(value) = staged_value {
+                        visit(staged_key, value)?;
+                    }
+                    staged_index += 1;
+                    return Ok(());
+                }
+
+                visit(base_key, base_value)
+            })?;
+
+        while let Some((staged_key, staged_value)) = staged.get(staged_index) {
+            if let Some(value) = staged_value {
+                visit(staged_key, value)?;
+            }
+            staged_index += 1;
         }
         Ok(())
     }
@@ -398,6 +421,28 @@ where
         cf: &ColumnFamilyName,
         prefix: &Key,
     ) -> Result<Option<KeyValue>, Error> {
+        let mut has_staged_delete = false;
+        for operation in self.staged_writes.borrow().iter() {
+            if operation.cf() != cf || !operation.key().starts_with(prefix) {
+                continue;
+            }
+            match operation {
+                OwnedWriteOperation::Set { .. } => {}
+                OwnedWriteOperation::Delete { .. } => has_staged_delete = true,
+            }
+        }
+
+        if !has_staged_delete {
+            let largest_staged_set = staged_prefix_overlay_desc(cf, prefix, self.staged_writes)
+                .into_iter()
+                .find_map(|(key, value)| value.map(|value| (key, value)));
+            return match (self.base.last_with_prefix(cf, prefix)?, largest_staged_set) {
+                (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
+                (Some(base), _) => Ok(Some(base)),
+                (None, staged) => Ok(staged),
+            };
+        }
+
         let mut values = self.base.prefix(cf, prefix)?;
         overlay_values(
             &mut values,
@@ -447,6 +492,28 @@ fn overlay_values(
             .into_iter()
             .filter_map(|(key, value)| value.map(|value| (key, value))),
     );
+}
+
+fn staged_prefix_overlay_desc(
+    cf: &ColumnFamilyName,
+    prefix: &Key,
+    staged_writes: &RefCell<Vec<OwnedWriteOperation>>,
+) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    let mut overlay = BTreeMap::new();
+    for operation in staged_writes.borrow().iter() {
+        if operation.cf() != cf || !operation.key().starts_with(prefix) {
+            continue;
+        }
+        match operation {
+            OwnedWriteOperation::Set { key, value, .. } => {
+                overlay.insert(key.clone(), Some(value.clone()));
+            }
+            OwnedWriteOperation::Delete { key, .. } => {
+                overlay.insert(key.clone(), None);
+            }
+        }
+    }
+    overlay.into_iter().rev().collect()
 }
 
 impl<'a> WriteOperation<'a> {
@@ -552,6 +619,7 @@ pub(crate) mod conformance {
 mod tests {
     use super::*;
     use crate::records::{Value, ValueType};
+    use std::cell::Cell;
 
     #[test]
     fn get_set_and_delete_values() {
@@ -889,21 +957,233 @@ mod tests {
             }
         }
 
-        let storage = MemoryStorage::new(&["indices"]);
-        storage.set("indices", b"user:1", b"base-1").unwrap();
-        storage.set("indices", b"user:2", b"base-2").unwrap();
-        storage.set("indices", b"user:4", b"base-4").unwrap();
-        storage.set("indices", b"view:1", b"base-view").unwrap();
-        let staged = RefCell::new(vec![
-            OwnedWriteOperation::Set {
-                cf: "indices".to_owned(),
-                key: b"user:2".to_vec(),
-                value: b"staged-2".to_vec(),
-            },
-            OwnedWriteOperation::Delete {
+        fn assert_case(
+            name: &str,
+            base_rows: &[(&[u8], &[u8])],
+            staged_rows: Vec<OwnedWriteOperation>,
+            prefix: &[u8],
+            expected: Vec<KeyValue>,
+        ) {
+            let storage = MemoryStorage::new(&["indices"]);
+            for (key, value) in base_rows {
+                storage.set("indices", key, value).unwrap();
+            }
+            storage.set("indices", b"view:1", b"base-view").unwrap();
+            let staged = RefCell::new(staged_rows);
+            let overlay = StagedWriteOverlay::new(&storage, &staged);
+            let default_reverse = DefaultReverse(&overlay);
+
+            let mut optimized = Vec::new();
+            overlay
+                .scan_prefix_reverse("indices", prefix, &mut |key, value| {
+                    optimized.push((key.to_vec(), value.to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+
+            let mut defaulted = Vec::new();
+            default_reverse
+                .scan_prefix_reverse("indices", prefix, &mut |key, value| {
+                    defaulted.push((key.to_vec(), value.to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+
+            assert_eq!(optimized, defaulted, "{name}");
+            assert_eq!(optimized, expected, "{name}");
+            assert_eq!(
+                overlay.last_with_prefix("indices", prefix).unwrap(),
+                default_reverse.last_with_prefix("indices", prefix).unwrap(),
+                "{name}"
+            );
+        }
+
+        assert_case(
+            "mixed staged overrides and deletes",
+            &[
+                (b"user:1", b"base-1"),
+                (b"user:2", b"base-2"),
+                (b"user:4", b"base-4"),
+            ],
+            vec![
+                OwnedWriteOperation::Set {
+                    cf: "indices".to_owned(),
+                    key: b"user:2".to_vec(),
+                    value: b"staged-2".to_vec(),
+                },
+                OwnedWriteOperation::Delete {
+                    cf: "indices".to_owned(),
+                    key: b"user:4".to_vec(),
+                },
+                OwnedWriteOperation::Set {
+                    cf: "indices".to_owned(),
+                    key: b"user:3".to_vec(),
+                    value: b"staged-3".to_vec(),
+                },
+                OwnedWriteOperation::Set {
+                    cf: "indices".to_owned(),
+                    key: b"view:2".to_vec(),
+                    value: b"staged-view".to_vec(),
+                },
+            ],
+            b"user:",
+            vec![
+                (b"user:3".to_vec(), b"staged-3".to_vec()),
+                (b"user:2".to_vec(), b"staged-2".to_vec()),
+                (b"user:1".to_vec(), b"base-1".to_vec()),
+            ],
+        );
+
+        assert_case(
+            "staged delete of base last key",
+            &[
+                (b"user:1", b"base-1"),
+                (b"user:2", b"base-2"),
+                (b"user:4", b"base-4"),
+            ],
+            vec![OwnedWriteOperation::Delete {
                 cf: "indices".to_owned(),
                 key: b"user:4".to_vec(),
-            },
+            }],
+            b"user:",
+            vec![
+                (b"user:2".to_vec(), b"base-2".to_vec()),
+                (b"user:1".to_vec(), b"base-1".to_vec()),
+            ],
+        );
+
+        assert_case(
+            "empty staged buffer",
+            &[(b"user:1", b"base-1"), (b"user:2", b"base-2")],
+            Vec::new(),
+            b"user:",
+            vec![
+                (b"user:2".to_vec(), b"base-2".to_vec()),
+                (b"user:1".to_vec(), b"base-1".to_vec()),
+            ],
+        );
+
+        assert_case(
+            "staged-only prefix",
+            &[(b"user:1", b"base-1")],
+            vec![OwnedWriteOperation::Set {
+                cf: "indices".to_owned(),
+                key: b"team:1".to_vec(),
+                value: b"staged-team".to_vec(),
+            }],
+            b"team:",
+            vec![(b"team:1".to_vec(), b"staged-team".to_vec())],
+        );
+
+        assert_case(
+            "base empty for prefix",
+            &[(b"view:1", b"base-view")],
+            vec![
+                OwnedWriteOperation::Set {
+                    cf: "indices".to_owned(),
+                    key: b"user:1".to_vec(),
+                    value: b"staged-1".to_vec(),
+                },
+                OwnedWriteOperation::Set {
+                    cf: "indices".to_owned(),
+                    key: b"user:3".to_vec(),
+                    value: b"staged-3".to_vec(),
+                },
+            ],
+            b"user:",
+            vec![
+                (b"user:3".to_vec(), b"staged-3".to_vec()),
+                (b"user:1".to_vec(), b"staged-1".to_vec()),
+            ],
+        );
+    }
+
+    #[test]
+    fn staged_overlay_last_with_prefix_no_delete_uses_one_base_seek() {
+        struct CountingStorage<S> {
+            inner: S,
+            prefix_scans: Cell<usize>,
+            reverse_prefix_scans: Cell<usize>,
+            last_with_prefix_calls: Cell<usize>,
+        }
+
+        impl<S> CountingStorage<S> {
+            fn new(inner: S) -> Self {
+                Self {
+                    inner,
+                    prefix_scans: Cell::new(0),
+                    reverse_prefix_scans: Cell::new(0),
+                    last_with_prefix_calls: Cell::new(0),
+                }
+            }
+        }
+
+        impl<S> OrderedKvStorage for CountingStorage<S>
+        where
+            S: OrderedKvStorage,
+        {
+            fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+                self.inner.get(cf, key)
+            }
+
+            fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+                self.inner.set(cf, key, value)
+            }
+
+            fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+                self.inner.delete(cf, key)
+            }
+
+            fn scan_range(
+                &self,
+                cf: &ColumnFamilyName,
+                start: &Key,
+                end: &Key,
+                visit: &mut ScanVisitor<'_>,
+            ) -> Result<(), Error> {
+                self.inner.scan_range(cf, start, end, visit)
+            }
+
+            fn scan_prefix(
+                &self,
+                cf: &ColumnFamilyName,
+                prefix: &Key,
+                visit: &mut ScanVisitor<'_>,
+            ) -> Result<(), Error> {
+                self.prefix_scans.set(self.prefix_scans.get() + 1);
+                self.inner.scan_prefix(cf, prefix, visit)
+            }
+
+            fn scan_prefix_reverse(
+                &self,
+                cf: &ColumnFamilyName,
+                prefix: &Key,
+                visit: &mut ScanVisitor<'_>,
+            ) -> Result<(), Error> {
+                self.reverse_prefix_scans
+                    .set(self.reverse_prefix_scans.get() + 1);
+                self.inner.scan_prefix_reverse(cf, prefix, visit)
+            }
+
+            fn last_with_prefix(
+                &self,
+                cf: &ColumnFamilyName,
+                prefix: &Key,
+            ) -> Result<Option<KeyValue>, Error> {
+                self.last_with_prefix_calls
+                    .set(self.last_with_prefix_calls.get() + 1);
+                self.inner.last_with_prefix(cf, prefix)
+            }
+
+            fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+                self.inner.write_many(operations)
+            }
+        }
+
+        let storage = CountingStorage::new(MemoryStorage::new(&["indices"]));
+        storage.set("indices", b"user:1", b"base-1").unwrap();
+        storage.set("indices", b"user:2", b"base-2").unwrap();
+        let staged = RefCell::new(vec![
             OwnedWriteOperation::Set {
                 cf: "indices".to_owned(),
                 key: b"user:3".to_vec(),
@@ -911,44 +1191,19 @@ mod tests {
             },
             OwnedWriteOperation::Set {
                 cf: "indices".to_owned(),
-                key: b"view:2".to_vec(),
-                value: b"staged-view".to_vec(),
+                key: b"user:0".to_vec(),
+                value: b"staged-0".to_vec(),
             },
         ]);
         let overlay = StagedWriteOverlay::new(&storage, &staged);
-        let default_reverse = DefaultReverse(&overlay);
 
-        let mut optimized = Vec::new();
-        overlay
-            .scan_prefix_reverse("indices", b"user:", &mut |key, value| {
-                optimized.push((key.to_vec(), value.to_vec()));
-                Ok(())
-            })
-            .unwrap();
-
-        let mut defaulted = Vec::new();
-        default_reverse
-            .scan_prefix_reverse("indices", b"user:", &mut |key, value| {
-                defaulted.push((key.to_vec(), value.to_vec()));
-                Ok(())
-            })
-            .unwrap();
-
-        assert_eq!(optimized, defaulted);
-        assert_eq!(
-            optimized,
-            vec![
-                (b"user:3".to_vec(), b"staged-3".to_vec()),
-                (b"user:2".to_vec(), b"staged-2".to_vec()),
-                (b"user:1".to_vec(), b"base-1".to_vec()),
-            ]
-        );
         assert_eq!(
             overlay.last_with_prefix("indices", b"user:").unwrap(),
-            default_reverse
-                .last_with_prefix("indices", b"user:")
-                .unwrap()
+            Some((b"user:3".to_vec(), b"staged-3".to_vec()))
         );
+        assert_eq!(storage.last_with_prefix_calls.get(), 1);
+        assert_eq!(storage.prefix_scans.get(), 0);
+        assert_eq!(storage.reverse_prefix_scans.get(), 0);
     }
 
     #[test]
