@@ -27,7 +27,10 @@ deltas (`PeerState.shipped_complete_tx_payloads`, `PeerMetrics`) (`INV-PERF-4`);
 incremental subscription state converging to a full rehydrate for both filtered
 query bindings and whole-table current-row views (`INV-PERF-5`); and current-row
 optimizations preserving deletion/restore visibility including register
-witnesses (`INV-PERF-6`).
+witnesses (`INV-PERF-6`). The committed successor to complete-tx dedup is the
+known-state design (ch. 8 §8.11, `INV-SYNC-24..27`, target): version-granular,
+declaration-seeded, ack-free — it retires `shipped_complete_tx_payloads` when
+it lands.
 
 A **full-diff full recompute is sometimes correctness-preserving, not a failure**. For
 example, a permission change can make an old exclusive transaction newly
