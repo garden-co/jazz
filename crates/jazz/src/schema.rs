@@ -1007,6 +1007,10 @@ fn global_changes_table() -> GrooveTableSchema {
         "by_global_seq",
         ["global_seq", "table_name", "row_uuid", "layer"],
     ))
+    .with_index(GrooveIndexSchema::new(
+        "by_table_global_seq",
+        ["table_name", "global_seq", "row_uuid", "layer"],
+    ))
 }
 
 fn pending_edges_table() -> GrooveTableSchema {
@@ -1461,6 +1465,15 @@ mod tests {
         assert_eq!(
             index.columns,
             vec!["global_seq", "table_name", "row_uuid", "layer"]
+        );
+        let table_index = table
+            .indices
+            .iter()
+            .find(|index| index.name == "by_table_global_seq")
+            .unwrap();
+        assert_eq!(
+            table_index.columns,
+            vec!["table_name", "global_seq", "row_uuid", "layer"]
         );
     }
 
