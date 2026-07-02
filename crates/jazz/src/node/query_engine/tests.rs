@@ -470,6 +470,7 @@ impl SourceResolver for FakeSourceResolver {
                 row_uuid_field: "row_uuid".to_owned(),
                 metadata,
             },
+            routing_fields: BTreeSet::new(),
             content_version,
             deletion_register,
         })
@@ -2014,6 +2015,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
             app_rows: None,
             facts: BTreeSet::from([
                 ProgramFactKey::RelationEdges,
+                ProgramFactKey::ResultMembership,
                 ProgramFactKey::PathCorrelationCoverage,
             ]),
         },
@@ -2039,7 +2041,14 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     }
 
     assert!(matches!(
-        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
+        program
+            .lowered
+            .terminals
+            .iter()
+            .find(|terminal| terminal.sink == "maintained.relation_edges")
+            .expect("relation edge terminal")
+            .graph
+            .clone(),
         GraphBuilder::Recursive {
             ref seed,
             ref step,
@@ -2082,7 +2091,10 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
     );
     assert_eq!(
         program.lowered.parameters.routing_params,
-        BTreeSet::from([route_param_field("route")])
+        BTreeSet::from([
+            claim_param_field(&ClaimPath(vec!["sub".to_owned()])),
+            route_param_field("route")
+        ])
     );
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert!(terminals.iter().any(|terminal| {
@@ -2098,6 +2110,36 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
             })
         )
     }));
+    assert!(terminals.iter().any(|terminal| {
+        matches!(
+            terminal,
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::ResultMembership,
+                terminal: ProgramFactTerminal::Primary,
+                schema: ProgramFactSchema::ResultMembership(ResultMembershipSchema {
+                    routing_param_fields,
+                    ..
+                }),
+            }) if routing_param_fields.contains(&claim_param_field(&ClaimPath(vec!["sub".to_owned()])))
+                && routing_param_fields.contains(&route_param_field("route"))
+        )
+    }));
+    let result_membership_terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.result_current")
+        .expect("result-membership terminal");
+    let result_membership_fields = graph_declared_output_fields(&result_membership_terminal.graph)
+        .expect("result-membership terminal should declare output fields");
+    assert!(
+        result_membership_fields.contains(&claim_param_field(&ClaimPath(vec!["sub".to_owned()]))),
+        "result-membership terminal must retain claim route field"
+    );
+    assert!(
+        result_membership_fields.contains(&route_param_field("route")),
+        "result-membership terminal must retain user route field"
+    );
     assert!(terminals.iter().any(|terminal| {
         matches!(
             terminal,
@@ -2292,7 +2334,10 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
             .map(|param| (&param.path, &param.ty)),
         Some((&ClaimPath(vec!["sub".to_owned()]), &ColumnType::Uuid))
     );
-    assert_eq!(program.lowered.parameters.routing_params, BTreeSet::new());
+    assert_eq!(
+        program.lowered.parameters.routing_params,
+        BTreeSet::from([claim_param_field(&ClaimPath(vec!["sub".to_owned()]))])
+    );
 }
 
 #[test]
