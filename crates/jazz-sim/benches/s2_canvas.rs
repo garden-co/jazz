@@ -2560,6 +2560,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         | SyncMessage::CatalogueAck(_)
         | SyncMessage::FetchContentExtent { .. }
         | SyncMessage::SessionClaims { .. }
+        | SyncMessage::SubscribeRejected { .. }
         | SyncMessage::Unsubscribe { .. } => 0,
     }
 }
