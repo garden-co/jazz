@@ -14,7 +14,13 @@ pub struct Candidate {
     pub last_visible_at: i64,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+// Serialization must spread-omit falsy optionals exactly like the JS senders
+// (reportLeaderReady / reportStorageResetReady) — hence the skip attributes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum TabMessage {
     #[serde(rename_all = "camelCase")]
@@ -24,8 +30,11 @@ pub enum TabMessage {
         db_name: String,
         fingerprint: String,
         visibility: Visibility,
+        #[serde(skip_serializing_if = "Option::is_none")]
         force_takeover_timeout_ms: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         broker_ping_interval_ms: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         broker_pong_timeout_ms: Option<f64>,
     },
     #[serde(rename_all = "camelCase")]
@@ -39,7 +48,7 @@ pub enum TabMessage {
         leadership_id: u64,
         tab_lock_name: String,
         worker_lock_name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_false")]
         bridgeless_storage_reset: bool,
     },
     #[serde(rename_all = "camelCase")]
@@ -75,6 +84,7 @@ pub enum TabMessage {
         broker_instance_id: String,
         request_id: String,
         success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
         error_message: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
@@ -158,6 +168,26 @@ pub enum ControlMessage {
         broker_instance_id: String,
         reason: String,
     },
+    // The two port-carrying messages. The broker core never constructs these
+    // (it emits AttachFollowerChannel commands instead); the tab client core
+    // receives them with the `port` field stripped by the shell, which holds
+    // the MessagePort and pairs it back on the matching Invoke* command.
+    #[serde(rename_all = "camelCase")]
+    AttachFollowerPort {
+        broker_instance_id: String,
+        follower_tab_id: String,
+        leadership_id: u64,
+    },
+    #[serde(rename_all = "camelCase")]
+    UseFollowerPort {
+        broker_instance_id: String,
+        leader_tab_id: String,
+        leadership_id: u64,
+    },
+    /// Anything a future broker version might send: dropped by the tab client
+    /// core exactly like the JS `switch` fell through unknown types.
+    #[serde(other)]
+    Unknown,
 }
 
 pub fn select_leader_candidate<'a, I>(candidates: I) -> Option<&'a Candidate>

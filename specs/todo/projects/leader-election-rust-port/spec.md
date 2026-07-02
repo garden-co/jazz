@@ -644,16 +644,8 @@ the pure helpers of `browser-broker-protocol.ts` into `jazz-browser-broker` +
 in `browser-broker-protocol.ts` remain the source of truth for the TS side; add a
 round-trip test asserting Rust serde output matches representative TS fixtures.
 
-**Phase 2 — tab client core.** Port the `BrowserBrokerClient` state machine
-(role/leadershipId tracking, message stamping/queueing rules, liveness timer, reconnect
-sequencing, reset waiter settlement) into `tab_client.rs`, compiled into the existing
-`jazz-wasm` binary. Promise plumbing (`waitForRole`, reset waiters) stays in the TS
-wrapper; the core tells it _when_ to settle. Key invariants to carry: stamping returns
-null (drop) until `broker-hello` arrives; sends are queued when there is no port but
-dropped while reconnecting; the 100ms initial-leadership quiet window; liveness timeout =
-pingInterval + pongTimeout; the reconnect sequence (reset state → reject reset waiters →
-onDemote if held leadership → onCloseFollowerPort if follower → reconnect → replay
-visibility → onReconnected → flush queue).
+**Phase 2 — tab client core.** Port the `BrowserBrokerClient` decision logic into
+`tab_client.rs`. Normative design below (see "Phase 2: tab client core API").
 
 **Phase 3 (optional, separate effort) — connection-manager promotion state machine.**
 `BrowserConnectionManager`'s promotion/demotion/cancellation logic could follow the same
@@ -661,6 +653,171 @@ pattern, but it is entangled with worker spawning, OPFS deletion, and page lifec
 attempted: the durable-path waiter semantics are load-bearing (non-terminal port closures
 must _not_ reject waiters — regression history) and every `finishCancelledBrokerPromotion`
 checkpoint must survive verbatim. Not required for this project's definition of done.
+
+## Phase 2: tab client core API
+
+Port of `browser-broker-client.ts` decision logic into `tab_client.rs`
+(`jazz-browser-broker` crate), exposed as `WasmTabBrokerCore` from the **existing
+`jazz-wasm` binary** (new `broker_client` module). No new distribution artifact: the tab
+already loads jazz-wasm, and `createDbWithRuntimeModule` awaits `runtimeModule.load()`
+**before** `connectionManager.start()`, so the binary is always initialized before the
+broker client connects. For standalone use (unit tests in Node), the shell calls
+`loadWasmModule(options.runtimeSources)` itself — it is idempotent and has a packaged-
+bytes Node bootstrap path.
+
+### Boundary rules (timing contract — do not violate)
+
+`browser-broker-client.test.ts` dispatches fake-port messages **synchronously after the
+`connect()` call** and uses fake timers around the hello timeout. Therefore:
+
+1. **The synchronous prefix of `connectToBroker` stays in the shell, unchanged**:
+   `createSharedWorker()`, listener attachment, `port.start()`, hello-promise setup with
+   its 5s `setTimeout`, worker `error` listener, and the hello `postMessage` all happen
+   synchronously. (Hello needs no core: it is the one unstamped message.)
+2. Core init (`await loadWasmModule(...)`, `new WasmTabBrokerCore(...)`) happens _after_
+   that prefix. Control messages arriving earlier are **queued by the shell and replayed
+   in order** once the core exists — before `connect()` resolves.
+3. `closedError` stays a JS `Error` **instance** owned by the shell (tests assert
+   `instanceof IncompatibleBrowserBrokerConfigurationError` and `error.cause` identity).
+   The core signals `CloseWithError { message, code }`; the shell constructs/stores the
+   typed error and passes it to waiter rejections and `onClosed`.
+4. Async **choreography** stays in the shell where the JS awaits callbacks: the reconnect
+   sequence and the `onStorageResetBegin` promise chain. The core makes every decision
+   and emits the steps; the shell executes them in order.
+5. Promise plumbing (`waitForRole`, reset waiters) stays in the shell keyed by shell-
+   allocated waiter ids; the core decides settlement.
+
+### Core types
+
+```rust
+pub struct TabClientCore { /* mirrors BrowserBrokerClient fields */ }
+
+impl TabClientCore {
+    /// tab_id + normalized liveness inputs + storage-reset start timeout.
+    pub fn new(options: TabClientOptions) -> Self;
+    pub fn handle(&mut self, event: TabClientEvent) -> Vec<TabClientCommand>;
+    pub fn snapshot(&self) -> TabClientSnapshot; // brokerInstanceId, role, leaderTabId, leadershipId, closed, reconnecting
+}
+
+pub enum TabTimerKey {
+    Liveness,
+    RoleWaiter { waiter_id: u64 },
+    ResetStartWaiter { waiter_id: u64 },
+}
+
+pub enum TabClientEvent {
+    /// A (re)connected port finished the hello handshake path far enough to
+    /// process control traffic. Fired by the shell right after core init or
+    /// after a reconnect's connectToBroker succeeds.
+    PortAttached,
+    /// Inbound control message with any MessagePort stripped by the shell
+    /// (the shell holds the port for the matching Invoke* command).
+    ControlMessage { message: TabControlMessage },
+    PortMessageError,
+    TimerFired { timer: TabTimerKey },
+    /// connect() finished waitForInitialLeadershipMessage → arm liveness.
+    ConnectCompleted,
+    RoleWaiterAdded { waiter_id: u64, role: Role, timeout_ms: u64 },
+    StorageResetRequested { request_id: String, start_waiter_id: u64, completion_waiter_id: u64 },
+    /// report*()/send() surface: unstamped tab message from the public API.
+    SendRequested { message: UnstampedTabMessage },
+    VisibilityReported { visibility: Visibility },
+    ShutdownRequested,
+    /// Shell finished the reconnect choreography (None = success).
+    ReconnectFinished { error: Option<String> },
+}
+
+pub enum TabClientCommand {
+    PostToBroker { message: TabMessage },          // stamped, ready to post
+    SetTimer { timer: TabTimerKey, delay_ms: u64 },
+    ClearTimer { timer: TabTimerKey },
+    SettleRoleWaiter { waiter_id: u64, error: Option<String> },
+    SettleResetStartWaiters { waiter_ids: Vec<u64>, error: Option<ResetWaiterError> },
+    SettleResetWaiters { waiter_ids: Vec<u64>, error: Option<ResetWaiterError> },
+    InvokeOnBecomeLeader { leadership_id: u64, reset_request_id: Option<String> },
+    InvokeOnDemote { leadership_id: u64 },
+    InvokeOnAttachFollowerPort { follower_tab_id: String, leadership_id: u64 },
+    InvokeOnUseFollowerPort { leadership_id: u64 },
+    InvokeOnFollowerReady { leadership_id: u64 },
+    InvokeOnCloseFollowerPort { leadership_id: u64 },
+    InvokeOnDetachFollowerPort { follower_tab_id: String, leadership_id: u64 },
+    InvokeOnStorageResetBegin { request_id: String, leadership_id: u64 },
+    InvokeOnSchemaBlocked { reason: String },
+    InvokeOnReconnected,
+    /// onBrokerPing + optional pong. The pong decision (respondToBrokerPings
+    /// may be a function) is evaluated by the shell; the pong is stamped with
+    /// the **ping's** instance id, which this command carries.
+    HandleBrokerPing { broker_instance_id: String },
+    /// Shell: detach+close current port. Emitted on close/reconnect/shutdown.
+    DetachPort,
+    /// Shell: run the JS reconnect choreography (await onDemote if
+    /// previous_leadership_id > 0, onCloseFollowerPort if previous follower,
+    /// connectToBroker, then feed ReconnectFinished).
+    StartReconnect { previous_role: Role, previous_leadership_id: u64 },
+    /// Shell: build typed Error (code → IncompatibleBrowserBrokerConfigurationError),
+    /// store as closedError, reject remaining waiters, invoke onClosed.
+    CloseWithError { message: String, code: Option<String> },
+    /// ResetWaiterError::Closed → reject with the stored closedError instance;
+    /// ::Message(s) → reject with new Error(s).
+    ...
+}
+```
+
+`TabControlMessage` extends the Phase 1 `ControlMessage` enum with the two port-carrying
+variants (`attach-follower-port`, `use-follower-port`) minus their `port` field; the
+shell strips the port before deserialization and pairs it back on the Invoke command
+(events and commands are processed strictly in order, one event at a time, so "the port
+of the message currently being handled" is unambiguous).
+
+### Tab-client invariants
+
+- T1. Stamping: hello passes through untouched; every other outbound message gets the
+  current `brokerInstanceId`; a null instance id drops the message silently.
+- T2. `send()` rules, in order: closed → drop; stamp fails → drop; reconnecting → drop;
+  no port → queue; else post. The queue is flushed in order after connect and after a
+  successful reconnect — and **cleared without replay** when a reconnect starts.
+- T3. `broker-hello` records the instance id. The mismatch guard runs **before** the
+  message dispatch: any control message stamped with a different instance id (while one
+  is set) triggers a reconnect and is not otherwise processed.
+- T4. `become-leader`: adopt leadershipId, invoke `onBecomeLeader`; a rejected callback
+  reports `leader-failed` with the stringified error (shell catches the promise).
+- T5. `demote`: matching leadershipId → role=follower, leaderTabId=null, re-resolve role
+  waiters. `onDemote` is invoked **regardless** of the id match (future demotes cancel
+  in-flight promotions).
+- T6. `leader-ready`: adopt id+leader; role = (leaderTabId == tabId); resolve role
+  waiters (a waiter resolves only when role matches **and** leaderTabId is non-null).
+- T7. `attach-follower-port` is ignored unless leadershipId matches exactly.
+  `use-follower-port` / `follower-ready` adopt the id and force role=follower.
+- T8. Storage reset: `storage-reset-begin`/`-started`/`-finished` all resolve start
+  waiters; `-begin` additionally runs `onStorageResetBegin` and replies
+  `storage-reset-ready` (success / stringified error); `-finished` settles completion
+  waiters (reject `errorMessage ?? "Browser storage reset failed"` on failure). Only the
+  **start** acknowledgment has a timeout (`storageResetTimeoutMs`, default 5000).
+- T9. `requestStorageReset` throws the stored closedError when closed, and loops
+  `await reconnectDone` while a reconnect is in flight before sending.
+- T10. Liveness: timeout = normalized pingInterval (default 1000) + normalized
+  pongTimeout (default 3000); re-armed on every `broker-ping` and once after connect;
+  expiry triggers a reconnect. Pong reply is optional (`respondToBrokerPings`, default
+  true) and stamped with the ping's instance id.
+- T11. Reconnect sequence: guard (closed/reconnecting) → set reconnecting → capture
+  previous role/leadership → stop liveness → reset instance/role/leader/leadership →
+  clear queue → reject reset+start waiters ("Browser broker restarted during storage
+  reset") → detach old port → await `onDemote` if previous leadership > 0 →
+  `onCloseFollowerPort` if previously follower with leadership > 0 → reconnect →
+  on failure `closeWithError` (preserving the thrown error as `cause`) → on success
+  send current visibility, invoke `onReconnected`, flush queue.
+- T12. `unsupported` → `closeWithError` with the typed error; `onClosed` invoked exactly
+  once; all waiters rejected; port detached; later sends drop.
+- T13. `shutdown()`: idempotent; stamps and posts the shutdown message **before** marking
+  closed (skipped when no instance id yet); rejects all waiters with "Browser broker
+  client closed".
+- T14. `waitForRole`: immediate resolve when role already matches with a non-null
+  leaderTabId; immediate throw of closedError when closed; timeout rejects
+  "Timed out waiting for broker role {role}".
+- T15. The 100ms initial-leadership quiet window after hello (skipped when a leadership
+  message already arrived) runs before `connect()` resolves.
+- T16. Constants: hello timeout 5000 (registered synchronously — fake-timers contract),
+  quiet window 100, `DEFAULT_STORAGE_RESET_TIMEOUT_MS` 5000, `waitForRole` default 5000.
 
 ## Testing
 
