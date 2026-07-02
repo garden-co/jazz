@@ -122,9 +122,14 @@ pub fn smoke() {
     let summary = run_jazz(&config);
     assert_eq!(summary.appends, config.commits_per_stream());
     assert_eq!(summary.resume_samples.len(), 3 * config.resumers);
+    let profile = PeerProfile::new(config.profile.clone(), 1, 0, 0);
+    let log = run_log_floor(&config);
+    let sqlite = run_sqlite_baseline(&config);
+    emit_summary(&config, &profile, &summary, &log, &sqlite);
     let db_surface = run_db_surface(&config);
     assert_eq!(db_surface.appends, config.commits_per_stream());
     assert_eq!(db_surface.rows, config.streams);
+    emit_db_surface_summary(&config, &profile, &db_surface);
     let resume_canary = run_process_local_resume_canary(&config);
     assert!(resume_canary.full_rehydrate_bytes > 0);
     assert!(resume_canary.resume_bytes > 0);
@@ -132,6 +137,7 @@ pub fn smoke() {
         resume_canary.resume_status,
         "resumed_smaller" | "resumed_larger_or_equal"
     ));
+    emit_process_local_resume_canary(&config, &profile, &resume_canary);
 }
 
 #[derive(Debug)]

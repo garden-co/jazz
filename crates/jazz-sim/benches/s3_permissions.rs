@@ -109,6 +109,7 @@ pub fn smoke() {
     let summary = profiling::maybe_profile_phase("s3_permissions", "deterministic_run", || {
         run(&mut deterministic, &config)
     });
+    emit_summaries("deterministic", &config, &summary);
     assert_eq!(summary.forbidden_deliveries, 0);
 }
 
