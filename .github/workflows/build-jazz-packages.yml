@@ -144,10 +144,27 @@ jobs:
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
+      # Build-time only (never published): jazz-tools' bundled broker
+      # SharedWorker embeds these wasm bytes as base64.
+      - name: Build jazz-broker-wasm package
+        run: pnpm --filter jazz-broker-wasm build
+
+      - name: Verify built jazz-broker-wasm artifacts
+        run: |
+          test -f crates/jazz-broker-wasm/pkg/jazz_broker_wasm_bg.wasm
+          test -f crates/jazz-broker-wasm/pkg/jazz_broker_wasm.js
+          test -f crates/jazz-broker-wasm/pkg/jazz_broker_wasm.d.ts
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-broker-wasm-pkg
+          path: crates/jazz-broker-wasm/pkg
           if-no-files-found: error
 
   build-napi:
@@ -323,6 +340,13 @@ jobs:
         with:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
+
+      # Required by jazz-tools' bundle-broker-worker.mjs, which inlines the
+      # broker wasm into dist/worker/jazz-broker-worker.js during the build.
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-broker-wasm-pkg
+          path: crates/jazz-broker-wasm/pkg
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:

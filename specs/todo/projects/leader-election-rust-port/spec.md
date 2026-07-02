@@ -87,7 +87,11 @@ crates/
       tests/                    # black-box event→command scenario tests
   jazz-broker-wasm/             # NEW — tiny wasm-bindgen wrapper around BrokerCore only.
                                 #   Separate from jazz-wasm so the SharedWorker loads a
-                                #   ~100KB module, not the multi-MB runtime binary.
+                                #   small module, not the multi-MB runtime binary.
+                                #   NOT published to npm: `private: true`, devDependency of
+                                #   jazz-tools. Its wasm bytes are embedded base64 into the
+                                #   bundled broker worker at build time, so consumers never
+                                #   install it and no extra release is needed.
 ```
 
 `jazz-browser-broker` must not depend on `jazz-tools` (the Rust crate), tokio, or anything

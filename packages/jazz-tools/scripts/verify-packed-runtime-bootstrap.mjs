@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { accessSync, chmodSync, constants, existsSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const BINARIES = {
@@ -72,4 +72,24 @@ if (process.platform !== "win32") {
   } catch {
     fail(`Packed native binary ${binaryName} is not executable after runtime bootstrap.`);
   }
+}
+
+// The broker SharedWorker ships as one self-contained bundle with the
+// jazz-broker-wasm bytes embedded base64 at build time (that package is
+// private and never published). A packed tarball without the embedded bytes
+// would break every persistent-mode browser consumer at runtime.
+const brokerWorkerPath = join(packageDir, "dist", "worker", "jazz-broker-worker.js");
+if (!existsSync(brokerWorkerPath)) {
+  fail(`Packed broker worker bundle missing: ${brokerWorkerPath}`);
+}
+const brokerWorkerSource = readFileSync(brokerWorkerPath, "utf8");
+const embeddedWasm = brokerWorkerSource.match(/JAZZ_BROKER_WASM_BASE64\s*=\s*"([^"]*)"/);
+if (!embeddedWasm || embeddedWasm[1].length < 10_000) {
+  fail(
+    "Packed broker worker bundle does not embed the jazz-broker-wasm bytes; " +
+      "was jazz-broker-wasm built before bundling?",
+  );
+}
+if (/from\s*["']jazz-broker-wasm["']/.test(brokerWorkerSource)) {
+  fail("Packed broker worker bundle still contains a bare jazz-broker-wasm import.");
 }

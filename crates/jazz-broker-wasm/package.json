@@ -1,24 +1,12 @@
 {
   "name": "jazz-broker-wasm",
   "version": "2.0.0-alpha.52",
-  "description": "WebAssembly bindings for the Jazz browser broker state machine",
+  "private": true,
+  "description": "WebAssembly bindings for the Jazz browser broker state machine. Build-time only: the wasm bytes are embedded into jazz-tools' bundled broker SharedWorker, so this package is never published or installed by consumers.",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/garden-co/jazz"
-  },
-  "files": [
-    "pkg/jazz_broker_wasm_bg.wasm",
-    "pkg/jazz_broker_wasm.js",
-    "pkg/jazz_broker_wasm.d.ts"
-  ],
   "type": "module",
   "main": "pkg/jazz_broker_wasm.js",
   "types": "pkg/jazz_broker_wasm.d.ts",
-  "publishConfig": {
-    "access": "public",
-    "tag": "alpha"
-  },
   "scripts": {
     "build": "wasm-pack build --target web --release"
   }
