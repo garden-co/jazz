@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::time::Instant;
+
+mod support;
 
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -10,6 +11,7 @@ use jazz::node::{MergeableCommit, NodeState};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::DurabilityTier;
+use support::{emit_json_line, env_usize, insert_node_metrics, phase_fields, reset_phase_counters};
 
 const TABLE: &str = "todos";
 
@@ -18,10 +20,12 @@ fn main() {
     let (dir, mut node) = open_node(node_uuid(1), schema());
     let branch_id = branch(0x51);
 
+    reset_phase_counters(&mut [&mut node]);
     let create_start = Instant::now();
     node.create_branch(branch_id).expect("create branch");
-    let create_ms = create_start.elapsed().as_millis();
+    emit_phase("create_branch", create_start.elapsed(), writes, None, &node);
 
+    reset_phase_counters(&mut [&mut node]);
     let write_start = Instant::now();
     for idx in 0..writes {
         node.commit_mergeable_on_branch(
@@ -33,18 +37,48 @@ fn main() {
         )
         .expect("branch write");
     }
-    let write_ms = write_start.elapsed().as_millis();
+    emit_phase("branch_writes", write_start.elapsed(), writes, None, &node);
 
+    reset_phase_counters(&mut [&mut node]);
     let merge_start = Instant::now();
     node.merge_back_branch(branch_id)
         .expect("merge back branch");
-    let merge_ms = merge_start.elapsed().as_millis();
-    let rows = current_row_count(&mut node);
-
-    println!(
-        "{{\"writes\":{writes},\"rows\":{rows},\"create_ms\":{create_ms},\"branch_write_ms\":{write_ms},\"merge_back_ms\":{merge_ms}}}"
+    emit_phase(
+        "merge_back_branch",
+        merge_start.elapsed(),
+        writes,
+        None,
+        &node,
     );
+
+    reset_phase_counters(&mut [&mut node]);
+    let row_count_start = Instant::now();
+    let rows = current_row_count(&mut node);
+    emit_phase(
+        "current_row_count",
+        row_count_start.elapsed(),
+        writes,
+        Some(rows),
+        &node,
+    );
+
     drop(dir);
+}
+
+fn emit_phase(
+    phase: &str,
+    elapsed: std::time::Duration,
+    writes: usize,
+    rows: Option<usize>,
+    node: &NodeState<RocksDbStorage>,
+) {
+    let mut fields = phase_fields(phase, elapsed.as_micros());
+    fields.insert("writes".to_owned(), serde_json::json!(writes));
+    if let Some(rows) = rows {
+        fields.insert("rows".to_owned(), serde_json::json!(rows));
+    }
+    insert_node_metrics(&mut fields, "node", node);
+    emit_json_line("merge_back_cost", fields);
 }
 
 fn schema() -> JazzSchema {
@@ -85,11 +119,4 @@ fn branch(byte: u8) -> BranchId {
 
 fn row(idx: usize) -> RowUuid {
     RowUuid::from_bytes((idx as u128).to_be_bytes())
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
 }

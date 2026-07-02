@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::time::Instant;
+
+mod support;
 
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -11,6 +12,10 @@ use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::{DurabilityTier, Fate};
+use support::{
+    csv_usizes, emit_json_line, insert_durability_tier, insert_node_metrics, phase_fields,
+    reset_phase_counters,
+};
 
 const TABLE: &str = "todos";
 
@@ -23,10 +28,8 @@ fn main() {
 
             let global = bench.current_rows_update_elapsed(DurabilityTier::Global);
             let local = bench.current_rows_update_elapsed(DurabilityTier::Local);
-
-            println!(
-                "depth {depth}, ahead {ahead}: global_current_rows_update = {global:?}, local_current_rows_update = {local:?}"
-            );
+            bench.emit_result(depth, ahead, DurabilityTier::Global, global);
+            bench.emit_result(depth, ahead, DurabilityTier::Local, local);
         }
     }
 }
@@ -102,6 +105,7 @@ impl ColdSubscriptionBench {
     }
 
     fn current_rows_update_elapsed(&mut self, tier: DurabilityTier) -> std::time::Duration {
+        reset_phase_counters(&mut [&mut self.core]);
         let mut peer = PeerState::new();
         let start = Instant::now();
         match tier {
@@ -122,6 +126,28 @@ impl ColdSubscriptionBench {
         }
         start.elapsed()
     }
+
+    fn emit_result(
+        &self,
+        depth: usize,
+        ahead: usize,
+        tier: DurabilityTier,
+        elapsed: std::time::Duration,
+    ) {
+        let phase = match tier {
+            DurabilityTier::Global => "global_current_rows_update",
+            DurabilityTier::Local => "local_current_rows",
+            DurabilityTier::None | DurabilityTier::Edge => {
+                unreachable!("bench only uses local/global")
+            }
+        };
+        let mut fields = phase_fields(phase, elapsed.as_micros());
+        fields.insert("depth".to_owned(), serde_json::json!(depth));
+        fields.insert("pending_ahead".to_owned(), serde_json::json!(ahead));
+        insert_durability_tier(&mut fields, tier);
+        insert_node_metrics(&mut fields, "core", &self.core);
+        emit_json_line("cold_subscription", fields);
+    }
 }
 
 fn core_ingest(
@@ -141,29 +167,11 @@ fn core_ingest(
 }
 
 fn depths() -> Vec<usize> {
-    env::var("JAZZ_DEPTHS")
-        .unwrap_or_else(|_| "1000,5000,10000".to_owned())
-        .split(',')
-        .map(|value| {
-            value
-                .trim()
-                .parse::<usize>()
-                .unwrap_or_else(|_| panic!("invalid JAZZ_DEPTHS value: {value}"))
-        })
-        .collect()
+    csv_usizes("JAZZ_DEPTHS", "1000,5000,10000")
 }
 
 fn pending_sizes() -> Vec<usize> {
-    env::var("JAZZ_PENDING_SIZES")
-        .unwrap_or_else(|_| "0,10,100".to_owned())
-        .split(',')
-        .map(|value| {
-            value
-                .trim()
-                .parse::<usize>()
-                .unwrap_or_else(|_| panic!("invalid JAZZ_PENDING_SIZES value: {value}"))
-        })
-        .collect()
+    csv_usizes("JAZZ_PENDING_SIZES", "0,10,100")
 }
 
 fn schema() -> JazzSchema {

@@ -60,3 +60,4 @@ data-multi/
 
 # Benchmark scratch data
 /crates/opfs-btree/wasm-bench/bench-data/
+/dev/benchmarks/results/

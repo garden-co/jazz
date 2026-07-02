@@ -1926,6 +1926,11 @@ where
         self.database.last_commit_metrics()
     }
 
+    /// Return metrics for the most recent Groove runtime tick, if any.
+    pub fn last_tick_metrics(&self) -> Option<&groove::ivm::TickMetrics> {
+        self.database.last_tick_metrics()
+    }
+
     /// Return accumulated storage-read metrics since the last reset.
     pub fn storage_read_metrics(&self) -> groove::db::StorageReadMetrics {
         self.database.storage_read_metrics()
