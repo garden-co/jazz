@@ -11,6 +11,7 @@ EXCERPT_LINES="${SMOKE_LEDGER_EXCERPT_LINES:-18}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RESULT_DIR="$RESULT_ROOT/$RUN_ID"
 MANIFEST="$RESULT_DIR/manifest.tsv"
+PREBUILD_S="0.000000"
 
 mkdir -p "$LOG_DIR" "$RESULT_DIR"
 : >"$MANIFEST"
@@ -30,6 +31,60 @@ git_dirty() {
     printf 'false'
   else
     printf 'true'
+  fi
+}
+
+prebuild_benches() {
+  local start end status log
+  log="$LOG_DIR/prebuild.log"
+  printf '==> prebuild smoke bench binaries\n'
+  start="$(perl -MTime::HiRes=time -e 'print time')"
+  (
+    cd "$ROOT"
+    cargo bench -p jazz --no-run -j 2
+    # Package-wide jazz-sim --no-run currently also builds stale lib-test ABI
+    # code; prebuild the actual smoke bench binaries until that cleanup lands.
+    for bench in \
+      micro \
+      s1_saas \
+      s2_canvas \
+      s3_permissions \
+      s4_order_processing \
+      s5_durable_stream \
+      s6_text_traces \
+      s7_migrations \
+      s9_durable_execution
+    do
+      cargo bench -p jazz-sim --bench "$bench" --no-run -j 2
+    done
+  ) >"$log" 2>&1
+  status=$?
+  end="$(perl -MTime::HiRes=time -e 'print time')"
+  PREBUILD_S="$(awk -v start="$start" -v end="$end" 'BEGIN { printf "%.6f", end - start }')"
+  if [[ $status -ne 0 ]]; then
+    failures+=("prebuild (fail)")
+  fi
+
+  if [[ "${SMOKE_PREBUILD_PROFILING:-0}" == "1" ]]; then
+    local profile_start profile_end profile_status
+    printf '==> prebuild profiling bench binaries\n'
+    profile_start="$(perl -MTime::HiRes=time -e 'print time')"
+    (
+      cd "$ROOT"
+      for bench in s1_saas s3_permissions s4_order_processing
+      do
+        cargo bench -p jazz-sim --bench "$bench" --no-run -j 2 --features profiling
+      done
+    ) >>"$log" 2>&1
+    profile_status=$?
+    profile_end="$(perl -MTime::HiRes=time -e 'print time')"
+    PREBUILD_S="$(
+      awk -v base="$PREBUILD_S" -v start="$profile_start" -v end="$profile_end" \
+        'BEGIN { printf "%.6f", base + end - start }'
+    )"
+    if [[ $profile_status -ne 0 ]]; then
+      failures+=("profiling prebuild (fail)")
+    fi
   fi
 }
 
@@ -172,6 +227,7 @@ append_ledger_run() {
   RUN_RESULT="$result" \
   RUN_SHA="$sha" \
   RUN_DIRTY="$dirty" \
+  PREBUILD_S="$PREBUILD_S" \
   EXCERPT_LINES="$EXCERPT_LINES" \
   python3 <<'PY' >>"$LEDGER"
 import json
@@ -290,6 +346,7 @@ print(f"- git: `{os.environ['RUN_SHA']}`")
 print(f"- dirty: `{os.environ['RUN_DIRTY']}`")
 print(f"- log_dir: `target/benchmark-smoke`")
 print(f"- result_dir: `{result_dir.relative_to(root)}`")
+print(f"- prebuild_s: `{float(os.environ['PREBUILD_S']):.3f}`")
 print(f"- excerpt_lines: `{excerpt_lines}`")
 if os.environ["RUN_NOTES"]:
     print(f"- notes: {os.environ['RUN_NOTES']}")
@@ -349,6 +406,8 @@ for scenario in scenarios:
     print("```")
 PY
 }
+
+prebuild_benches
 
 run_scenario \
   "jazz/cold_subscription" \

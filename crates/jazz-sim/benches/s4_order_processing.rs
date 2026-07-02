@@ -19,7 +19,7 @@ use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::GlobalSeq;
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
-use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields};
+use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields, profiling};
 use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
 
@@ -186,17 +186,29 @@ pub fn smoke() {
         stock_level_pct: 5,
         per_warehouse_rate: 40,
     };
-    let throughput = run_jazz(
-        &config,
-        config.throughput_commits,
-        RunMode::ThroughputPropagationInclusive,
-        PeerRefreshMode::AfterAccept,
+    let throughput = profiling::maybe_profile_phase(
+        "s4_order_processing",
+        "smoke_throughput_propagation_inclusive",
+        || {
+            run_jazz(
+                &config,
+                config.throughput_commits,
+                RunMode::ThroughputPropagationInclusive,
+                PeerRefreshMode::AfterAccept,
+            )
+        },
     );
-    let throughput_settlement = replay_jazz(
-        &config,
-        &throughput.accepted_schedule,
-        RunMode::ThroughputSettlement,
-        PeerRefreshMode::SuppressAfterAccept,
+    let throughput_settlement = profiling::maybe_profile_phase(
+        "s4_order_processing",
+        "smoke_throughput_settlement",
+        || {
+            replay_jazz(
+                &config,
+                &throughput.accepted_schedule,
+                RunMode::ThroughputSettlement,
+                PeerRefreshMode::SuppressAfterAccept,
+            )
+        },
     );
     assert_eq!(
         throughput_settlement.accepted_schedule, throughput.accepted_schedule,
@@ -213,7 +225,10 @@ pub fn smoke() {
         &throughput.final_totals,
     );
     let profile = PeerProfile::new(config.profile.clone(), 1, 0, 0);
-    let throughput_sqlite = run_sqlite_reference(&config, &throughput.accepted_schedule);
+    let throughput_sqlite =
+        profiling::maybe_profile_phase("s4_order_processing", "smoke_sqlite_reference", || {
+            run_sqlite_reference(&config, &throughput.accepted_schedule)
+        });
     emit_summary(
         &config,
         &profile,
@@ -228,19 +243,24 @@ pub fn smoke() {
         Some(&throughput_sqlite),
         RunMode::ThroughputPropagationInclusive,
     );
-    let slo = run_jazz(
-        &config,
-        config.slo_commits,
-        RunMode::Slo,
-        PeerRefreshMode::AfterAccept,
-    );
+    let slo = profiling::maybe_profile_phase("s4_order_processing", "smoke_slo", || {
+        run_jazz(
+            &config,
+            config.slo_commits,
+            RunMode::Slo,
+            PeerRefreshMode::AfterAccept,
+        )
+    });
     assert_sqlite_replay_matches(&config, &slo.accepted_schedule, &slo.final_totals);
     for level in [
         ContentionLevel::Low,
         ContentionLevel::Medium,
         ContentionLevel::High,
     ] {
-        let contention = run_jazz_contention(&config, level);
+        let phase = format!("smoke_contention_{}", level.as_str());
+        let contention = profiling::maybe_profile_phase("s4_order_processing", &phase, || {
+            run_jazz_contention(&config, level)
+        });
         let mut contention_config = config.clone();
         contention_config.clients = level.attempts_per_round();
         assert_sqlite_replay_matches(
@@ -249,7 +269,10 @@ pub fn smoke() {
             &contention.final_totals,
         );
     }
-    let hot_items = run_jazz_hot_item_contention(&config);
+    let hot_items =
+        profiling::maybe_profile_phase("s4_order_processing", "smoke_contention_hot_items", || {
+            run_jazz_hot_item_contention(&config)
+        });
     assert_sqlite_replay_matches(
         &config,
         &hot_items.accepted_schedule,
