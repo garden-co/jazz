@@ -44,23 +44,35 @@ fn main() {
         env_u64("JAZZ_LINK_JITTER_MS", 0),
         env_u64("JAZZ_LINK_OVERHEAD_MS", 0),
     );
-    let throughput = run_jazz(
-        &config,
-        config.throughput_commits,
-        RunMode::ThroughputPropagationInclusive,
-        PeerRefreshMode::AfterAccept,
+    let throughput = profiling::maybe_profile_phase(
+        "s4_order_processing",
+        "throughput_propagation_inclusive",
+        || {
+            run_jazz(
+                &config,
+                config.throughput_commits,
+                RunMode::ThroughputPropagationInclusive,
+                PeerRefreshMode::AfterAccept,
+            )
+        },
     );
-    let throughput_settlement = replay_jazz(
-        &config,
-        &throughput.accepted_schedule,
-        RunMode::ThroughputSettlement,
-        PeerRefreshMode::SuppressAfterAccept,
-    );
+    let throughput_settlement =
+        profiling::maybe_profile_phase("s4_order_processing", "throughput_settlement", || {
+            replay_jazz(
+                &config,
+                &throughput.accepted_schedule,
+                RunMode::ThroughputSettlement,
+                PeerRefreshMode::SuppressAfterAccept,
+            )
+        });
     assert_eq!(
         throughput_settlement.accepted_schedule, throughput.accepted_schedule,
         "settlement and propagation-inclusive throughput runs must use the same accepted workload"
     );
-    let throughput_sqlite = run_sqlite_reference(&config, &throughput.accepted_schedule);
+    let throughput_sqlite =
+        profiling::maybe_profile_phase("s4_order_processing", "sqlite_reference", || {
+            run_sqlite_reference(&config, &throughput.accepted_schedule)
+        });
     assert_sqlite_replay_matches(
         &config,
         &throughput_settlement.accepted_schedule,
@@ -86,12 +98,14 @@ fn main() {
         RunMode::ThroughputPropagationInclusive,
     );
 
-    let slo = run_jazz(
-        &config,
-        config.slo_commits,
-        RunMode::Slo,
-        PeerRefreshMode::AfterAccept,
-    );
+    let slo = profiling::maybe_profile_phase("s4_order_processing", "slo", || {
+        run_jazz(
+            &config,
+            config.slo_commits,
+            RunMode::Slo,
+            PeerRefreshMode::AfterAccept,
+        )
+    });
     assert_sqlite_replay_matches(&config, &slo.accepted_schedule, &slo.final_totals);
     emit_summary(&config, &profile, &slo, None, RunMode::Slo);
 
@@ -100,7 +114,10 @@ fn main() {
         ContentionLevel::Medium,
         ContentionLevel::High,
     ] {
-        let contention = run_jazz_contention(&config, level);
+        let phase = format!("contention_{}", level.as_str());
+        let contention = profiling::maybe_profile_phase("s4_order_processing", &phase, || {
+            run_jazz_contention(&config, level)
+        });
         let mut contention_config = config.clone();
         contention_config.clients = level.attempts_per_round();
         assert_sqlite_replay_matches(
@@ -117,7 +134,10 @@ fn main() {
         );
     }
 
-    let hot_items = run_jazz_hot_item_contention(&config);
+    let hot_items =
+        profiling::maybe_profile_phase("s4_order_processing", "contention_hot_items", || {
+            run_jazz_hot_item_contention(&config)
+        });
     assert_sqlite_replay_matches(
         &config,
         &hot_items.accepted_schedule,
@@ -136,12 +156,15 @@ fn main() {
         let mut scale_config = config.clone();
         scale_config.warehouses = warehouses;
         scale_config.clients = warehouses.max(1);
-        let scale = run_jazz(
-            &scale_config,
-            scale_config.slo_commits,
-            RunMode::ScaleOut,
-            PeerRefreshMode::AfterAccept,
-        );
+        let phase = format!("scale_out_{}w", warehouses);
+        let scale = profiling::maybe_profile_phase("s4_order_processing", &phase, || {
+            run_jazz(
+                &scale_config,
+                scale_config.slo_commits,
+                RunMode::ScaleOut,
+                PeerRefreshMode::AfterAccept,
+            )
+        });
         let achieved_rate =
             scale.accepted_schedule.len() as f64 / (scale.elapsed_us as f64 / 1_000_000.0);
         let required_rate = (scale_config.per_warehouse_rate * warehouses as u64) as f64;

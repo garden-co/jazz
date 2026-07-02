@@ -66,19 +66,29 @@ fn main() {
     let topology = topology(&config, profile.clone());
 
     let mut deterministic = DeterministicDriver::new(topology.clone(), config.seed);
-    let deterministic_summary = run(&mut deterministic, &config);
+    let deterministic_summary =
+        profiling::maybe_profile_phase("s3_permissions", "deterministic_run", || {
+            run(&mut deterministic, &config)
+        });
     emit_summaries("deterministic", &config, &deterministic_summary);
 
     let mut threaded = ThreadedDriver::new(topology, config.seed);
-    let threaded_summary = run(&mut threaded, &config);
+    let threaded_summary = profiling::maybe_profile_phase("s3_permissions", "threaded_run", || {
+        run(&mut threaded, &config)
+    });
     emit_summaries("threaded", &config, &threaded_summary);
 
-    let db_surface = run_db_surface(&config);
+    let db_surface =
+        profiling::maybe_profile_phase("s3_permissions", "db_surface", || run_db_surface(&config));
     emit_db_surface_summary(&config, &db_surface);
 
-    let block_summary = run_block_tree_variant(&config, profile.clone());
+    let block_summary = profiling::maybe_profile_phase("s3_permissions", "block_tree", || {
+        run_block_tree_variant(&config, profile.clone())
+    });
     emit_block_tree_summary(&config, &block_summary);
-    let headline = run_block_tree_cold_headline(&config, profile);
+    let headline = profiling::maybe_profile_phase("s3_permissions", "block_tree_headline", || {
+        run_block_tree_cold_headline(&config, profile)
+    });
     emit_block_tree_cold_headline(&config, &headline);
 }
 
