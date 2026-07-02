@@ -103,3 +103,23 @@ fn control_message_serde_omits_absent_optional_fields() {
         })
     );
 }
+
+#[test]
+fn select_leader_candidate_falls_back_to_hidden_tabs_when_none_are_visible() {
+    let candidates = vec![
+        Candidate {
+            tab_id: "tab-a".to_string(),
+            visibility: Visibility::Hidden,
+            last_visible_at: 30,
+        },
+        Candidate {
+            tab_id: "tab-b".to_string(),
+            visibility: Visibility::Hidden,
+            last_visible_at: 10,
+        },
+    ];
+
+    let selected = select_leader_candidate(&candidates).expect("expected a leader candidate");
+
+    assert_eq!(selected.tab_id, "tab-a");
+}

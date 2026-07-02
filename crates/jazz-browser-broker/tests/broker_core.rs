@@ -1516,3 +1516,68 @@ fn broker_events_deserialize_from_the_shell_wire_shapes() {
         }
     );
 }
+
+#[test]
+fn completed_reset_outcomes_cap_at_100_and_refinish_moves_to_the_back_of_eviction() {
+    let mut broker = new_broker();
+    connect(&mut broker, 1, "tab-a", 0);
+
+    let mut next_leadership = 1_u64;
+    let mut run_bridgeless_reset = |broker: &mut BrokerCore, request_id: &str, first: bool| {
+        send(broker, 1, storage_reset_request(request_id), 0);
+        let commands = send(broker, 1, storage_reset_ready(request_id, true, None), 0);
+        let commands = if first {
+            // The initial (never-ready) leader was cleared with lock names:
+            // the reset probes them before promoting.
+            assert!(matches!(
+                commands.last(),
+                Some(BrokerCommand::ProbeLocks { .. })
+            ));
+            broker.handle(
+                BrokerEvent::LocksProbeResult {
+                    probe_id: ProbeId(1),
+                    all_acquired: true,
+                },
+                0,
+            )
+        } else {
+            commands
+        };
+        next_leadership += 1;
+        assert_eq!(
+            become_leader_posts(&commands),
+            vec![(1, next_leadership, Some(request_id.to_string()))]
+        );
+        send(
+            broker,
+            1,
+            TabMessage::LeaderReady {
+                broker_instance_id: BROKER.to_string(),
+                leadership_id: next_leadership,
+                tab_lock_name: "tab-lock".to_string(),
+                worker_lock_name: "worker-lock".to_string(),
+                bridgeless_storage_reset: true,
+            },
+            0,
+        );
+    };
+
+    for i in 1..=100 {
+        run_bridgeless_reset(&mut broker, &format!("r{i}"), i == 1);
+    }
+    // Re-finishing r1 must move it to the back of the eviction order
+    // (delete-before-insert), so the next overflow evicts r2, not r1.
+    run_bridgeless_reset(&mut broker, "r1", false);
+    run_bridgeless_reset(&mut broker, "r101", false);
+
+    let commands = connect(&mut broker, 2, "tab-b", 0);
+    let redelivered: Vec<String> = reset_finished_posts(&commands)
+        .into_iter()
+        .map(|(_, request_id, _, _)| request_id)
+        .collect();
+
+    assert_eq!(redelivered.len(), 100);
+    assert!(!redelivered.contains(&"r2".to_string()));
+    assert_eq!(redelivered.first().map(String::as_str), Some("r3"));
+    assert_eq!(&redelivered[98..], &["r1".to_string(), "r101".to_string()]);
+}
