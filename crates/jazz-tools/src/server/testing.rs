@@ -260,7 +260,7 @@ impl JazzServer {
             auth_clock,
         } = builder;
 
-        let app_id = app_id.unwrap_or_else(Self::default_app_id);
+        let app_id = app_id.unwrap_or_else(AppId::random);
         let data_dir = if persistent_storage {
             ServerDataDir::persistent(data_dir)
         } else {
