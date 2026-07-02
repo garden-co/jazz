@@ -1,8 +1,10 @@
 # Scope-Based Contraction — TODO (Launch)
 
-When a query is removed and a row falls out of scope, the client keeps what it received ("no unsend"). There's no mechanism to inform the client that certain rows are no longer being tracked. Useful for client-side GC.
-
-Related runtime issue: [`specs/todo/issues/stale-client-cache-after-scope-removal.md`](../issues/stale-client-cache-after-scope-removal.md)
+When a query is removed and a row falls out of scope, the client keeps what it
+received ("no unsend"). This is spec-conformant: revocation is forward-looking
+sync narrowing, not post-delivery redaction (`INV-RLS-6`). A future scope
+contraction mechanism would be useful for client-side GC and cache pressure, not
+for correctness of settled subscription/query results.
 
 Legacy alpha scope-tracking lived in:
 

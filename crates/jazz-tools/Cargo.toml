@@ -196,6 +196,10 @@ name = "inherited_policies"
 required-features = ["test"]
 
 [[test]]
+name = "scope_revocation"
+required-features = ["test"]
+
+[[test]]
 name = "transactions"
 required-features = ["test-utils"]
 
