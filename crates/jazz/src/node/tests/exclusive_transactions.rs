@@ -457,6 +457,37 @@ fn exclusive_predicate_phantom_conflict_rejects() {
     };
     assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
 }
+
+#[test]
+fn exclusive_whole_table_predicate_ignores_other_table_changes() {
+    let schema = JazzSchema::new([
+        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
+        TableSchema::new("notes", [ColumnSchema::new("title", ColumnType::String)]),
+    ]);
+    let (_client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
+    let (_other_dir, mut other) = open_node_with_schema(node(2), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+
+    let tx_id = client.open_exclusive().unwrap();
+    assert!(client.tx_current_rows(tx_id, "todos").unwrap().is_empty());
+    commit_mergeable_global(
+        &mut other,
+        &mut core,
+        MergeableCommit::new("notes", row(1), 10).cells(title_cells("other table")),
+    );
+    client
+        .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
+        .unwrap();
+    let (_tx_id, unit) = client
+        .commit_exclusive(tx_id, AuthorId::SYSTEM, 11)
+        .unwrap();
+    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Accepted);
+}
+
 #[test]
 fn exclusive_filtered_shape_phantom_conflict_rejects() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
