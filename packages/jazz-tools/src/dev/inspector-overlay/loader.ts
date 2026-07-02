@@ -226,6 +226,20 @@ function overlayStyleSheet(): CSSStyleSheet {
 // The host app's Db, set by startInspectorOverlay() before the element mounts,
 // so connectedCallback can publish the host handle for the iframe.
 let hostDb: Db | undefined;
+// The overlay iframe's window, captured once by connectedCallback, and the
+// disposer for the handle currently bound to it. Rebinding (see bindHost())
+// lets a later startInspectorOverlay() call — e.g. after the host recreates
+// its Db on login/logout — repoint the published handle at the new Db instead
+// of leaving the overlay bound to a shut-down one forever.
+let hostIframeWindow: Window | undefined;
+let disposeHost: (() => void) | undefined;
+
+function bindHost(): void {
+  disposeHost?.();
+  disposeHost = undefined;
+  if (!hostDb || !hostIframeWindow) return;
+  disposeHost = installInspectorHost(hostDb, hostIframeWindow, window.location.origin);
+}
 
 // The overlay chrome: a floating toggle + a bottom dock hosting the inspector
 // iframe, isolated from the host page by its shadow root. All listeners are
@@ -393,14 +407,17 @@ class JazzInspectorOverlay extends HTMLElement {
     // Publish the host handle + push the active-subscription list to the iframe.
     // The overlay reads the config off window.__jazzInspectorHost and opens its
     // own worker connection; we only push the stack-less subscription list.
-    if (hostDb) {
-      const disposeHost = installInspectorHost(
-        hostDb,
-        iframe.contentWindow!,
-        window.location.origin,
-      );
-      signal.addEventListener("abort", () => disposeHost(), { once: true });
-    }
+    hostIframeWindow = iframe.contentWindow ?? undefined;
+    bindHost();
+    signal.addEventListener(
+      "abort",
+      () => {
+        disposeHost?.();
+        disposeHost = undefined;
+        hostIframeWindow = undefined;
+      },
+      { once: true },
+    );
 
     // The in-iframe Close button posts up here (same-origin).
     window.addEventListener(
@@ -433,13 +450,24 @@ function mount(): void {
 
 /**
  * Start the inspector for an app db: record the db and mount the overlay UI
- * (floating toggle + bottom dock + iframe). The element's connectedCallback then
- * publishes the host handle (window.__jazzInspectorHost) and pushes the active
- * subscription list to the iframe; the overlay opens its own worker connection
- * from the published config. Idempotent. No-op at module load — providers call
- * this from a dev-only dynamic import, so it's absent from prod builds.
+ * (floating toggle + bottom dock + iframe). The first call's mount() triggers
+ * connectedCallback, which publishes the host handle (window.__jazzInspectorHost)
+ * and pushes the active subscription list to the iframe; the overlay opens its
+ * own worker connection from the published config. Safe to call again with a
+ * new db (e.g. the host recreated its client on login/logout) — bindHost()
+ * rebinds the already-mounted iframe to it. No-op at module load — providers
+ * call this from a dev-only dynamic import, so it's absent from prod builds.
  */
 export function startInspectorOverlay(db: object): void {
   hostDb = db as Db;
+  // If the element isn't mounted yet, mount() appends it, which synchronously
+  // fires connectedCallback() — and that already calls bindHost(), so a second
+  // call here would immediately dispose and reinstall the handle it just
+  // installed. Only rebind ourselves when the element was already mounted
+  // (connectedCallback won't rerun), e.g. a db swap on login/logout.
+  const alreadyMounted = document.querySelector(ELEMENT_NAME) !== null;
   mount();
+  if (alreadyMounted) {
+    bindHost();
+  }
 }

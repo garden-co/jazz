@@ -42,10 +42,27 @@ describe("host-link", () => {
       window.dispatchEvent(
         new MessageEvent("message", {
           data: { type: "jazz-inspector:subscriptions", list: [{ id: "s2", table: "projects" }] },
+          // Real cross-window postMessage sets event.source to the sender;
+          // window.parent === window in jsdom, so that's `window` here.
+          source: window,
         }),
       );
     });
     expect(result.current).toEqual([{ id: "s2", table: "projects" }]);
+  });
+
+  it("ignores a subscriptions push whose source isn't the host window", () => {
+    installHost([{ id: "s1", table: "todos" }]);
+    const { result } = renderHook(() => useHostSubscriptions());
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "jazz-inspector:subscriptions", list: [{ id: "s2", table: "projects" }] },
+        }),
+      );
+    });
+    expect(result.current).toEqual([{ id: "s1", table: "todos" }]);
   });
 
   it("returns [] when there is no host", () => {

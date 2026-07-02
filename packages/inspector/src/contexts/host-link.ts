@@ -50,8 +50,12 @@ export function useHostSubscriptions(): InspectorSubscription[] {
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
+      // The host handle push always comes from the parent window (same-origin,
+      // per readHost() above) — mirror the deleted bridge's event.source guard
+      // so an unrelated same-origin frame/tab can't spoof a subscription push.
+      if (event.source !== window.parent) return;
       const data = event.data as InspectorSubscriptionsMessage | undefined;
-      if (data?.type === INSPECTOR_SUBSCRIPTIONS_MESSAGE) {
+      if (data?.type === INSPECTOR_SUBSCRIPTIONS_MESSAGE && Array.isArray(data.list)) {
         setList(data.list);
       }
     };

@@ -26,7 +26,10 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
       return {
         appId: c.appId,
         serverUrl: c.serverUrl,
-        env: c.env ?? "",
+        // Match createBrokerFingerprint's default ("dev") — a host that omits
+        // `env` must fingerprint identically to the overlay's forwarded value,
+        // or the broker rejects the join.
+        env: c.env ?? "dev",
         userBranch: c.userBranch,
         // The *resolved* OPFS namespace (e.g. `appId::user_id` for an
         // authenticated session), not the raw `c.dbName` which is usually unset.
@@ -39,6 +42,7 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
         secret: c.secret,
         adminSecret: c.adminSecret,
         jwtToken: c.jwtToken,
+        cookieSession: c.cookieSession,
       };
     },
     getWasmSchema() {

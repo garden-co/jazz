@@ -1,5 +1,6 @@
 import type { WasmSchema } from "../../drivers/types.js";
 import type { ActiveQuerySubscriptionTrace } from "../../runtime/db.js";
+import type { Session } from "../../runtime/context.js";
 
 /** Active subscription as sent to the overlay — the trace minus the JS stack. */
 export type InspectorSubscription = Omit<ActiveQuerySubscriptionTrace, "stack">;
@@ -27,6 +28,7 @@ export interface InspectorConnectionConfig {
   secret?: string;
   adminSecret?: string;
   jwtToken?: string;
+  cookieSession?: Session;
 }
 
 /** Read-once handle the host publishes on `window` for the same-origin overlay. */
