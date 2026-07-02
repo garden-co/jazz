@@ -104,6 +104,8 @@ pub(crate) enum ProgramFactSchema {
 pub(crate) struct AuthorizedRowsSchema {
     /// Row identity field.
     pub(crate) row_field: String,
+    /// Hidden routing fields retained for prepared/multisink partitioning.
+    pub(crate) routing_param_fields: BTreeSet<String>,
 }
 
 /// Root result membership terminal row schema.
