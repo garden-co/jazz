@@ -9,7 +9,10 @@ rocksdb = ["dep:rocksdb"]
 
 [dependencies]
 internment = { version = "0.8.6", features = ["serde"] }
-rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, optional = true }
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
+  "lz4",
+  "zstd",
+], optional = true }
 paste = "1.0.15"
 thiserror = "2.0.17"
 serde = { version = "1.0.228", features = ["derive"] }

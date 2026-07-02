@@ -11,11 +11,14 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use rocksdb::{
-    ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options, ReadOptions, WriteBatch,
-    WriteOptions,
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompressionType, Direction,
+    IteratorMode, Options, ReadOptions, WriteBatch, WriteBufferManager, WriteOptions,
 };
 
 use super::{ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation};
+
+const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
+const ROCKSDB_WRITE_BUFFER_MANAGER_BYTES: usize = 256 * 1024 * 1024;
 
 /// RocksDB durability tier used for writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -54,7 +57,12 @@ impl RocksDbStorage {
         durability: Durability,
     ) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
-        let mut options = Options::default();
+        // Share one 256MB block cache and one 256MB write-buffer budget across
+        // all column families opened by this storage instance.
+        let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
+        let write_buffer_manager =
+            WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
+        let mut options = rocksdb_options(&block_cache, &write_buffer_manager);
         options.create_if_missing(true);
         options.create_missing_column_families(true);
         if matches!(durability, Durability::FullSync) {
@@ -77,7 +85,12 @@ impl RocksDbStorage {
             .iter()
             .map(String::as_str)
             .filter(|name| *name != "default")
-            .map(|name| ColumnFamilyDescriptor::new(name, Options::default()));
+            .map(|name| {
+                ColumnFamilyDescriptor::new(
+                    name,
+                    rocksdb_options(&block_cache, &write_buffer_manager),
+                )
+            });
 
         let db = DB::open_cf_descriptors(&options, &path, descriptors)?;
 
@@ -99,6 +112,19 @@ impl RocksDbStorage {
             .cf_handle(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))
     }
+}
+
+fn rocksdb_options(block_cache: &Cache, write_buffer_manager: &WriteBufferManager) -> Options {
+    let mut block_options = BlockBasedOptions::default();
+    block_options.set_bloom_filter(10.0, false);
+    block_options.set_block_cache(block_cache);
+
+    let mut options = Options::default();
+    options.set_block_based_table_factory(&block_options);
+    options.set_write_buffer_manager(write_buffer_manager);
+    options.set_compression_type(DBCompressionType::Lz4);
+    options.set_bottommost_compression_type(DBCompressionType::Zstd);
+    options
 }
 
 impl super::ReopenableStorage for RocksDbStorage {

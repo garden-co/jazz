@@ -502,10 +502,6 @@ where
             row_result_set.remove(&member);
         }
         row_result_set.extend(result_member_adds);
-        let mirrored_result_set = row_result_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .collect::<BTreeSet<_>>();
         let program_facts = self
             .query
             .settled_program_facts
@@ -518,13 +514,19 @@ where
         // Diagnostic-only: the duplicate-content-version scan feeds a
         // debug_assert, so it is wasted work in release. Gate to debug builds.
         #[cfg(debug_assertions)]
-        if let Some((table, row_uuid, first, second)) =
-            duplicate_row_result_set(&mirrored_result_set)
         {
-            debug_assert!(
-                first == second,
-                "settled binding view {binding_view_key:?} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
-            );
+            let row_result_set = row_result_set
+                .iter()
+                .filter_map(ResultMemberEntry::as_row)
+                .collect::<BTreeSet<_>>();
+            if let Some((table, row_uuid, first, second)) =
+                duplicate_row_result_set(&row_result_set)
+            {
+                debug_assert!(
+                    first == second,
+                    "settled binding view {binding_view_key:?} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
+                );
+            }
         }
         Ok(())
     }

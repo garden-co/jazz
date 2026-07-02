@@ -71,6 +71,7 @@ pub struct IvmRuntime {
     next_shape_id: u64,
     logical_nodes_requested: u64,
     auto_direct_family_enabled: bool,
+    collect_tick_runtime_stats: bool,
 }
 
 impl IvmRuntime {
@@ -94,6 +95,7 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
+            collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::new(),
             auto_direct_families: HashMap::new(),
             binding_sources: HashMap::new(),
@@ -101,6 +103,10 @@ impl IvmRuntime {
         };
         runtime.add_dedup_schema_indices()?;
         Ok(runtime)
+    }
+
+    pub fn set_tick_runtime_stats_enabled(&mut self, enabled: bool) {
+        self.collect_tick_runtime_stats = enabled;
     }
 
     pub fn graph(&self) -> &IvmGraph {
@@ -323,7 +329,11 @@ impl IvmRuntime {
         }
         debug_assert!(self.retained_recursive_nodes_are_current(current_tick));
         self.eval_memo.clear();
-        metrics.runtime_stats = self.stats();
+        metrics.runtime_stats = if self.collect_tick_runtime_stats {
+            self.stats()
+        } else {
+            self.cheap_stats()
+        };
         Ok(metrics)
     }
 
@@ -1238,20 +1248,7 @@ impl IvmRuntime {
     }
 
     pub fn stats(&self) -> RuntimeStats {
-        let mut stats = RuntimeStats {
-            graph_nodes: self.graph.nodes().len(),
-            active_subscriptions: self.multisink_subscriptions.len(),
-            active_prepared_shapes: self.prepared_shapes.len(),
-            active_shape_params: self
-                .binding_sources
-                .values()
-                .map(|source| source.refcounts.len())
-                .sum(),
-            arrangement_count: self.arrangement_states.len(),
-            logical_nodes_requested: self.logical_nodes_requested,
-            deduped_graph_nodes: self.graph.nodes().len(),
-            ..RuntimeStats::default()
-        };
+        let mut stats = self.cheap_stats();
         for arrangement in self.arrangement_states.values() {
             stats.arrangement_rows += arrangement.value().row_count();
             stats.arrangement_encoded_bytes += arrangement.value().encoded_bytes();
@@ -1266,6 +1263,23 @@ impl IvmRuntime {
                 recursive.value().accumulated_encoded_bytes();
         }
         stats
+    }
+
+    fn cheap_stats(&self) -> RuntimeStats {
+        RuntimeStats {
+            graph_nodes: self.graph.nodes().len(),
+            active_subscriptions: self.multisink_subscriptions.len(),
+            active_prepared_shapes: self.prepared_shapes.len(),
+            active_shape_params: self
+                .binding_sources
+                .values()
+                .map(|source| source.refcounts.len())
+                .sum(),
+            arrangement_count: self.arrangement_states.len(),
+            logical_nodes_requested: self.logical_nodes_requested,
+            deduped_graph_nodes: self.graph.nodes().len(),
+            ..RuntimeStats::default()
+        }
     }
 
     fn add_retainer(&mut self, id: NodeId, retainer: Retainer) -> bool {
