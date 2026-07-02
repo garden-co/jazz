@@ -4668,3 +4668,763 @@ JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution
 {"acceptance_p50_us":4623,"acceptance_p95_us":5979,"api_surface":"db","driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s9-smoke","scenario":"s9_durable_execution","seed":1493172225}
 {"driver":"synchronous","git_dirty":true,"hydration_bytes":9420,"hydration_floor_bytes":9420,"hydration_rows":8,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s9-smoke","scenario":"s9_durable_execution","scope":"workflow_table_surface","seed":1493172225}
 ```
+
+---
+
+## Run 2026-07-02T06:01:32Z - smoke
+
+- result: `pass`
+- git: `057b05e43`
+- dirty: `false`
+- log_dir: `target/benchmark-smoke`
+- result_dir: `dev/benchmarks/results/20260702T060100Z`
+- prebuild_s: `0.374`
+- excerpt_lines: `18`
+
+### Summary
+
+| Scenario                       | Status | Wall Time | Previous |   Delta | JSONL Rows | Invocation                                                                                            |
+| ------------------------------ | ------ | --------: | -------: | ------: | ---------: | ----------------------------------------------------------------------------------------------------- |
+| jazz/cold_subscription         | `pass` |    0.400s |   0.894s | -0.494s |          5 | `JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --bench cold_subscription`               |
+| jazz/sync                      | `pass` |    0.268s |   0.647s | -0.379s |          2 | `GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --bench sync`                              |
+| jazz/validation                | `pass` |    0.300s |   0.679s | -0.379s |          2 | `GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --bench validation`            |
+| jazz/merge_back_cost           | `pass` |    0.314s |   0.680s | -0.366s |          5 | `JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost`                               |
+| jazz/large_value_checkpointing | `pass` |    3.525s |   3.930s | -0.405s |          3 | `JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing`        |
+| jazz-sim/micro                 | `pass` |   10.687s |  11.336s | -0.649s |         23 | `JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain` |
+| jazz-sim/s1_saas               | `pass` |    0.964s |   1.413s | -0.449s |          5 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s1_saas`                                                |
+| jazz-sim/s2_canvas             | `pass` |    3.600s |   4.025s | -0.425s |          3 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s2_canvas`                                              |
+| jazz-sim/s3_permissions        | `pass` |    0.942s |   1.400s | -0.458s |          9 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s3_permissions`                                         |
+| jazz-sim/s4_order_processing   | `pass` |    5.320s |   5.840s | -0.520s |          7 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s4_order_processing`                                    |
+| jazz-sim/s5_durable_stream     | `pass` |    0.403s |   0.935s | -0.532s |          6 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream`                                      |
+| jazz-sim/s6_text_traces        | `pass` |    0.559s |   1.062s | -0.503s |         28 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s6_text_traces`                                         |
+| jazz-sim/s7_migrations         | `pass` |    1.316s |   1.661s | -0.345s |          5 | `cargo bench -p jazz-sim --bench s7_migrations # source always runs smoke(); no env knob`             |
+| jazz-sim/s9_durable_execution  | `pass` |    0.638s |   1.044s | -0.406s |          5 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution`                                   |
+
+### Details
+
+#### jazz/cold_subscription
+
+- status: `pass`
+- wall_time: `0.400s`
+- previous_wall_time: `0.894s`
+- delta: `-0.494s`
+- log: `target/benchmark-smoke/jazz_cold_subscription.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz_cold_subscription.jsonl`
+- invocation:
+
+```sh
+JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --bench cold_subscription
+```
+
+- excerpt:
+
+```jsonl
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":9,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":0,"core_last_commit_storage_write_history_indexes_count":0,"core_last_commit_storage_write_... [truncated; see jsonl]
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":9,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":0,"core_last_commit_storage_write_history_indexes_count":0,"core_last_commit_storage_write_... [truncated; see jsonl]
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":16,"core_last_commit_storage_write_bytes":750,"core_last_commit_storage_write_count":6,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":121,"core_last_commit_storage_write_history_indexes_count":1,"core_last_commit_storage_wr... [truncated; see jsonl]
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":16,"core_last_commit_storage_write_bytes":750,"core_last_commit_storage_write_count":6,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":121,"core_last_commit_storage_write_history_indexes_count":1,"core_last_commit_storage_wr... [truncated; see jsonl]
+```
+
+#### jazz/sync
+
+- status: `pass`
+- wall_time: `0.268s`
+- previous_wall_time: `0.647s`
+- delta: `-0.379s`
+- log: `target/benchmark-smoke/jazz_sync.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz_sync.jsonl`
+- invocation:
+
+```sh
+GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --bench sync
+```
+
+- excerpt:
+
+```jsonl
+{"accept_count":20,"commits":20,"core_edge_complete_tx_payload_refs_out":0,"core_edge_version_bundles_out":21,"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":53,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_hist... [truncated; see jsonl]
+```
+
+#### jazz/validation
+
+- status: `pass`
+- wall_time: `0.300s`
+- previous_wall_time: `0.679s`
+- delta: `-0.379s`
+- log: `target/benchmark-smoke/jazz_validation.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz_validation.jsonl`
+- invocation:
+
+```sh
+GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --bench validation
+```
+
+- excerpt:
+
+```jsonl
+{"accept_count":18,"clients":5,"commits":25,"core_ingest_max_us":422,"core_ingest_p50_us":202,"core_ingest_p95_us":374,"core_ingest_p99_us":422,"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":9,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"co... [truncated; see jsonl]
+```
+
+#### jazz/merge_back_cost
+
+- status: `pass`
+- wall_time: `0.314s`
+- previous_wall_time: `0.680s`
+- delta: `-0.366s`
+- log: `target/benchmark-smoke/jazz_merge_back_cost.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz_merge_back_cost.jsonl`
+- invocation:
+
+```sh
+JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost
+```
+
+- excerpt:
+
+```jsonl
+{"git_dirty":false,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":10,"node_last_commit_storage_write_bytes":60,"node_last_commit_storage_write_count":1,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":0,"node_last_commit_storage_writ... [truncated; see jsonl]
+{"git_dirty":false,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":17,"node_last_commit_storage_write_bytes":587,"node_last_commit_storage_write_count":4,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":204,"node_last_commit_storage_w... [truncated; see jsonl]
+{"git_dirty":false,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":18,"node_last_commit_storage_write_bytes":60,"node_last_commit_storage_write_count":1,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":0,"node_last_commit_storage_writ... [truncated; see jsonl]
+{"git_dirty":false,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":18,"node_last_commit_storage_write_bytes":60,"node_last_commit_storage_write_count":1,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":0,"node_last_commit_storage_writ... [truncated; see jsonl]
+```
+
+#### jazz/large_value_checkpointing
+
+- status: `pass`
+- wall_time: `3.525s`
+- previous_wall_time: `3.930s`
+- delta: `-0.405s`
+- log: `target/benchmark-smoke/jazz_large_value_checkpointing.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz_large_value_checkpointing.jsonl`
+- invocation:
+
+```sh
+JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing
+```
+
+- excerpt:
+
+```jsonl
+{"bytes":300,"checkpoint_interval":"checkpointed","checkpoint_interval_ops":64,"depth":300,"git_dirty":false,"knobs":{"JAZZ_LV_DEPTH":"300","JAZZ_LV_INTERVALS":"64"},"node_large_value_checkpoint_hits":1,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":44,"node_large_value_last_replayed_versions":44,"node_large_value_materializations":1,"node_large_value_total_replayed_ops":44,"node_last_commit_ivm_tick_us":27,"node_last_commit_storage_write_bytes":898,"node_last_commit_storage_write_count":9,"node_last_commit_storage_write_global_changes_indexes_bytes":137,"node_last_commit_storage_write_global_changes_indexes_count":1,"node_last_commit_storage_write_global_changes_rows_bytes":100,"node_last_commit_storage_write_global_changes_rows_count":1,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":172,"node_last_commit_storage_write... [truncated; see jsonl]
+{"bytes":300,"checkpoint_interval":"full","checkpoint_interval_ops":18446744073709551615,"depth":300,"git_dirty":false,"knobs":{"JAZZ_LV_DEPTH":"300","JAZZ_LV_INTERVALS":"64"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":300,"node_large_value_last_replayed_versions":300,"node_large_value_materializations":1,"node_large_value_total_replayed_ops":300,"node_last_commit_ivm_tick_us":27,"node_last_commit_storage_write_bytes":898,"node_last_commit_storage_write_count":9,"node_last_commit_storage_write_global_changes_indexes_bytes":137,"node_last_commit_storage_write_global_changes_indexes_count":1,"node_last_commit_storage_write_global_changes_rows_bytes":100,"node_last_commit_storage_write_global_changes_rows_count":1,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":172,"node_last_commit_... [truncated; see jsonl]
+```
+
+#### jazz-sim/micro
+
+- status: `pass`
+- wall_time: `10.687s`
+- previous_wall_time: `11.336s`
+- delta: `-0.649s`
+- log: `target/benchmark-smoke/jazz-sim_micro.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz-sim_micro.jsonl`
+- invocation:
+
+```sh
+JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain
+```
+
+- excerpt:
+
+```jsonl
+{"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"node_open_max_ns":18694143,"node_open_p50_ns":18694143,"node_open_p95_ns":18694143,"node_open_p99_ns":18694143,"primitive":"node_open","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"versions":1000}
+{"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"node_open_max_ns":72024063,"node_open_p50_ns":72024063,"node_open_p95_ns":72024063,"node_open_p99_ns":72024063,"primitive":"node_open","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"versions":10000}
+{"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"node_open_max_ns":687341567,"node_open_p50_ns":687341567,"node_open_p95_ns":687341567,"node_open_p99_ns":687341567,"primitive":"node_open","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"versions":100000}
+{"driver":"micro","git_dirty":false,"hlc_mint_max_ns":208,"hlc_mint_p50_ns":208,"hlc_mint_p95_ns":208,"hlc_mint_p99_ns":208,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"hlc_mint","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"driver":"micro","git_dirty":false,"hlc_receive_max_max_ns":42,"hlc_receive_max_p50_ns":42,"hlc_receive_max_p95_ns":42,"hlc_receive_max_p99_ns":42,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"hlc_receive_max","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"driver":"micro","git_dirty":false,"hlc_compare_max_ns":42,"hlc_compare_p50_ns":42,"hlc_compare_p95_ns":42,"hlc_compare_p99_ns":42,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"hlc_compare","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":236927,"domination_winner_probe_p50_ns":236927,"domination_winner_probe_p95_ns":236927,"domination_winner_probe_p99_ns":236927,"driver":"micro","git_dirty":false,"heads":1,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":227839,"domination_winner_probe_p50_ns":227839,"domination_winner_probe_p95_ns":227839,"domination_winner_probe_p99_ns":227839,"driver":"micro","git_dirty":false,"heads":2,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":213375,"domination_winner_probe_p50_ns":213375,"domination_winner_probe_p95_ns":213375,"domination_winner_probe_p99_ns":213375,"driver":"micro","git_dirty":false,"heads":8,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":226047,"domination_winner_probe_p50_ns":226047,"domination_winner_probe_p95_ns":226047,"domination_winner_probe_p99_ns":226047,"driver":"micro","git_dirty":false,"heads":64,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"deletion_register_resolution_max_ns":208383,"deletion_register_resolution_p50_ns":208383,"deletion_register_resolution_p95_ns":208383,"deletion_register_resolution_p99_ns":208383,"driver":"micro","events":32,"git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"deletion_register_resolution","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":91,"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"version_ingest_rate","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"version_ingest_rate_max_ns":171519,"version_ingest_rate_p50_ns":171519,"version_ingest_rate_p95_ns":171519,"version_ingest_rate_p99_ns":171519,"versions":1,"versions_per_sec_p50":5830}
+{"bytes":94,"commit_unit_encode_max_ns":7627,"commit_unit_encode_p50_ns":7627,"commit_unit_encode_p95_ns":7627,"commit_unit_encode_p99_ns":7627,"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_encode","profile":"micro","rows_per_unit":1,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":94,"commit_unit_decode_ingest_max_ns":173439,"commit_unit_decode_ingest_p50_ns":173439,"commit_unit_decode_ingest_p95_ns":173439,"commit_unit_decode_ingest_p99_ns":173439,"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_decode_ingest","profile":"micro","rows_per_unit":1,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":940,"commit_unit_encode_max_ns":26303,"commit_unit_encode_p50_ns":26303,"commit_unit_encode_p95_ns":26303,"commit_unit_encode_p99_ns":26303,"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_encode","profile":"micro","rows_per_unit":10,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":940,"commit_unit_decode_ingest_max_ns":568319,"commit_unit_decode_ingest_p50_ns":568319,"commit_unit_decode_ingest_p95_ns":568319,"commit_unit_decode_ingest_p99_ns":568319,"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_decode_ingest","profile":"micro","rows_per_unit":10,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":9490,"commit_unit_encode_max_ns":207103,"commit_unit_encode_p50_ns":207103,"commit_unit_encode_p95_ns":207103,"commit_unit_encode_p99_ns":207103,"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_encode","profile":"micro","rows_per_unit":100,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":9490,"commit_unit_decode_ingest_max_ns":4179967,"commit_unit_decode_ingest_p50_ns":4179967,"commit_unit_decode_ingest_p95_ns":4179967,"commit_unit_decode_ingest_p99_ns":4179967,"driver":"micro","git_dirty":false,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_decode_ingest","profile":"micro","rows_per_unit":100,"samples":1,"scenario":"micro","seed":469919560303}
+```
+
+#### jazz-sim/s1_saas
+
+- status: `pass`
+- wall_time: `0.964s`
+- previous_wall_time: `1.413s`
+- delta: `-0.449s`
+- log: `target/benchmark-smoke/jazz-sim_s1_saas.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz-sim_s1_saas.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s1_saas
+```
+
+- excerpt:
+
+```jsonl
+{"clients":2,"closure_rows":10,"cold_bytes":3728,"cold_bytes_floor":1808,"cold_complete_p50_us":2000,"cold_complete_p95_us":2000,"driver":"deterministic","fixture_hash":11224403247539415689,"fixture_rows":51,"git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"naive_refetch_ceiling_bytes":5520,"profile":"s1-smoke","result_set_rows":4,"scenario":"s1_saas","seed":1370116097,"transport_codec":"wire_frames","warm_local_p50_us":1373,"warm_local_p95_us":1490,"warm_settled_p50_us":413,"warm_settled_p95_us":507,"writes_applied":3}
+{"acceptance_p50_us":1000,"acceptance_p95_us":1000,"driver":"deterministic","durability_tier":"Edge","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s1-smoke","scenario":"s1_saas","seed":1370116097}
+{"driver":"deterministic","git_dirty":false,"hydration_bytes":3728,"hydration_floor_bytes":1808,"hydration_rows":4,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s1-smoke","scenario":"s1_saas","scope":"saas_query_closure","seed":1370116097}
+{"catchup_bytes":5368,"catchup_bytes_floor":2552,"catchup_us":6000,"closure_rows":16,"driver":"deterministic","fixture_commits_applied":53,"git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"messages_delivered":130,"messages_dropped":4,"messages_sent":134,"phase":"reconnect","profile":"s1-smoke","result_set_rows":6,"scenario":"s1_saas_reconnect","seed":1370116097,"transport_codec":"wire_frames","transport_codec_decode_avg_us_per_message":2.544776119402985,"transport_codec_decode_count":134,"transport_codec_decode_max_us":37,"transport_codec_decode_p50_us":1,"transport_codec_decode_p95_us":8,"transport_codec_decode_p99_us":35,"transport_codec_decode_total_us":341,"transport_codec_encode_avg_us_per_message":1.3134328358208955,"transport_codec_encode_count":134,"transport_codec_encode_max_us":15,"transport_codec_encode_p50_us":1,"transport_codec_encode_p95_us":5,"transport_codec_encode_p99_us":15,"transport_codec_encode_total_us":176,"transport_codec_encoded_bytes":53677,"transport_codec_encode... [truncated; see jsonl]
+```
+
+#### jazz-sim/s2_canvas
+
+- status: `pass`
+- wall_time: `3.600s`
+- previous_wall_time: `4.025s`
+- delta: `-0.425s`
+- log: `target/benchmark-smoke/jazz-sim_s2_canvas.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz-sim_s2_canvas.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s2_canvas
+```
+
+- excerpt:
+
+```jsonl
+{"coalesced_16ms":false,"driver":"deterministic","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"needs":"historical-implicit-include-source-coverage","phase":"historical_load","profile":"s2-smoke","scenario":"s2_canvas","seed":1375783678,"status":"gated"}
+{"coalesced_16ms":true,"driver":"deterministic","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"needs":"historical-implicit-include-source-coverage","phase":"historical_load","profile":"s2-smoke","scenario":"s2_canvas","seed":1375783678,"status":"gated"}
+```
+
+#### jazz-sim/s3_permissions
+
+- status: `pass`
+- wall_time: `0.942s`
+- previous_wall_time: `1.400s`
+- delta: `-0.458s`
+- log: `target/benchmark-smoke/jazz-sim_s3_permissions.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz-sim_s3_permissions.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s3_permissions
+```
+
+- excerpt:
+
+```jsonl
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"cold_bytes":2205,"cold_bytes_floor":1197,"cold_complete_us":4000,"cold_core_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":21,"reads":364},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":7,"reads":140},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":25,"reads":0},"total":{"ranges":66,"reads":513},"transactions_indexes":{"ranges":0,"reads":0},"transactions_rows":{"ranges":9,"reads":9}},"cold_view_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":21,"reads":364},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":7,"reads":140},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":... [truncated; see jsonl]
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"cold_bytes":4920,"cold_bytes_floor":2680,"cold_complete_us":4000,"cold_core_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":27,"reads":339},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":6,"reads":120},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":31,"reads":0},"total":{"ranges":88,"reads":479},"transactions_indexes":{"ranges":0,"reads":0},"transactions_rows":{"ranges":20,"reads":20}},"cold_view_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":21,"reads":364},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":7,"reads":140},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges... [truncated; see jsonl]
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","edge_core_one_way_ms":1,"git_dirty":false,"grant_global_p50_us":4001,"grant_global_p95_us":4001,"grant_none_p50_us":4001,"grant_none_p95_us":4001,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"grant","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"teams_per_org":4}
+{"access_edges_per_resource":1,"apply_us":18,"client_edge_one_way_ms":1,"core_recompute_p50_us":1578,"core_recompute_p95_us":1578,"disappearance_p50_us":4001,"disappearance_p95_us":4001,"driver":"deterministic","edge_core_one_way_ms":1,"git_dirty":false,"hidden_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"revocation","profile":"s3-smoke","query_update_us":35234,"resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"send_recv_us":0,"teams_per_org":4,"update_rows":1}
+{"access_edges_per_resource":1,"apply_us":23,"client_edge_one_way_ms":1,"core_recompute_p50_us":1585,"core_recompute_p95_us":1585,"disappearance_p50_us":4001,"disappearance_p95_us":4001,"driver":"deterministic","edge_core_one_way_ms":1,"git_dirty":false,"hidden_rows":3,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"revocation","profile":"s3-smoke","query_update_us":34131,"resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"send_recv_us":0,"teams_per_org":4,"update_rows":3}
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","edge_core_one_way_ms":1,"forbidden_deliveries":0,"git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"forbidden_writes","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"teams_per_org":4}
+{"acceptance_p50_us":2000,"acceptance_p95_us":2000,"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","durability_tier":"Edge","edge_core_one_way_ms":1,"git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"orgs":1,"phase":"edge_mergeable_acceptance","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"teams_per_org":4}
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","edge_core_one_way_ms":1,"edge_scope_subscription_count_after_drain":0,"edge_scope_subscription_count_before_drain":1,"git_dirty":false,"hydration_bytes":5418,"hydration_floor_bytes":2954,"hydration_rows":22,"knobs":{"JAZZ_SMOKE":"1"},"orgs":1,"phase":"edge_permission_scope_hydration","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","scope":"narrow(policy_shape, writer_claim)","seed":1392508929,"teams_per_org":4,"whole_table_scope":"not hydrated; bench reports the narrow B2 scope only"}
+```
+
+#### jazz-sim/s4_order_processing
+
+- status: `pass`
+- wall_time: `5.320s`
+- previous_wall_time: `5.840s`
+- delta: `-0.520s`
+- log: `target/benchmark-smoke/jazz-sim_s4_order_processing.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz-sim_s4_order_processing.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s4_order_processing
+```
+
+- excerpt:
+
+```jsonl
+{"abort_retry_rate":0.0,"attempts":5,"clients":1,"committed":5,"customers":20,"customers_per_district":2,"delivered_order_lines":0,"delivered_orders":0,"districts_per_warehouse":10,"driver":"synchronous","git_dirty":false,"items":5,"jazz_settle_tx_per_sec":112.53404154756814,"jazz_sqlite_ratio":null,"jazz_wall_tx_per_sec":112.53404154756814,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"measurement_excludes":"per-accepted-commit peer current_rows_update fan-out","measurement_includes":"engine commit/accept path","phase":"throughput_settlement","profile":"s4-smoke","propagation_p50_us":0,"propagation_p95_us":0,"ratio_omitted_reason":"minimum sample is 200 committed transactions","rejects":0,"retries":0,"same_schedule_replay":"matched","scenario":"s4_order_processing","seed":1409286145,"settle_p50_us":9111,"settle_p95_us":9479,"settlement_tx_per_sec":112.53404154756814,"sqlite_elapsed_us":71,"sqlite_tx_per_sec":70422.5352112676,"stock_rows":5,"throughput_line":"settlement throughpu... [truncated; see jsonl]
+{"acceptance_p50_us":1178,"acceptance_p95_us":1951,"clients":1,"driver":"synchronous","durability_tier":"Edge","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s4-smoke","scenario":"s4_order_processing","seed":1409286145}
+{"driver":"synchronous","git_dirty":false,"hydration_bytes":20391,"hydration_floor_bytes":20391,"hydration_rows":77,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s4-smoke","scenario":"s4_order_processing","scope":"order_processing_table_surface","seed":1409286145}
+{"abort_retry_rate":0.0,"attempts":5,"clients":1,"committed":5,"customers":20,"customers_per_district":2,"delivered_order_lines":0,"delivered_orders":0,"districts_per_warehouse":10,"driver":"synchronous","git_dirty":false,"items":5,"jazz_settle_tx_per_sec":113.15033153047139,"jazz_sqlite_ratio":null,"jazz_wall_tx_per_sec":26.712969146520635,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"measurement_excludes":null,"measurement_includes":"engine commit/accept path plus per-accepted-commit peer current_rows_update fan-out","phase":"throughput_propagation_inclusive","profile":"s4-smoke","propagation_inclusive_tx_per_sec":26.712969146520635,"propagation_p50_us":28575,"propagation_p95_us":29247,"ratio_omitted_reason":"minimum sample is 200 committed transactions","rejects":0,"retries":0,"same_schedule_replay":"matched","scenario":"s4_order_processing","seed":1409286145,"settle_p50_us":8727,"settle_p95_us":10095,"sqlite_elapsed_us":71,"sqlite_tx_per_sec":70422.5352112676,"stock_rows":5,... [truncated; see jsonl]
+{"acceptance_p50_us":1142,"acceptance_p95_us":1947,"clients":1,"driver":"synchronous","durability_tier":"Edge","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s4-smoke","scenario":"s4_order_processing","seed":1409286145}
+{"driver":"synchronous","git_dirty":false,"hydration_bytes":22991,"hydration_floor_bytes":22991,"hydration_rows":86,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s4-smoke","scenario":"s4_order_processing","scope":"order_processing_table_surface","seed":1409286145}
+```
+
+#### jazz-sim/s5_durable_stream
+
+- status: `pass`
+- wall_time: `0.403s`
+- previous_wall_time: `0.935s`
+- delta: `-0.532s`
+- log: `target/benchmark-smoke/jazz-sim_s5_durable_stream.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz-sim_s5_durable_stream.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream
+```
+
+- excerpt:
+
+```jsonl
+{"append_p50_us":537,"append_tail_p50_us":544,"append_tail_p99_us":660,"batch_tokens":2,"commits":2,"core_cpu_us_per_append":565.0,"correctness":"prefix_monotone_and_resumer_exact","driver":"synchronous","durability_regime":"wal_no_sync_equivalent; log floor fsyncs once at end","git_dirty":false,"history_metadata_bytes_per_token":77384.25,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"log_floor_bytes_per_token":10.5,"log_floor_nosync_elapsed_us":4804,"peak_rss_bytes":26820608,"profile":"s5-smoke","resume_bytes":696,"resume_bytes_by_gap":[232,232,232],"resume_elapsed_us_by_gap":[2313,2381,2311],"resume_gap_tokens":[3,2,1],"resume_p50_us":2313,"resumers":1,"run_seconds":1,"scenario":"s5_durable_stream","seed":1426063361,"sqlite_db_bytes_per_token":3072.0,"sqlite_elapsed_us":69,"storage_amplification":19346.0625,"storage_bytes_per_token_note":"most meaningful at full-rate/full-duration knobs","streams":1,"sustained_appends_per_sec":44.91152429713464,"synced_bytes_per_token_per_taile... [truncated; see jsonl]
+{"append_p50_us":1916,"append_p95_us":1916,"append_p99_us":1916,"batch_tokens":2,"changed_p50_us":0,"changed_p95_us":0,"commits":2,"correctness":"db_watch_tailers_prefix_monotone_and_final_exact","current_p50_us":1,"current_p95_us":1,"drain_p50_us":1205,"drain_p99_us":1205,"driver":"db_surface","git_dirty":false,"history_metadata_bytes_per_token":153903.5,"knobs":{"JAZZ_SMOKE":"1"},"peak_rss_bytes":27918336,"phase":"db_surface_live","profile":"s5-smoke","rows":1,"run_seconds":1,"scenario":"s5_durable_stream","seed":1426063361,"streams":1,"sustained_appends_per_sec":487.685930260912,"tailers":1,"tokens_per_second":4,"update_p50_us":710,"update_p99_us":710,"wait_p50_us":0,"wait_p99_us":0}
+{"acceptance_p50_us":103,"acceptance_p95_us":153,"driver":"db_surface","durability_tier":"Edge","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s5-smoke","scenario":"s5_durable_stream","seed":1426063361}
+{"driver":"db_surface","git_dirty":false,"hydration_bytes":423,"hydration_floor_bytes":423,"hydration_rows":2,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s5-smoke","scenario":"s5_durable_stream","scope":"durable_stream_table_surface","seed":1426063361}
+{"driver":"db_surface","full_rehydrate_bytes":59,"git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"process_local_resume","profile":"s5-smoke","resume_bytes":12291,"resume_ratio":208.32203389830508,"resume_status":"resumed_larger_or_equal","rows":16,"scenario":"s5_durable_stream","seed":1426063361}
+```
+
+#### jazz-sim/s6_text_traces
+
+- status: `pass`
+- wall_time: `0.559s`
+- previous_wall_time: `1.062s`
+- delta: `-0.503s`
+- log: `target/benchmark-smoke/jazz-sim_s6_text_traces.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz-sim_s6_text_traces.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s6_text_traces
+```
+
+- excerpt:
+
+```jsonl
+{"batch_edits":1,"commits":8,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":false,"history_metadata_bytes_per_edit":34762.5,"ingest_edits_per_sec":1836.1257746155613,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":273,"local_echo_p95_us":460,"peak_memory_proxy_bytes":8,"peak_rss_bytes":16138240,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":1,"commits":8,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":false,"history_metadata_bytes_per_edit":66789.875,"ingest_edits_per_sec":1747.1063550993667,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":176,"local_echo_p95_us":276,"peak_memory_proxy_bytes":8,"peak_rss_bytes":22626304,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"acceptance_p50_us":15,"acceptance_p95_us":150,"batch_edits":1,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":1,"driver":"synchronous","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":false,"hydration_bytes":207,"hydration_floor_bytes":207,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":4,"commits":2,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":false,"history_metadata_bytes_per_edit":33160.5,"ingest_edits_per_sec":7142.857142857143,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":248,"local_echo_p95_us":335,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23052288,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":4,"commits":2,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":false,"history_metadata_bytes_per_edit":65917.75,"ingest_edits_per_sec":4223.864836325238,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":158,"local_echo_p95_us":162,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23363584,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"acceptance_p50_us":17,"acceptance_p95_us":135,"batch_edits":4,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":4,"driver":"synchronous","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":false,"hydration_bytes":207,"hydration_floor_bytes":207,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"driver":"synchronous","edit_rate_nominal_per_sec":10,"edits":4,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"observer_p95_us":1129,"phase":"live_observation","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"synced_bytes":1356,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":1,"commits":8,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":false,"history_metadata_bytes_per_edit":34762.5,"ingest_edits_per_sec":2037.178507766743,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":241,"local_echo_p95_us":269,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23396352,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":1,"commits":8,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":false,"history_metadata_bytes_per_edit":66789.875,"ingest_edits_per_sec":1751.6969564265382,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":167,"local_echo_p95_us":230,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23576576,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"acceptance_p50_us":15,"acceptance_p95_us":143,"batch_edits":1,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"batch_edits":1,"driver":"synchronous","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":false,"hydration_bytes":207,"hydration_floor_bytes":207,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"batch_edits":4,"commits":2,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":false,"history_metadata_bytes_per_edit":33160.5,"ingest_edits_per_sec":8064.516129032258,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":226,"local_echo_p95_us":234,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23576576,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":4,"commits":2,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":false,"history_metadata_bytes_per_edit":65917.75,"ingest_edits_per_sec":4121.586810922205,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":156,"local_echo_p95_us":165,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23707648,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"acceptance_p50_us":21,"acceptance_p95_us":143,"batch_edits":4,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"batch_edits":4,"driver":"synchronous","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":false,"hydration_bytes":207,"hydration_floor_bytes":207,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"driver":"synchronous","edit_rate_nominal_per_sec":10,"edits":4,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"observer_p95_us":1331,"phase":"live_observation","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"synced_bytes":1356,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+```
+
+#### jazz-sim/s7_migrations
+
+- status: `pass`
+- wall_time: `1.316s`
+- previous_wall_time: `1.661s`
+- delta: `-0.345s`
+- log: `target/benchmark-smoke/jazz-sim_s7_migrations.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz-sim_s7_migrations.jsonl`
+- invocation:
+
+```sh
+cargo bench -p jazz-sim --bench s7_migrations # source always runs smoke(); no env knob
+```
+
+- excerpt:
+
+```jsonl
+{"acceptance_p50_us":211,"acceptance_p95_us":211,"driver":"synchronous","durability_tier":"Edge","git_dirty":false,"knobs":{},"phase":"edge_mergeable_acceptance","profile":"s7-local","scenario":"s7_migrations","seed":1459617793}
+{"driver":"synchronous","git_dirty":false,"hydration_bytes":0,"hydration_floor_bytes":0,"hydration_rows":3,"knobs":{},"phase":"edge_permission_scope_hydration","profile":"s7-local","scenario":"s7_migrations","scope":"migration_schema_catalog","seed":1459617793}
+{"driver":"synchronous","git_dirty":false,"iterations":64,"knobs":{},"native_p50_us":753,"native_p95_us":862,"one_hop_p50_us":661,"one_hop_p95_us":723,"phase":"lens_read_latency","profile":"s7-local","rows":128,"scenario":"s7_migrations","seed":1459617793,"three_hop_p50_us":696,"three_hop_p95_us":746}
+{"driver":"synchronous","git_dirty":false,"knobs":{},"native_p50_us":1024,"native_p95_us":1319,"one_hop_p50_us":1620,"one_hop_p95_us":2274,"phase":"lens_write_translation","profile":"s7-local","rows":128,"scenario":"s7_migrations","seed":1459617793,"three_hop_p50_us":2450,"three_hop_p95_us":2960}
+```
+
+#### jazz-sim/s9_durable_execution
+
+- status: `pass`
+- wall_time: `0.638s`
+- previous_wall_time: `1.044s`
+- delta: `-0.406s`
+- log: `target/benchmark-smoke/jazz-sim_s9_durable_execution.log`
+- jsonl: `dev/benchmarks/results/20260702T060100Z/jazz-sim_s9_durable_execution.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution
+```
+
+- excerpt:
+
+```jsonl
+{"aggregate_elapsed_us":144243,"aggregate_transitions_per_sec":83.1929452382438,"aggregate_with_assertions_elapsed_us":178898,"aggregate_with_assertions_transitions_per_sec":67.07732898075999,"assertion_elapsed_us":34643,"attempts":15,"cold_resume_elapsed_us":33201,"cold_resume_transitions_per_sec":361.4348965392609,"committed_transitions":12,"correctness":"gap_free_monotone_no_double_advance_resume_exact","dashboard_p95_us":1275,"double_advance_rejects":3,"double_advances":0,"driver":"synchronous","fixture_current_state_bytes":398142,"git_dirty":false,"injected_races":3,"instances":8,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"log_floor_bytes_per_step":7.0,"log_floor_elapsed_us":5912,"max_concurrent_instances_within_slo":8,"phase":"smoke","profile":"s9-smoke","rejects":3,"resume_bytes":8156,"resume_p95_us":33215,"same_schedule_replay":"matched","scenario":"s9_durable_execution","seed":1493172225,"settle_transitions_per_sec":227.25120727203864,"sqlite_elapsed_us":206,"sqlite_t... [truncated; see jsonl]
+{"correctness":"matched","driver":"deterministic","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"smoke_timing","profile":"s9-smoke","scenario":"s9_durable_execution","seed":1493172225,"smoke_elapsed_us":450058}
+{"acceptance_p50_us":4351,"acceptance_p95_us":4879,"api_surface":"db","driver":"synchronous","durability_tier":"Edge","git_dirty":false,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s9-smoke","scenario":"s9_durable_execution","seed":1493172225}
+{"driver":"synchronous","git_dirty":false,"hydration_bytes":9420,"hydration_floor_bytes":9420,"hydration_rows":8,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s9-smoke","scenario":"s9_durable_execution","scope":"workflow_table_surface","seed":1493172225}
+```
+
+---
+
+## Run 2026-07-02T06:20:14Z - smoke
+
+- result: `pass`
+- git: `057b05e43`
+- dirty: `true`
+- log_dir: `target/benchmark-smoke`
+- result_dir: `dev/benchmarks/results/20260702T061220Z`
+- prebuild_s: `434.414`
+- excerpt_lines: `18`
+
+### Summary
+
+| Scenario                       | Status | Wall Time | Previous |   Delta | JSONL Rows | Invocation                                                                                            |
+| ------------------------------ | ------ | --------: | -------: | ------: | ---------: | ----------------------------------------------------------------------------------------------------- |
+| jazz/cold_subscription         | `pass` |    1.084s |   0.400s | +0.684s |          5 | `JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --bench cold_subscription`               |
+| jazz/sync                      | `pass` |    0.795s |   0.268s | +0.527s |          2 | `GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --bench sync`                              |
+| jazz/validation                | `pass` |    0.830s |   0.300s | +0.530s |          2 | `GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --bench validation`            |
+| jazz/merge_back_cost           | `pass` |    0.804s |   0.314s | +0.490s |          5 | `JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost`                               |
+| jazz/large_value_checkpointing | `pass` |    4.104s |   3.525s | +0.579s |          3 | `JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing`        |
+| jazz-sim/micro                 | `pass` |   11.384s |  10.687s | +0.697s |         23 | `JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain` |
+| jazz-sim/s1_saas               | `pass` |    1.563s |   0.964s | +0.599s |          5 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s1_saas`                                                |
+| jazz-sim/s2_canvas             | `pass` |    4.026s |   3.600s | +0.426s |          3 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s2_canvas`                                              |
+| jazz-sim/s3_permissions        | `pass` |    1.562s |   0.942s | +0.620s |          9 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s3_permissions`                                         |
+| jazz-sim/s4_order_processing   | `pass` |    6.074s |   5.320s | +0.754s |          7 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s4_order_processing`                                    |
+| jazz-sim/s5_durable_stream     | `pass` |    1.033s |   0.403s | +0.630s |          6 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream`                                      |
+| jazz-sim/s6_text_traces        | `pass` |    1.127s |   0.559s | +0.568s |         28 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s6_text_traces`                                         |
+| jazz-sim/s7_migrations         | `pass` |    1.832s |   1.316s | +0.516s |          5 | `cargo bench -p jazz-sim --bench s7_migrations # source always runs smoke(); no env knob`             |
+| jazz-sim/s9_durable_execution  | `pass` |    1.269s |   0.638s | +0.631s |          5 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution`                                   |
+
+### Details
+
+#### jazz/cold_subscription
+
+- status: `pass`
+- wall_time: `1.084s`
+- previous_wall_time: `0.400s`
+- delta: `+0.684s`
+- log: `target/benchmark-smoke/jazz_cold_subscription.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz_cold_subscription.jsonl`
+- invocation:
+
+```sh
+JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --bench cold_subscription
+```
+
+- excerpt:
+
+```jsonl
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":10,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":0,"core_last_commit_storage_write_history_indexes_count":0,"core_last_commit_storage_write... [truncated; see jsonl]
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":10,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":0,"core_last_commit_storage_write_history_indexes_count":0,"core_last_commit_storage_write... [truncated; see jsonl]
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":29,"core_last_commit_storage_write_bytes":750,"core_last_commit_storage_write_count":6,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":121,"core_last_commit_storage_write_history_indexes_count":1,"core_last_commit_storage_wr... [truncated; see jsonl]
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":29,"core_last_commit_storage_write_bytes":750,"core_last_commit_storage_write_count":6,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":121,"core_last_commit_storage_write_history_indexes_count":1,"core_last_commit_storage_wr... [truncated; see jsonl]
+```
+
+#### jazz/sync
+
+- status: `pass`
+- wall_time: `0.795s`
+- previous_wall_time: `0.268s`
+- delta: `+0.527s`
+- log: `target/benchmark-smoke/jazz_sync.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz_sync.jsonl`
+- invocation:
+
+```sh
+GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --bench sync
+```
+
+- excerpt:
+
+```jsonl
+{"accept_count":20,"commits":20,"core_edge_complete_tx_payload_refs_out":0,"core_edge_version_bundles_out":21,"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":54,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_hist... [truncated; see jsonl]
+```
+
+#### jazz/validation
+
+- status: `pass`
+- wall_time: `0.830s`
+- previous_wall_time: `0.300s`
+- delta: `+0.530s`
+- log: `target/benchmark-smoke/jazz_validation.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz_validation.jsonl`
+- invocation:
+
+```sh
+GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --bench validation
+```
+
+- excerpt:
+
+```jsonl
+{"accept_count":18,"clients":5,"commits":25,"core_ingest_max_us":510,"core_ingest_p50_us":206,"core_ingest_p95_us":326,"core_ingest_p99_us":510,"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":10,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"c... [truncated; see jsonl]
+```
+
+#### jazz/merge_back_cost
+
+- status: `pass`
+- wall_time: `0.804s`
+- previous_wall_time: `0.314s`
+- delta: `+0.490s`
+- log: `target/benchmark-smoke/jazz_merge_back_cost.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz_merge_back_cost.jsonl`
+- invocation:
+
+```sh
+JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost
+```
+
+- excerpt:
+
+```jsonl
+{"git_dirty":true,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":17,"node_last_commit_storage_write_bytes":60,"node_last_commit_storage_write_count":1,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":0,"node_last_commit_storage_write... [truncated; see jsonl]
+{"git_dirty":true,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":18,"node_last_commit_storage_write_bytes":587,"node_last_commit_storage_write_count":4,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":204,"node_last_commit_storage_wr... [truncated; see jsonl]
+{"git_dirty":true,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":14,"node_last_commit_storage_write_bytes":60,"node_last_commit_storage_write_count":1,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":0,"node_last_commit_storage_write... [truncated; see jsonl]
+{"git_dirty":true,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":14,"node_last_commit_storage_write_bytes":60,"node_last_commit_storage_write_count":1,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":0,"node_last_commit_storage_write... [truncated; see jsonl]
+```
+
+#### jazz/large_value_checkpointing
+
+- status: `pass`
+- wall_time: `4.104s`
+- previous_wall_time: `3.525s`
+- delta: `+0.579s`
+- log: `target/benchmark-smoke/jazz_large_value_checkpointing.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz_large_value_checkpointing.jsonl`
+- invocation:
+
+```sh
+JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing
+```
+
+- excerpt:
+
+```jsonl
+{"bytes":300,"checkpoint_interval":"checkpointed","checkpoint_interval_ops":64,"depth":300,"git_dirty":true,"knobs":{"JAZZ_LV_DEPTH":"300","JAZZ_LV_INTERVALS":"64"},"node_large_value_checkpoint_hits":1,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":44,"node_large_value_last_replayed_versions":44,"node_large_value_materializations":1,"node_large_value_total_replayed_ops":44,"node_last_commit_ivm_tick_us":23,"node_last_commit_storage_write_bytes":898,"node_last_commit_storage_write_count":9,"node_last_commit_storage_write_global_changes_indexes_bytes":137,"node_last_commit_storage_write_global_changes_indexes_count":1,"node_last_commit_storage_write_global_changes_rows_bytes":100,"node_last_commit_storage_write_global_changes_rows_count":1,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":172,"node_last_commit_storage_write_... [truncated; see jsonl]
+{"bytes":300,"checkpoint_interval":"full","checkpoint_interval_ops":18446744073709551615,"depth":300,"git_dirty":true,"knobs":{"JAZZ_LV_DEPTH":"300","JAZZ_LV_INTERVALS":"64"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":300,"node_large_value_last_replayed_versions":300,"node_large_value_materializations":1,"node_large_value_total_replayed_ops":300,"node_last_commit_ivm_tick_us":21,"node_last_commit_storage_write_bytes":898,"node_last_commit_storage_write_count":9,"node_last_commit_storage_write_global_changes_indexes_bytes":137,"node_last_commit_storage_write_global_changes_indexes_count":1,"node_last_commit_storage_write_global_changes_rows_bytes":100,"node_last_commit_storage_write_global_changes_rows_count":1,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":172,"node_last_commit_s... [truncated; see jsonl]
+```
+
+#### jazz-sim/micro
+
+- status: `pass`
+- wall_time: `11.384s`
+- previous_wall_time: `10.687s`
+- delta: `+0.697s`
+- log: `target/benchmark-smoke/jazz-sim_micro.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz-sim_micro.jsonl`
+- invocation:
+
+```sh
+JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain
+```
+
+- excerpt:
+
+```jsonl
+{"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"node_open_max_ns":21987327,"node_open_p50_ns":21987327,"node_open_p95_ns":21987327,"node_open_p99_ns":21987327,"primitive":"node_open","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"versions":1000}
+{"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"node_open_max_ns":73334783,"node_open_p50_ns":73334783,"node_open_p95_ns":73334783,"node_open_p99_ns":73334783,"primitive":"node_open","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"versions":10000}
+{"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"node_open_max_ns":688914431,"node_open_p50_ns":688914431,"node_open_p95_ns":688914431,"node_open_p99_ns":688914431,"primitive":"node_open","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"versions":100000}
+{"driver":"micro","git_dirty":true,"hlc_mint_max_ns":125,"hlc_mint_p50_ns":125,"hlc_mint_p95_ns":125,"hlc_mint_p99_ns":125,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"hlc_mint","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"driver":"micro","git_dirty":true,"hlc_receive_max_max_ns":125,"hlc_receive_max_p50_ns":125,"hlc_receive_max_p95_ns":125,"hlc_receive_max_p99_ns":125,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"hlc_receive_max","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"driver":"micro","git_dirty":true,"hlc_compare_max_ns":0,"hlc_compare_p50_ns":0,"hlc_compare_p95_ns":0,"hlc_compare_p99_ns":0,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"hlc_compare","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":634879,"domination_winner_probe_p50_ns":634879,"domination_winner_probe_p95_ns":634879,"domination_winner_probe_p99_ns":634879,"driver":"micro","git_dirty":true,"heads":1,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":203903,"domination_winner_probe_p50_ns":203903,"domination_winner_probe_p95_ns":203903,"domination_winner_probe_p99_ns":203903,"driver":"micro","git_dirty":true,"heads":2,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":216575,"domination_winner_probe_p50_ns":216575,"domination_winner_probe_p95_ns":216575,"domination_winner_probe_p99_ns":216575,"driver":"micro","git_dirty":true,"heads":8,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":247167,"domination_winner_probe_p50_ns":247167,"domination_winner_probe_p95_ns":247167,"domination_winner_probe_p99_ns":247167,"driver":"micro","git_dirty":true,"heads":64,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"deletion_register_resolution_max_ns":224895,"deletion_register_resolution_p50_ns":224895,"deletion_register_resolution_p95_ns":224895,"deletion_register_resolution_p99_ns":224895,"driver":"micro","events":32,"git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"deletion_register_resolution","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":91,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"version_ingest_rate","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"version_ingest_rate_max_ns":236159,"version_ingest_rate_p50_ns":236159,"version_ingest_rate_p95_ns":236159,"version_ingest_rate_p99_ns":236159,"versions":1,"versions_per_sec_p50":4234}
+{"bytes":94,"commit_unit_encode_max_ns":6587,"commit_unit_encode_p50_ns":6587,"commit_unit_encode_p95_ns":6587,"commit_unit_encode_p99_ns":6587,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_encode","profile":"micro","rows_per_unit":1,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":94,"commit_unit_decode_ingest_max_ns":182527,"commit_unit_decode_ingest_p50_ns":182527,"commit_unit_decode_ingest_p95_ns":182527,"commit_unit_decode_ingest_p99_ns":182527,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_decode_ingest","profile":"micro","rows_per_unit":1,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":940,"commit_unit_encode_max_ns":27711,"commit_unit_encode_p50_ns":27711,"commit_unit_encode_p95_ns":27711,"commit_unit_encode_p99_ns":27711,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_encode","profile":"micro","rows_per_unit":10,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":940,"commit_unit_decode_ingest_max_ns":573439,"commit_unit_decode_ingest_p50_ns":573439,"commit_unit_decode_ingest_p95_ns":573439,"commit_unit_decode_ingest_p99_ns":573439,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_decode_ingest","profile":"micro","rows_per_unit":10,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":9490,"commit_unit_encode_max_ns":209151,"commit_unit_encode_p50_ns":209151,"commit_unit_encode_p95_ns":209151,"commit_unit_encode_p99_ns":209151,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_encode","profile":"micro","rows_per_unit":100,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":9490,"commit_unit_decode_ingest_max_ns":4218879,"commit_unit_decode_ingest_p50_ns":4218879,"commit_unit_decode_ingest_p95_ns":4218879,"commit_unit_decode_ingest_p99_ns":4218879,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_decode_ingest","profile":"micro","rows_per_unit":100,"samples":1,"scenario":"micro","seed":469919560303}
+```
+
+#### jazz-sim/s1_saas
+
+- status: `pass`
+- wall_time: `1.563s`
+- previous_wall_time: `0.964s`
+- delta: `+0.599s`
+- log: `target/benchmark-smoke/jazz-sim_s1_saas.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz-sim_s1_saas.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s1_saas
+```
+
+- excerpt:
+
+```jsonl
+{"clients":2,"closure_rows":10,"cold_bytes":3728,"cold_bytes_floor":1808,"cold_complete_p50_us":2000,"cold_complete_p95_us":2000,"driver":"deterministic","fixture_hash":11224403247539415689,"fixture_rows":51,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"naive_refetch_ceiling_bytes":5520,"profile":"s1-smoke","result_set_rows":4,"scenario":"s1_saas","seed":1370116097,"transport_codec":"wire_frames","warm_local_p50_us":1095,"warm_local_p95_us":1613,"warm_settled_p50_us":382,"warm_settled_p95_us":451,"writes_applied":3}
+{"acceptance_p50_us":1000,"acceptance_p95_us":1000,"driver":"deterministic","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s1-smoke","scenario":"s1_saas","seed":1370116097}
+{"driver":"deterministic","git_dirty":true,"hydration_bytes":3728,"hydration_floor_bytes":1808,"hydration_rows":4,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s1-smoke","scenario":"s1_saas","scope":"saas_query_closure","seed":1370116097}
+{"catchup_bytes":5368,"catchup_bytes_floor":2552,"catchup_us":6000,"closure_rows":16,"driver":"deterministic","fixture_commits_applied":53,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"messages_delivered":130,"messages_dropped":4,"messages_sent":134,"phase":"reconnect","profile":"s1-smoke","result_set_rows":6,"scenario":"s1_saas_reconnect","seed":1370116097,"transport_codec":"wire_frames","transport_codec_decode_avg_us_per_message":2.5522388059701493,"transport_codec_decode_count":134,"transport_codec_decode_max_us":40,"transport_codec_decode_p50_us":2,"transport_codec_decode_p95_us":7,"transport_codec_decode_p99_us":38,"transport_codec_decode_total_us":342,"transport_codec_encode_avg_us_per_message":1.2985074626865671,"transport_codec_encode_count":134,"transport_codec_encode_max_us":18,"transport_codec_encode_p50_us":1,"transport_codec_encode_p95_us":4,"transport_codec_encode_p99_us":14,"transport_codec_encode_total_us":174,"transport_codec_encoded_bytes":53677,"transport_codec_encode... [truncated; see jsonl]
+```
+
+#### jazz-sim/s2_canvas
+
+- status: `pass`
+- wall_time: `4.026s`
+- previous_wall_time: `3.600s`
+- delta: `+0.426s`
+- log: `target/benchmark-smoke/jazz-sim_s2_canvas.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz-sim_s2_canvas.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s2_canvas
+```
+
+- excerpt:
+
+```jsonl
+{"coalesced_16ms":false,"driver":"deterministic","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"needs":"historical-implicit-include-source-coverage","phase":"historical_load","profile":"s2-smoke","scenario":"s2_canvas","seed":1375783678,"status":"gated"}
+{"coalesced_16ms":true,"driver":"deterministic","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"needs":"historical-implicit-include-source-coverage","phase":"historical_load","profile":"s2-smoke","scenario":"s2_canvas","seed":1375783678,"status":"gated"}
+```
+
+#### jazz-sim/s3_permissions
+
+- status: `pass`
+- wall_time: `1.562s`
+- previous_wall_time: `0.942s`
+- delta: `+0.620s`
+- log: `target/benchmark-smoke/jazz-sim_s3_permissions.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz-sim_s3_permissions.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s3_permissions
+```
+
+- excerpt:
+
+```jsonl
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"cold_bytes":2205,"cold_bytes_floor":1197,"cold_complete_us":4000,"cold_core_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":21,"reads":364},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":7,"reads":140},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":25,"reads":0},"total":{"ranges":66,"reads":513},"transactions_indexes":{"ranges":0,"reads":0},"transactions_rows":{"ranges":9,"reads":9}},"cold_view_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":21,"reads":364},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":7,"reads":140},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":... [truncated; see jsonl]
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"cold_bytes":4920,"cold_bytes_floor":2680,"cold_complete_us":4000,"cold_core_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":27,"reads":339},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":6,"reads":120},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":31,"reads":0},"total":{"ranges":88,"reads":479},"transactions_indexes":{"ranges":0,"reads":0},"transactions_rows":{"ranges":20,"reads":20}},"cold_view_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":21,"reads":364},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":7,"reads":140},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges... [truncated; see jsonl]
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","edge_core_one_way_ms":1,"git_dirty":true,"grant_global_p50_us":4001,"grant_global_p95_us":4001,"grant_none_p50_us":4001,"grant_none_p95_us":4001,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"grant","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"teams_per_org":4}
+{"access_edges_per_resource":1,"apply_us":21,"client_edge_one_way_ms":1,"core_recompute_p50_us":1851,"core_recompute_p95_us":1851,"disappearance_p50_us":4001,"disappearance_p95_us":4001,"driver":"deterministic","edge_core_one_way_ms":1,"git_dirty":true,"hidden_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"revocation","profile":"s3-smoke","query_update_us":36586,"resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"send_recv_us":0,"teams_per_org":4,"update_rows":1}
+{"access_edges_per_resource":1,"apply_us":24,"client_edge_one_way_ms":1,"core_recompute_p50_us":1680,"core_recompute_p95_us":1680,"disappearance_p50_us":4001,"disappearance_p95_us":4001,"driver":"deterministic","edge_core_one_way_ms":1,"git_dirty":true,"hidden_rows":3,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"revocation","profile":"s3-smoke","query_update_us":35895,"resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"send_recv_us":0,"teams_per_org":4,"update_rows":3}
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","edge_core_one_way_ms":1,"forbidden_deliveries":0,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"forbidden_writes","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"teams_per_org":4}
+{"acceptance_p50_us":2000,"acceptance_p95_us":2000,"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","durability_tier":"Edge","edge_core_one_way_ms":1,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"orgs":1,"phase":"edge_mergeable_acceptance","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"teams_per_org":4}
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","edge_core_one_way_ms":1,"edge_scope_subscription_count_after_drain":0,"edge_scope_subscription_count_before_drain":1,"git_dirty":true,"hydration_bytes":5418,"hydration_floor_bytes":2954,"hydration_rows":22,"knobs":{"JAZZ_SMOKE":"1"},"orgs":1,"phase":"edge_permission_scope_hydration","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","scope":"narrow(policy_shape, writer_claim)","seed":1392508929,"teams_per_org":4,"whole_table_scope":"not hydrated; bench reports the narrow B2 scope only"}
+```
+
+#### jazz-sim/s4_order_processing
+
+- status: `pass`
+- wall_time: `6.074s`
+- previous_wall_time: `5.320s`
+- delta: `+0.754s`
+- log: `target/benchmark-smoke/jazz-sim_s4_order_processing.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz-sim_s4_order_processing.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s4_order_processing
+```
+
+- excerpt:
+
+```jsonl
+{"abort_retry_rate":0.0,"attempts":5,"clients":1,"committed":5,"customers":20,"customers_per_district":2,"delivered_order_lines":0,"delivered_orders":0,"districts_per_warehouse":10,"driver":"synchronous","git_dirty":true,"items":5,"jazz_settle_tx_per_sec":109.08694229300752,"jazz_sqlite_ratio":null,"jazz_wall_tx_per_sec":109.08694229300752,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"measurement_excludes":"per-accepted-commit peer current_rows_update fan-out","measurement_includes":"engine commit/accept path","phase":"throughput_settlement","profile":"s4-smoke","propagation_p50_us":0,"propagation_p95_us":0,"ratio_omitted_reason":"minimum sample is 200 committed transactions","rejects":0,"retries":0,"same_schedule_replay":"matched","scenario":"s4_order_processing","seed":1409286145,"settle_p50_us":8863,"settle_p95_us":10735,"settlement_tx_per_sec":109.08694229300752,"sqlite_elapsed_us":73,"sqlite_tx_per_sec":68493.1506849315,"stock_rows":5,"throughput_line":"settlement throughpu... [truncated; see jsonl]
+{"acceptance_p50_us":1190,"acceptance_p95_us":2175,"clients":1,"driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s4-smoke","scenario":"s4_order_processing","seed":1409286145}
+{"driver":"synchronous","git_dirty":true,"hydration_bytes":20391,"hydration_floor_bytes":20391,"hydration_rows":77,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s4-smoke","scenario":"s4_order_processing","scope":"order_processing_table_surface","seed":1409286145}
+{"abort_retry_rate":0.0,"attempts":5,"clients":1,"committed":5,"customers":20,"customers_per_district":2,"delivered_order_lines":0,"delivered_orders":0,"districts_per_warehouse":10,"driver":"synchronous","git_dirty":true,"items":5,"jazz_settle_tx_per_sec":106.8764294722442,"jazz_sqlite_ratio":null,"jazz_wall_tx_per_sec":25.434031751845236,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"measurement_excludes":null,"measurement_includes":"engine commit/accept path plus per-accepted-commit peer current_rows_update fan-out","phase":"throughput_propagation_inclusive","profile":"s4-smoke","propagation_inclusive_tx_per_sec":25.434031751845236,"propagation_p50_us":29951,"propagation_p95_us":30399,"ratio_omitted_reason":"minimum sample is 200 committed transactions","rejects":0,"retries":0,"same_schedule_replay":"matched","scenario":"s4_order_processing","seed":1409286145,"settle_p50_us":8975,"settle_p95_us":10943,"sqlite_elapsed_us":73,"sqlite_tx_per_sec":68493.1506849315,"stock_rows":5,"t... [truncated; see jsonl]
+{"acceptance_p50_us":1202,"acceptance_p95_us":2087,"clients":1,"driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s4-smoke","scenario":"s4_order_processing","seed":1409286145}
+{"driver":"synchronous","git_dirty":true,"hydration_bytes":22991,"hydration_floor_bytes":22991,"hydration_rows":86,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s4-smoke","scenario":"s4_order_processing","scope":"order_processing_table_surface","seed":1409286145}
+```
+
+#### jazz-sim/s5_durable_stream
+
+- status: `pass`
+- wall_time: `1.033s`
+- previous_wall_time: `0.403s`
+- delta: `+0.630s`
+- log: `target/benchmark-smoke/jazz-sim_s5_durable_stream.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz-sim_s5_durable_stream.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream
+```
+
+- excerpt:
+
+```jsonl
+{"append_p50_us":579,"append_tail_p50_us":565,"append_tail_p99_us":632,"batch_tokens":2,"commits":2,"core_cpu_us_per_append":601.5,"correctness":"prefix_monotone_and_resumer_exact","driver":"synchronous","durability_regime":"wal_no_sync_equivalent; log floor fsyncs once at end","git_dirty":true,"history_metadata_bytes_per_token":77384.25,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"log_floor_bytes_per_token":10.5,"log_floor_nosync_elapsed_us":4665,"peak_rss_bytes":26853376,"profile":"s5-smoke","resume_bytes":696,"resume_bytes_by_gap":[232,232,232],"resume_elapsed_us_by_gap":[2955,2634,2452],"resume_gap_tokens":[3,2,1],"resume_p50_us":2635,"resumers":1,"run_seconds":1,"scenario":"s5_durable_stream","seed":1426063361,"sqlite_db_bytes_per_token":3072.0,"sqlite_elapsed_us":49,"storage_amplification":19346.0625,"storage_bytes_per_token_note":"most meaningful at full-rate/full-duration knobs","streams":1,"sustained_appends_per_sec":39.408866995073886,"synced_bytes_per_token_per_taile... [truncated; see jsonl]
+{"append_p50_us":2435,"append_p95_us":2435,"append_p99_us":2435,"batch_tokens":2,"changed_p50_us":0,"changed_p95_us":0,"commits":2,"correctness":"db_watch_tailers_prefix_monotone_and_final_exact","current_p50_us":1,"current_p95_us":1,"drain_p50_us":1489,"drain_p99_us":1489,"driver":"db_surface","git_dirty":true,"history_metadata_bytes_per_token":153903.5,"knobs":{"JAZZ_SMOKE":"1"},"peak_rss_bytes":27934720,"phase":"db_surface_live","profile":"s5-smoke","rows":1,"run_seconds":1,"scenario":"s5_durable_stream","seed":1426063361,"streams":1,"sustained_appends_per_sec":392.695857058708,"tailers":1,"tokens_per_second":4,"update_p50_us":836,"update_p99_us":836,"wait_p50_us":0,"wait_p99_us":0}
+{"acceptance_p50_us":149,"acceptance_p95_us":210,"driver":"db_surface","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s5-smoke","scenario":"s5_durable_stream","seed":1426063361}
+{"driver":"db_surface","git_dirty":true,"hydration_bytes":423,"hydration_floor_bytes":423,"hydration_rows":2,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s5-smoke","scenario":"s5_durable_stream","scope":"durable_stream_table_surface","seed":1426063361}
+{"driver":"db_surface","full_rehydrate_bytes":59,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"process_local_resume","profile":"s5-smoke","resume_bytes":12291,"resume_ratio":208.32203389830508,"resume_status":"resumed_larger_or_equal","rows":16,"scenario":"s5_durable_stream","seed":1426063361}
+```
+
+#### jazz-sim/s6_text_traces
+
+- status: `pass`
+- wall_time: `1.127s`
+- previous_wall_time: `0.559s`
+- delta: `+0.568s`
+- log: `target/benchmark-smoke/jazz-sim_s6_text_traces.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz-sim_s6_text_traces.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s6_text_traces
+```
+
+- excerpt:
+
+```jsonl
+{"batch_edits":1,"commits":8,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"history_metadata_bytes_per_edit":34762.5,"ingest_edits_per_sec":1020.1479214486101,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":317,"local_echo_p95_us":2675,"peak_memory_proxy_bytes":8,"peak_rss_bytes":16039936,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":1,"commits":8,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"history_metadata_bytes_per_edit":66789.875,"ingest_edits_per_sec":1591.4064054107816,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":180,"local_echo_p95_us":248,"peak_memory_proxy_bytes":8,"peak_rss_bytes":22298624,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"acceptance_p50_us":18,"acceptance_p95_us":254,"batch_edits":1,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":1,"driver":"synchronous","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"hydration_bytes":207,"hydration_floor_bytes":207,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":4,"commits":2,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"history_metadata_bytes_per_edit":33160.5,"ingest_edits_per_sec":7866.273352999017,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":237,"local_echo_p95_us":242,"peak_memory_proxy_bytes":8,"peak_rss_bytes":22757376,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":4,"commits":2,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"history_metadata_bytes_per_edit":65917.75,"ingest_edits_per_sec":4259.850905218317,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":151,"local_echo_p95_us":160,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23035904,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"acceptance_p50_us":16,"acceptance_p95_us":129,"batch_edits":4,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":4,"driver":"synchronous","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"hydration_bytes":207,"hydration_floor_bytes":207,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"driver":"synchronous","edit_rate_nominal_per_sec":10,"edits":4,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"observer_p95_us":1366,"phase":"live_observation","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"synced_bytes":1356,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":1,"commits":8,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"history_metadata_bytes_per_edit":34762.5,"ingest_edits_per_sec":2059.732234809475,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":240,"local_echo_p95_us":279,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23216128,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":1,"commits":8,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"history_metadata_bytes_per_edit":66789.875,"ingest_edits_per_sec":1717.1066752522001,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":174,"local_echo_p95_us":253,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23560192,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"acceptance_p50_us":16,"acceptance_p95_us":153,"batch_edits":1,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"batch_edits":1,"driver":"synchronous","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"hydration_bytes":207,"hydration_floor_bytes":207,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"batch_edits":4,"commits":2,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"history_metadata_bytes_per_edit":33160.5,"ingest_edits_per_sec":7714.561234329798,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":244,"local_echo_p95_us":266,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23560192,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":4,"commits":2,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"history_metadata_bytes_per_edit":65917.75,"ingest_edits_per_sec":4153.686396677051,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":160,"local_echo_p95_us":162,"peak_memory_proxy_bytes":8,"peak_rss_bytes":23592960,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"acceptance_p50_us":19,"acceptance_p95_us":139,"batch_edits":4,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"batch_edits":4,"driver":"synchronous","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"hydration_bytes":207,"hydration_floor_bytes":207,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"driver":"synchronous","edit_rate_nominal_per_sec":10,"edits":4,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"observer_p95_us":1400,"phase":"live_observation","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"synced_bytes":1356,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+```
+
+#### jazz-sim/s7_migrations
+
+- status: `pass`
+- wall_time: `1.832s`
+- previous_wall_time: `1.316s`
+- delta: `+0.516s`
+- log: `target/benchmark-smoke/jazz-sim_s7_migrations.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz-sim_s7_migrations.jsonl`
+- invocation:
+
+```sh
+cargo bench -p jazz-sim --bench s7_migrations # source always runs smoke(); no env knob
+```
+
+- excerpt:
+
+```jsonl
+{"acceptance_p50_us":219,"acceptance_p95_us":219,"driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{},"phase":"edge_mergeable_acceptance","profile":"s7-local","scenario":"s7_migrations","seed":1459617793}
+{"driver":"synchronous","git_dirty":true,"hydration_bytes":0,"hydration_floor_bytes":0,"hydration_rows":3,"knobs":{},"phase":"edge_permission_scope_hydration","profile":"s7-local","scenario":"s7_migrations","scope":"migration_schema_catalog","seed":1459617793}
+{"driver":"synchronous","git_dirty":true,"iterations":64,"knobs":{},"native_p50_us":756,"native_p95_us":855,"one_hop_p50_us":658,"one_hop_p95_us":729,"phase":"lens_read_latency","profile":"s7-local","rows":128,"scenario":"s7_migrations","seed":1459617793,"three_hop_p50_us":693,"three_hop_p95_us":778}
+{"driver":"synchronous","git_dirty":true,"knobs":{},"native_p50_us":1023,"native_p95_us":1325,"one_hop_p50_us":1632,"one_hop_p95_us":1921,"phase":"lens_write_translation","profile":"s7-local","rows":128,"scenario":"s7_migrations","seed":1459617793,"three_hop_p50_us":2199,"three_hop_p95_us":2524}
+```
+
+#### jazz-sim/s9_durable_execution
+
+- status: `pass`
+- wall_time: `1.269s`
+- previous_wall_time: `0.638s`
+- delta: `+0.631s`
+- log: `target/benchmark-smoke/jazz-sim_s9_durable_execution.log`
+- jsonl: `dev/benchmarks/results/20260702T061220Z/jazz-sim_s9_durable_execution.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution
+```
+
+- excerpt:
+
+```jsonl
+{"aggregate_elapsed_us":150041,"aggregate_transitions_per_sec":79.97813930858898,"aggregate_with_assertions_elapsed_us":186174,"aggregate_with_assertions_transitions_per_sec":64.45583164136775,"assertion_elapsed_us":36120,"attempts":15,"cold_resume_elapsed_us":34087,"cold_resume_transitions_per_sec":352.04036729544987,"committed_transitions":12,"correctness":"gap_free_monotone_no_double_advance_resume_exact","dashboard_p95_us":1843,"double_advance_rejects":3,"double_advances":0,"driver":"synchronous","fixture_current_state_bytes":398142,"git_dirty":true,"injected_races":3,"instances":8,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"log_floor_bytes_per_step":7.0,"log_floor_elapsed_us":4691,"max_concurrent_instances_within_slo":8,"phase":"smoke","profile":"s9-smoke","rejects":3,"resume_bytes":8156,"resume_p95_us":34111,"same_schedule_replay":"matched","scenario":"s9_durable_execution","seed":1493172225,"settle_transitions_per_sec":218.20165469588144,"sqlite_elapsed_us":239,"sqlite_... [truncated; see jsonl]
+{"correctness":"matched","driver":"deterministic","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"smoke_timing","profile":"s9-smoke","scenario":"s9_durable_execution","seed":1493172225,"smoke_elapsed_us":491790}
+{"acceptance_p50_us":4479,"acceptance_p95_us":5371,"api_surface":"db","driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s9-smoke","scenario":"s9_durable_execution","seed":1493172225}
+{"driver":"synchronous","git_dirty":true,"hydration_bytes":9420,"hydration_floor_bytes":9420,"hydration_rows":8,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s9-smoke","scenario":"s9_durable_execution","scope":"workflow_table_surface","seed":1493172225}
+```
