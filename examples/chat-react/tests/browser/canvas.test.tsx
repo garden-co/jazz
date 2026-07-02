@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -208,7 +208,6 @@ describe("Canvas E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("collab-canvas-a"),
       serverUrl,
-      secret: await testSecret(`canvas-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -265,7 +264,6 @@ describe("Canvas E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("collab-canvas-b"),
       serverUrl,
-      secret: await testSecret(`canvas-user-b-${Date.now()}`),
     });
 
     // User B should see the canvas

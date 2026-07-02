@@ -22,6 +22,7 @@ export function useLocalFirstAuth(store: Accessor<AuthSecretStore> = () => brows
   const [error, setError] = createSignal<Error | null>(null);
 
   createEffect(() => {
+    const currentStore = store();
     let disposed = false;
     onCleanup(() => {
       disposed = true;
@@ -36,7 +37,7 @@ export function useLocalFirstAuth(store: Accessor<AuthSecretStore> = () => brows
       setIsLoading(true);
 
       try {
-        const resolved = await store().getOrCreateSecret();
+        const resolved = await currentStore.getOrCreateSecret();
         if (stale()) {
           return;
         }
@@ -53,7 +54,7 @@ export function useLocalFirstAuth(store: Accessor<AuthSecretStore> = () => brows
       }
     };
 
-    const listeners = getListeners(store());
+    const listeners = getListeners(currentStore);
 
     refetch();
     listeners.add(refetch);
