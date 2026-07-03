@@ -746,18 +746,6 @@ fn validate_output_capabilities(
     {
         return;
     }
-    if matches!(plan, AnalyzedQueryPlan::CorrelatedPath(_))
-        && request.output.app_rows.is_none()
-        && request
-            .output
-            .facts
-            .contains(&ProgramFactKey::AuthorizedRows)
-    {
-        gaps.push(UnsupportedReason::Operator(
-            "policy shapes with array subqueries are not lowered yet".to_owned(),
-        ));
-        return;
-    }
     if !request
         .output
         .facts
@@ -766,12 +754,6 @@ fn validate_output_capabilities(
         return;
     }
     if plan_contains_aggregate(plan) {
-        return;
-    }
-    if matches!(plan, AnalyzedQueryPlan::CorrelatedPath(_)) && request.output.app_rows.is_none() {
-        gaps.push(UnsupportedReason::Operator(
-            "maintained subscription views over array subqueries are not lowered yet".to_owned(),
-        ));
         return;
     }
     if maintained_result_membership_window_supported(plan) {
@@ -1972,9 +1954,20 @@ fn lower_correlated_path_plan(
             child_root
         ))
     })?;
+    let child_relation_steps = path
+        .child
+        .steps
+        .iter()
+        .filter(|step| !matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let child_relation_plan = LinearCurrentRoot {
+        root: path.child.root.clone(),
+        steps: child_relation_steps,
+    };
     let child = lower_linear_plan_steps(
         child_source.graph.clone(),
-        &path.child,
+        &child_relation_plan,
         child_source,
         resolved_sources,
         request,
@@ -1993,16 +1986,6 @@ fn lower_correlated_path_plan(
     let child_key_nullable = source_field_is_nullable(child_source, &child_key);
     let parent = unwrap_join_key_if_nullable(parent.graph, parent_key.clone(), parent_key_nullable);
     let child = unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable);
-
-    if request.output.app_rows.is_none() {
-        let graph = GraphBuilder::join(parent, child, [parent_key], [child_key]);
-        return Ok(LoweredRelationInput {
-            graph,
-            root_source: None,
-            fields: BTreeSet::new(),
-            nullable_fields: BTreeSet::new(),
-        });
-    }
 
     let lowered = match path.requirement {
         CorrelationRequirement::Optional => Ok(LoweredRelationInput {

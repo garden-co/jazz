@@ -879,7 +879,7 @@ where
         if opts.propagation == Propagation::Full {
             ensure_supported_propagated_subscription_tier(read_tier)?;
         }
-        let (subscription, rows) = self
+        let (subscription, snapshot) = self
             .node
             .node
             .borrow_mut()
@@ -890,10 +890,7 @@ where
                 read_tier,
                 &opts.read_view,
             )?;
-        let (maintained_subscription, snapshot) = (
-            Some(subscription),
-            subscription_snapshot_for_rows(&prepared.shape, rows),
-        );
+        let maintained_subscription = Some(subscription);
         let mut state_shape = prepared.shape.clone();
         let mut state_binding = prepared.binding.clone();
         let mut remote_read_tier = None;
@@ -2812,29 +2809,7 @@ where
                                 .drain_local_maintained_view_subscription(maintained)?
                         };
                         if let Some(update) = update {
-                            let mut rows_by_id = previous
-                                .rows
-                                .iter()
-                                .cloned()
-                                .map(|row| (subscription_row_key(&row), row))
-                                .collect::<BTreeMap<_, _>>();
-                            for member in update.removes {
-                                let Some((_, row_uuid, _)) = member.as_row() else {
-                                    return Err(crate::node::Error::InvalidStoredValue(
-                                        "local maintained subscription removal cannot materialize non-row result member",
-                                    )
-                                    .into());
-                                };
-                                rows_by_id.retain(|(_, existing_row_uuid), _| {
-                                    *existing_row_uuid != row_uuid
-                                });
-                            }
-                            for row in update.adds {
-                                rows_by_id.insert(subscription_row_key(&row), row);
-                            }
-                            let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
-                            node.borrow().apply_query_order(shape.query(), &mut rows)?;
-                            subscription_snapshot_for_rows(shape, rows)
+                            update.snapshot
                         } else {
                             previous.clone()
                         }
@@ -4376,13 +4351,8 @@ fn ensure_supported_subscription_shape(shape: &ValidatedQuery) -> Result<(), Err
 }
 
 fn ensure_supported_maintained_coverage_query_shape(query: &Query) -> Result<(), Error> {
-    if query.array_subqueries.is_empty() {
-        return Ok(());
-    }
-    Err(Error::new(
-        ErrorCode::Query,
-        "maintained query coverage with array subqueries requires unified relation/path lowering or relation-edge terminal deltas",
-    ))
+    let _ = query;
+    Ok(())
 }
 
 fn ensure_supported_propagated_subscription_tier(tier: DurabilityTier) -> Result<(), Error> {
@@ -5188,21 +5158,6 @@ fn subscription_delta_event(
         removed_edges,
         settled,
         tier,
-    }
-}
-
-fn subscription_snapshot_for_rows(
-    shape: &ValidatedQuery,
-    rows: Vec<CurrentRow>,
-) -> RelationSnapshot {
-    debug_assert!(
-        shape.query().array_subqueries.is_empty(),
-        "maintained relation subscriptions must produce relation edges"
-    );
-    RelationSnapshot {
-        root_count: rows.len(),
-        rows,
-        edges: Vec::new(),
     }
 }
 
