@@ -2820,6 +2820,67 @@ mod tests {
     }
 
     #[test]
+    fn maintained_subscription_view_order_by_limit_updates_move_rows_across_boundary() {
+        let (_dir, mut core) = open_node_with_schema(node(0x93), priority_schema());
+        let alpha = row_from_u64(10);
+        let bravo = row_from_u64(20);
+        let charlie = row_from_u64(30);
+        let alpha_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", alpha, 1_000).cells(priority_cells("alpha", 10)),
+            )
+            .unwrap();
+        let bravo_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", bravo, 1_001).cells(priority_cells("bravo", 20)),
+            )
+            .unwrap();
+        let charlie_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", charlie, 1_002).cells(priority_cells("charlie", 30)),
+            )
+            .unwrap();
+        accept_global(&mut core, alpha_tx, 1);
+        accept_global(&mut core, bravo_tx, 2);
+        accept_global(&mut core, charlie_tx, 3);
+        let shape = Query::from("todos")
+            .order_by("priority", OrderDirection::Asc)
+            .limit(2)
+            .validate(&priority_schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let mut peer = PeerState::new();
+
+        peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        let charlie_promoted_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", charlie, 1_003).cells(priority_cells("charlie", 5)),
+            )
+            .unwrap();
+        accept_global(&mut core, charlie_promoted_tx, 4);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        assert_view_update_rows(
+            update,
+            vec![("todos", charlie, charlie_promoted_tx)],
+            vec![("todos", bravo, bravo_tx)],
+        );
+
+        let charlie_demoted_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", charlie, 1_004).cells(priority_cells("charlie", 35)),
+            )
+            .unwrap();
+        accept_global(&mut core, charlie_demoted_tx, 5);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        assert_view_update_rows(
+            update,
+            vec![("todos", bravo, bravo_tx)],
+            vec![("todos", charlie, charlie_promoted_tx)],
+        );
+    }
+
+    #[test]
     fn maintained_subscription_view_order_by_desc_limit_two_initial_hydration() {
         let (_dir, mut core) = open_node_with_schema(node(0x94), priority_schema());
         let alpha_tx = core
@@ -2909,6 +2970,21 @@ mod tests {
                 ("todos", row_from_u64(20), second_tx),
             ],
             vec![],
+        );
+
+        let replacement = row_from_u64(5);
+        let replacement_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", replacement, 1_003)
+                    .cells(priority_cells("zeroth", 7)),
+            )
+            .unwrap();
+        accept_global(&mut core, replacement_tx, 4);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        assert_view_update_rows(
+            update,
+            vec![("todos", replacement, replacement_tx)],
+            vec![("todos", row_from_u64(20), second_tx)],
         );
     }
 
@@ -3073,6 +3149,82 @@ mod tests {
             ],
             vec![],
         );
+
+        let zeroth = row_from_u64(5);
+        let zeroth_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", zeroth, 1_003).cells(priority_cells("zeroth", 5)),
+            )
+            .unwrap();
+        accept_global(&mut core, zeroth_tx, 4);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        assert_view_update_row_order(update, vec![("todos", row_from_u64(10), first_tx)], vec![]);
+
+        let delete_first_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(10), 1_004)
+                    .deletion(DeletionEvent::Deleted),
+            )
+            .unwrap();
+        accept_global(&mut core, delete_first_tx, 5);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        assert_view_update_row_order(update, vec![], vec![("todos", row_from_u64(10), first_tx)]);
+    }
+
+    #[test]
+    fn maintained_subscription_view_order_by_limit_handles_emptying_below_limit_and_repopulate() {
+        let (_dir, mut core) = open_node_with_schema(node(0x98), priority_schema());
+        let alpha = row_from_u64(10);
+        let bravo = row_from_u64(20);
+        let alpha_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", alpha, 1_000).cells(priority_cells("alpha", 10)),
+            )
+            .unwrap();
+        let bravo_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", bravo, 1_001).cells(priority_cells("bravo", 20)),
+            )
+            .unwrap();
+        accept_global(&mut core, alpha_tx, 1);
+        accept_global(&mut core, bravo_tx, 2);
+        let shape = Query::from("todos")
+            .order_by("priority", OrderDirection::Asc)
+            .limit(3)
+            .validate(&priority_schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let mut peer = PeerState::new();
+
+        peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        let delete_alpha_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", alpha, 1_002).deletion(DeletionEvent::Deleted),
+            )
+            .unwrap();
+        accept_global(&mut core, delete_alpha_tx, 3);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        assert_view_update_rows(update, vec![], vec![("todos", alpha, alpha_tx)]);
+
+        let delete_bravo_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", bravo, 1_003).deletion(DeletionEvent::Deleted),
+            )
+            .unwrap();
+        accept_global(&mut core, delete_bravo_tx, 4);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        assert_view_update_rows(update, vec![], vec![("todos", bravo, bravo_tx)]);
+
+        let charlie = row_from_u64(30);
+        let charlie_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", charlie, 1_004).cells(priority_cells("charlie", 30)),
+            )
+            .unwrap();
+        accept_global(&mut core, charlie_tx, 5);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        assert_view_update_rows(update, vec![("todos", charlie, charlie_tx)], vec![]);
     }
 
     #[test]
