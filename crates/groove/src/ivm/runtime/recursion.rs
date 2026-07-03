@@ -8,14 +8,14 @@
 
 use std::collections::HashMap;
 
-use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, TableSourceOp};
+use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
 use crate::records::RecordDescriptor;
 use crate::storage::{OrderedKvStorage, RecordStore};
 
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
-    RecordDelta, RecordDeltas, ScopePath, SubTick, TableDelta, consolidate_deltas, plan_expr_names,
-    project_binding_source_deltas,
+    RecordDelta, RecordDeltas, ScopePath, StaticScanBounds, SubTick, TableDelta,
+    consolidate_deltas, plan_expr_names, project_binding_source_deltas, scan_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -248,8 +248,8 @@ where
     S: OrderedKvStorage,
 {
     let mut tables = HashMap::<String, RecordDescriptor>::new();
-    collect_table_sources(runtime.graph, seed, &mut tables)?;
-    collect_table_sources(runtime.graph, step, &mut tables)?;
+    collect_table_source_names(runtime.graph, seed, &mut tables)?;
+    collect_table_source_names(runtime.graph, step, &mut tables)?;
     let mut anti_join_right_tables = HashMap::<String, RecordDescriptor>::new();
     collect_anti_join_right_table_sources(runtime.graph, seed, &mut anti_join_right_tables)?;
     collect_anti_join_right_table_sources(runtime.graph, step, &mut anti_join_right_tables)?;
@@ -310,7 +310,8 @@ where
     // Evaluate the step once against snapshot table deltas and the full
     // accumulated relation. The result is discarded; the purpose is to prepare
     // shared arrangements so later positive ticks can probe old state.
-    let full_table_deltas = snapshot_table_deltas(runtime.graph, runtime.storage, step)?;
+    let full_table_deltas =
+        snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, step)?;
     runtime.eval_with_binding_and_table_deltas(
         &full_table_deltas,
         0,
@@ -322,26 +323,38 @@ where
 }
 
 pub(super) fn snapshot_table_deltas(
+    _schema: &crate::schema::DatabaseSchema,
     graph: &IvmGraph,
     storage: &impl OrderedKvStorage,
     root: NodeId,
 ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
-    let mut tables = HashMap::<String, RecordDescriptor>::new();
+    let mut tables = HashMap::<TableSnapshotSource, RecordDescriptor>::new();
     collect_table_sources(graph, root, &mut tables)?;
     tables
         .into_iter()
-        .map(|(table, descriptor)| {
-            let store = RecordStore::new(storage, &table, &descriptor);
+        .map(|(source, descriptor)| {
+            let store = RecordStore::new(storage, &source.table, &descriptor);
             let mut deltas = Vec::new();
-            store.scan_prefix(b"", &mut |_, record| {
+            let mut visit = |_: &[u8], record: &[u8]| {
                 deltas.push(RecordDelta {
                     record: record.to_vec(),
                     weight: 1,
                 });
                 Ok(())
-            })?;
+            };
+            match &source.scan {
+                None => store.scan_prefix(b"", &mut visit)?,
+                Some(scan) => match scan_bounds(scan)? {
+                    StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix, &mut visit)?,
+                    StaticScanBounds::Range { start, end } => {
+                        if start < end {
+                            store.scan_range(&start, &end, &mut visit)?;
+                        }
+                    }
+                },
+            }
             Ok(TableDelta {
-                table,
+                table: source.table,
                 descriptor,
                 deltas,
             })
@@ -349,17 +362,26 @@ pub(super) fn snapshot_table_deltas(
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TableSnapshotSource {
+    table: String,
+    scan: Option<StaticScanSpec>,
+}
+
 fn collect_table_sources(
     graph: &IvmGraph,
     node: NodeId,
-    tables: &mut HashMap<String, RecordDescriptor>,
+    tables: &mut HashMap<TableSnapshotSource, RecordDescriptor>,
 ) -> Result<(), IvmRuntimeError> {
     let graph_node = graph
         .node(node)
         .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
     if let OpType::TableSource(table) = &graph_node.descriptor.operator {
         tables
-            .entry(table.table.clone())
+            .entry(TableSnapshotSource {
+                table: table.table.clone(),
+                scan: table.scan.clone(),
+            })
             .or_insert_with(|| graph_node.descriptor.output);
     }
     for input in &graph_node.descriptor.inputs {
@@ -374,11 +396,34 @@ pub(super) fn recursive_read_tables(
     step: NodeId,
 ) -> Result<Vec<String>, IvmRuntimeError> {
     let mut tables = HashMap::<String, RecordDescriptor>::new();
-    collect_table_sources(graph, seed, &mut tables)?;
-    collect_table_sources(graph, step, &mut tables)?;
+    collect_table_source_names(graph, seed, &mut tables)?;
+    collect_table_source_names(graph, step, &mut tables)?;
     let mut tables = tables.into_keys().collect::<Vec<_>>();
     tables.sort();
     Ok(tables)
+}
+
+fn collect_table_source_names(
+    graph: &IvmGraph,
+    node: NodeId,
+    tables: &mut HashMap<String, RecordDescriptor>,
+) -> Result<(), IvmRuntimeError> {
+    let graph_node = graph
+        .node(node)
+        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+    if let OpType::TableSource(table) = &graph_node.descriptor.operator {
+        tables
+            .entry(table.table.clone())
+            .or_insert_with(|| graph_node.descriptor.output);
+    } else if let OpType::IndexSource(index) = &graph_node.descriptor.operator {
+        tables
+            .entry(index.table.clone())
+            .or_insert_with(|| graph_node.descriptor.output);
+    }
+    for input in &graph_node.descriptor.inputs {
+        collect_table_source_names(graph, *input, tables)?;
+    }
+    Ok(())
 }
 
 fn collect_binding_sources(
@@ -414,7 +459,7 @@ fn collect_anti_join_right_table_sources(
             .inputs
             .get(1)
             .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
-        collect_table_sources(graph, *right, tables)?;
+        collect_table_source_names(graph, *right, tables)?;
     }
     for input in &graph_node.descriptor.inputs {
         collect_anti_join_right_table_sources(graph, *input, tables)?;
@@ -536,6 +581,13 @@ where
         let output_desc = graph_node.descriptor.output;
         match &graph_node.descriptor.operator {
             OpType::TableSource(table) => self.eval_table_source(table, output_desc),
+            OpType::IndexSource(index) => super::NodeState::update_index_source(
+                index,
+                &output_desc,
+                &[],
+                Some(self.storage),
+                super::EvalMode::Hydrate,
+            ),
             OpType::InlineRecords(inline) => Ok(RecordDeltas {
                 descriptor: output_desc,
                 deltas: inline

@@ -10,7 +10,8 @@ use super::*;
 use std::sync::mpsc::TryRecvError;
 
 use crate::ivm::{
-    AggregateExpr, AggregateFunction, PlanExpr, PredicateExpr, ProjectField, TopByOrder,
+    AggregateExpr, AggregateFunction, LiteralValue, PlanExpr, PredicateExpr, ProjectField,
+    StaticScanSpec, TopByOrder,
 };
 use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
@@ -19,7 +20,7 @@ use crate::queries::{
 use crate::records::{EnumSchema, RecordDescriptor, ValueType};
 use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
-    PrimaryKey, PrimaryKeyColumn,
+    PrimaryKey, PrimaryKeyColumn, PrimaryKeyType,
 };
 use crate::storage::{MemoryStorage, RocksDbStorage};
 
@@ -56,6 +57,35 @@ fn unique_indexed_albums_schema() -> DatabaseSchema {
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(IndexSchema::new("unique_albums_by_title", ["title"]).unique())])
+}
+
+fn scan_spec_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "docs",
+        [
+            ColumnSchema::new("tenant", ColumnType::String),
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("path", ColumnType::String),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::new("tenant", PrimaryKeyType::String),
+        PrimaryKeyColumn::integer("id", IntegerKeyType::U64),
+    ]))
+    .with_index(IndexSchema::new("docs_by_path", ["path", "tenant"]))])
+}
+
+fn insert_scan_doc(batch: &mut DatabaseBatch, tenant: &str, id: u64, path: &str, payload: &[u8]) {
+    batch.insert(
+        "docs",
+        vec![
+            Value::String(tenant.to_owned()),
+            Value::U64(id),
+            Value::String(path.to_owned()),
+            Value::Bytes(payload.to_vec()),
+        ],
+    );
 }
 
 fn uuid(value: u128) -> uuid::Uuid {
@@ -4418,6 +4448,213 @@ fn query_returns_empty_result_for_empty_answers() {
         .unwrap();
 
     assert!(result.is_empty());
+}
+
+#[test]
+fn table_static_scan_specs_hydrate_like_full_scan_then_filter() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["docs", "indices"]).unwrap();
+    let mut database = Database::new(scan_spec_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    insert_scan_doc(&mut batch, "a", 1, "/alpha", b"\0first");
+    insert_scan_doc(&mut batch, "a", 2, "/beta", b"second");
+    insert_scan_doc(&mut batch, "équipe", 1, "/unicode", b"\xffthird");
+    insert_scan_doc(&mut batch, "z", 1, "/zeta", b"last");
+    database.commit_batch(batch).unwrap();
+
+    let prefix = database
+        .query_graph(GraphBuilder::table_scan(
+            "docs",
+            StaticScanSpec::Prefix(vec![LiteralValue::String("a".to_owned())]),
+        ))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(
+        prefix,
+        [
+            (
+                vec![
+                    Value::String("a".to_owned()),
+                    Value::U64(1),
+                    Value::String("/alpha".to_owned()),
+                    Value::Bytes(b"\0first".to_vec()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::String("a".to_owned()),
+                    Value::U64(2),
+                    Value::String("/beta".to_owned()),
+                    Value::Bytes(b"second".to_vec()),
+                ],
+                1,
+            ),
+        ]
+    );
+
+    let point = database
+        .query_graph(GraphBuilder::table_scan(
+            "docs",
+            StaticScanSpec::Point(vec![
+                LiteralValue::String("équipe".to_owned()),
+                LiteralValue::U64(1),
+            ]),
+        ))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(point.len(), 1);
+    assert_eq!(point[0].0[0], Value::String("équipe".to_owned()));
+
+    let range = database
+        .query_graph(GraphBuilder::table_scan(
+            "docs",
+            StaticScanSpec::Range {
+                start: vec![LiteralValue::String("a".to_owned()), LiteralValue::U64(2)],
+                end: vec![LiteralValue::String("z".to_owned())],
+            },
+        ))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(
+        range
+            .into_iter()
+            .map(|(row, _)| row[2].clone())
+            .collect::<Vec<_>>(),
+        [Value::String("/beta".to_owned())]
+    );
+
+    let empty = database
+        .query_graph(GraphBuilder::table_scan(
+            "docs",
+            StaticScanSpec::Range {
+                start: vec![LiteralValue::String("z".to_owned())],
+                end: vec![LiteralValue::String("a".to_owned())],
+            },
+        ))
+        .unwrap();
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn index_static_scan_specs_filter_index_records() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["docs", "indices"]).unwrap();
+    let mut database = Database::new(scan_spec_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    insert_scan_doc(&mut batch, "a", 1, "/alpha", b"first");
+    insert_scan_doc(&mut batch, "b", 2, "/alpha", b"second");
+    insert_scan_doc(&mut batch, "b", 3, "/beta", b"third");
+    database.commit_batch(batch).unwrap();
+
+    let prefix = database
+        .query_graph(GraphBuilder::index_scan(
+            "docs",
+            "docs_by_path",
+            StaticScanSpec::Prefix(vec![LiteralValue::String("/alpha".to_owned())]),
+        ))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(prefix.len(), 2);
+
+    let point = database
+        .query_graph(GraphBuilder::index_scan(
+            "docs",
+            "docs_by_path",
+            StaticScanSpec::Point(vec![
+                LiteralValue::String("/alpha".to_owned()),
+                LiteralValue::String("b".to_owned()),
+            ]),
+        ))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(point.len(), 1);
+
+    let range = database
+        .query_graph(GraphBuilder::index_scan(
+            "docs",
+            "docs_by_path",
+            StaticScanSpec::Range {
+                start: vec![LiteralValue::String("/alpha".to_owned())],
+                end: vec![LiteralValue::String("/beta".to_owned())],
+            },
+        ))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(range.len(), 2);
+}
+
+#[test]
+fn static_scan_specs_participate_in_node_identity() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["docs", "indices"]).unwrap();
+    let mut database = Database::new(scan_spec_schema(), storage).unwrap();
+
+    let same_a = GraphBuilder::table_scan(
+        "docs",
+        StaticScanSpec::Prefix(vec![LiteralValue::String("a".to_owned())]),
+    );
+    let same_b = same_a.clone();
+    let different = GraphBuilder::table_scan(
+        "docs",
+        StaticScanSpec::Prefix(vec![LiteralValue::String("b".to_owned())]),
+    );
+
+    let first_subscription = database.subscribe_one_sink(same_a).unwrap();
+    let after_first = database.ivm_runtime.graph().nodes().len();
+    let second_subscription = database.subscribe_one_sink(same_b).unwrap();
+    let after_same = database.ivm_runtime.graph().nodes().len();
+    let different_subscription = database.subscribe_one_sink(different).unwrap();
+    let after_different = database.ivm_runtime.graph().nodes().len();
+
+    assert_eq!(after_first, after_same);
+    assert!(after_different > after_same);
+    drop((
+        first_subscription,
+        second_subscription,
+        different_subscription,
+    ));
+}
+
+#[test]
+fn one_shot_static_scan_does_not_perturb_existing_subscription() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["docs", "indices"]).unwrap();
+    let mut database = Database::new(scan_spec_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("docs").project(["tenant", "id"]))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    insert_scan_doc(&mut batch, "a", 1, "/alpha", b"first");
+    insert_scan_doc(&mut batch, "b", 2, "/beta", b"second");
+    database.commit_batch(batch).unwrap();
+    let initial = expect_recv_vals(&subscription);
+    assert_eq!(initial.len(), 2);
+
+    let queried = database
+        .query_graph(GraphBuilder::table_scan(
+            "docs",
+            StaticScanSpec::Prefix(vec![LiteralValue::String("a".to_owned())]),
+        ))
+        .unwrap();
+    assert_eq!(queried.deltas.len(), 1);
+
+    let mut batch = database.open_batch();
+    insert_scan_doc(&mut batch, "c", 3, "/gamma", b"third");
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::String("c".to_owned()), Value::U64(3)], 1)]
+    );
 }
 
 #[test]

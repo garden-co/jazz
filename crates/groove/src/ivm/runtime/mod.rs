@@ -18,14 +18,14 @@ use std::sync::mpsc::{self, Receiver, RecvError, Sender, TryRecvError};
 use crate::ivm::{
     AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, BindingSourceOp,
     DurableStorage, FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp,
-    InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp, NodeDescriptor,
-    NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
-    ProjectionExpr, RecursiveOp, Retainer, TableSourceOp, TopByDirection, TopByOp, TopByOrderField,
-    UnnestOp, UnwrapNullableOp,
+    IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp,
+    NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr,
+    ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
+    TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
 };
 use crate::records::{self, BorrowedRecord, RecordDescriptor, Value, ValueType};
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
-use crate::storage::{OrderedKvStorage, OwnedWriteOperation, StagedWriteOverlay};
+use crate::storage::{OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay};
 use thiserror::Error;
 
 mod join;
@@ -269,6 +269,7 @@ impl IvmRuntime {
         };
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut evaluator = TickEvaluator {
+            schema: &self.schema,
             graph: &self.graph,
             table_deltas: &table_deltas,
             binding_deltas: &binding_deltas,
@@ -346,11 +347,12 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let table_deltas = snapshot_table_deltas(&self.graph, storage, output_node)?;
+        let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut eval_memo = HashMap::new();
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
+            schema: &self.schema,
             graph: &self.graph,
             table_deltas: &table_deltas,
             binding_deltas: &[],
@@ -393,11 +395,12 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let table_deltas = snapshot_table_deltas(&self.graph, storage, output_node)?;
+        let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut eval_memo = HashMap::new();
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
+            schema: &self.schema,
             graph: &self.graph,
             table_deltas: &table_deltas,
             binding_deltas: &[],
@@ -441,6 +444,7 @@ impl IvmRuntime {
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
+            schema: &self.schema,
             graph: &self.graph,
             table_deltas,
             binding_deltas: &[],
@@ -1006,7 +1010,7 @@ impl IvmRuntime {
         graph: &GraphBuilder,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
         match graph {
-            GraphBuilder::Table { table } => self
+            GraphBuilder::Table { table, .. } => self
                 .schema
                 .table(table)
                 .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))
@@ -1481,12 +1485,13 @@ impl IvmRuntime {
     fn add_dedup_graph(&mut self, graph: &GraphBuilder) -> Result<CompiledNode, IvmRuntimeError> {
         let inferred_output = self.infer_builder_output(graph)?;
         match graph {
-            GraphBuilder::Table { table } => {
+            GraphBuilder::Table { table, scan } => {
                 let output = inferred_output;
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::TableSource(TableSourceOp {
                             table: table.clone(),
+                            scan: scan.clone(),
                         }),
                         [],
                         output,
@@ -1516,7 +1521,7 @@ impl IvmRuntime {
                     node,
                 })
             }
-            GraphBuilder::Index { table, index } => {
+            GraphBuilder::Index { table, index, scan } => {
                 let table = self
                     .schema
                     .table(table)
@@ -1528,7 +1533,14 @@ impl IvmRuntime {
                     .find(|candidate| candidate.name == *index)
                     .ok_or_else(|| IvmRuntimeError::IndexNotFound(index.clone()))?
                     .clone();
-                self.add_dedup_index_by(&table, &index)
+                let source = self.index_source_op(&table, &index, scan.clone())?;
+                let output = inferred_output;
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(OpType::IndexSource(source), [], output),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode { output, node })
             }
             GraphBuilder::FrontierSource { binding, output } => {
                 let node = self.graph.dedup_node(
@@ -1616,7 +1628,7 @@ impl IvmRuntime {
                     .map(|field| resolve_field_ref(&output, field))
                     .collect::<Result<Vec<_>, _>>()?;
                 let primary_key_field_indices =
-                    if let GraphBuilder::Table { table } = input.as_ref() {
+                    if let GraphBuilder::Table { table, .. } = input.as_ref() {
                         let table_schema = self
                             .schema
                             .table(table)
@@ -1690,7 +1702,7 @@ impl IvmRuntime {
                     .map(|field| resolve_field_ref(&output, field))
                     .collect::<Result<Vec<_>, _>>()?;
                 let primary_key_field_indices =
-                    if let GraphBuilder::Table { table } = input.as_ref() {
+                    if let GraphBuilder::Table { table, .. } = input.as_ref() {
                         let table_schema = self
                             .schema
                             .table(table)
@@ -2066,6 +2078,7 @@ impl IvmRuntime {
             NodeDescriptor::new(
                 OpType::TableSource(TableSourceOp {
                     table: table.name.clone(),
+                    scan: None,
                 }),
                 [],
                 table_descriptor,
@@ -2077,7 +2090,7 @@ impl IvmRuntime {
         let CompiledNode {
             output: index_descriptor,
             node: index_by,
-        } = self.add_dedup_index_by_from_input(table, index, input, table_descriptor)?;
+        } = self.add_dedup_index_by_from_input(table, index, input, table_descriptor, None)?;
 
         let storage = DurableStorage {
             column_family: "indices".to_owned(),
@@ -2105,24 +2118,50 @@ impl IvmRuntime {
         Ok(persist)
     }
 
-    fn add_dedup_index_by(
-        &mut self,
+    fn index_source_op(
+        &self,
         table: &TableSchema,
         index: &IndexSchema,
-    ) -> Result<CompiledNode, IvmRuntimeError> {
+        scan: Option<StaticScanSpec>,
+    ) -> Result<IndexSourceOp, IvmRuntimeError> {
         let table_descriptor = table.record_schema();
-        let input = self.graph.dedup_node(
-            NodeDescriptor::new(
-                OpType::TableSource(TableSourceOp {
-                    table: table.name.clone(),
-                }),
-                [],
-                table_descriptor,
-            ),
-            NodeDurability::Ephemeral,
-        );
-        self.initialize_node_runtime(input);
-        self.add_dedup_index_by_from_input(table, index, input, table_descriptor)
+        let key_fields = index
+            .columns
+            .iter()
+            .map(|column| {
+                table_descriptor
+                    .field_index(column)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let primary_key = table
+            .primary_key
+            .as_ref()
+            .ok_or_else(|| IvmRuntimeError::MissingPrimaryKey(table.name.clone()))?;
+        let value_fields = primary_key
+            .columns
+            .iter()
+            .map(|column| {
+                table_descriptor
+                    .field_index(&column.column)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.column.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let index_key_covers_primary_key = primary_key
+            .columns
+            .iter()
+            .all(|primary_key_column| index.columns.contains(&primary_key_column.column));
+
+        Ok(IndexSourceOp {
+            table: table.name.clone(),
+            index: index.name.clone(),
+            key_fields,
+            value_fields,
+            unique: index.unique || index_key_covers_primary_key,
+            append_value_to_key: !index.unique && !index_key_covers_primary_key,
+            store_value: index.unique && !index_key_covers_primary_key,
+            scan,
+        })
     }
 
     fn add_dedup_index_by_from_input(
@@ -2131,6 +2170,7 @@ impl IvmRuntime {
         index: &IndexSchema,
         input: NodeId,
         table_descriptor: RecordDescriptor,
+        scan: Option<StaticScanSpec>,
     ) -> Result<CompiledNode, IvmRuntimeError> {
         let index_descriptor = index_record_descriptor();
         let key_fields = index
@@ -2179,6 +2219,7 @@ impl IvmRuntime {
                     unique: index.unique || index_key_covers_primary_key,
                     append_value_to_key: !index.unique && !index_key_covers_primary_key,
                     store_value: index.unique && !index_key_covers_primary_key,
+                    scan,
                 }),
                 [input],
                 index_descriptor,
@@ -3699,15 +3740,95 @@ struct NodeState;
 impl NodeState {
     fn update_table_source(
         input: &TableSourceOp,
+        schema: &DatabaseSchema,
         output_desc: &RecordDescriptor,
         table_deltas: &[TableDelta],
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let table_schema = schema
+            .table(&input.table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
+        let primary_key_fields = primary_key_field_indices(table_schema, output_desc)?;
         let mut deltas = Vec::new();
         for delta in table_deltas
             .iter()
             .filter(|delta| delta.table == input.table)
         {
-            deltas.extend(delta.deltas.iter().cloned());
+            for record_delta in &delta.deltas {
+                if let Some(scan) = &input.scan {
+                    let key = primary_key_value_bytes(
+                        output_desc,
+                        record_delta.raw(),
+                        &primary_key_fields,
+                    )?;
+                    if !key_matches_static_scan(&key, scan)? {
+                        continue;
+                    }
+                }
+                deltas.push(record_delta.clone());
+            }
+        }
+        Ok(RecordDeltas {
+            descriptor: *output_desc,
+            deltas,
+        })
+    }
+
+    fn update_index_source<S>(
+        input: &IndexSourceOp,
+        output_desc: &RecordDescriptor,
+        table_deltas: &[TableDelta],
+        storage: Option<&S>,
+        eval_mode: EvalMode,
+    ) -> Result<RecordDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        if eval_mode == EvalMode::Hydrate {
+            let storage = storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
+            let store = RecordStore::new(storage, "indices", output_desc);
+            let mut deltas = Vec::new();
+            let mut visit = |_: &[u8], record: &[u8]| {
+                deltas.push(RecordDelta {
+                    record: record.to_vec(),
+                    weight: 1,
+                });
+                Ok(())
+            };
+            match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
+                StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix, &mut visit)?,
+                StaticScanBounds::Range { start, end } => {
+                    if start < end {
+                        store.scan_range(&start, &end, &mut visit)?;
+                    }
+                }
+            }
+            return Ok(RecordDeltas {
+                descriptor: *output_desc,
+                deltas,
+            });
+        }
+
+        let index_by = IndexByOp {
+            key_expressions: Vec::new(),
+            value_expressions: Vec::new(),
+            explicit_index: None,
+            key_fields: input.key_fields.clone(),
+            value_fields: input.value_fields.clone(),
+            unique: input.unique,
+            append_value_to_key: input.append_value_to_key,
+            store_value: input.store_value,
+            scan: input.scan.clone(),
+        };
+        let mut deltas = Vec::new();
+        for table_delta in table_deltas
+            .iter()
+            .filter(|table_delta| table_delta.table == input.table)
+        {
+            deltas.extend(apply_index_by(
+                &index_by,
+                &table_delta.descriptor,
+                &table_delta.deltas,
+            )?);
         }
         Ok(RecordDeltas {
             descriptor: *output_desc,
@@ -3996,6 +4117,7 @@ fn validate_arg_by_primary_key_indices(
 
 /// Single-tick evaluator over a deduplicated graph.
 struct TickEvaluator<'a, S> {
+    schema: &'a DatabaseSchema,
     graph: &'a IvmGraph,
     table_deltas: &'a [TableDelta],
     binding_deltas: &'a [BindingDelta],
@@ -4012,6 +4134,7 @@ struct TickEvaluator<'a, S> {
 /// Borrowed runtime pieces used by recursive evaluation to run child graphs.
 /// This avoids giving recursion ownership of the whole [`IvmRuntime`].
 pub(super) struct GraphRuntimeView<'a, S> {
+    pub(super) schema: &'a DatabaseSchema,
     pub(super) graph: &'a IvmGraph,
     pub(super) table_deltas: &'a [TableDelta],
     pub(super) binding_deltas: &'a [BindingDelta],
@@ -4027,6 +4150,7 @@ pub(super) struct GraphRuntimeView<'a, S> {
 
 #[allow(clippy::too_many_arguments)]
 fn graph_runtime_view<'a, S>(
+    schema: &'a DatabaseSchema,
     graph: &'a IvmGraph,
     table_deltas: &'a [TableDelta],
     binding_deltas: &'a [BindingDelta],
@@ -4040,6 +4164,7 @@ fn graph_runtime_view<'a, S>(
     metrics: &'a mut TickMetrics,
 ) -> GraphRuntimeView<'a, S> {
     GraphRuntimeView {
+        schema,
         graph,
         table_deltas,
         binding_deltas,
@@ -4066,6 +4191,7 @@ where
         node: NodeId,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut evaluator = TickEvaluator {
+            schema: self.schema,
             graph: self.graph,
             table_deltas: self.table_deltas,
             binding_deltas: self.binding_deltas,
@@ -4091,6 +4217,7 @@ where
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut isolated_memo = HashMap::new();
         let mut evaluator = TickEvaluator {
+            schema: self.schema,
             graph: self.graph,
             table_deltas,
             binding_deltas: self.binding_deltas,
@@ -4114,6 +4241,7 @@ where
 
     pub(super) fn eval_root(&mut self, node: NodeId) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut evaluator = TickEvaluator {
+            schema: self.schema,
             graph: self.graph,
             table_deltas: self.table_deltas,
             binding_deltas: self.binding_deltas,
@@ -4160,8 +4288,15 @@ where
         }
         let result = match &graph_node.descriptor.operator {
             OpType::TableSource(input) => {
-                NodeState::update_table_source(input, &output_desc, self.table_deltas)
+                NodeState::update_table_source(input, self.schema, &output_desc, self.table_deltas)
             }
+            OpType::IndexSource(input) => NodeState::update_index_source(
+                input,
+                &output_desc,
+                self.table_deltas,
+                self.storage,
+                self.context.eval_mode,
+            ),
             OpType::InlineRecords(inline) if self.context.eval_mode == EvalMode::Hydrate => {
                 Ok(RecordDeltas {
                     descriptor: output_desc,
@@ -4898,6 +5033,7 @@ where
                 deltas: recursive_as_of.value().accumulated_deltas(),
             };
             let mut runtime = graph_runtime_view(
+                self.schema,
                 self.graph,
                 self.table_deltas,
                 self.binding_deltas,
@@ -4921,6 +5057,7 @@ where
         let deltas = recursive_delta(
             recursive_as_of.value_mut(),
             graph_runtime_view(
+                self.schema,
                 self.graph,
                 self.table_deltas,
                 self.binding_deltas,
@@ -5266,6 +5403,11 @@ fn apply_index_by(
             Vec::new()
         };
         for key in keys {
+            if let Some(scan) = &index_by.scan
+                && !key_matches_static_scan(&key, scan)?
+            {
+                continue;
+            }
             deltas.push(RecordDelta {
                 record: index_record_descriptor()
                     .create(&[Value::Bytes(key), Value::Bytes(value.clone())])?,
@@ -5315,6 +5457,64 @@ fn index_keys(
     Ok(keys)
 }
 
+pub(super) enum StaticScanBounds {
+    Prefix(Vec<u8>),
+    Range { start: Vec<u8>, end: Vec<u8> },
+}
+
+pub(super) fn scan_bounds(scan: &StaticScanSpec) -> Result<StaticScanBounds, IvmRuntimeError> {
+    match scan {
+        StaticScanSpec::Point(values) | StaticScanSpec::Prefix(values) => {
+            Ok(StaticScanBounds::Prefix(static_scan_key(values)?))
+        }
+        StaticScanSpec::Range { start, end } => Ok(StaticScanBounds::Range {
+            start: static_scan_key(start)?,
+            end: static_scan_key(end)?,
+        }),
+    }
+}
+
+fn static_scan_key(values: &[LiteralValue]) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut key = Vec::new();
+    for value in values {
+        encode_key_part(&mut key, &value.to_value())?;
+    }
+    Ok(key)
+}
+
+fn key_matches_static_scan(key: &[u8], scan: &StaticScanSpec) -> Result<bool, IvmRuntimeError> {
+    Ok(match scan_bounds(scan)? {
+        StaticScanBounds::Prefix(prefix) => key.starts_with(&prefix),
+        StaticScanBounds::Range { start, end } => start.as_slice() <= key && key < end.as_slice(),
+    })
+}
+
+fn persisted_index_scan_bounds(
+    table: &str,
+    index: &str,
+    scan: Option<&StaticScanSpec>,
+) -> Result<StaticScanBounds, IvmRuntimeError> {
+    let base = durable_index_key_prefix(table, index);
+    let wrap_prefix = |logical_key: Vec<u8>| {
+        let mut storage_key = base.clone();
+        if !logical_key.is_empty() {
+            storage_key.push(7);
+            encode_ordered_bytes_without_terminal(&mut storage_key, &logical_key);
+        }
+        storage_key
+    };
+    Ok(match scan {
+        None => StaticScanBounds::Prefix(base),
+        Some(StaticScanSpec::Point(values) | StaticScanSpec::Prefix(values)) => {
+            StaticScanBounds::Prefix(wrap_prefix(static_scan_key(values)?))
+        }
+        Some(StaticScanSpec::Range { start, end }) => StaticScanBounds::Range {
+            start: wrap_prefix(static_scan_key(start)?),
+            end: wrap_prefix(static_scan_key(end)?),
+        },
+    })
+}
+
 pub(crate) fn durable_index_key_prefix(table: &str, index: &str) -> Vec<u8> {
     let mut prefix = Vec::new();
     // NUL separators keep table/index names prefix-decodable without escaping.
@@ -5323,6 +5523,16 @@ pub(crate) fn durable_index_key_prefix(table: &str, index: &str) -> Vec<u8> {
     prefix.extend(index.as_bytes());
     prefix.push(0);
     prefix
+}
+
+fn encode_ordered_bytes_without_terminal(key: &mut Vec<u8>, value: &[u8]) {
+    for byte in value {
+        if *byte == 0 {
+            key.extend([0, 0xff]);
+        } else {
+            key.push(*byte);
+        }
+    }
 }
 
 fn primary_key_value_bytes(
@@ -5335,6 +5545,25 @@ fn primary_key_value_bytes(
         encode_record_field_key_part(&mut bytes, descriptor, record, *primary_key_field_idx)?;
     }
     Ok(bytes)
+}
+
+pub(super) fn primary_key_field_indices(
+    table: &TableSchema,
+    descriptor: &RecordDescriptor,
+) -> Result<Vec<usize>, IvmRuntimeError> {
+    let primary_key = table
+        .primary_key
+        .as_ref()
+        .ok_or_else(|| IvmRuntimeError::MissingPrimaryKey(table.name.clone()))?;
+    primary_key
+        .columns
+        .iter()
+        .map(|column| {
+            descriptor
+                .field_index(&column.column)
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.column.clone()))
+        })
+        .collect()
 }
 
 fn encode_record_field_key_part(
