@@ -2071,6 +2071,15 @@ impl WasmRuntime {
         Ok(user_id.to_string())
     }
 
+    /// Compute the canonical schema hash (64-char hex) for a JSON-encoded
+    /// schema without constructing a runtime.
+    #[wasm_bindgen(js_name = "computeSchemaHash")]
+    pub fn compute_schema_hash_static(schema_json: &str) -> Result<String, JsError> {
+        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+        Ok(SchemaHash::compute(&runtime_schema.schema).to_string())
+    }
+
     #[wasm_bindgen(js_name = "mintJazzSelfSignedToken")]
     pub fn mint_jazz_self_signed_token_static(
         seed_b64: &str,
