@@ -92,6 +92,12 @@ where
         })
     }
 
+    /// Return approximate live bytes for one backing class/column family when
+    /// the storage backend exposes that optional capability.
+    pub fn approximate_class_bytes(&self, cf: &str) -> Result<Option<u64>, Error> {
+        Ok(self.storage.approximate_class_bytes(cf)?)
+    }
+
     pub fn into_storage(self) -> S {
         self.storage
     }

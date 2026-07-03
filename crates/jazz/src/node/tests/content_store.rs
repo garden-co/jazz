@@ -2,13 +2,42 @@ use crate::ids::AuthorId;
 use crate::json_merge::{
     JsonMergeStrategy, STRATEGY_ID as JSON_STRATEGY_ID, STRATEGY_VERSION as JSON_STRATEGY_VERSION,
 };
-use crate::node::EdgeCacheClass;
+use crate::groove::storage::MemoryStorage;
+use crate::node::{EdgeCacheBudget, EdgeCacheClass};
 use crate::peer::PeerEvictionPins;
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::schema::{CONTENT_META_STORE, TextMergeSpec};
 use crate::tx::{RecordedMergeStrategy, TxId};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+fn open_memory_node_for_eviction() -> NodeState<MemoryStorage> {
+    let schema = schema();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    NodeState::new(node(0xe1), schema, MemoryStorage::new(&refs)).unwrap()
+}
+
+fn commit_global_title<S>(
+    node: &mut NodeState<S>,
+    row_uuid: RowUuid,
+    tx_time: u64,
+    title: &str,
+) -> TxId
+where
+    S: OrderedKvStorage,
+{
+    let tx_id = node
+        .commit_mergeable(
+            MergeableCommit::new("todos", row_uuid, tx_time).cells(BTreeMap::from([(
+                "title".to_owned(),
+                Value::String(title.to_owned()),
+            )])),
+        )
+        .unwrap();
+    node.finalize_local_mergeable_commit(tx_id).unwrap();
+    tx_id
+}
 
 #[test]
 fn content_store_appends_reads_isolates_and_survives_reopen() {
@@ -274,6 +303,99 @@ fn evict_cold_removes_content_bytes_and_preserves_pin_set() {
         opened.content_store().read(&extent),
         Err(Error::MissingContentExtent(_))
     ));
+}
+
+#[test]
+fn budget_eviction_removes_least_recently_written_unpinned_rows_to_low_water() {
+    // Internal test: cache byte accounting and physical row-version eviction
+    // order are below the public client API. The public refetch behavior is
+    // covered by `evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate`.
+    let mut node = open_memory_node_for_eviction();
+    let old = commit_global_title(&mut node, row(0x51), 51, &"old ".repeat(256));
+    let middle = commit_global_title(&mut node, row(0x52), 52, &"middle ".repeat(256));
+    let new = commit_global_title(&mut node, row(0x53), 53, &"new ".repeat(256));
+    let before = node.edge_cache_metered_bytes().unwrap().unwrap();
+
+    let report = node
+        .enforce_edge_cache_budget(
+            &PeerEvictionPins::default(),
+            EdgeCacheBudget::new(before.saturating_sub(1)),
+        )
+        .unwrap()
+        .expect("over-budget cache should evict");
+
+    assert!(report.after_bytes <= report.low_water_bytes);
+    assert_eq!(report.evicted.row_versions_evictable, 1);
+    assert!(node.query_versions_for_tx(old).unwrap().is_empty());
+    assert!(!node.query_versions_for_tx(middle).unwrap().is_empty());
+    assert!(!node.query_versions_for_tx(new).unwrap().is_empty());
+}
+
+#[test]
+fn budget_eviction_preserves_pinned_rows_regardless_of_age() {
+    // Internal test: pin classification is an edge-cache storage contract, not
+    // directly observable through public query results.
+    let mut node = open_memory_node_for_eviction();
+    let pending = node
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x54), 54).cells(BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("pending pinned ".repeat(256)),
+            )])),
+        )
+        .unwrap();
+    let accepted = commit_global_title(&mut node, row(0x55), 55, &"accepted ".repeat(256));
+    let before = node.edge_cache_metered_bytes().unwrap().unwrap();
+
+    let report = node
+        .enforce_edge_cache_budget(
+            &PeerEvictionPins::default(),
+            EdgeCacheBudget::new(before.saturating_sub(1)),
+        )
+        .unwrap()
+        .expect("over-budget cache should evict");
+
+    assert_eq!(report.evicted.fate_pending_txs_pinned, 1);
+    assert!(!node.query_versions_for_tx(pending).unwrap().is_empty());
+    assert!(node.query_versions_for_tx(accepted).unwrap().is_empty());
+}
+
+#[test]
+fn absent_budget_leaves_eviction_manual_only() {
+    // Internal test: absent budget preserves today's manual-only behavior.
+    let mut node = open_memory_node_for_eviction();
+    let tx_id = commit_global_title(&mut node, row(0x56), 56, &"budget absent".repeat(256));
+    let before = node.edge_cache_metered_bytes().unwrap().unwrap();
+
+    assert!(before > 1);
+    assert!(!node.query_versions_for_tx(tx_id).unwrap().is_empty());
+}
+
+#[test]
+fn budget_eviction_survives_reopen() {
+    // Internal test: restart persistence is a storage/cache property, so this
+    // checks the physical row-version body after reopening the node.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let mut opened = NodeState::new(node(0xe3), schema.clone(), storage).unwrap();
+    let old = commit_global_title(&mut opened, row(0x57), 57, &"old reopen ".repeat(256));
+    let _new = commit_global_title(&mut opened, row(0x58), 58, &"new reopen ".repeat(256));
+    let before = opened.edge_cache_metered_bytes().unwrap().unwrap();
+    opened
+        .enforce_edge_cache_budget(
+        &PeerEvictionPins::default(),
+        EdgeCacheBudget::new(before.saturating_sub(1)),
+    )
+    .unwrap()
+    .expect("over-budget cache should evict");
+    assert!(opened.query_versions_for_tx(old).unwrap().is_empty());
+    drop(opened);
+
+    let mut reopened = reopen_node_at(&temp_dir, node(0xe3), schema);
+    assert!(reopened.query_versions_for_tx(old).unwrap().is_empty());
 }
 
 #[test]
