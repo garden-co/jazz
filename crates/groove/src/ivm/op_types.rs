@@ -217,6 +217,7 @@ pub enum TopByDirection {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AggregateOp {
     pub group_key: Vec<PlanExpr>,
+    pub group_field_indices: Vec<usize>,
     pub aggregates: Vec<AggregateExpr>,
 }
 
@@ -233,6 +234,7 @@ pub struct AggregateExpr {
 pub enum AggregateFunction {
     Count,
     Sum,
+    Avg,
     Min,
     Max,
 }

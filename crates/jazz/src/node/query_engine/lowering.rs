@@ -226,6 +226,22 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 .map(|field| field.output_name.clone())
                 .collect(),
         ),
+        GraphBuilder::Aggregate {
+            group_cols,
+            aggregates,
+            ..
+        } => Some(
+            group_cols
+                .iter()
+                .map(|field| field.display_name())
+                .chain(aggregates.iter().enumerate().map(|(index, aggregate)| {
+                    aggregate
+                        .output_name
+                        .clone()
+                        .unwrap_or_else(|| format!("aggregate_{index}"))
+                }))
+                .collect(),
+        ),
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
@@ -456,7 +472,8 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. } => collect_binding_source_params(input, domain),
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => collect_binding_source_params(input, domain),
         GraphBuilder::Union { inputs } => {
             for input in inputs {
                 collect_binding_source_params(input, domain);

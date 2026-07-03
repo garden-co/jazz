@@ -207,6 +207,11 @@ pub enum GraphBuilder {
         offset: usize,
         limit: usize,
     },
+    Aggregate {
+        input: Box<GraphBuilder>,
+        group_cols: Vec<FieldRef>,
+        aggregates: Vec<AggregateExpr>,
+    },
 }
 
 /// Field reference carried by graph builders.
@@ -372,6 +377,18 @@ impl GraphBuilder {
             tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
             offset,
             limit,
+        }
+    }
+
+    pub fn aggregate(
+        input: GraphBuilder,
+        group_cols: impl IntoIterator<Item = impl Into<String>>,
+        aggregates: impl IntoIterator<Item = AggregateExpr>,
+    ) -> Self {
+        Self::Aggregate {
+            input: Box::new(input),
+            group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
+            aggregates: aggregates.into_iter().collect(),
         }
     }
 
@@ -829,6 +846,16 @@ impl NodeDescriptor {
             }
             OpType::Aggregate(_) => {
                 expect_arity(&self.inputs, 1)?;
+                if let OpType::Aggregate(aggregate) = &self.operator {
+                    for &field_idx in &aggregate.group_field_indices {
+                        if field_idx >= input_outputs[0].fields().len() {
+                            return Err(GraphValidationError::FieldIndexOutOfBounds {
+                                index: field_idx,
+                                len: input_outputs[0].fields().len(),
+                            });
+                        }
+                    }
+                }
                 Ok(())
             }
             OpType::Recursive(_) => expect_arity(&self.inputs, 2),

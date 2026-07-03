@@ -16,11 +16,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, RecvError, Sender, TryRecvError};
 
 use crate::ivm::{
-    ArgMaxByOp, ArgMinByOp, BindingSourceOp, DurableStorage, FieldRef, FilterOp, FrontierName,
-    FrontierSourceOp, GraphBuilder, IndexByOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind,
-    LiteralValue, MapProjectOp, NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp,
-    PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer,
-    TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
+    AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, BindingSourceOp,
+    DurableStorage, FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp,
+    InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp, NodeDescriptor,
+    NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
+    ProjectionExpr, RecursiveOp, Retainer, TableSourceOp, TopByDirection, TopByOp, TopByOrderField,
+    UnnestOp, UnwrapNullableOp,
 };
 use crate::records::{self, BorrowedRecord, RecordDescriptor, Value, ValueType};
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
@@ -1018,6 +1019,14 @@ impl IvmRuntime {
             | GraphBuilder::ArgMaxBy { input, .. }
             | GraphBuilder::ArgMinBy { input, .. }
             | GraphBuilder::TopBy { input, .. } => self.infer_builder_output(input),
+            GraphBuilder::Aggregate {
+                input,
+                group_cols,
+                aggregates,
+            } => {
+                let input = self.infer_builder_output(input)?;
+                aggregate_descriptor(&input, group_cols, aggregates)
+            }
             GraphBuilder::UnwrapNullable { input, field } => {
                 let input = self.infer_builder_output(input)?;
                 let field_idx = resolve_field_ref(&input, field)?;
@@ -1365,30 +1374,71 @@ impl IvmRuntime {
             .graph
             .nodes()
             .values()
-            .filter_map(|node| {
-                let (OpType::Join(join) | OpType::AntiJoin(join)) = &node.descriptor.operator
-                else {
-                    return None;
-                };
-                let [left, right] = node.descriptor.inputs.as_slice() else {
-                    return None;
-                };
-                Some([
-                    ArrangementKey {
-                        scope: ScopePath::root(),
-                        input: *left,
-                        fields: plan_expr_names(&join.left_key),
-                        descriptor: join.left_descriptor,
-                    },
-                    ArrangementKey {
-                        scope: ScopePath::root(),
-                        input: *right,
-                        fields: plan_expr_names(&join.right_key),
-                        descriptor: join.right_descriptor,
-                    },
-                ])
+            .flat_map(|node| {
+                let mut keys = Vec::new();
+                match &node.descriptor.operator {
+                    OpType::Join(join) | OpType::AntiJoin(join) => {
+                        if let [left, right] = node.descriptor.inputs.as_slice() {
+                            keys.push(ArrangementKey {
+                                scope: ScopePath::root(),
+                                input: *left,
+                                fields: plan_expr_names(&join.left_key),
+                                descriptor: join.left_descriptor,
+                            });
+                            keys.push(ArrangementKey {
+                                scope: ScopePath::root(),
+                                input: *right,
+                                fields: plan_expr_names(&join.right_key),
+                                descriptor: join.right_descriptor,
+                            });
+                        }
+                    }
+                    OpType::ArgMaxBy(arg_by) => {
+                        if let [input] = node.descriptor.inputs.as_slice() {
+                            keys.push(ArrangementKey {
+                                scope: ScopePath::root(),
+                                input: *input,
+                                fields: arg_by.group_fields.clone(),
+                                descriptor: node.descriptor.output,
+                            });
+                        }
+                    }
+                    OpType::ArgMinBy(arg_by) => {
+                        if let [input] = node.descriptor.inputs.as_slice() {
+                            keys.push(ArrangementKey {
+                                scope: ScopePath::root(),
+                                input: *input,
+                                fields: arg_by.group_fields.clone(),
+                                descriptor: node.descriptor.output,
+                            });
+                        }
+                    }
+                    OpType::TopBy(top_by) => {
+                        if let [input] = node.descriptor.inputs.as_slice() {
+                            keys.push(ArrangementKey {
+                                scope: ScopePath::root(),
+                                input: *input,
+                                fields: top_by.group_fields.clone(),
+                                descriptor: node.descriptor.output,
+                            });
+                        }
+                    }
+                    OpType::Aggregate(aggregate) => {
+                        if let [input] = node.descriptor.inputs.as_slice()
+                            && let Some(input_node) = self.graph.node(*input)
+                        {
+                            keys.push(ArrangementKey {
+                                scope: ScopePath::root(),
+                                input: *input,
+                                fields: plan_expr_names(&aggregate.group_key),
+                                descriptor: input_node.descriptor.output,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                keys
             })
-            .flatten()
             .collect::<HashSet<_>>();
         self.arrangement_states.retain(|key, _| {
             referenced.iter().any(|referenced| {
@@ -1767,6 +1817,42 @@ impl IvmRuntime {
                             limit: *limit,
                         }),
                         [compiled_input.node],
+                        output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode { output, node })
+            }
+            GraphBuilder::Aggregate {
+                input,
+                group_cols,
+                aggregates,
+            } => {
+                let compiled_input = self.add_dedup_graph(input)?;
+                let input_node = compiled_input.node;
+                let input_output = compiled_input.output;
+                let output = inferred_output;
+                let group_field_indices = group_cols
+                    .iter()
+                    .map(|field| resolve_field_ref(&input_output, field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let group_key = group_field_indices
+                    .iter()
+                    .map(|field| Ok(PlanExpr::Field(field_name_at(&input_output, *field)?)))
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let aggregates = aggregates
+                    .iter()
+                    .map(|aggregate| resolve_aggregate_expr(&input_output, aggregate))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        OpType::Aggregate(AggregateOp {
+                            group_key,
+                            group_field_indices,
+                            aggregates,
+                        }),
+                        [input_node],
                         output,
                     ),
                     NodeDurability::Ephemeral,
@@ -2775,7 +2861,8 @@ fn count_builder_nodes(graph: &GraphBuilder) -> usize {
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. } => 1 + count_builder_nodes(input),
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => 1 + count_builder_nodes(input),
         GraphBuilder::Union { inputs } => 1 + inputs.iter().map(count_builder_nodes).sum::<usize>(),
         GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
             1 + count_builder_nodes(left) + count_builder_nodes(right)
@@ -2795,7 +2882,8 @@ fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. } => builder_contains_binding_source(input),
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => builder_contains_binding_source(input),
         GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_binding_source),
         GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
             builder_contains_binding_source(left) || builder_contains_binding_source(right)
@@ -2860,7 +2948,8 @@ fn collect_builder_field_names(
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. } => {
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => {
             collect_builder_field_names(input, runtime, occupied)?;
         }
         GraphBuilder::Union { inputs } => {
@@ -3193,6 +3282,25 @@ fn lift_literal_filter(
                 value: lifted.value,
             }))
         }
+        GraphBuilder::Aggregate {
+            input,
+            group_cols,
+            aggregates,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+                return Ok(None);
+            };
+            let mut group_cols = group_cols.clone();
+            group_cols.push(FieldRef::name(binding_field));
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::Aggregate {
+                    input: Box::new(lifted.graph),
+                    group_cols,
+                    aggregates: aggregates.clone(),
+                },
+                value: lifted.value,
+            }))
+        }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::Index { .. }
@@ -3335,7 +3443,8 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. } => graph_outputs_binding(input, binding_field),
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => graph_outputs_binding(input, binding_field),
         GraphBuilder::Recursive { seed, .. } => graph_outputs_binding(seed, binding_field),
         GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
             graph_outputs_binding(left, binding_field)
@@ -3463,6 +3572,7 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::ArgMaxBy { .. }
         | GraphBuilder::ArgMinBy { .. }
         | GraphBuilder::TopBy { .. }
+        | GraphBuilder::Aggregate { .. }
         | GraphBuilder::Union { .. } => None,
     }
 }
@@ -3534,6 +3644,15 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             tie_cols,
             offset,
             limit,
+        },
+        GraphBuilder::Aggregate {
+            input,
+            group_cols,
+            aggregates,
+        } => GraphBuilder::Aggregate {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            group_cols,
+            aggregates,
         },
         GraphBuilder::Union { inputs } => GraphBuilder::Union {
             inputs: inputs
@@ -3839,7 +3958,8 @@ fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. } => builder_contains_recursive(input),
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => builder_contains_recursive(input),
         GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_recursive),
         GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
             builder_contains_recursive(left) || builder_contains_recursive(right)
@@ -4111,6 +4231,10 @@ where
             OpType::TopBy(top_by) => {
                 let input = self.update_unary_input(&graph_node, node)?;
                 self.update_top_by(node, top_by, output_desc, input)
+            }
+            OpType::Aggregate(aggregate) => {
+                let input = self.update_unary_input(&graph_node, node)?;
+                self.update_aggregate(node, aggregate, output_desc, input)
             }
             OpType::IndexBy(index_by) => {
                 let input = self.update_unary_input(&graph_node, node)?;
@@ -4552,6 +4676,150 @@ where
         })
     }
 
+    fn update_aggregate(
+        &mut self,
+        node: NodeId,
+        aggregate: &AggregateOp,
+        output_desc: RecordDescriptor,
+        input: RecordDeltas,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        if input.deltas.is_empty() {
+            return Ok(RecordDeltas::empty(output_desc));
+        }
+        let [input_node] = self
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?
+            .descriptor
+            .inputs
+            .as_slice()
+        else {
+            return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+        };
+        let input_desc = input.descriptor;
+        let group_fields = plan_expr_names(&aggregate.group_key);
+        if self.context.eval_mode == EvalMode::Hydrate {
+            let mut groups = BTreeMap::<Vec<u8>, Vec<(Vec<u8>, i64)>>::new();
+            for delta in input.deltas {
+                let group_key = encoded_record_key_part(
+                    input_desc,
+                    delta.raw(),
+                    &aggregate.group_field_indices,
+                )?;
+                groups
+                    .entry(group_key)
+                    .or_default()
+                    .push((delta.record, delta.weight));
+            }
+            let mut output = Vec::new();
+            for records in groups.values() {
+                if let Some(record) =
+                    aggregate_row_from_records(input_desc, output_desc, aggregate, records)?
+                {
+                    output.push(RecordDelta { record, weight: 1 });
+                }
+            }
+            return Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas: output,
+            });
+        }
+        let arrangement_key =
+            self.arrangement_key(*input_node, input_desc, group_fields.clone())?;
+        let sub_tick = self.arrangement_sub_tick(&arrangement_key);
+        let mut arrangement = self
+            .arrangement_states
+            .remove(&arrangement_key)
+            .unwrap_or_default();
+        let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
+        for delta in &input.deltas {
+            let group_key =
+                encoded_record_key_part(input_desc, delta.raw(), &aggregate.group_field_indices)?;
+            touched_groups
+                .entry(group_key)
+                .or_default()
+                .push(delta.clone());
+        }
+        let before_groups =
+            if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
+                BTreeMap::new()
+            } else {
+                touched_groups
+                    .keys()
+                    .map(|group| (group.clone(), arrangement.value().records_for_key(group)))
+                    .collect::<BTreeMap<_, _>>()
+            };
+        let should_apply_arrangement = self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            || arrangement.as_of() != Some(sub_tick);
+        if should_apply_arrangement {
+            let replace_within_same_tick = self.context.arrangement_update_mode
+                == ArrangementUpdateMode::Replace
+                && arrangement
+                    .as_of()
+                    .is_some_and(|current| current.tick == sub_tick.tick);
+            if !replace_within_same_tick
+                && arrangement
+                    .as_of()
+                    .is_some_and(|current| current > sub_tick)
+            {
+                return Err(IvmRuntimeError::OutOfOrderRuntimeState {
+                    current: format!("{:?}", arrangement.as_of().expect("checked above")),
+                    next: format!("{sub_tick:?}"),
+                });
+            }
+            arrangement.value_mut().apply_record_deltas(
+                input_desc,
+                &group_fields,
+                &input.deltas,
+                self.context.arrangement_update_mode,
+            )?;
+            if replace_within_same_tick {
+                arrangement.replace_as_of_at_least(sub_tick);
+            } else {
+                arrangement.mark_forward_as_of(sub_tick)?;
+            }
+        }
+
+        let mut output = Vec::new();
+        for group_prefix in touched_groups.keys() {
+            let after_records = arrangement.value().records_for_key(group_prefix);
+            let after =
+                aggregate_row_from_records(input_desc, output_desc, aggregate, &after_records)?;
+            let before_records = if let Some(records) = before_groups
+                .get(group_prefix)
+                .filter(|records| !records.is_empty())
+            {
+                records.clone()
+            } else {
+                records_before_from_deltas(
+                    after_records,
+                    touched_groups
+                        .get(group_prefix)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            };
+            let before =
+                aggregate_row_from_records(input_desc, output_desc, aggregate, &before_records)?;
+            if before == after {
+                continue;
+            }
+            if let Some(record) = before {
+                output.push(RecordDelta { record, weight: -1 });
+            }
+            if let Some(record) = after {
+                output.push(RecordDelta { record, weight: 1 });
+            }
+        }
+        self.arrangement_states.insert(arrangement_key, arrangement);
+
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas: consolidate_deltas(output),
+        })
+    }
+
     fn arrangement_key(
         &self,
         input: NodeId,
@@ -4897,6 +5165,87 @@ fn unnest_descriptor(
         .collect::<Vec<_>>();
     fields.push((element_field.to_owned(), (**element_type).clone()));
     Ok(RecordDescriptor::new(fields))
+}
+
+fn aggregate_descriptor(
+    input: &RecordDescriptor,
+    group_cols: &[FieldRef],
+    aggregates: &[AggregateExpr],
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    let mut fields = Vec::new();
+    for group_col in group_cols {
+        let field_idx = resolve_field_ref(input, group_col)?;
+        let field = input
+            .fields()
+            .get(field_idx)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+        fields.push((field_ref_name(input, group_col)?, field.value_type.clone()));
+    }
+    for (index, aggregate) in aggregates.iter().enumerate() {
+        let name = aggregate
+            .output_name
+            .clone()
+            .unwrap_or_else(|| format!("aggregate_{index}"));
+        fields.push((name, aggregate_output_type(input, aggregate)?));
+    }
+    Ok(RecordDescriptor::new(fields))
+}
+
+fn aggregate_output_type(
+    input: &RecordDescriptor,
+    aggregate: &AggregateExpr,
+) -> Result<ValueType, IvmRuntimeError> {
+    Ok(match aggregate.function {
+        AggregateFunction::Count => ValueType::U64,
+        AggregateFunction::Avg => ValueType::F64,
+        AggregateFunction::Sum => {
+            let value_type = aggregate_expr_value_type(input, aggregate)?;
+            match non_nullable_type(&value_type) {
+                ValueType::U8
+                | ValueType::U16
+                | ValueType::U32
+                | ValueType::U64
+                | ValueType::F64 => value_type,
+                _ => return Err(IvmRuntimeError::UnsupportedOperator),
+            }
+        }
+        AggregateFunction::Min | AggregateFunction::Max => {
+            aggregate_expr_value_type(input, aggregate)?
+        }
+    })
+}
+
+fn aggregate_expr_value_type(
+    input: &RecordDescriptor,
+    aggregate: &AggregateExpr,
+) -> Result<ValueType, IvmRuntimeError> {
+    let Some(expr) = &aggregate.expression else {
+        return Err(IvmRuntimeError::UnsupportedOperator);
+    };
+    match expr {
+        PlanExpr::Field(field) | PlanExpr::Nullable(field) | PlanExpr::NullableFlat(field) => {
+            let field_idx = input
+                .field_index(field)
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+            Ok(input
+                .fields()
+                .get(field_idx)
+                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?
+                .value_type
+                .clone())
+        }
+        PlanExpr::Literal(literal) => literal
+            .value_type()
+            .ok_or(IvmRuntimeError::UnsupportedOperator),
+        PlanExpr::Null(value_type) => Ok(value_type.clone()),
+    }
+}
+
+fn non_nullable_type(value_type: &ValueType) -> &ValueType {
+    match value_type {
+        ValueType::Nullable(inner) => inner,
+        other => other,
+    }
 }
 
 fn index_record_descriptor() -> RecordDescriptor {
@@ -5360,6 +5709,303 @@ fn consolidate_deltas(deltas: Vec<RecordDelta>) -> Vec<RecordDelta> {
         .collect()
 }
 
+fn resolve_aggregate_expr(
+    input: &RecordDescriptor,
+    aggregate: &AggregateExpr,
+) -> Result<AggregateExpr, IvmRuntimeError> {
+    let expression = match &aggregate.expression {
+        Some(PlanExpr::Field(field)) => Some(PlanExpr::Field(resolve_field_name(input, field)?)),
+        Some(PlanExpr::Nullable(field)) => {
+            Some(PlanExpr::Nullable(resolve_field_name(input, field)?))
+        }
+        Some(PlanExpr::NullableFlat(field)) => {
+            Some(PlanExpr::NullableFlat(resolve_field_name(input, field)?))
+        }
+        Some(PlanExpr::Literal(_)) | Some(PlanExpr::Null(_)) | None => aggregate.expression.clone(),
+    };
+    Ok(AggregateExpr {
+        function: aggregate.function.clone(),
+        expression,
+        distinct: aggregate.distinct,
+        output_name: aggregate.output_name.clone(),
+    })
+}
+
+fn resolve_field_name(input: &RecordDescriptor, field: &str) -> Result<String, IvmRuntimeError> {
+    let field_idx = input
+        .field_index(field)
+        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
+    field_name_at(input, field_idx)
+}
+
+fn records_before_from_deltas(
+    after_records: Vec<(Vec<u8>, i64)>,
+    deltas: Vec<RecordDelta>,
+) -> Vec<(Vec<u8>, i64)> {
+    let mut records = BTreeMap::<Vec<u8>, (Vec<u8>, i64)>::new();
+    for (record, weight) in after_records {
+        records.insert(record.clone(), (record, weight));
+    }
+    for delta in deltas {
+        let entry = records
+            .entry(delta.record.clone())
+            .or_insert_with(|| (delta.record.clone(), 0));
+        entry.1 -= delta.weight;
+    }
+    records
+        .into_iter()
+        .filter_map(|(_, (record, weight))| (weight > 0).then_some((record, weight)))
+        .collect()
+}
+
+fn aggregate_row_from_records(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    aggregate: &AggregateOp,
+    records: &[(Vec<u8>, i64)],
+) -> Result<Option<Vec<u8>>, IvmRuntimeError> {
+    let mut positive = Vec::new();
+    let mut total_weight = 0_i64;
+    for (record, weight) in records {
+        if *weight < 0 {
+            return Err(IvmRuntimeError::UnsupportedOperator);
+        }
+        if *weight > 0 {
+            total_weight += *weight;
+            positive.push((record.as_slice(), *weight));
+        }
+    }
+    if total_weight == 0 {
+        return Ok(None);
+    }
+
+    let first = BorrowedRecord::new(positive[0].0, &input_desc);
+    let mut values = Vec::new();
+    for group_expr in &aggregate.group_key {
+        values.push(evaluate_aggregate_expr(&first, group_expr)?);
+    }
+    for aggregate_expr in &aggregate.aggregates {
+        values.push(evaluate_aggregate(records, input_desc, aggregate_expr)?);
+    }
+    output_desc
+        .create(&values)
+        .map(Some)
+        .map_err(IvmRuntimeError::RecordEncoding)
+}
+
+fn evaluate_aggregate(
+    records: &[(Vec<u8>, i64)],
+    input_desc: RecordDescriptor,
+    aggregate: &AggregateExpr,
+) -> Result<Value, IvmRuntimeError> {
+    if aggregate.distinct {
+        return Err(IvmRuntimeError::UnsupportedOperator);
+    }
+    match aggregate.function {
+        AggregateFunction::Count => {
+            let mut count = 0_u64;
+            for (record, weight) in records {
+                if *weight <= 0 {
+                    continue;
+                }
+                if let Some(expr) = &aggregate.expression {
+                    let value =
+                        evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr)?;
+                    if is_null_value(&value) {
+                        continue;
+                    }
+                }
+                count = count
+                    .checked_add(
+                        u64::try_from(*weight).map_err(|_| IvmRuntimeError::UnsupportedOperator)?,
+                    )
+                    .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+            }
+            Ok(Value::U64(count))
+        }
+        AggregateFunction::Sum => aggregate_sum(records, input_desc, aggregate),
+        AggregateFunction::Avg => aggregate_avg(records, input_desc, aggregate),
+        AggregateFunction::Min | AggregateFunction::Max => {
+            aggregate_extremum(records, input_desc, aggregate)
+        }
+    }
+}
+
+fn aggregate_sum(
+    records: &[(Vec<u8>, i64)],
+    input_desc: RecordDescriptor,
+    aggregate: &AggregateExpr,
+) -> Result<Value, IvmRuntimeError> {
+    let Some(expr) = &aggregate.expression else {
+        return Err(IvmRuntimeError::UnsupportedOperator);
+    };
+    let mut kind = None;
+    let mut u64_sum = 0_u64;
+    let mut f64_sum = 0_f64;
+    for (record, weight) in records {
+        if *weight <= 0 {
+            continue;
+        }
+        let value = evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr)?;
+        let Some(value) = unwrap_nullable_value(value) else {
+            continue;
+        };
+        match value {
+            Value::U8(value) => {
+                kind.get_or_insert(ValueType::U8);
+                u64_sum = add_weighted_u64(u64_sum, u64::from(value), *weight)?;
+            }
+            Value::U16(value) => {
+                kind.get_or_insert(ValueType::U16);
+                u64_sum = add_weighted_u64(u64_sum, u64::from(value), *weight)?;
+            }
+            Value::U32(value) => {
+                kind.get_or_insert(ValueType::U32);
+                u64_sum = add_weighted_u64(u64_sum, u64::from(value), *weight)?;
+            }
+            Value::U64(value) => {
+                kind.get_or_insert(ValueType::U64);
+                u64_sum = add_weighted_u64(u64_sum, value, *weight)?;
+            }
+            Value::F64(value) => {
+                kind.get_or_insert(ValueType::F64);
+                f64_sum += value * (*weight as f64);
+            }
+            _ => return Err(IvmRuntimeError::UnsupportedOperator),
+        }
+    }
+    match kind.ok_or(IvmRuntimeError::UnsupportedOperator)? {
+        ValueType::U8 => u8::try_from(u64_sum)
+            .map(Value::U8)
+            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+        ValueType::U16 => u16::try_from(u64_sum)
+            .map(Value::U16)
+            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+        ValueType::U32 => u32::try_from(u64_sum)
+            .map(Value::U32)
+            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+        ValueType::U64 => Ok(Value::U64(u64_sum)),
+        ValueType::F64 => Ok(Value::F64(f64_sum)),
+        _ => Err(IvmRuntimeError::UnsupportedOperator),
+    }
+}
+
+fn aggregate_avg(
+    records: &[(Vec<u8>, i64)],
+    input_desc: RecordDescriptor,
+    aggregate: &AggregateExpr,
+) -> Result<Value, IvmRuntimeError> {
+    let Some(expr) = &aggregate.expression else {
+        return Err(IvmRuntimeError::UnsupportedOperator);
+    };
+    let mut sum = 0_f64;
+    let mut count = 0_i64;
+    for (record, weight) in records {
+        if *weight <= 0 {
+            continue;
+        }
+        let value = evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr)?;
+        let Some(value) = unwrap_nullable_value(value) else {
+            continue;
+        };
+        let numeric = numeric_value_as_f64(&value)?;
+        sum += numeric * (*weight as f64);
+        count += *weight;
+    }
+    if count <= 0 {
+        return Err(IvmRuntimeError::UnsupportedOperator);
+    }
+    Ok(Value::F64(sum / (count as f64)))
+}
+
+fn aggregate_extremum(
+    records: &[(Vec<u8>, i64)],
+    input_desc: RecordDescriptor,
+    aggregate: &AggregateExpr,
+) -> Result<Value, IvmRuntimeError> {
+    let Some(expr) = &aggregate.expression else {
+        return Err(IvmRuntimeError::UnsupportedOperator);
+    };
+    let mut best: Option<(Vec<u8>, Vec<u8>, Value)> = None;
+    for (record, weight) in records {
+        if *weight <= 0 {
+            continue;
+        }
+        let value = evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr)?;
+        let Some(value) = unwrap_nullable_value(value) else {
+            continue;
+        };
+        let mut value_key = Vec::new();
+        encode_key_part(&mut value_key, &value)?;
+        let replaces =
+            best.as_ref()
+                .is_none_or(|(best_key, best_record, _)| match aggregate.function {
+                    AggregateFunction::Min => {
+                        value_key < *best_key || (value_key == *best_key && record < best_record)
+                    }
+                    AggregateFunction::Max => {
+                        value_key > *best_key || (value_key == *best_key && record < best_record)
+                    }
+                    _ => false,
+                });
+        if replaces {
+            best = Some((value_key, record.clone(), value));
+        }
+    }
+    best.map(|(_, _, value)| value)
+        .ok_or(IvmRuntimeError::UnsupportedOperator)
+}
+
+fn add_weighted_u64(current: u64, value: u64, weight: i64) -> Result<u64, IvmRuntimeError> {
+    let weight = u64::try_from(weight).map_err(|_| IvmRuntimeError::UnsupportedOperator)?;
+    current
+        .checked_add(
+            value
+                .checked_mul(weight)
+                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+        )
+        .ok_or(IvmRuntimeError::UnsupportedOperator)
+}
+
+fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
+    match value {
+        Value::U8(value) => Ok(f64::from(*value)),
+        Value::U16(value) => Ok(f64::from(*value)),
+        Value::U32(value) => Ok(f64::from(*value)),
+        Value::U64(value) => Ok(*value as f64),
+        Value::F64(value) => Ok(*value),
+        _ => Err(IvmRuntimeError::UnsupportedOperator),
+    }
+}
+
+fn unwrap_nullable_value(value: Value) -> Option<Value> {
+    match value {
+        Value::Nullable(None) => None,
+        Value::Nullable(Some(value)) => Some(*value),
+        value => Some(value),
+    }
+}
+
+fn is_null_value(value: &Value) -> bool {
+    matches!(value, Value::Nullable(None))
+}
+
+fn evaluate_aggregate_expr(
+    record: &BorrowedRecord<'_>,
+    expr: &PlanExpr,
+) -> Result<Value, IvmRuntimeError> {
+    match expr {
+        PlanExpr::Field(field) | PlanExpr::Nullable(field) | PlanExpr::NullableFlat(field) => {
+            record.get(field).map_err(IvmRuntimeError::RecordEncoding)
+        }
+        PlanExpr::Literal(literal) => Ok(literal.to_value()),
+        PlanExpr::Null(value_type) => Ok(Value::Nullable(match value_type {
+            ValueType::Nullable(_) => None,
+            _ => None,
+        })),
+    }
+}
+
 type SourceRecord = (Vec<u8>, Vec<u8>);
 type RankedRecord = (Vec<TopBySortPart>, Vec<u8>);
 
@@ -5714,7 +6360,7 @@ pub enum IvmRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ivm::{AggregateFunction, AggregateOp, JoinOpKind};
+    use crate::ivm::JoinOpKind;
     use crate::schema::{
         ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     };
@@ -6538,20 +7184,7 @@ mod tests {
             right_descriptor: output,
             residual_predicate: None,
         };
-        let unsupported = [
-            OpType::SemiJoin(join),
-            OpType::Distinct,
-            OpType::Negate,
-            OpType::Aggregate(AggregateOp {
-                group_key: vec![PlanExpr::Field("id".to_owned())],
-                aggregates: vec![crate::ivm::AggregateExpr {
-                    function: AggregateFunction::Count,
-                    expression: None,
-                    distinct: false,
-                    output_name: Some("count".to_owned()),
-                }],
-            }),
-        ];
+        let unsupported = [OpType::SemiJoin(join), OpType::Distinct, OpType::Negate];
 
         for operator in unsupported {
             let inputs = match operator {
