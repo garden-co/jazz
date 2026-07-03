@@ -186,6 +186,10 @@ impl OrderedKvStorage for MemoryStorage {
         }
         Ok(())
     }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        Some(self.inner.borrow().keys().cloned().collect())
+    }
 }
 
 impl ReopenableStorage for MemoryStorage {

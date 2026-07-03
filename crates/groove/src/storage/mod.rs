@@ -22,7 +22,7 @@ mod opfs;
 pub mod rocksdb_storage;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::records::{Record, RecordDescriptor};
 use thiserror::Error;
@@ -112,6 +112,15 @@ pub trait OrderedKvStorage {
     }
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error>;
 
+    /// Return known column-family names when the backend can enumerate them.
+    ///
+    /// This is intentionally optional so the ordered-KV contract stays small.
+    /// Layout validation uses it to reject pre-release physical-layout changes
+    /// loudly instead of opening an old store as if it were empty.
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        None
+    }
+
     fn range(&self, cf: &ColumnFamilyName, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
         let mut values = Vec::new();
         self.scan_range(cf, start, end, &mut |key, value| {
@@ -128,6 +137,333 @@ pub trait OrderedKvStorage {
             Ok(())
         })?;
         Ok(values)
+    }
+}
+
+const CLASS_HISTORY_CF: &str = "__groove_class_history";
+const CLASS_REGISTER_CF: &str = "__groove_class_register";
+const CLASS_META_CF: &str = "__groove_class_meta";
+const CLASS_LAYOUT_MARKER_KEY: &[u8] = b"groove-storage-layout";
+const CLASS_LAYOUT_MARKER_VALUE: &[u8] = b"class-cf-v1";
+
+/// Logical-to-physical storage layout used by [`LayoutStorage`].
+///
+/// The identity layout preserves the historical one-logical-table-per-CF
+/// mapping. The class layout maps selected logical tables into shared physical
+/// class CFs while prefixing keys with a length-framed logical table name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StorageLayout {
+    #[default]
+    Identity,
+    JazzClassV1 {
+        mapped_logical_cfs: BTreeSet<String>,
+    },
+}
+
+impl StorageLayout {
+    pub fn jazz_class_v1() -> Self {
+        Self::JazzClassV1 {
+            mapped_logical_cfs: BTreeSet::new(),
+        }
+    }
+
+    pub fn jazz_class_v1_for<'a>(
+        logical_column_families: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        let mapped_logical_cfs = logical_column_families
+            .into_iter()
+            .filter(|name| is_jazz_history_table(name) || is_jazz_register_table(name))
+            .map(str::to_owned)
+            .collect();
+        Self::JazzClassV1 { mapped_logical_cfs }
+    }
+
+    pub fn physical_column_families<'a>(
+        &self,
+        logical_column_families: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        let mut names = BTreeSet::new();
+        if matches!(self, Self::JazzClassV1 { .. }) {
+            names.insert(CLASS_META_CF.to_owned());
+        }
+        for logical in logical_column_families {
+            names.insert(self.map_cf(logical).physical_cf.to_owned());
+        }
+        names.into_iter().collect()
+    }
+
+    fn map_cf<'a>(&'a self, logical_cf: &'a str) -> PhysicalCf<'a> {
+        match self {
+            Self::Identity => PhysicalCf {
+                physical_cf: logical_cf,
+                logical_prefix: None,
+            },
+            Self::JazzClassV1 { mapped_logical_cfs } => {
+                let should_map =
+                    mapped_logical_cfs.is_empty() || mapped_logical_cfs.contains(logical_cf);
+                if should_map && is_jazz_history_table(logical_cf) {
+                    PhysicalCf {
+                        physical_cf: CLASS_HISTORY_CF,
+                        logical_prefix: Some(logical_cf),
+                    }
+                } else if should_map && is_jazz_register_table(logical_cf) {
+                    PhysicalCf {
+                        physical_cf: CLASS_REGISTER_CF,
+                        logical_prefix: Some(logical_cf),
+                    }
+                } else {
+                    PhysicalCf {
+                        physical_cf: logical_cf,
+                        logical_prefix: None,
+                    }
+                }
+            }
+        }
+    }
+
+    fn validates_marker(&self) -> bool {
+        matches!(self, Self::JazzClassV1 { .. })
+    }
+
+    fn mapped_legacy_cf(&self, cf: &str) -> bool {
+        match self {
+            Self::Identity => false,
+            Self::JazzClassV1 { mapped_logical_cfs } => {
+                (mapped_logical_cfs.is_empty() || mapped_logical_cfs.contains(cf))
+                    && (is_jazz_history_table(cf) || is_jazz_register_table(cf))
+            }
+        }
+    }
+}
+
+struct PhysicalCf<'a> {
+    physical_cf: &'a str,
+    logical_prefix: Option<&'a str>,
+}
+
+fn is_jazz_history_table(name: &str) -> bool {
+    name.starts_with("jazz_") && name.ends_with("_history")
+}
+
+fn is_jazz_register_table(name: &str) -> bool {
+    name.starts_with("jazz_")
+        && name.ends_with("_register")
+        && !name.ends_with("_register_global_current")
+        && !name.ends_with("_register_ahead_current")
+}
+
+/// Storage view that keeps logical CF names at the database boundary while
+/// reading and writing a physical class-CF layout below it.
+pub struct LayoutStorage<S> {
+    inner: S,
+    layout: StorageLayout,
+}
+
+impl<S> LayoutStorage<S>
+where
+    S: OrderedKvStorage,
+{
+    pub fn new(inner: S, layout: StorageLayout) -> Result<Self, Error> {
+        let storage = Self { inner, layout };
+        storage.ensure_layout_marker()?;
+        Ok(storage)
+    }
+
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+
+    fn ensure_layout_marker(&self) -> Result<(), Error> {
+        if !self.layout.validates_marker() {
+            return Ok(());
+        }
+
+        match self.inner.get(CLASS_META_CF, CLASS_LAYOUT_MARKER_KEY)? {
+            Some(value) if value == CLASS_LAYOUT_MARKER_VALUE => Ok(()),
+            Some(_) => Err(Error::InvalidStorageLayout(
+                "unsupported class-CF storage layout marker".to_owned(),
+            )),
+            None => {
+                if self.has_class_data_or_legacy_layout()? {
+                    return Err(Error::InvalidStorageLayout(
+                        "missing class-CF storage layout marker in non-empty store".to_owned(),
+                    ));
+                }
+                self.inner.set(
+                    CLASS_META_CF,
+                    CLASS_LAYOUT_MARKER_KEY,
+                    CLASS_LAYOUT_MARKER_VALUE,
+                )
+            }
+        }
+    }
+
+    fn has_class_data_or_legacy_layout(&self) -> Result<bool, Error> {
+        if let Some(names) = self.inner.column_family_names()
+            && names.iter().any(|name| self.layout.mapped_legacy_cf(name))
+        {
+            return Ok(true);
+        }
+        for cf in [CLASS_HISTORY_CF, CLASS_REGISTER_CF] {
+            match self.inner.last_with_prefix(cf, b"") {
+                Ok(Some(_)) => return Ok(true),
+                Ok(None) | Err(Error::ColumnFamilyNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
+    }
+
+    fn physical_key(&self, cf: &ColumnFamilyName, key: &Key) -> (String, Vec<u8>) {
+        let mapping = self.layout.map_cf(cf);
+        let Some(logical_prefix) = mapping.logical_prefix else {
+            return (mapping.physical_cf.to_owned(), key.to_vec());
+        };
+        let mut physical_key = Vec::with_capacity(4 + logical_prefix.len() + key.len());
+        physical_key.extend_from_slice(&(logical_prefix.len() as u32).to_be_bytes());
+        physical_key.extend_from_slice(logical_prefix.as_bytes());
+        physical_key.extend_from_slice(key);
+        (mapping.physical_cf.to_owned(), physical_key)
+    }
+
+    fn physical_prefix(&self, cf: &ColumnFamilyName, prefix: &Key) -> (String, Vec<u8>, usize) {
+        let mapping = self.layout.map_cf(cf);
+        let Some(logical_prefix) = mapping.logical_prefix else {
+            return (mapping.physical_cf.to_owned(), prefix.to_vec(), 0);
+        };
+        let mut physical_prefix = Vec::with_capacity(4 + logical_prefix.len() + prefix.len());
+        physical_prefix.extend_from_slice(&(logical_prefix.len() as u32).to_be_bytes());
+        physical_prefix.extend_from_slice(logical_prefix.as_bytes());
+        physical_prefix.extend_from_slice(prefix);
+        let strip_len = 4 + logical_prefix.len();
+        (mapping.physical_cf.to_owned(), physical_prefix, strip_len)
+    }
+
+    fn strip_key<'a>(&self, key: &'a [u8], strip_len: usize) -> Result<&'a [u8], Error> {
+        key.get(strip_len..).ok_or_else(|| {
+            Error::InvalidStorageKey("physical layout key shorter than logical prefix".to_owned())
+        })
+    }
+}
+
+impl<S> OrderedKvStorage for LayoutStorage<S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
+        let (physical_cf, physical_key) = self.physical_key(cf, key);
+        self.inner.get(&physical_cf, &physical_key)
+    }
+
+    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+        let (physical_cf, physical_key) = self.physical_key(cf, key);
+        self.inner.set(&physical_cf, &physical_key, value)
+    }
+
+    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+        let (physical_cf, physical_key) = self.physical_key(cf, key);
+        self.inner.delete(&physical_cf, &physical_key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        let (physical_cf, physical_start, strip_len) = self.physical_prefix(cf, start);
+        let (_, physical_end, _) = self.physical_prefix(cf, end);
+        self.inner.scan_range(
+            &physical_cf,
+            &physical_start,
+            &physical_end,
+            &mut |key, value| visit(self.strip_key(key, strip_len)?, value),
+        )
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
+        self.inner
+            .scan_prefix(&physical_cf, &physical_prefix, &mut |key, value| {
+                visit(self.strip_key(key, strip_len)?, value)
+            })
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
+        self.inner
+            .scan_prefix_reverse(&physical_cf, &physical_prefix, &mut |key, value| {
+                visit(self.strip_key(key, strip_len)?, value)
+            })
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
+        Ok(self
+            .inner
+            .last_with_prefix(&physical_cf, &physical_prefix)?
+            .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
+        let (_, physical_upper, _) = self.physical_prefix(cf, upper);
+        Ok(self
+            .inner
+            .last_with_prefix_before_or_at(&physical_cf, &physical_prefix, &physical_upper)?
+            .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+        let translated = operations
+            .iter()
+            .map(|operation| match operation {
+                WriteOperation::Set { cf, key, value } => {
+                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                    OwnedWriteOperation::Set {
+                        cf: physical_cf,
+                        key: physical_key,
+                        value: (*value).to_vec(),
+                    }
+                }
+                WriteOperation::Delete { cf, key } => {
+                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                    OwnedWriteOperation::Delete {
+                        cf: physical_cf,
+                        key: physical_key,
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let borrowed = translated
+            .iter()
+            .map(OwnedWriteOperation::as_write_operation)
+            .collect::<Vec<_>>();
+        self.inner.write_many(&borrowed)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
     }
 }
 
@@ -530,6 +866,8 @@ impl<'a> WriteOperation<'a> {
 pub enum Error {
     #[error("column family not found: {0}")]
     ColumnFamilyNotFound(String),
+    #[error("invalid storage layout: {0}")]
+    InvalidStorageLayout(String),
     #[error("invalid storage key: {0}")]
     InvalidStorageKey(String),
     #[cfg(feature = "rocksdb")]
@@ -620,6 +958,112 @@ mod tests {
     use super::*;
     use crate::records::{Value, ValueType};
     use std::cell::Cell;
+
+    fn reverse_prefix_values<S: OrderedKvStorage>(
+        storage: &S,
+        cf: &str,
+        prefix: &[u8],
+    ) -> Result<Vec<KeyValue>, Error> {
+        let mut values = Vec::new();
+        storage.scan_prefix_reverse(cf, prefix, &mut |key, value| {
+            values.push((key.to_vec(), value.to_vec()));
+            Ok(())
+        })?;
+        Ok(values)
+    }
+
+    #[test]
+    fn class_layout_keeps_logical_keys_isolated_inside_shared_physical_cf() {
+        let physical_cfs = StorageLayout::jazz_class_v1().physical_column_families([
+            "jazz_albums_history",
+            "jazz_tracks_history",
+            "jazz_albums_register",
+        ]);
+        let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            LayoutStorage::new(MemoryStorage::new(&refs), StorageLayout::jazz_class_v1()).unwrap();
+
+        storage
+            .set("jazz_albums_history", b"row:1", b"album-one")
+            .unwrap();
+        storage
+            .set("jazz_albums_history", b"row:3", b"album-three")
+            .unwrap();
+        storage
+            .set("jazz_tracks_history", b"row:2", b"track-two")
+            .unwrap();
+        storage
+            .set("jazz_albums_register", b"row:2", b"album-register")
+            .unwrap();
+
+        assert_eq!(
+            storage.prefix("jazz_albums_history", b"row:").unwrap(),
+            vec![
+                (b"row:1".to_vec(), b"album-one".to_vec()),
+                (b"row:3".to_vec(), b"album-three".to_vec()),
+            ]
+        );
+        assert_eq!(
+            reverse_prefix_values(&storage, "jazz_albums_history", b"row:").unwrap(),
+            vec![
+                (b"row:3".to_vec(), b"album-three".to_vec()),
+                (b"row:1".to_vec(), b"album-one".to_vec()),
+            ]
+        );
+        assert_eq!(
+            storage
+                .last_with_prefix("jazz_albums_history", b"row:")
+                .unwrap(),
+            Some((b"row:3".to_vec(), b"album-three".to_vec()))
+        );
+        assert_eq!(
+            storage
+                .range("jazz_albums_history", b"row:1", b"row:4")
+                .unwrap(),
+            vec![
+                (b"row:1".to_vec(), b"album-one".to_vec()),
+                (b"row:3".to_vec(), b"album-three".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn class_layout_rejects_missing_marker_with_legacy_mapped_families() {
+        let storage = MemoryStorage::new(&["__groove_class_meta", "jazz_albums_history"]);
+        assert!(matches!(
+            LayoutStorage::new(storage, StorageLayout::jazz_class_v1()),
+            Err(Error::InvalidStorageLayout(_))
+        ));
+    }
+
+    #[test]
+    fn class_layout_accepts_truly_empty_store_and_writes_marker() {
+        let storage = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"]);
+        let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+        assert_eq!(
+            storage
+                .inner
+                .get("__groove_class_meta", CLASS_LAYOUT_MARKER_KEY)
+                .unwrap(),
+            Some(CLASS_LAYOUT_MARKER_VALUE.to_vec())
+        );
+    }
+
+    #[test]
+    fn class_layout_preserves_missing_logical_cf_errors_when_declared_set_is_known() {
+        let layout = StorageLayout::jazz_class_v1_for(["jazz_albums_history"]);
+        let physical_cfs = layout.physical_column_families(["jazz_albums_history"]);
+        let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout).unwrap();
+
+        storage
+            .set("jazz_albums_history", b"row:1", b"album-one")
+            .unwrap();
+        assert!(matches!(
+            storage.get("jazz_tracks_history", b"row:1"),
+            Err(Error::ColumnFamilyNotFound(_))
+        ));
+    }
 
     #[test]
     fn get_set_and_delete_values() {
