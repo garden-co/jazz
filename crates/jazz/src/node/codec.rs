@@ -9,7 +9,9 @@ use super::query_engine::{left_field, user_column_field};
 use super::*;
 use crate::schema::{
     ColumnSchema, branch_partition_history_table_name, branch_partition_register_table_name,
-    partition_history_table_name, partition_register_table_name,
+    partition_ahead_current_table_name, partition_global_current_table_name,
+    partition_history_table_name, partition_register_ahead_current_table_name,
+    partition_register_global_current_table_name, partition_register_table_name,
 };
 
 use groove::schema::TableSchema as GrooveTableSchema;
@@ -1999,6 +2001,54 @@ pub(super) fn ahead_current_table_name(table: &str) -> String {
 
 pub(super) fn register_ahead_current_table_name(table: &str) -> String {
     format!("jazz_{table}_register_ahead_current")
+}
+
+pub(super) fn global_current_table_name_for_schema(
+    table: &str,
+    schema_version: SchemaVersionId,
+    base_schema_version: SchemaVersionId,
+) -> String {
+    if schema_version == base_schema_version {
+        global_current_table_name(table)
+    } else {
+        partition_global_current_table_name(table, schema_version)
+    }
+}
+
+pub(super) fn register_global_current_table_name_for_schema(
+    table: &str,
+    schema_version: SchemaVersionId,
+    base_schema_version: SchemaVersionId,
+) -> String {
+    if schema_version == base_schema_version {
+        register_global_current_table_name(table)
+    } else {
+        partition_register_global_current_table_name(table, schema_version)
+    }
+}
+
+pub(super) fn ahead_current_table_name_for_schema(
+    table: &str,
+    schema_version: SchemaVersionId,
+    base_schema_version: SchemaVersionId,
+) -> String {
+    if schema_version == base_schema_version {
+        ahead_current_table_name(table)
+    } else {
+        partition_ahead_current_table_name(table, schema_version)
+    }
+}
+
+pub(super) fn register_ahead_current_table_name_for_schema(
+    table: &str,
+    schema_version: SchemaVersionId,
+    base_schema_version: SchemaVersionId,
+) -> String {
+    if schema_version == base_schema_version {
+        register_ahead_current_table_name(table)
+    } else {
+        partition_register_ahead_current_table_name(table, schema_version)
+    }
 }
 
 pub(super) fn version_layer_string(layer: VersionLayer) -> String {

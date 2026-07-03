@@ -77,15 +77,6 @@ use text_oplog::{Content as TextContent, Op as TextOp};
 
 pub use eviction::{EdgeCacheClass, EvictColdReport};
 
-fn jazz_physical_column_families(schema: &groove::schema::DatabaseSchema) -> Vec<String> {
-    StorageLayout::jazz_class_v1().physical_column_families(
-        schema
-            .column_families()
-            .into_iter()
-            .chain(std::iter::once("indices")),
-    )
-}
-
 #[cfg(test)]
 mod tests;
 
@@ -434,10 +425,7 @@ where
         schema: JazzSchema,
         storage: S,
         history_complete: bool,
-    ) -> Result<Self, Error>
-    where
-        S: ReopenableStorage,
-    {
+    ) -> Result<Self, Error> {
         Self::new_with_options(
             node_uuid,
             schema,
@@ -453,10 +441,7 @@ where
         storage: S,
         history_complete: bool,
         large_value_checkpoint_op_interval: usize,
-    ) -> Result<Self, Error>
-    where
-        S: ReopenableStorage,
-    {
+    ) -> Result<Self, Error> {
         let current_schema_version_id = schema.version_id();
         let CatalogueOpenState {
             storage,
@@ -473,13 +458,6 @@ where
                 SchemaVersion::new(schema.clone()),
             );
         }
-        let refs = jazz_physical_column_families(&schema.lower_to_groove_with_partitions(
-            &schemas,
-            &partitions,
-            &branch_partitions,
-        ));
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = storage.reopen(&refs)?;
         let database =
             Self::open_full_database(&schema, &schemas, &partitions, &branch_partitions, storage)?;
         let current_row_graphs = current_row_graphs(&schema);
@@ -609,19 +587,9 @@ where
         self.session_claims.insert(identity, claims);
     }
 
-    fn rebuild_database_slot(&mut self) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
+    fn rebuild_database_slot(&mut self) -> Result<(), Error> {
         let old_database = self.database.take();
-        let refs =
-            jazz_physical_column_families(&self.catalogue.schema.lower_to_groove_with_partitions(
-                &self.catalogue.catalogue_schemas,
-                &self.catalogue.partitions,
-                &self.branches.branch_partitions,
-            ));
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = old_database.into_storage().reopen(&refs)?;
+        let storage = old_database.into_storage();
         let database = Self::open_full_database(
             &self.catalogue.schema,
             &self.catalogue.catalogue_schemas,
@@ -668,10 +636,10 @@ where
         Ok(())
     }
 
-    fn open_catalogue_stage(schema: JazzSchema, storage: S) -> Result<CatalogueOpenState<S>, Error>
-    where
-        S: ReopenableStorage,
-    {
+    fn open_catalogue_stage(
+        schema: JazzSchema,
+        storage: S,
+    ) -> Result<CatalogueOpenState<S>, Error> {
         let current_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let logical_cfs = meta_schema
@@ -1003,7 +971,7 @@ where
                 stored.record.raw().to_vec(),
             );
             self.update_merge_heads_for_content_version(&mut batch, &stored)?;
-            self.write_ahead_current_insert(&mut batch, &stored);
+            self.write_ahead_current_insert(&mut batch, &stored)?;
             for parent in stored.parents() {
                 if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
                     batch.insert(
@@ -1164,7 +1132,7 @@ where
             stored.record.raw().to_vec(),
         );
         self.update_merge_heads_for_content_version(&mut batch, &stored)?;
-        self.write_ahead_current_insert(&mut batch, &stored);
+        self.write_ahead_current_insert(&mut batch, &stored)?;
         for parent in stored.parents() {
             if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
                 batch.insert(
@@ -1660,7 +1628,10 @@ where
             if version.layer() != VersionLayer::Content {
                 continue;
             }
-            let table = self.table(version.table())?.clone();
+            let schema_version = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+            let table = self.table_in_schema(version.table(), schema_version)?;
             for column in table
                 .columns
                 .iter()
