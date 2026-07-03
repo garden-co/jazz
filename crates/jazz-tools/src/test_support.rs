@@ -57,6 +57,8 @@ where
     F: FnMut(QueryRows) -> Option<T>,
 {
     let description = description.into();
+    #[cfg(feature = "sync-autopsy")]
+    jazz::db::sync_autopsy::enable();
     let deadline = tokio::time::Instant::now() + load_tolerant_wait_timeout(timeout);
 
     let mut last_error: Option<String> = None;
@@ -81,11 +83,17 @@ where
         }
 
         if tokio::time::Instant::now() >= deadline {
+            #[cfg(feature = "sync-autopsy")]
+            let autopsy = jazz::db::sync_autopsy::dump();
+            #[cfg(not(feature = "sync-autopsy"))]
+            let autopsy = String::new();
             match last_error {
-                Some(e) => panic!("timed out waiting for {description}: last query error: {e}"),
+                Some(e) => {
+                    panic!("timed out waiting for {description}: last query error: {e}\n{autopsy}")
+                }
                 None => panic!(
-                    "timed out waiting for {description}: last rows: {:?}",
-                    last_rows
+                    "timed out waiting for {description}: last rows: {:?}\n{}",
+                    last_rows, autopsy
                 ),
             }
         }

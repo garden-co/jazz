@@ -3226,7 +3226,14 @@ where
         &self,
         subscription: SubscriptionKey,
     ) -> Result<bool, Error> {
-        let binding_view_key = self.binding_view_key_for_subscription(subscription)?;
+        let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
+            Ok(binding_view_key) => binding_view_key,
+            Err(Error::InvalidStoredValue(
+                "subscription referenced unregistered shape"
+                | "subscription referenced unregistered binding",
+            )) => return Ok(false),
+            Err(error) => return Err(error),
+        };
         Ok(self
             .query
             .known_state_declared_binding_views

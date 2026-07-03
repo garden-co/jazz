@@ -731,6 +731,12 @@ async fn send_ws_encoded_frames(
     frames: &[Vec<u8>],
 ) -> Result<(), axum::Error> {
     let batch = postcard::to_allocvec(frames).map_err(axum::Error::new)?;
+    #[cfg(feature = "sync-autopsy")]
+    jazz::db::sync_autopsy::record(format!(
+        "server websocket send batch frames={} bytes={}",
+        frames.len(),
+        batch.len()
+    ));
     socket.send(Message::Binary(batch)).await
 }
 
