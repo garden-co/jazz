@@ -605,13 +605,30 @@ impl PerNodeKnowledge {
         let SyncMessage::ViewUpdate {
             version_bundles,
             reset_result_set,
+            peer_payload_inventory,
             result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
             ..
         } = message
         else {
             return;
         };
-        if *reset_result_set {
+        // Keep this condition in sync with NodeState::apply_view_update in
+        // node/views.rs: empty resets against non-empty shared state are
+        // coverage stamps, not replacement snapshots. Sanctioned by reviewer
+        // instruction for the Plan 5 close-out seed 2210401 diagnosis.
+        let empty_reset = *reset_result_set
+            && version_bundles.is_empty()
+            && peer_payload_inventory.complete_tx_payloads.is_empty()
+            && result_member_adds.is_empty()
+            && result_member_removes.is_empty()
+            && program_fact_adds.is_empty()
+            && program_fact_removes.is_empty();
+        let preserve_existing_shared_state =
+            empty_reset && !self.subscription_entries.is_empty();
+        if *reset_result_set && !preserve_existing_shared_state {
             self.subscription_entries.clear();
         }
         let result_add_keys = result_member_adds
@@ -637,16 +654,11 @@ impl PerNodeKnowledge {
         {
             self.subscription_entries.insert((tx_id, row_uuid));
         }
-        if let SyncMessage::ViewUpdate {
-            result_member_removes, ..
-        } = message
+        for (_, row_uuid, tx_id) in result_member_removes
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
         {
-            for (_, row_uuid, tx_id) in result_member_removes
-                .iter()
-                .filter_map(crate::protocol::ResultMemberEntry::as_row)
-            {
-                self.subscription_entries.remove(&(tx_id, row_uuid));
-            }
+            self.subscription_entries.remove(&(tx_id, row_uuid));
         }
         for bundle in version_bundles {
             if usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len()) {
