@@ -3413,7 +3413,7 @@ where
                         received.encoded_len
                     ));
                     match received.message {
-                        SyncMessage::RowVersionPayloads { versions } => {
+                        SyncMessage::RowVersionPayloads { version_bundles } => {
                             let Some(repair) = pending_row_version_repairs.pop_front() else {
                                 return Err(Error::new(
                                     ErrorCode::Protocol,
@@ -3424,19 +3424,17 @@ where
                                 let mut node = self.node.borrow_mut();
                                 node.apply_row_version_payloads_for_requests(
                                     &repair.requests,
-                                    versions,
+                                    version_bundles,
                                 )?;
                                 node.apply_sync_message(repair.update)?;
                             }
                         }
                         message @ SyncMessage::ViewUpdate { subscription, .. } => {
+                            #[cfg(not(feature = "sync-autopsy"))]
+                            let _ = subscription;
                             let missing = {
                                 let mut node = self.node.borrow_mut();
-                                if node.subscription_is_known_state_declared(subscription)? {
-                                    node.missing_known_state_row_version_refs(&message)?
-                                } else {
-                                    Vec::new()
-                                }
+                                node.missing_known_state_row_version_refs(&message)?
                             };
                             if missing.is_empty() {
                                 self.node
@@ -3704,7 +3702,12 @@ where
                                 peer.serve_row_versions(&mut node, &requests)?
                             };
                             for response in responses {
-                                self.transport.send(response).map_err(transport_error)?;
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    response,
+                                )?;
                             }
                         }
                         SyncMessage::FetchContentExtent { owner, extent } => {
@@ -3926,8 +3929,8 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
         SyncMessage::FetchRowVersions { requests } => {
             format!("FetchRowVersions requests={}", requests.len())
         }
-        SyncMessage::RowVersionPayloads { versions } => {
-            format!("RowVersionPayloads versions={}", versions.len())
+        SyncMessage::RowVersionPayloads { version_bundles } => {
+            format!("RowVersionPayloads bundles={}", version_bundles.len())
         }
         SyncMessage::ContentExtents { extents } => {
             format!("ContentExtents extents={}", extents.len())

@@ -29,6 +29,20 @@ const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(feature = "test-utils")]
 const DEFAULT_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 
+/// Sanctioned test-support reconnect control: mirrors the public client's
+/// upstream detach without clearing local known-state or pending writes.
+#[cfg(feature = "test-utils")]
+pub fn disconnect_client(client: &JazzClient) -> bool {
+    client.disconnect_upstream_for_test()
+}
+
+/// Sanctioned test-support reconnect control: reattaches the preserved client
+/// state to the original upstream transport.
+#[cfg(feature = "test-utils")]
+pub async fn reconnect_client(client: &JazzClient) -> crate::Result<bool> {
+    client.reconnect_upstream_for_test().await
+}
+
 #[cfg(feature = "test-utils")]
 fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
     let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")

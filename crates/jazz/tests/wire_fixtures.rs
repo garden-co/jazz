@@ -231,7 +231,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "row_version_payloads_empty",
             "RowVersionPayloads",
             SyncMessage::RowVersionPayloads {
-                versions: Vec::new(),
+                version_bundles: Vec::new(),
             },
         ),
     ]
