@@ -803,29 +803,35 @@ fn authority_text_merge_dispatches_registered_markdown_strategy_and_records_spec
         crate::markdown_strategy::SimpleMarkdownStrategy,
     ));
 
-    let base_unit = commit_large_value_edit_unit(
+    // Format-declared columns take whole-value writes (op edits are a 4c
+    // staging rejection); the strategy still merges the concurrent values.
+    let base_unit = commit_large_value_unit(
         &mut base_writer,
-        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+        MergeableCommit::new("docs", row_uuid, 10)
             .made_by(user(0xa1))
-            .insert(0, b"# Title\nSecond paragraph.\n"),
+            .cell("body", Value::Bytes(b"# Title\nSecond paragraph.\n".to_vec())),
     );
     apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
     apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
     apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
 
-    let left = commit_large_value_edit_unit(
+    let left = commit_large_value_unit(
         &mut left_writer,
-        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+        MergeableCommit::new("docs", row_uuid, 20)
             .made_by(user(0xa1))
-            .delete(2, 5)
-            .insert(2, b"New Title"),
+            .cell(
+                "body",
+                Value::Bytes(b"# New Title\nSecond paragraph.\n".to_vec()),
+            ),
     );
-    let right = commit_large_value_edit_unit(
+    let right = commit_large_value_unit(
         &mut right_writer,
-        LargeValueEditCommit::new("docs", row_uuid, "body", 21)
+        MergeableCommit::new("docs", row_uuid, 21)
             .made_by(user(0xa2))
-            .delete(15, 9)
-            .insert(15, b"changed paragraph"),
+            .cell(
+                "body",
+                Value::Bytes(b"# Title\nSecond changed paragraph.\n".to_vec()),
+            ),
     );
     apply_large_value_unit(&mut core, &left_writer, left);
     apply_large_value_unit(&mut core, &right_writer, right);
