@@ -31,6 +31,16 @@ const STOCK: &str = "stock";
 const ORDERS: &str = "orders";
 const ORDER_LINES: &str = "orderLines";
 const PAYMENTS: &str = "payments";
+const TABLES: [&str; 8] = [
+    WAREHOUSES,
+    DISTRICTS,
+    CUSTOMERS,
+    ITEMS,
+    STOCK,
+    ORDERS,
+    ORDER_LINES,
+    PAYMENTS,
+];
 
 fn main() {
     if std::env::var("JAZZ_SMOKE").is_ok() {
@@ -1117,27 +1127,20 @@ fn refresh_clients(core: &mut NodeState<RocksDbStorage>, clients: &mut [ClientHa
 }
 
 fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarness) {
-    for table in [
-        WAREHOUSES,
-        DISTRICTS,
-        CUSTOMERS,
-        ITEMS,
-        STOCK,
-        ORDERS,
-        ORDER_LINES,
-        PAYMENTS,
-    ] {
+    for table in TABLES {
         let update = client.edge_peer.current_rows_update(core, table).unwrap();
         client.hydration_bytes += view_update_bytes(&update);
         client.hydration_rows += result_row_count(&update);
         client.edge.apply_sync_message(update).unwrap();
+    }
+    for table in TABLES {
         let update = client
             .client_peer
             .current_rows_update(&mut client.edge, table)
             .unwrap();
         client.inbound.borrow_mut().push_back(update);
-        client.db.tick().unwrap();
     }
+    client.db.tick().unwrap();
 }
 
 fn seed_jazz_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>) {
