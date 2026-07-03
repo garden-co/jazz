@@ -160,6 +160,24 @@ fn commit(
     .unwrap()
 }
 
+fn commit_as(
+    ui: &mut NodeState<RocksDbStorage>,
+    row_uuid: RowUuid,
+    made_at: u64,
+    title: &str,
+    writer: AuthorId,
+    parents: impl IntoIterator<Item = TxId>,
+) -> (TxId, SyncMessage) {
+    ui.commit_mergeable_unit(
+        MergeableCommit::new("todos", row_uuid, made_at)
+            .made_by(writer)
+            .permission_subject(writer)
+            .parents(parents.into_iter().collect())
+            .cells(cells(title, writer)),
+    )
+    .unwrap()
+}
+
 fn deletion(
     ui: &mut NodeState<RocksDbStorage>,
     row_uuid: RowUuid,
@@ -647,6 +665,164 @@ fn edge_deduplicates_scope_subscription_for_repeated_deferred_units() {
 
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 2);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
+}
+
+#[test]
+fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
+    let schema = read_write_policy_schema();
+    let writer_a = AuthorId::from_bytes([0xa1; 16]);
+    let writer_b = AuthorId::from_bytes([0xb2; 16]);
+
+    let (_client_a_dir, mut client_a) = open_node(node(1), schema.clone());
+    let (_client_b_dir, mut client_b) = open_node(node(2), schema.clone());
+    let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
+    let mut edge_to_a = PeerState::edge_client(writer_a);
+    let mut edge_to_b = PeerState::edge_client(writer_b);
+
+    for (idx, row_uuid) in [row(41), row(42)].into_iter().enumerate() {
+        let (_tx_id, unit) = commit_as(
+            &mut client_a,
+            row_uuid,
+            10 + idx as u64,
+            "same claim",
+            writer_a,
+            [],
+        );
+        let SyncMessage::CommitUnit { tx, versions } = unit else {
+            panic!("expected commit unit");
+        };
+        assert!(
+            edge_to_a
+                .ingest_edge_mergeable_commit_unit(
+                    &mut edge,
+                    tx,
+                    versions,
+                    u64::MAX - SKEW_TOLERANCE_MS,
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    let (_tx_id, unit) = commit_as(&mut client_b, row(43), 20, "different claim", writer_b, []);
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    assert!(
+        edge_to_b
+            .ingest_edge_mergeable_commit_unit(
+                &mut edge,
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    let scope_a = permission_scope_key(&schema, "todos", writer_a);
+    let scope_b = permission_scope_key(&schema, "todos", writer_b);
+    assert_eq!(
+        scope_a.shape_id, scope_b.shape_id,
+        "same write-policy shape must be reused across writer claims"
+    );
+    assert_ne!(
+        scope_a.binding_id, scope_b.binding_id,
+        "writer claim must remain part of scope identity"
+    );
+    assert!(edge_to_a.subscription_result_sets(scope_a).is_some());
+    assert!(edge_to_a.subscription_result_sets(scope_b).is_none());
+    assert!(edge_to_b.subscription_result_sets(scope_b).is_some());
+    assert!(edge_to_b.subscription_result_sets(scope_a).is_none());
+    assert_eq!(
+        edge_to_a.edge_scope_subscription_count(),
+        1,
+        "same-claim deferred writes share one retained scope"
+    );
+    assert_eq!(
+        edge_to_b.edge_scope_subscription_count(),
+        1,
+        "different claims use a separate retained scope"
+    );
+}
+
+#[test]
+fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
+    let schema = read_write_policy_schema();
+    let writer_a = AuthorId::from_bytes([0xa1; 16]);
+    let writer_b = AuthorId::from_bytes([0xb2; 16]);
+
+    let (_client_a_dir, mut client_a) = open_node(node(1), schema.clone());
+    let (_client_b_dir, mut client_b) = open_node(node(2), schema.clone());
+    let (_edge_dir, mut edge) = open_node(node(3), schema);
+    let mut edge_to_a = PeerState::edge_client(writer_a);
+    let mut edge_to_b = PeerState::edge_client(writer_b);
+
+    let (first_a, unit) = commit_as(&mut client_a, row(44), 10, "a first", writer_a, []);
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    assert!(
+        edge_to_a
+            .ingest_edge_mergeable_commit_unit(
+                &mut edge,
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let [_fate] = edge_to_a
+        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        edge.transaction_state(first_a).unwrap(),
+        (Fate::Accepted, None, DurabilityTier::Edge)
+    );
+
+    let (second_a, unit) = commit_as(&mut client_a, row(45), 20, "a second", writer_a, []);
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let [a_fate] = edge_to_a
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        a_fate,
+        SyncMessage::FateUpdate {
+            tx_id: second_a,
+            fate: Fate::Accepted,
+            global_seq: None,
+            durability: Some(DurabilityTier::Edge),
+        }
+    );
+
+    let (first_b, unit) = commit_as(&mut client_b, row(46), 30, "b first", writer_b, []);
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    assert!(
+        edge_to_b
+            .ingest_edge_mergeable_commit_unit(
+                &mut edge,
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+            )
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(edge_to_b.deferred_edge_fate_count(), 1);
+    assert_eq!(
+        edge.transaction_state(first_b).unwrap().0,
+        Fate::Pending,
+        "settled writer-A scope must not satisfy missing writer-B scope"
+    );
 }
 
 #[test]
