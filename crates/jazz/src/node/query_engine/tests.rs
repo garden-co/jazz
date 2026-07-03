@@ -568,7 +568,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
         );
         assert!(matches!(
             program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
-            GraphBuilder::Table { ref table } if table == "resolved_todos"
+            GraphBuilder::Table { ref table, .. } if table == "resolved_todos"
         ));
         assert_eq!(program.lowered.parameters, ParameterDomain::default());
         assert_eq!(
@@ -703,7 +703,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
                     predicate: groove::ivm::PredicateExpr::Eq { field, value },
                 } if matches!(
                     input.as_ref(),
-                    GraphBuilder::Table { table } if table == "resolved_todos"
+                    GraphBuilder::Table { table, .. } if table == "resolved_todos"
                 ) && field == "user_title"
                     && value == &groove::ivm::LiteralValue::String("ship".to_owned())
             )
@@ -803,7 +803,7 @@ fn current_source_select_projection_and_unordered_slice_lower() {
             ref tie_cols,
             offset: 2,
             limit: 3,
-        } if matches!(input.as_ref(), GraphBuilder::Table { table } if table == "resolved_todos")
+        } if matches!(input.as_ref(), GraphBuilder::Table { table, .. } if table == "resolved_todos")
             && group_cols.is_empty()
             && order_cols.is_empty()
             && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]
@@ -923,7 +923,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                         right,
                         left_on,
                         right_on,
-                    } if matches!(left.as_ref(), GraphBuilder::Table { table } if table == "resolved_todos")
+                    } if matches!(left.as_ref(), GraphBuilder::Table { table, .. } if table == "resolved_todos")
                         && matches!(
                             right.as_ref(),
                             GraphBuilder::UnwrapNullable { input, field }
@@ -933,7 +933,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                                         GraphBuilder::Filter { input, predicate }
                                             if matches!(
                                                 input.as_ref(),
-                                                GraphBuilder::Table { table } if table == "resolved_todo_tags"
+                                                GraphBuilder::Table { table, .. } if table == "resolved_todo_tags"
                                             ) && matches!(
                                                 predicate,
                                                 groove::ivm::PredicateExpr::Eq { field, value }
@@ -1620,7 +1620,7 @@ fn correlated_path_optional_app_rows_materialize_parent_rows() {
 
     assert!(matches!(
         program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
-        GraphBuilder::Table { ref table } if table == "resolved_todos"
+        GraphBuilder::Table { ref table, .. } if table == "resolved_todos"
     ));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert!(
@@ -1725,7 +1725,7 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
         .expect("app row terminal");
     assert!(matches!(
         app_rows.graph,
-        GraphBuilder::Table { ref table } if table == "resolved_todos"
+        GraphBuilder::Table { ref table, .. } if table == "resolved_todos"
     ));
     let relation_edges = program
         .lowered

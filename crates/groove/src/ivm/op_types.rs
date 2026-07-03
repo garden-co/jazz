@@ -25,6 +25,31 @@ use crate::schema::IndexSchema;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TableSourceOp {
     pub table: String,
+    pub scan: Option<StaticScanSpec>,
+}
+
+/// Source node for a schema-declared durable index arrangement.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexSourceOp {
+    pub table: String,
+    pub index: String,
+    pub key_fields: Vec<usize>,
+    pub value_fields: Vec<usize>,
+    pub unique: bool,
+    pub append_value_to_key: bool,
+    pub store_value: bool,
+    pub scan: Option<StaticScanSpec>,
+}
+
+/// Static ordered-key scan supplied at graph construction.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum StaticScanSpec {
+    Point(Vec<LiteralValue>),
+    Prefix(Vec<LiteralValue>),
+    Range {
+        start: Vec<LiteralValue>,
+        end: Vec<LiteralValue>,
+    },
 }
 
 /// Source node for snapshot-only in-memory records.
@@ -119,6 +144,7 @@ pub struct IndexByOp {
     pub unique: bool,
     pub append_value_to_key: bool,
     pub store_value: bool,
+    pub scan: Option<StaticScanSpec>,
 }
 
 // Stateful transformations.
