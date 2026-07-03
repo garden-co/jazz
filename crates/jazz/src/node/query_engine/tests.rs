@@ -180,6 +180,91 @@ fn chained_row_set_input(byte: u8, binding_values: BTreeMap<String, Value>) -> R
     }
 }
 
+fn aggregate_over_window_row_set_input(byte: u8) -> RowSetProgramInput {
+    let root = RowSetNodeId("root".to_owned());
+    let order = RowSetNodeId("order".to_owned());
+    let slice = RowSetNodeId("slice".to_owned());
+    let aggregate = RowSetNodeId("aggregate".to_owned());
+    let root_source = source("todos", SourceRole::Root);
+    RowSetProgramInput {
+        shape: NormalizedRowSetShape {
+            identity: NormalizedShapeIdentity {
+                shape_id: shape(byte),
+                canonical: vec![byte],
+            },
+            root: aggregate.clone(),
+            result: ResultId::SyntheticTuple {
+                identity: SyntheticIdentitySpec {
+                    table: "todos_aggregate".to_owned(),
+                    key_columns: Vec::new(),
+                    revision_columns: vec!["count".to_owned()],
+                },
+            },
+            auxiliary_sources: BTreeSet::new(),
+            closure_paths: Vec::new(),
+            join_contributions: Vec::new(),
+            reachable_contributions: Vec::new(),
+            nodes: BTreeMap::from([
+                (
+                    root.clone(),
+                    RowSetExpr::Source {
+                        source: root_source.clone(),
+                        visibility: RowVisibility::Visible,
+                    },
+                ),
+                (
+                    order.clone(),
+                    RowSetExpr::OrderBy {
+                        input: root,
+                        keys: vec![OrderKey {
+                            value: NormalizedValueRef::SourceField {
+                                source: root_source.clone(),
+                                field: "title".to_owned(),
+                            },
+                            direction: SortDirection::Asc,
+                        }],
+                    },
+                ),
+                (
+                    slice.clone(),
+                    RowSetExpr::Slice {
+                        input: order,
+                        partition_by: Vec::new(),
+                        limit: Some(2),
+                        offset: 0,
+                        tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(
+                            root_source.clone(),
+                        ))],
+                        rank_output: None,
+                    },
+                ),
+                (
+                    aggregate.clone(),
+                    RowSetExpr::Aggregate {
+                        input: slice,
+                        group_by: Vec::new(),
+                        outputs: vec![AggregateExpr {
+                            output: TypedOutputField {
+                                name: "count".to_owned(),
+                                ty: ColumnType::U64,
+                            },
+                            function: AggregateFunction::Count,
+                            input: None,
+                        }],
+                    },
+                ),
+            ]),
+        },
+        binding: ProgramBinding {
+            id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            source_shape: None,
+            extra_user_params: BTreeMap::new(),
+            param_types: BTreeMap::new(),
+            values: BTreeMap::new(),
+        },
+    }
+}
+
 fn claim_filtered_row_set_input(byte: u8, claim: &str) -> RowSetProgramInput {
     let root = RowSetNodeId("root".to_owned());
     let filter = RowSetNodeId("filter".to_owned());
@@ -2354,6 +2439,24 @@ fn unbound_filter_param_reports_operator_gap() {
         err.gaps.as_slice(),
         [UnsupportedReason::Operator(message)]
             if message.contains("binding parameter 'title' is not bound")
+    ));
+}
+
+#[test]
+fn aggregate_over_window_fails_closed_for_maintained_lowering() {
+    let request = QueryProgramRequest {
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: system_policy_context(),
+        input: aggregate_over_window_row_set_input(0x73),
+        output: production_output_request(ProductionOutputProfile::MaintainedView, false),
+    };
+
+    let err = lower_query_program(request, &mut FakeSourceResolver::default()).unwrap_err();
+
+    assert!(matches!(
+        err.gaps.as_slice(),
+        [UnsupportedReason::Operator(message)]
+            if message.contains("aggregate over ordered/windowed input is not lowered yet")
     ));
 }
 
