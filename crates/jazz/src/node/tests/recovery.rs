@@ -318,6 +318,7 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
                 predicate_read_set: None,
                 user_metadata_json: None,
             source_branch: None,
+            merge_strategy: None,
             },
             vec![version_record(
                 row(2),

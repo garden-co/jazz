@@ -65,7 +65,11 @@ fn open_db(seed: u64, extra_columns: usize) -> DirectDb {
 }
 
 fn item_cells(index: usize, extra_columns: usize) -> BTreeMap<String, Value> {
-    let owner = if index % 2 == 0 { AUTHOR } else { OTHER_AUTHOR };
+    let owner = if index.is_multiple_of(2) {
+        AUTHOR
+    } else {
+        OTHER_AUTHOR
+    };
     let mut cells = BTreeMap::from([
         ("owner_id".to_owned(), Value::Uuid(owner.0)),
         ("name".to_owned(), Value::String(format!("Item {index}"))),

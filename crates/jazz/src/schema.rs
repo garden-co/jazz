@@ -1157,6 +1157,7 @@ fn transactions_table() -> GrooveTableSchema {
             column("user_metadata", GrooveColumnType::String.nullable()),
             column("source_branch", GrooveColumnType::Uuid.nullable()),
             column("permission_subject", GrooveColumnType::Uuid.nullable()),
+            column("merge_strategy", GrooveColumnType::String.nullable()),
             // upstream-decided: written only by fate/state application.
             column("fate", fate_column()),
             // upstream-decided: written only by fate/state application.

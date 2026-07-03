@@ -136,6 +136,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     predicate_read_set: None,
                     user_metadata_json: Some("{\"fixture\":\"wire\"}".to_owned()),
                     source_branch: None,
+                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },

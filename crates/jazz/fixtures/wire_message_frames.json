@@ -47,10 +47,10 @@
     {
       "name": "commit_unit_mergeable_empty",
       "message_family": "CommitUnit",
-      "frame_hex": "0101010041010c101111111111111111111111111111111100001055555555555555555555555555555555000000000001127b2266697874757265223a2277697265227d0000",
-      "frame_base64": "AQEBAEEBDBARERERERERERERERERERERAAAQVVVVVVVVVVVVVVVVVVVVVQAAAAAAARJ7ImZpeHR1cmUiOiJ3aXJlIn0AAA==",
-      "payload_hex": "010c101111111111111111111111111111111100001055555555555555555555555555555555000000000001127b2266697874757265223a2277697265227d0000",
-      "decoded_debug": "CommitUnit { tx: Transaction { tx_id: TxId { time: TxTime(12), node: NodeUuid(11111111-1111-1111-1111-111111111111) }, kind: Mergeable, n_total_writes: 0, made_by: AuthorId(55555555-5555-5555-5555-555555555555), permission_subject: None, base_snapshot: None, row_read_set: None, absent_read_set: None, predicate_read_set: None, user_metadata_json: Some(\"{\\\"fixture\\\":\\\"wire\\\"}\"), source_branch: None }, versions: [] }"
+      "frame_hex": "0101010042010c101111111111111111111111111111111100001055555555555555555555555555555555000000000001127b2266697874757265223a2277697265227d000000",
+      "frame_base64": "AQEBAEIBDBARERERERERERERERERERERAAAQVVVVVVVVVVVVVVVVVVVVVQAAAAAAARJ7ImZpeHR1cmUiOiJ3aXJlIn0AAAA=",
+      "payload_hex": "010c101111111111111111111111111111111100001055555555555555555555555555555555000000000001127b2266697874757265223a2277697265227d000000",
+      "decoded_debug": "CommitUnit { tx: Transaction { tx_id: TxId { time: TxTime(12), node: NodeUuid(11111111-1111-1111-1111-111111111111) }, kind: Mergeable, n_total_writes: 0, made_by: AuthorId(55555555-5555-5555-5555-555555555555), permission_subject: None, base_snapshot: None, row_read_set: None, absent_read_set: None, predicate_read_set: None, user_metadata_json: Some(\"{\\\"fixture\\\":\\\"wire\\\"}\"), source_branch: None, merge_strategy: None }, versions: [] }"
     },
     {
       "name": "publish_schema_todos_body",
