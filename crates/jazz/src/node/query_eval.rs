@@ -38,9 +38,9 @@ use super::query_engine::{
     logical_user_column, lower_query_program, right_field, route_param_field, user_column_field,
 };
 use crate::protocol::{
-    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ReadViewKey, ReadViewSourceSpec,
-    ReadViewSpec, ResultMemberEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe,
-    SubscriptionKey, SyncMessage,
+    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewKey,
+    ReadViewSourceSpec, ReadViewSpec, ResultMemberEntry, RowVersionRef, ShapeAst, ShapeBody,
+    Subscribe, SubscriptionKey, SyncMessage,
 };
 use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES};
 use crate::query::{
@@ -59,6 +59,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     tables: BTreeMap<String, TableSchema>,
     result_table: String,
     result_set: BTreeSet<ResultMemberEntry>,
+    program_facts: BTreeSet<ProgramFactEntry>,
 }
 
 pub(crate) fn take_required_sink_deltas(
@@ -391,8 +392,7 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 }
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
-    pub(crate) adds: Vec<CurrentRow>,
-    pub(crate) removes: Vec<ResultMemberEntry>,
+    pub(crate) snapshot: RelationSnapshot,
 }
 
 enum CurrentQueryProgramOutput {
@@ -1895,6 +1895,14 @@ fn current_query_output_request(
             ])
         }
         CurrentQueryProgramOutput::RelationSnapshot => BTreeSet::new(),
+        CurrentQueryProgramOutput::MaintainedView if !query.array_subqueries.is_empty() => {
+            BTreeSet::from([
+                ProgramFactKey::ResultMembership,
+                ProgramFactKey::VersionWitnesses,
+                ProgramFactKey::ReplacementWitnesses,
+                ProgramFactKey::RelationEdges,
+            ])
+        }
         CurrentQueryProgramOutput::MaintainedView => BTreeSet::from([
             ProgramFactKey::ResultMembership,
             ProgramFactKey::VersionWitnesses,
@@ -5113,7 +5121,7 @@ where
         identity: AuthorId,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
-    ) -> Result<(LocalMaintainedViewSubscription, Vec<CurrentRow>), Error> {
+    ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
         let (subscription, maintained, terminal_schemas, transitions, tables) = self
             .open_seeded_maintained_subscription_view(shape, binding, identity, tier, read_view)?;
         let mut local = LocalMaintainedViewSubscription {
@@ -5123,9 +5131,10 @@ where
             tables,
             result_table: shape.query().table.clone(),
             result_set: BTreeSet::new(),
+            program_facts: BTreeSet::new(),
         };
         let initial = self.apply_local_maintained_view_transitions(&mut local, transitions)?;
-        Ok((local, initial.adds))
+        Ok((local, initial.snapshot))
     }
 
     pub(crate) fn drain_local_maintained_view_subscription(
@@ -5134,6 +5143,7 @@ where
     ) -> Result<Option<LocalMaintainedViewSubscriptionUpdate>, Error> {
         self.database.flush().map_err(Error::Groove)?;
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
+        let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         loop {
             match local.subscription.try_recv() {
                 Ok(deltas) => {
@@ -5157,6 +5167,20 @@ where
                             .and_modify(|(_, after)| *after = false)
                             .or_insert((before, false));
                     }
+                    for fact in transitions.program_fact_adds {
+                        let before = local.program_facts.contains(&fact);
+                        fact_states
+                            .entry(fact)
+                            .and_modify(|(_, after)| *after = true)
+                            .or_insert((before, true));
+                    }
+                    for fact in transitions.program_fact_removes {
+                        let before = local.program_facts.contains(&fact);
+                        fact_states
+                            .entry(fact)
+                            .and_modify(|(_, after)| *after = false)
+                            .or_insert((before, false));
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -5164,7 +5188,7 @@ where
                 }
             }
         }
-        if states.is_empty() {
+        if states.is_empty() && fact_states.is_empty() {
             return Ok(None);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
@@ -5175,12 +5199,15 @@ where
                 _ => {}
             }
         }
-        let update = self.apply_local_maintained_view_transitions(local, transitions)?;
-        if update.adds.is_empty() && update.removes.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(update))
+        for (fact, (before, after)) in fact_states {
+            match (before, after) {
+                (false, true) => transitions.program_fact_adds.push(fact),
+                (true, false) => transitions.program_fact_removes.push(fact),
+                _ => {}
+            }
         }
+        let update = self.apply_local_maintained_view_transitions(local, transitions)?;
+        Ok(Some(update))
     }
 
     fn apply_local_maintained_view_transitions(
@@ -5188,28 +5215,100 @@ where
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
-        let mut adds = Vec::new();
+        let mut changed = false;
         for member in transitions.adds {
             if member.table_name() != Some(local.result_table.as_str()) {
                 continue;
             }
-            if local.result_set.insert(member.clone())
-                && let Some(row) =
-                    self.materialize_local_maintained_view_result_member(local, &member)?
-            {
-                adds.push(row);
+            if local.result_set.insert(member) {
+                changed = true;
             }
         }
-        let mut removes = Vec::new();
         for member in transitions.removes {
             if member.table_name() != Some(local.result_table.as_str()) {
                 continue;
             }
             if local.result_set.remove(&member) {
-                removes.push(member);
+                changed = true;
             }
         }
-        Ok(LocalMaintainedViewSubscriptionUpdate { adds, removes })
+        for fact in transitions.program_fact_removes {
+            if local.program_facts.remove(&fact) {
+                changed = true;
+            }
+        }
+        for fact in transitions.program_fact_adds {
+            if local.program_facts.insert(fact) {
+                changed = true;
+            }
+        }
+        let _ = changed;
+        self.materialize_local_maintained_relation_snapshot(local)
+            .map(|snapshot| LocalMaintainedViewSubscriptionUpdate { snapshot })
+    }
+
+    fn materialize_local_maintained_relation_snapshot(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+    ) -> Result<RelationSnapshot, Error> {
+        let mut rows = Vec::new();
+        let mut row_keys = BTreeSet::new();
+        for member in &local.result_set {
+            if let Some(row) =
+                self.materialize_local_maintained_view_result_member(local, member)?
+            {
+                row_keys.insert((row.table().to_owned(), row.row_uuid()));
+                rows.push(row);
+            }
+        }
+        let root_count = rows.len();
+        let mut edges = Vec::new();
+        for fact in &local.program_facts {
+            let ProgramFactEntry::RelationEdge(edge) = fact else {
+                continue;
+            };
+            edges.push(RelationEdge {
+                source_table: edge.source_table.to_string(),
+                source_row: edge.source_row,
+                relation: edge.path.clone(),
+                target_table: edge.target_table.to_string(),
+                target_row: edge.target_row,
+            });
+            if row_keys.insert((edge.target_table.to_string(), edge.target_row))
+                && let Some(version) = &edge.target_version
+                && let Some(row) = self.materialize_local_maintained_view_relation_edge_row(
+                    local,
+                    edge.target_table.as_str(),
+                    edge.target_row,
+                    version.tx,
+                )?
+            {
+                rows.push(row);
+            }
+        }
+        Ok(RelationSnapshot {
+            root_count,
+            rows,
+            edges,
+        })
+    }
+
+    fn materialize_local_maintained_view_relation_edge_row(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+        table_name: &str,
+        row_uuid: RowUuid,
+        tx_id: TxId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let table = self.table(table_name)?.clone();
+        let tx_versions = local.maintained.versions_by_tx(tx_id);
+        let Some(version) =
+            local_maintained_view_content_witness(&tx_versions, table_name, row_uuid)
+        else {
+            return Ok(None);
+        };
+        self.current_row_from_materialized_version(&table, version)
+            .map(Some)
     }
 
     fn materialize_local_maintained_view_result_member(
