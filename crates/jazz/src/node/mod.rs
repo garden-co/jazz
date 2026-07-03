@@ -673,7 +673,18 @@ where
         S: ReopenableStorage,
     {
         let current_schema_version_id = schema.version_id();
-        let meta_database = Database::new(schema.lower_catalogue_meta_to_groove(), storage)?;
+        let meta_schema = schema.lower_catalogue_meta_to_groove();
+        let logical_cfs = meta_schema
+            .column_families()
+            .into_iter()
+            .chain(std::iter::once("indices"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let meta_database = Database::new_with_storage_layout(
+            meta_schema,
+            storage,
+            StorageLayout::jazz_class_v1_for(logical_cfs.iter().map(String::as_str)),
+        )?;
         let mut catalogue_schemas = BTreeMap::new();
         let mut catalogue_lenses = BTreeMap::new();
         for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {

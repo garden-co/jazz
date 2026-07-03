@@ -142,6 +142,11 @@ pub trait OrderedKvStorage {
 
 const CLASS_HISTORY_CF: &str = "__groove_class_history";
 const CLASS_REGISTER_CF: &str = "__groove_class_register";
+const CLASS_GLOBAL_CURRENT_CF: &str = "__groove_class_global_current";
+const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
+const CLASS_CHANGES_CF: &str = "__groove_class_changes";
+const CLASS_INDICES_CF: &str = "__groove_class_indices";
+const CLASS_CONTENT_CF: &str = "__groove_class_content";
 const CLASS_META_CF: &str = "__groove_class_meta";
 const CLASS_LAYOUT_MARKER_KEY: &[u8] = b"groove-storage-layout";
 const CLASS_LAYOUT_MARKER_VALUE: &[u8] = b"class-cf-v1";
@@ -172,7 +177,7 @@ impl StorageLayout {
     ) -> Self {
         let mapped_logical_cfs = logical_column_families
             .into_iter()
-            .filter(|name| is_jazz_history_table(name) || is_jazz_register_table(name))
+            .filter(|name| jazz_physical_class(name).is_some())
             .map(str::to_owned)
             .collect();
         Self::JazzClassV1 { mapped_logical_cfs }
@@ -201,14 +206,9 @@ impl StorageLayout {
             Self::JazzClassV1 { mapped_logical_cfs } => {
                 let should_map =
                     mapped_logical_cfs.is_empty() || mapped_logical_cfs.contains(logical_cf);
-                if should_map && is_jazz_history_table(logical_cf) {
+                if should_map && let Some(physical_cf) = jazz_physical_class(logical_cf) {
                     PhysicalCf {
-                        physical_cf: CLASS_HISTORY_CF,
-                        logical_prefix: Some(logical_cf),
-                    }
-                } else if should_map && is_jazz_register_table(logical_cf) {
-                    PhysicalCf {
-                        physical_cf: CLASS_REGISTER_CF,
+                        physical_cf,
                         logical_prefix: Some(logical_cf),
                     }
                 } else {
@@ -230,7 +230,7 @@ impl StorageLayout {
             Self::Identity => false,
             Self::JazzClassV1 { mapped_logical_cfs } => {
                 (mapped_logical_cfs.is_empty() || mapped_logical_cfs.contains(cf))
-                    && (is_jazz_history_table(cf) || is_jazz_register_table(cf))
+                    && jazz_physical_class(cf).is_some()
             }
         }
     }
@@ -250,6 +250,49 @@ fn is_jazz_register_table(name: &str) -> bool {
         && name.ends_with("_register")
         && !name.ends_with("_register_global_current")
         && !name.ends_with("_register_ahead_current")
+}
+
+fn is_jazz_global_current_table(name: &str) -> bool {
+    name.starts_with("jazz_")
+        && (name.ends_with("_global_current") || name.ends_with("_register_global_current"))
+        && !name.contains("_ahead_current")
+}
+
+fn is_jazz_ahead_current_table(name: &str) -> bool {
+    name.starts_with("jazz_")
+        && (name.ends_with("_ahead_current") || name.ends_with("_register_ahead_current"))
+}
+
+fn is_jazz_content_store(name: &str) -> bool {
+    matches!(
+        name,
+        "jazz_content_extents" | "jazz_content_meta" | "jazz_content_checkpoints"
+    )
+}
+
+fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
+    if is_jazz_history_table(logical_cf) {
+        Some(CLASS_HISTORY_CF)
+    } else if is_jazz_register_table(logical_cf) {
+        Some(CLASS_REGISTER_CF)
+    } else if is_jazz_global_current_table(logical_cf) {
+        Some(CLASS_GLOBAL_CURRENT_CF)
+    } else if is_jazz_ahead_current_table(logical_cf) {
+        Some(CLASS_AHEAD_CURRENT_CF)
+    } else if logical_cf == "jazz_global_changes" {
+        Some(CLASS_CHANGES_CF)
+    } else if logical_cf == "indices" {
+        // The class prefix wraps the existing durable-index key. That key
+        // already starts with table/index identity, so this avoids introducing
+        // a second table prefix while keeping one physical index CF.
+        Some(CLASS_INDICES_CF)
+    } else if is_jazz_content_store(logical_cf) {
+        Some(CLASS_CONTENT_CF)
+    } else if logical_cf.starts_with("jazz_") {
+        Some(CLASS_META_CF)
+    } else {
+        None
+    }
 }
 
 /// Storage view that keeps logical CF names at the database boundary while
@@ -304,7 +347,16 @@ where
         {
             return Ok(true);
         }
-        for cf in [CLASS_HISTORY_CF, CLASS_REGISTER_CF] {
+        for cf in [
+            CLASS_HISTORY_CF,
+            CLASS_REGISTER_CF,
+            CLASS_GLOBAL_CURRENT_CF,
+            CLASS_AHEAD_CURRENT_CF,
+            CLASS_CHANGES_CF,
+            CLASS_INDICES_CF,
+            CLASS_CONTENT_CF,
+            CLASS_META_CF,
+        ] {
             match self.inner.last_with_prefix(cf, b"") {
                 Ok(Some(_)) => return Ok(true),
                 Ok(None) | Err(Error::ColumnFamilyNotFound(_)) => {}
@@ -1025,6 +1077,57 @@ mod tests {
                 (b"row:3".to_vec(), b"album-three".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn class_layout_isolates_every_jazz_physical_class() {
+        let logical_cfs = [
+            ("jazz_albums_history", "jazz_tracks_history"),
+            ("jazz_albums_register", "jazz_tracks_register"),
+            ("jazz_albums_global_current", "jazz_tracks_global_current"),
+            (
+                "jazz_albums_register_global_current",
+                "jazz_tracks_register_global_current",
+            ),
+            ("jazz_albums_ahead_current", "jazz_tracks_ahead_current"),
+            (
+                "jazz_albums_register_ahead_current",
+                "jazz_tracks_register_ahead_current",
+            ),
+            ("jazz_global_changes", "jazz_known_state_facts"),
+            ("indices", "jazz_content_extents"),
+            ("jazz_content_meta", "jazz_content_checkpoints"),
+            ("jazz_nodes", "jazz_transactions"),
+        ];
+        let all_logical = logical_cfs
+            .iter()
+            .flat_map(|(left, right)| [*left, *right])
+            .collect::<Vec<_>>();
+        let layout = StorageLayout::jazz_class_v1_for(all_logical.iter().copied());
+        let physical_cfs = layout.physical_column_families(all_logical.iter().copied());
+        let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout).unwrap();
+
+        for (left, right) in logical_cfs {
+            storage.set(left, b"k:1", left.as_bytes()).unwrap();
+            storage.set(right, b"k:2", right.as_bytes()).unwrap();
+
+            assert_eq!(
+                storage.prefix(left, b"k:").unwrap(),
+                vec![(b"k:1".to_vec(), left.as_bytes().to_vec())],
+                "{left} must not read rows from {right}"
+            );
+            assert_eq!(
+                reverse_prefix_values(&storage, right, b"k:").unwrap(),
+                vec![(b"k:2".to_vec(), right.as_bytes().to_vec())],
+                "{right} reverse scan must not read rows from {left}"
+            );
+            assert_eq!(
+                storage.last_with_prefix(left, b"k:").unwrap(),
+                Some((b"k:1".to_vec(), left.as_bytes().to_vec())),
+                "{left} last_with_prefix must stay within its logical prefix"
+            );
+        }
     }
 
     #[test]

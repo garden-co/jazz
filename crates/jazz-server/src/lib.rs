@@ -1467,7 +1467,11 @@ mod tests {
     fn exposes_required_column_families_for_jazz_schema() {
         let column_families = required_column_families(&simple_schema());
 
-        assert!(column_families.iter().any(|name| name == "jazz_nodes"));
+        assert!(
+            column_families
+                .iter()
+                .any(|name| name == "__groove_class_meta")
+        );
         assert!(
             column_families
                 .iter()
@@ -1483,7 +1487,11 @@ mod tests {
                 .iter()
                 .any(|name| name == "jazz_todos_history")
         );
-        assert!(column_families.iter().any(|name| name == "indices"));
+        assert!(
+            column_families
+                .iter()
+                .any(|name| name == "__groove_class_indices")
+        );
     }
 
     #[test]
