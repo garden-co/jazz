@@ -234,7 +234,7 @@ fn open_db_with_schema(
         author,
         history_complete,
         schema,
-        |refs| MemoryStorage::new(refs),
+        MemoryStorage::new,
         "open core realistic benchmark db",
     )
 }
@@ -413,7 +413,14 @@ fn membership_cells(
         ("user".to_owned(), Value::Uuid(users[index % users.len()].0)),
         (
             "role".to_owned(),
-            Value::String(if index % 5 == 0 { "admin" } else { "member" }.to_owned()),
+            Value::String(
+                if index.is_multiple_of(5) {
+                    "admin"
+                } else {
+                    "member"
+                }
+                .to_owned(),
+            ),
         ),
     ])
 }
@@ -501,7 +508,7 @@ fn activity_cells(
         (
             "kind".to_owned(),
             Value::String(
-                if index % 2 == 0 {
+                if index.is_multiple_of(2) {
                     "updated"
                 } else {
                     "commented"
@@ -1118,7 +1125,7 @@ fn r4_hot_task_history(c: &mut Criterion) {
                                 (
                                     "status".to_owned(),
                                     Value::String(
-                                        if event_index % 2 == 0 {
+                                        if event_index.is_multiple_of(2) {
                                             "doing"
                                         } else {
                                             "review"
@@ -1264,7 +1271,7 @@ fn r10_sync_fanout(c: &mut Criterion) {
                                     (
                                         "status".to_owned(),
                                         Value::String(
-                                            if update_index % 2 == 0 {
+                                            if update_index.is_multiple_of(2) {
                                                 "doing"
                                             } else {
                                                 "review"

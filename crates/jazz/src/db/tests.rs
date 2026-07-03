@@ -8,10 +8,14 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
-    CatalogueAck, LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ShapeAst,
-    Subscribe, SubscribeRejectReason, TableLens,
+    CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp, ReadViewSourceSpec,
+    ReadViewSpec, RegisterShapeOptions, RowVersionRef, ShapeAst, Subscribe, SubscribeRejectReason,
+    TableLens,
 };
-use crate::protocol_limits::{MAX_CONTENT_EXTENT_BYTES, MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES};
+use crate::protocol_limits::{
+    MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
+    MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES,
+};
 use crate::query::{
     ArraySubquery, Include, JoinMode, OrderDirection, all_of, any_of, claim, col, contains, eq, gt,
     in_list, is_null, lit, lte, ne, not,
@@ -106,6 +110,21 @@ fn related_text_values(
         .map(|row| match row.cell(table, column) {
             Some(Value::String(value)) => value,
             other => panic!("expected text cell {target_table}.{column}, got {other:?}"),
+        })
+        .collect()
+}
+
+fn oversized_row_version_refs(len: usize) -> Vec<RowVersionRef> {
+    (0..len)
+        .map(|idx| {
+            RowVersionRef::new(
+                "todos",
+                RowUuid(uuid::Uuid::from_u128(idx as u128 + 1)),
+                TxId::new(
+                    crate::time::TxTime(idx as u64 + 1),
+                    NodeUuid::from_bytes([0x44; 16]),
+                ),
+            )
         })
         .collect()
 }
@@ -209,17 +228,6 @@ fn assert_unsupported_propagated_subscription_tier(error: Error) {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(
         error.message.contains("global-tier remote coverage"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
-fn assert_unsupported_sync_register_tier(error: Error) {
-    assert_eq!(error.code, ErrorCode::Query);
-    assert!(
-        error
-            .message
-            .contains("sync subscription serving requires global tier"),
         "unexpected error message: {}",
         error.message
     );
@@ -3548,8 +3556,10 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
 #[test]
 fn subscriber_connection_rejects_local_tier_register_shape() {
     let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
     let client_author = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    seed(&server, "todos", cells("after malformed", false, owner));
 
     // Internal sync-loop coverage: public propagated subscriptions normalize
     // local reads before sending RegisterShape, so this sends protocol messages
@@ -3570,7 +3580,45 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
         })
         .unwrap();
 
-    assert_unsupported_sync_register_tier(subscriber.borrow_mut().tick().unwrap_err());
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .sync_metrics()
+            .dropped_peer_request_messages,
+        1
+    );
+
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("valid subscription should still be served after malformed register"),
+        subscription,
+    );
 }
 
 #[test]
@@ -3609,12 +3657,207 @@ fn subscriber_connection_rejects_subscribe_without_link_shape_options() {
         }))
         .unwrap();
 
-    let error = subscriber.borrow_mut().tick().unwrap_err();
-    assert_eq!(error.code, ErrorCode::Protocol);
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .sync_metrics()
+            .dropped_peer_request_messages,
+        1
+    );
+}
+
+#[test]
+fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    seed(&server, "todos", cells("after malformed", false, owner));
+
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: Some(KnownStateDeclaration::ExactVersionSet {
+                versions: oversized_row_version_refs(MAX_KNOWN_STATE_EXACT_REFS + 1),
+            }),
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .sync_metrics()
+            .dropped_peer_request_messages,
+        1
+    );
     assert!(
-        error.message.contains("unregistered shape/read view"),
-        "unexpected error message: {}",
-        error.message
+        client_transport.try_recv().is_none(),
+        "oversized known-state request should not receive a view update"
+    );
+
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: Some(KnownStateDeclaration::Fast {
+                completeness: KnownStateCompleteness::FastCurrentMembership,
+                position: crate::time::GlobalSeq::default(),
+            }),
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("valid resubscribe should be served after malformed known-state"),
+        subscription,
+    );
+}
+
+#[test]
+fn subscriber_connection_drops_oversized_fetch_row_versions_and_keeps_serving() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    seed(&server, "todos", cells("after malformed", false, owner));
+
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    client_transport
+        .send(SyncMessage::FetchRowVersions {
+            requests: oversized_row_version_refs(MAX_FETCH_ROW_VERSIONS + 1),
+        })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .sync_metrics()
+            .dropped_peer_request_messages,
+        1
+    );
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("valid subscription should still be served after malformed repair request"),
+        subscription,
+    );
+}
+
+#[test]
+fn subscriber_connection_drops_mismatched_shape_id_and_keeps_serving() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    seed(&server, "todos", cells("after malformed", false, owner));
+
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let other_shape = Query::from("todos")
+        .filter(eq(col("done"), lit(true)))
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: other_shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .sync_metrics()
+            .dropped_peer_request_messages,
+        1
+    );
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("valid subscription should still be served after mismatched shape id"),
+        subscription,
     );
 }
 
@@ -3701,14 +3944,14 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
         })
         .unwrap();
 
-    let error = subscriber.borrow_mut().tick().unwrap_err();
-    assert_eq!(error.code, ErrorCode::Query);
-    assert!(
-        error
-            .message
-            .contains("sync subscription serving requires global tier"),
-        "unexpected error message: {}",
-        error.message
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .sync_metrics()
+            .dropped_peer_request_messages,
+        1
     );
 }
 
@@ -4943,9 +5186,17 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
         .borrow_mut()
         .push(PendingUpload { tx_id, unit: None });
 
-    let error = client.tick().unwrap_err();
-    assert_eq!(error.code, ErrorCode::Backpressure);
+    client.tick().unwrap();
     assert!(outbound.borrow().is_empty());
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .sync_metrics()
+            .transport_backpressure_retries,
+        1
+    );
 
     client.tick().unwrap();
     let sent = outbound.borrow_mut().pop_front().unwrap();
@@ -4954,6 +5205,31 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
     };
     assert_eq!(tx.tx_id, tx_id);
     assert!(outbound.borrow_mut().pop_front().is_none());
+}
+
+#[test]
+fn local_missing_upload_body_still_kills_sync_driver() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, _server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let missing_tx = TxId::new(
+        crate::time::TxTime(client.next_now_ms()),
+        NodeUuid::from_bytes([0xee; 16]),
+    );
+    client.node.outbox.borrow_mut().push(PendingUpload {
+        tx_id: missing_tx,
+        unit: None,
+    });
+
+    let error = client.tick().unwrap_err();
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(
+        error.message.contains("missing transaction"),
+        "unexpected local-fatal error: {}",
+        error.message
+    );
 }
 
 #[test]

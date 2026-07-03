@@ -2048,6 +2048,14 @@ where
         &self.sync_metrics
     }
 
+    pub(crate) fn record_dropped_peer_request(&mut self) {
+        self.sync_metrics.dropped_peer_request_messages += 1;
+    }
+
+    pub(crate) fn record_transport_backpressure_retry(&mut self) {
+        self.sync_metrics.transport_backpressure_retries += 1;
+    }
+
     /// Deterministic counters for query-engine read authorization paths.
     pub fn query_engine_read_metrics(&self) -> &QueryEngineReadMetrics {
         &self.query_engine_read_metrics
@@ -3458,6 +3466,10 @@ pub struct SyncMetrics {
     pub parked_catalogue_shapes_resolved: u64,
     /// Per-subscription messages dropped because the subscription is no longer registered locally.
     pub dropped_detached_subscription_messages: u64,
+    /// Remote peer requests dropped at the sync-driver boundary without killing the local driver.
+    pub dropped_peer_request_messages: u64,
+    /// Transport sends retried after local backpressure instead of killing the sync driver.
+    pub transport_backpressure_retries: u64,
     /// Rung-3 text strategies that degraded to the builtin char-walk merge.
     pub rung3_text_merge_fallbacks: u64,
 }
