@@ -177,7 +177,7 @@ fn content_store_reads_fail_closed_on_missing_or_gapped_ranges() {
     };
     assert!(matches!(
         node.content_store().read(&missing_tail),
-        Err(Error::InvalidStoredValue("content extent has a gap"))
+        Err(Error::MissingContentExtent(_))
     ));
     assert!(!node.content_store().contains(&missing_tail).unwrap());
 
@@ -190,7 +190,7 @@ fn content_store_reads_fail_closed_on_missing_or_gapped_ranges() {
     };
     assert!(matches!(
         node.content_store().read(&absent),
-        Err(Error::InvalidStoredValue("content extent is incomplete"))
+        Err(Error::MissingContentExtent(_))
     ));
     assert!(!node.content_store().contains(&absent).unwrap());
 }
@@ -266,7 +266,7 @@ fn evict_cold_removes_content_bytes_and_preserves_pin_set() {
     );
     assert!(matches!(
         opened.content_store().read(&extent),
-        Err(Error::InvalidStoredValue("content extent is incomplete"))
+        Err(Error::MissingContentExtent(_))
     ));
 }
 
@@ -347,11 +347,8 @@ fn evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate() {
     edge.apply_sync_message(SyncMessage::CommitUnit { tx, versions })
         .unwrap();
     assert_eq!(
-        edge.current_rows("docs", DurabilityTier::Local)
-            .unwrap()
-            .remove(0)
-            .cell(&schema.tables[0], "body"),
-        Some(Value::Bytes(b"refetch me".to_vec()))
+        hydrated_large_value_cell(&mut edge, &schema.tables[0], "body"),
+        b"refetch me".to_vec()
     );
 
     let mut peer = PeerState::new();
@@ -385,11 +382,8 @@ fn evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate() {
     assert_eq!(version_bundles.len(), 1);
     edge.apply_sync_message(update).unwrap();
     assert_eq!(
-        edge.current_rows("docs", DurabilityTier::Local)
-            .unwrap()
-            .remove(0)
-            .cell(&schema.tables[0], "body"),
-        Some(Value::Bytes(b"refetch me".to_vec()))
+        hydrated_large_value_cell(&mut edge, &schema.tables[0], "body"),
+        b"refetch me".to_vec()
     );
 }
 
@@ -486,11 +480,8 @@ fn commit_units_with_missing_large_value_content_are_parked_until_extents_arrive
         } if *accepted == tx_id
     )));
     assert_eq!(
-        core.current_rows("docs", DurabilityTier::Local)
-            .unwrap()
-            .remove(0)
-            .cell(table, "body"),
-        Some(Value::Bytes(b"park me".to_vec()))
+        hydrated_large_value_cell(&mut core, table, "body"),
+        b"park me".to_vec()
     );
 }
 
@@ -565,18 +556,11 @@ fn checkpointed_read_replays_only_suffix_and_matches_full_replay() {
 
     checkpointed.reset_large_value_metrics();
     full_replay.reset_large_value_metrics();
-    let checkpointed_value = checkpointed
-        .current_rows("docs", DurabilityTier::Local)
-        .unwrap()
-        .remove(0)
-        .cell(&large_value_schema().tables[0], "body");
-    let full_value = full_replay
-        .current_rows("docs", DurabilityTier::Local)
-        .unwrap()
-        .remove(0)
-        .cell(&large_value_schema().tables[0], "body");
+    let checkpointed_value =
+        hydrated_large_value_cell(&mut checkpointed, &large_value_schema().tables[0], "body");
+    let full_value = hydrated_large_value_cell(&mut full_replay, &large_value_schema().tables[0], "body");
 
-    assert_eq!(checkpointed_value, Some(Value::Bytes(b"abcde".to_vec())));
+    assert_eq!(checkpointed_value, b"abcde".to_vec());
     assert_eq!(checkpointed_value, full_value);
     assert_eq!(checkpointed.large_value_metrics().checkpoint_hits, 1);
     assert_eq!(checkpointed.large_value_metrics().last_replayed_ops, 2);
@@ -596,13 +580,9 @@ fn large_value_checkpoints_survive_reopen() {
 
     let mut reopened = reopen_node_at_with_checkpoint_interval(&dir, node(0x64), schema.clone(), 3);
     reopened.reset_large_value_metrics();
-    let value = reopened
-        .current_rows("docs", DurabilityTier::Local)
-        .unwrap()
-        .remove(0)
-        .cell(&schema.tables[0], "body");
+    let value = hydrated_large_value_cell(&mut reopened, &schema.tables[0], "body");
 
-    assert_eq!(value, Some(Value::Bytes(b"abcde".to_vec())));
+    assert_eq!(value, b"abcde".to_vec());
     assert_eq!(reopened.large_value_metrics().checkpoint_hits, 1);
     assert_eq!(reopened.large_value_metrics().last_replayed_ops, 2);
 }
@@ -644,17 +624,14 @@ fn out_of_order_text_unit_resolves_after_parent_arrives() {
             .made_by(user(0xa1))
             .insert(1, b"X"),
     );
-    let _ = core.apply_sync_message(child_unit).unwrap();
+    apply_large_value_unit(&mut core, &writer, child_unit);
     assert_eq!(core.sync_metrics().parked_orphans, 1);
     assert!(core.current_rows("docs", DurabilityTier::Local).unwrap().is_empty());
 
-    let _ = core.apply_sync_message(base_unit).unwrap();
+    apply_large_value_unit(&mut core, &writer, base_unit);
     assert_eq!(
-        core.current_rows("docs", DurabilityTier::Local)
-            .unwrap()
-            .remove(0)
-            .cell(&schema.tables[0], "body"),
-        Some(Value::Bytes(b"aXbc".to_vec()))
+        hydrated_large_value_cell(&mut core, &schema.tables[0], "body"),
+        b"aXbc".to_vec()
     );
 }
 
@@ -682,12 +659,8 @@ fn text_edit_history_rehydrates_materialized_text_after_reopen() {
 
     let mut reopened = reopen_node_at(&dir, node(0x79), schema.clone());
     assert_eq!(
-        reopened
-            .current_rows("docs", DurabilityTier::Local)
-            .unwrap()
-            .remove(0)
-            .cell(&schema.tables[0], "body"),
-        Some(Value::Bytes(b"hello after restart".to_vec()))
+        hydrated_large_value_cell(&mut reopened, &schema.tables[0], "body"),
+        b"hello after restart".to_vec()
     );
 }
 
@@ -718,12 +691,8 @@ fn linear_large_value_history_materializes_without_merge_regression() {
     )
     .unwrap();
 
-    let value = node
-        .current_rows("docs", DurabilityTier::Local)
-        .unwrap()
-        .remove(0)
-        .cell(&schema.tables[0], "body");
-    assert_eq!(value, Some(Value::Bytes(b"aLbc".to_vec())));
+    let value = hydrated_large_value_cell(&mut node, &schema.tables[0], "body");
+    assert_eq!(value, b"aLbc".to_vec());
 }
 
 #[test]
@@ -742,7 +711,7 @@ fn client_local_large_value_conflict_still_lww_drops_without_upstream_merge() {
             Value::Bytes(b"abc".to_vec()),
         )])),
     );
-    apply_large_value_unit(&mut client, &base_writer, base_unit.clone());
+    apply_large_value_unit_as_relay(&mut client, &base_writer, base_unit.clone());
     apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
     apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
 
@@ -758,19 +727,15 @@ fn client_local_large_value_conflict_still_lww_drops_without_upstream_merge() {
             .made_by(user(0xa2))
             .insert(1, b"RIGHT"),
     );
-    apply_large_value_unit(&mut client, &left_writer, left);
-    apply_large_value_unit(&mut client, &right_writer, right);
+    apply_large_value_unit_as_relay(&mut client, &left_writer, left);
+    apply_large_value_unit_as_relay(&mut client, &right_writer, right);
 
-    let winner_payload = client
-        .current_rows("docs", DurabilityTier::Local)
-        .unwrap()
-        .remove(0)
-        .cell(&schema.tables[0], "body");
-    let Some(Value::Bytes(payload)) = winner_payload else {
-        panic!("expected winning large-value payload");
-    };
-    let materialized = replay_large_value_payload(&client, b"abc", &payload);
-    assert!(materialized == b"aLEFTbc".to_vec() || materialized == b"aRIGHTbc".to_vec());
+    let materialized = hydrated_large_value_cell(&mut client, &schema.tables[0], "body");
+    assert!(
+        materialized == b"aLEFTbc".to_vec() || materialized == b"aRIGHTbc".to_vec(),
+        "unexpected materialized value: {:?}",
+        String::from_utf8_lossy(&materialized)
+    );
     assert_ne!(materialized, b"aLEFTRIGHTbc".to_vec());
 }
 
@@ -831,19 +796,17 @@ fn merged_concurrent_large_value_body(left_first: bool) -> Option<Value> {
         .unwrap()
         .is_some());
 
-    let Some(Value::Bytes(payload)) = core
+    let handle = core
         .current_rows("docs", DurabilityTier::Global)
         .unwrap()
         .remove(0)
-        .cell(&schema.tables[0], "body")
-    else {
-        panic!("expected merge large-value payload");
+        .cell(&schema.tables[0], "body");
+    let Some(Value::Bytes(handle)) = handle else {
+        panic!("expected merge large-value handle");
     };
-    Some(Value::Bytes(replay_large_value_payload(
-        &core,
-        b"aRIGHTbc",
-        &payload,
-    )))
+    Some(Value::Bytes(
+        core.hydrate_large_value_handle(&handle).unwrap(),
+    ))
 }
 
 fn merged_concurrent_text_body(left_first: bool) -> Option<Value> {
@@ -941,6 +904,20 @@ fn apply_large_value_unit(
     let _ = target.apply_sync_message(unit).unwrap();
 }
 
+fn apply_large_value_unit_as_relay(
+    target: &mut NodeState<RocksDbStorage>,
+    source: &NodeState<RocksDbStorage>,
+    unit: SyncMessage,
+) {
+    for extent in large_value_extents(source, &unit) {
+        target.content_store().put_extent(&extent.extent, &extent.bytes).unwrap();
+    }
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    target.ingest_relay_commit_unit(tx, versions).unwrap();
+}
+
 fn large_value_extents(
     source: &NodeState<RocksDbStorage>,
     unit: &SyncMessage,
@@ -951,10 +928,18 @@ fn large_value_extents(
     versions
         .iter()
         .filter_map(|version| {
+            let table = source.table(version.table()).ok()?;
+            let column = table.columns.first()?;
+            if column.large_value.is_none() {
+                return None;
+            }
             let Value::Bytes(payload) = version.cell_at(0)? else {
                 return None;
             };
-            text_oplog::decode(&payload).ok()
+            let payload = payload
+                .strip_prefix(b"JTXTREF1")
+                .unwrap_or(payload.as_slice());
+            text_oplog::decode(payload).ok()
         })
         .flatten()
         .filter_map(|op| match op {
@@ -971,24 +956,18 @@ fn large_value_extents(
         .collect()
 }
 
-fn replay_large_value_payload(
-    node: &NodeState<RocksDbStorage>,
-    parent: &[u8],
-    payload: &[u8],
+fn hydrated_large_value_cell(
+    node: &mut NodeState<RocksDbStorage>,
+    table: &TableSchema,
+    column: &str,
 ) -> Vec<u8> {
-    let ops = text_oplog::decode(payload)
-        .unwrap()
-        .into_iter()
-        .map(|op| match op {
-            TextOp::Insert {
-                pos,
-                content: TextContent::Ref(extent),
-            } => TextOp::Insert {
-                pos,
-                content: TextContent::Inline(node.content_store().read(&extent).unwrap()),
-            },
-            other => other,
-        })
-        .collect::<Vec<_>>();
-    text_oplog::replay(parent, &ops)
+    let mut rows = node.current_rows(&table.name, DurabilityTier::Local).unwrap();
+    if rows.is_empty() {
+        rows = node.current_rows(&table.name, DurabilityTier::Global).unwrap();
+    }
+    let handle = rows.remove(0).cell(table, column);
+    let Some(Value::Bytes(handle)) = handle else {
+        panic!("expected large-value handle");
+    };
+    node.hydrate_large_value_handle(&handle).unwrap()
 }

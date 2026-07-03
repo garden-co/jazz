@@ -32,6 +32,7 @@ use crate::protocol::{
     ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
     SyncMessage, VersionBundle, VersionRecord, ViewFactEntry,
 };
+use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
     JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind, MergeStrategy, TableSchema,
@@ -44,6 +45,9 @@ use crate::tx::{
     RecordedMergeStrategy, RejectedTransaction, RejectedVersion, RejectionReason, RowRead,
     Snapshot, Transaction, TransactionRecord, TxId, TxKind,
 };
+
+const TEXT_EXTENT_OPS_MAGIC: &[u8] = b"JTXTREF1";
+const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH1";
 
 mod branches;
 mod codec;
@@ -988,7 +992,11 @@ where
         let inline_ops = edit.ops;
         validate_large_value_edit_ranges(parent_len, &inline_ops)?;
         let cell_payload = match column.large_value {
-            Some(LargeValueKind::Text) => encode_plain_text_edit(parent_len, &inline_ops)?,
+            Some(LargeValueKind::Text) => {
+                let text_ops = large_value_edit_ops_to_legacy_text_ops(inline_ops);
+                let ops = self.extent_back_text_ops(made_by, row_uuid, &column_name, text_ops)?;
+                encode_extent_text_ops(&ops)
+            }
             Some(LargeValueKind::Blob) => {
                 let text_ops = large_value_edit_ops_to_legacy_text_ops(inline_ops);
                 let ops = self.extent_back_text_ops(made_by, row_uuid, &column_name, text_ops)?;
@@ -1296,8 +1304,14 @@ where
             };
             match column.large_value {
                 Some(LargeValueKind::Text) => {
-                    let ops = crate::text_merge::diff(&parent_value, &new_value);
-                    cells.insert(column.name.clone(), Value::Bytes(ops.encode()));
+                    let ops = text_oplog::diff(&parent_value, &new_value)
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    let ops = self.extent_back_text_ops(writer, row_uuid, &column.name, ops)?;
+                    cells.insert(
+                        column.name.clone(),
+                        Value::Bytes(encode_extent_text_ops(&ops)),
+                    );
                 }
                 Some(LargeValueKind::Blob) => {
                     let ops = text_oplog::diff(&parent_value, &new_value)
@@ -1325,13 +1339,17 @@ where
                     pos,
                     content: TextContent::Inline(bytes),
                 } => {
-                    let extent = self
-                        .content_store()
-                        .append(writer, row_uuid, column, &bytes)?;
-                    Ok(TextOp::Insert {
-                        pos,
-                        content: TextContent::Ref(extent),
-                    })
+                    let mut ops = Vec::new();
+                    for chunk in bytes.chunks(MAX_CONTENT_EXTENT_BYTES) {
+                        let extent = self
+                            .content_store()
+                            .append(writer, row_uuid, column, chunk)?;
+                        ops.push(TextOp::Insert {
+                            pos,
+                            content: TextContent::Ref(extent),
+                        });
+                    }
+                    Ok(ops)
                 }
                 TextOp::Insert {
                     content: TextContent::Ref(_),
@@ -1339,9 +1357,10 @@ where
                 } => Err(Error::InvalidStoredValue(
                     "text op input already has ref content",
                 )),
-                TextOp::Delete { pos, len } => Ok(TextOp::Delete { pos, len }),
+                TextOp::Delete { pos, len } => Ok(vec![TextOp::Delete { pos, len }]),
             })
-            .collect()
+            .collect::<Result<Vec<_>, Error>>()
+            .map(|chunks| chunks.into_iter().flatten().collect())
     }
 
     fn materialize_large_value_column(
@@ -1398,7 +1417,7 @@ where
             };
             match column_large_value_kind(table, column)? {
                 LargeValueKind::Text => {
-                    let op = decode_plain_text_op(&payload)?;
+                    let op = self.decode_text_storage_op(&payload)?;
                     replayed_ops = replayed_ops.checked_add(op.runs().len()).ok_or(
                         Error::InvalidStoredValue("large value replay op count overflow"),
                     )?;
@@ -1545,7 +1564,7 @@ where
             }
             if let Some(Value::Bytes(payload)) = version.cell(table, column)? {
                 let op_count = match column_large_value_kind(table, column)? {
-                    LargeValueKind::Text => decode_plain_text_op(&payload)?.runs().len(),
+                    LargeValueKind::Text => self.decode_text_storage_op(&payload)?.runs().len(),
                     LargeValueKind::Blob => text_oplog::decode(&payload)?.len(),
                 };
                 replayed_ops =
@@ -1606,7 +1625,7 @@ where
             };
             match column_large_value_kind(table, column)? {
                 LargeValueKind::Text => {
-                    let op = decode_plain_text_op(&payload)?;
+                    let op = self.decode_text_storage_op(&payload)?;
                     let value = vec![0; value_len];
                     value_len = op
                         .apply(&value)
@@ -1679,6 +1698,48 @@ where
             .collect()
     }
 
+    fn decode_text_storage_op(&self, payload: &[u8]) -> Result<PlainTextOp, Error> {
+        if let Some(extent_payload) = payload.strip_prefix(TEXT_EXTENT_OPS_MAGIC) {
+            let ops = self.resolve_text_op_refs(text_oplog::decode(extent_payload)?)?;
+            let mut runs = Vec::new();
+            let mut cursor = 0usize;
+            for op in ops {
+                match op {
+                    TextOp::Insert {
+                        pos,
+                        content: TextContent::Inline(bytes),
+                    } => {
+                        if pos > cursor {
+                            runs.push(PlainTextRun::Retain(pos - cursor));
+                            cursor = pos;
+                        }
+                        runs.push(PlainTextRun::Insert(bytes));
+                    }
+                    TextOp::Insert {
+                        content: TextContent::Ref(_),
+                        ..
+                    } => {
+                        return Err(Error::InvalidStoredValue(
+                            "text extent op refs must be resolved",
+                        ));
+                    }
+                    TextOp::Delete { pos, len } => {
+                        if pos > cursor {
+                            runs.push(PlainTextRun::Retain(pos - cursor));
+                            cursor = pos;
+                        }
+                        runs.push(PlainTextRun::Delete(len));
+                        cursor = cursor
+                            .checked_add(len)
+                            .ok_or(Error::InvalidStoredValue("text extent op cursor overflow"))?;
+                    }
+                }
+            }
+            return Ok(PlainTextOp::new(runs));
+        }
+        decode_plain_text_op(payload)
+    }
+
     fn materialize_current_row(
         &mut self,
         table: &TableSchema,
@@ -1737,11 +1798,12 @@ where
         }
         let mut cells = BTreeMap::new();
         for column in &table.columns {
-            let value = if column.large_value.is_some() {
-                Some(Value::Bytes(self.materialize_large_value_column(
+            let value = if let Some(kind) = column.large_value {
+                Some(Value::Bytes(self.large_value_handle_for_version(
                     table,
                     version,
                     &column.name,
+                    kind,
                 )?))
             } else {
                 version.cell(table, &column.name)?
@@ -1751,6 +1813,92 @@ where
             }
         }
         Ok(cells)
+    }
+
+    fn large_value_handle_for_version(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRow,
+        column: &str,
+        kind: LargeValueKind,
+    ) -> Result<Vec<u8>, Error> {
+        let len = self.large_value_column_len(table, version, column)?;
+        let refs = self.large_value_extent_refs_for_version(table, version, column, kind)?;
+        let tx_id = self.version_tx_id(version)?;
+        encode_large_value_handle(table, version.row_uuid(), column, tx_id, kind, len, refs)
+    }
+
+    fn large_value_extent_refs_for_version(
+        &mut self,
+        table: &TableSchema,
+        winner: &VersionRow,
+        column: &str,
+        kind: LargeValueKind,
+    ) -> Result<Vec<content_store::Extent>, Error> {
+        let mut suffix = Vec::new();
+        let mut current = self.version_tx_id(winner)?;
+        loop {
+            let version = self
+                .query_versions_for_tx(current)?
+                .into_iter()
+                .find(|version| {
+                    version.table() == table.name
+                        && version.row_uuid() == winner.row_uuid()
+                        && version.layer() == VersionLayer::Content
+                })
+                .ok_or(Error::MissingTransaction(current))?;
+            let parents = version.parents();
+            suffix.push(version);
+            match parents.as_slice() {
+                [] => break,
+                [parent] => current = *parent,
+                _ => current = self.large_value_primary_parent(&parents)?,
+            }
+        }
+        suffix.reverse();
+
+        let mut refs = Vec::new();
+        for version in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+                continue;
+            };
+            match kind {
+                LargeValueKind::Text => {
+                    if let Some(extent_payload) = payload.strip_prefix(TEXT_EXTENT_OPS_MAGIC) {
+                        refs.extend(content_refs_in_text_ops(text_oplog::decode(
+                            extent_payload,
+                        )?));
+                    }
+                }
+                LargeValueKind::Blob => {
+                    refs.extend(content_refs_in_text_ops(text_oplog::decode(&payload)?));
+                }
+            }
+        }
+        refs.sort();
+        refs.dedup();
+        Ok(refs)
+    }
+
+    /// Materialize the bytes referenced by a large-value handle returned in a row cell.
+    pub fn hydrate_large_value_handle(&mut self, handle: &[u8]) -> Result<Vec<u8>, Error> {
+        let handle = decode_large_value_handle(handle)?;
+        let table = self.table(&handle.table)?.clone();
+        let version = self
+            .query_versions_for_tx(handle.tx_id)?
+            .into_iter()
+            .find(|version| {
+                version.table() == handle.table
+                    && version.row_uuid() == handle.row_uuid
+                    && version.layer() == VersionLayer::Content
+            })
+            .ok_or(Error::MissingTransaction(handle.tx_id))?;
+        if column_large_value_kind(&table, &handle.column)? != handle.kind {
+            return Err(Error::InvalidStoredValue(
+                "large-value handle kind mismatch",
+            ));
+        }
+        self.materialize_large_value_column(&table, &version, &handle.column)
     }
 
     /// Subscribe to the raw history storage table.
@@ -3464,88 +3612,181 @@ fn large_value_edit_ops_to_legacy_text_ops(ops: Vec<LargeValueEditOp>) -> Vec<Te
         .collect()
 }
 
-fn encode_plain_text_edit(parent_len: usize, ops: &[LargeValueEditOp]) -> Result<Vec<u8>, Error> {
-    let mut tokens = (0..parent_len)
-        .map(PlainTextToken::Parent)
-        .collect::<Vec<_>>();
-    for op in ops {
-        match op {
-            LargeValueEditOp::Insert(pos, bytes) => {
-                if *pos > tokens.len() {
-                    return Err(Error::InvalidMergeableCommit(
-                        "large-value insert position is out of bounds",
-                    ));
-                }
-                tokens.splice(
-                    *pos..*pos,
-                    bytes.iter().copied().map(PlainTextToken::Inserted),
-                );
-            }
-            LargeValueEditOp::Delete(pos, len) => {
-                let end = pos.checked_add(*len).ok_or(Error::InvalidMergeableCommit(
-                    "large-value delete range overflows",
-                ))?;
-                if end > tokens.len() {
-                    return Err(Error::InvalidMergeableCommit(
-                        "large-value delete range is out of bounds",
-                    ));
-                }
-                tokens.drain(*pos..end);
-            }
-        }
-    }
-
-    let mut runs = Vec::new();
-    let mut parent_cursor = 0usize;
-    let mut idx = 0usize;
-    while idx < tokens.len() {
-        match tokens[idx] {
-            PlainTextToken::Parent(parent_idx) => {
-                if parent_idx > parent_cursor {
-                    runs.push(PlainTextRun::Delete(parent_idx - parent_cursor));
-                    parent_cursor = parent_idx;
-                }
-                let mut len = 0usize;
-                while idx < tokens.len() {
-                    match tokens[idx] {
-                        PlainTextToken::Parent(next_parent)
-                            if next_parent == parent_cursor + len =>
-                        {
-                            len += 1;
-                            idx += 1;
-                        }
-                        _ => break,
-                    }
-                }
-                runs.push(PlainTextRun::Retain(len));
-                parent_cursor += len;
-            }
-            PlainTextToken::Inserted(_) => {
-                let mut bytes = Vec::new();
-                while idx < tokens.len() {
-                    match tokens[idx] {
-                        PlainTextToken::Inserted(byte) => {
-                            bytes.push(byte);
-                            idx += 1;
-                        }
-                        PlainTextToken::Parent(_) => break,
-                    }
-                }
-                runs.push(PlainTextRun::Insert(bytes));
-            }
-        }
-    }
-    if parent_cursor < parent_len {
-        runs.push(PlainTextRun::Delete(parent_len - parent_cursor));
-    }
-
-    Ok(PlainTextOp::new(runs).encode())
+fn encode_extent_text_ops(ops: &[TextOp]) -> Vec<u8> {
+    let mut bytes = Vec::from(TEXT_EXTENT_OPS_MAGIC);
+    bytes.extend(text_oplog::encode(ops));
+    bytes
 }
 
-#[derive(Clone, Copy)]
-enum PlainTextToken {
-    Parent(usize),
-    Inserted(u8),
+fn encode_large_value_handle(
+    table: &TableSchema,
+    row_uuid: RowUuid,
+    column: &str,
+    tx_id: TxId,
+    kind: LargeValueKind,
+    len: usize,
+    refs: Vec<content_store::Extent>,
+) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::from(LARGE_VALUE_HANDLE_MAGIC);
+    write_handle_string(&mut bytes, &table.name)?;
+    bytes.extend_from_slice(row_uuid.as_bytes());
+    write_handle_string(&mut bytes, column)?;
+    bytes.extend_from_slice(&tx_id.time.0.to_be_bytes());
+    bytes.extend_from_slice(tx_id.node.as_bytes());
+    bytes.push(match kind {
+        LargeValueKind::Text => 1,
+        LargeValueKind::Blob => 2,
+    });
+    bytes.extend_from_slice(
+        &u64::try_from(len)
+            .map_err(|_| Error::InvalidStoredValue("large-value handle length exceeds u64"))?
+            .to_be_bytes(),
+    );
+    bytes.extend_from_slice(
+        &u64::try_from(refs.len())
+            .map_err(|_| Error::InvalidStoredValue("large-value handle refs exceed u64"))?
+            .to_be_bytes(),
+    );
+    for extent in refs {
+        bytes.extend_from_slice(extent.writer.as_bytes());
+        bytes.extend_from_slice(extent.row.as_bytes());
+        let column = extent.column.as_bytes();
+        bytes.extend_from_slice(
+            &u32::try_from(column.len())
+                .map_err(|_| Error::InvalidStoredValue("large-value handle column too long"))?
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(column);
+        bytes.extend_from_slice(&extent.offset.to_be_bytes());
+        bytes.extend_from_slice(&extent.len.to_be_bytes());
+    }
+    Ok(bytes)
+}
+
+fn write_handle_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), Error> {
+    bytes.extend_from_slice(
+        &u32::try_from(value.len())
+            .map_err(|_| Error::InvalidStoredValue("large-value handle string too long"))?
+            .to_be_bytes(),
+    );
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn content_refs_in_text_ops(ops: Vec<TextOp>) -> Vec<content_store::Extent> {
+    ops.into_iter()
+        .filter_map(|op| match op {
+            TextOp::Insert {
+                content: TextContent::Ref(extent),
+                ..
+            } => Some(extent),
+            TextOp::Insert { .. } | TextOp::Delete { .. } => None,
+        })
+        .collect()
+}
+
+struct DecodedLargeValueHandle {
+    table: String,
+    row_uuid: RowUuid,
+    column: String,
+    tx_id: TxId,
+    kind: LargeValueKind,
+}
+
+fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Error> {
+    let mut cursor = HandleCursor::new(
+        bytes
+            .strip_prefix(LARGE_VALUE_HANDLE_MAGIC)
+            .ok_or(Error::InvalidStoredValue("invalid large-value handle"))?,
+    );
+    let table = cursor.read_string()?;
+    let row_uuid = RowUuid(uuid::Uuid::from_bytes(cursor.read_array()?));
+    let column = cursor.read_string()?;
+    let tx_time = TxTime(cursor.read_u64()?);
+    let tx_node = NodeUuid(uuid::Uuid::from_bytes(cursor.read_array()?));
+    let kind = match cursor.read_u8()? {
+        1 => LargeValueKind::Text,
+        2 => LargeValueKind::Blob,
+        _ => return Err(Error::InvalidStoredValue("invalid large-value handle kind")),
+    };
+    let _len = cursor.read_u64()?;
+    let refs = cursor.read_u64()?;
+    for _ in 0..refs {
+        let _writer = AuthorId(uuid::Uuid::from_bytes(cursor.read_array()?));
+        let _row = RowUuid(uuid::Uuid::from_bytes(cursor.read_array()?));
+        let _column = cursor.read_string()?;
+        let _offset = cursor.read_u64()?;
+        let _len = cursor.read_u64()?;
+    }
+    if !cursor.is_empty() {
+        return Err(Error::InvalidStoredValue(
+            "trailing large-value handle bytes",
+        ));
+    }
+    Ok(DecodedLargeValueHandle {
+        table,
+        row_uuid,
+        column,
+        tx_id: TxId::new(tx_time, tx_node),
+        kind,
+    })
+}
+
+struct HandleCursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> HandleCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pos == self.bytes.len()
+    }
+
+    fn read_u8(&mut self) -> Result<u8, Error> {
+        let value = *self
+            .bytes
+            .get(self.pos)
+            .ok_or(Error::InvalidStoredValue("truncated large-value handle"))?;
+        self.pos += 1;
+        Ok(value)
+    }
+
+    fn read_u32(&mut self) -> Result<u32, Error> {
+        Ok(u32::from_be_bytes(self.read_array()?))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, Error> {
+        Ok(u64::from_be_bytes(self.read_array()?))
+    }
+
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], Error> {
+        self.read_bytes(N)?
+            .try_into()
+            .map_err(|_| Error::InvalidStoredValue("invalid large-value handle bytes"))
+    }
+
+    fn read_string(&mut self) -> Result<String, Error> {
+        let len = usize::try_from(self.read_u32()?)
+            .map_err(|_| Error::InvalidStoredValue("large-value handle string too long"))?;
+        String::from_utf8(self.read_bytes(len)?.to_vec())
+            .map_err(|_| Error::InvalidStoredValue("large-value handle string is not utf-8"))
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], Error> {
+        let end = self.pos.checked_add(len).ok_or(Error::InvalidStoredValue(
+            "large-value handle length overflow",
+        ))?;
+        let bytes = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or(Error::InvalidStoredValue("truncated large-value handle"))?;
+        self.pos = end;
+        Ok(bytes)
+    }
 }
 
 fn decode_plain_text_op(payload: &[u8]) -> Result<PlainTextOp, Error> {
@@ -3702,6 +3943,9 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
+    /// Content extent bytes are referenced by stored history but not hydrated locally.
+    #[error("missing content extent: {0:?}")]
+    MissingContentExtent(content_store::Extent),
     /// Transaction was not known locally.
     #[error("missing transaction: {0:?}")]
     MissingTransaction(TxId),

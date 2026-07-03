@@ -10,7 +10,7 @@ use jazz_tools::{
     ColumnDescriptor, ColumnType, DurabilityTier, JazzClient, LargeValueKind, ObjectId,
     QueryBuilder, RowDescriptor, Schema, Session, TableName, TableSchema, TextEdit, Value,
 };
-use support::{TestingClient, wait_for_query};
+use support::TestingClient;
 
 fn text_doc_schema() -> Schema {
     [(
@@ -39,19 +39,33 @@ async fn connect(server: &JazzServer, user: &str) -> JazzClient {
 
 async fn wait_for_body(client: &JazzClient, row: ObjectId, body: impl Into<Vec<u8>>, label: &str) {
     let body = body.into();
-    wait_for_query(
-        client,
-        docs_query(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(30),
-        label,
-        move |rows| {
-            rows.iter()
-                .any(|(id, values)| *id == row && values == &vec![Value::Bytea(body.clone())])
-                .then_some(rows)
-        },
-    )
-    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let rows = client
+            .query(docs_query(), Some(DurabilityTier::EdgeServer))
+            .await
+            .expect(label);
+        for (id, values) in rows.iter() {
+            if *id != row {
+                continue;
+            }
+            let Some(Value::LargeValue(handle)) = values.first() else {
+                continue;
+            };
+            if client
+                .hydrate_large_value(handle)
+                .await
+                .is_ok_and(|bytes| bytes == body)
+            {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {label}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
