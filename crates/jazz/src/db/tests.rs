@@ -3985,6 +3985,63 @@ fn byte_wire_round_trips_subscription_to_client() {
 }
 
 #[test]
+fn single_upstream_tick_applies_multiple_subscription_updates() {
+    let schema = issue_schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    let project = row(1);
+    server
+        .insert_with_id(
+            "projects",
+            project,
+            BTreeMap::from([("name".to_owned(), Value::String("Platform".to_owned()))]),
+        )
+        .unwrap();
+    seed(
+        &server,
+        "issues",
+        issue_cells("API", "open", owner, project, 5, &["api"], None),
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let projects = Query::from("projects");
+    let issues = Query::from("issues");
+    let mut project_subscription =
+        prepared_subscribe(&client, &projects, global_subscribe_opts()).unwrap();
+    let mut issue_subscription =
+        prepared_subscribe(&client, &issues, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(project_subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(issue_subscription.next_event()).unwrap()).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let stats = client.tick_stats().unwrap();
+
+    assert_eq!(prepared_read(&client, &projects).len(), 1);
+    assert_eq!(prepared_read(&client, &issues).len(), 1);
+    assert_eq!(stats.subscription_events, 2);
+    assert_eq!(
+        delta_rows(block_on(project_subscription.next_event()).unwrap())
+            .0
+            .len(),
+        1
+    );
+    assert_eq!(
+        delta_rows(block_on(issue_subscription.next_event()).unwrap())
+            .0
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
