@@ -966,6 +966,9 @@ where
                 "large-value edit column must be text or blob",
             ));
         }
+        // Format-declared text columns currently accept whole-value writes only.
+        // Canonicalizing op streams would rewrite client-authored ops, so this
+        // remains a named staging limitation until an op-preserving design lands.
         if column.text_merge_spec.is_some() {
             return Err(Error::InvalidMergeableCommit(
                 "op edits on format-declared columns not supported yet",
