@@ -84,13 +84,17 @@ fn cells(index: usize) -> BTreeMap<String, Value> {
         ),
         ("author".to_owned(), Value::Uuid(AUTHOR.0)),
         ("created_at".to_owned(), Value::U64(index as u64)),
-        ("done".to_owned(), Value::Bool(index % 2 == 0)),
+        ("done".to_owned(), Value::Bool(index.is_multiple_of(2))),
     ])
 }
 
 fn filtered_cells(index: usize) -> BTreeMap<String, Value> {
     let mut cells = cells(index);
-    let author = if index % 2 == 0 { AUTHOR } else { OTHER_AUTHOR };
+    let author = if index.is_multiple_of(2) {
+        AUTHOR
+    } else {
+        OTHER_AUTHOR
+    };
     cells.insert("author".to_owned(), Value::Uuid(author.0));
     cells.insert("folder".to_owned(), Value::Uuid(row_uuid(index % 2).0));
     cells
@@ -151,7 +155,8 @@ fn read_added_len(event: Option<SubscriptionEvent>) -> usize {
 fn single_subscription_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/single_latency");
 
-    for scale in [1_000usize] {
+    {
+        let scale = 1_000usize;
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
             let db = open_db(1);
@@ -178,7 +183,8 @@ fn single_subscription_latency(c: &mut Criterion) {
 fn fanout_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/fanout");
 
-    for scale in [1_000usize] {
+    {
+        let scale = 1_000usize;
         group.throughput(Throughput::Elements(FANOUT_SUBSCRIPTIONS as u64));
         group.bench_with_input(
             BenchmarkId::new("subscriptions_x100", scale),
@@ -219,7 +225,8 @@ fn fanout_latency(c: &mut Criterion) {
 fn cold_start_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/cold_start");
 
-    for scale in [1_000usize] {
+    {
+        let scale = 1_000usize;
         group.bench_with_input(
             BenchmarkId::new("initial_load", scale),
             &scale,
@@ -244,7 +251,8 @@ fn cold_start_latency(c: &mut Criterion) {
 fn filtered_subscription_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/filtered");
 
-    for scale in [1_000usize] {
+    {
+        let scale = 1_000usize;
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(
             BenchmarkId::new("author_filter", scale),

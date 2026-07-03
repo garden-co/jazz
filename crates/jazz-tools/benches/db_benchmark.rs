@@ -3,6 +3,8 @@
 //! These benchmarks intentionally exercise the replacement core path directly
 //! instead of the legacy jazz-tools RuntimeCore stack.
 
+#![allow(clippy::single_element_loop)]
+
 use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -149,13 +151,17 @@ fn cells(index: usize) -> BTreeMap<String, Value> {
         ),
         ("author".to_owned(), Value::Uuid(AUTHOR.0)),
         ("created_at".to_owned(), Value::U64(index as u64)),
-        ("done".to_owned(), Value::Bool(index % 2 == 0)),
+        ("done".to_owned(), Value::Bool(index.is_multiple_of(2))),
     ])
 }
 
 fn filtered_cells(index: usize) -> BTreeMap<String, Value> {
     let mut cells = cells(index);
-    let author = if index % 2 == 0 { AUTHOR } else { OTHER_AUTHOR };
+    let author = if index.is_multiple_of(2) {
+        AUTHOR
+    } else {
+        OTHER_AUTHOR
+    };
     cells.insert("author".to_owned(), Value::Uuid(author.0));
     cells.insert("folder".to_owned(), Value::Uuid(row_uuid(index % 2).0));
     cells
