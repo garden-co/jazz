@@ -7,12 +7,19 @@ amplifications — logical (history-keeping + arrangement maintenance), physical
 ## When
 
 Benchmarking & optimization mode: after Plan 5 (capability growth) and with/
-after Plan 6 (large values — the value-separation item overlaps), and strictly
-BEFORE Plan 7 (the CF restructure is storage-format-breaking; format must
-settle before version tags and artifact packaging). Sequencing option: pull
-item 0 forward into Plan 4 implementation if the arrangements CF is being laid
-out anyway. Re-run the medium profiles first — the denorm/watermark/known-state
-levers have moved the ground under the last ranking.
+after Plan 6 (large values — the value-separation item overlaps). Items 0
+(CF-per-class) and 1 (per-class policies) landed 2026-07-03 with receipts.
+
+**Format-freeze policy (decided with Anselm 2026-07-03):** the freeze is NOT
+coupled to Plan 7. It is its own late milestone, gated on all three of:
+(a) the whole marketed alpha surface is served, (b) perf is proven at the
+use-case-like benchmarks, and (c) a deliberate final cleanliness/elegance/
+future-proofness pass over the storage and wire formats has happened.
+Surprises are expected while chasing (a) and (b); format-breaking changes
+remain sanctioned (pre-release regenerate-only, fail-loud on old layouts)
+until the freeze milestone is declared. Wire-visible reservations (e.g. the
+columnar ViewUpdate variant, jazz ch. 8) are decided as they arise, not
+under freeze pressure.
 
 ## Items (ordered)
 
