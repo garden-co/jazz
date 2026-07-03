@@ -290,6 +290,10 @@ pub enum BrokerCommand {
     /// port.postMessage(message) — message already carries brokerInstanceId.
     Post { port_id: PortId, message: ControlMessage },
     ClosePort { port_id: PortId },
+    /// Drop the shell's port-map reference without closing (graceful tab
+    /// departure): the JS dropped its TabState.port reference here, and
+    /// without this the shell leaks every departed tab's MessagePort.
+    ReleasePort { port_id: PortId },
     /// The assignFollowerPorts pair: shell creates one MessageChannel and posts
     ///   {type:"attach-follower-port", followerTabId, leadershipId, port: ch.port1}
     ///     to leader_port_id (transferring port1), then

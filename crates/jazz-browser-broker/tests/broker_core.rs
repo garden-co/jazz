@@ -682,6 +682,9 @@ fn lock_monitor_loss_runs_demote_takeover_steal_and_reelection() {
                     leadership_id: 1,
                 },
             },
+            // The crashed leader's port is released (not closed): the shell
+            // must not keep referencing it forever.
+            BrokerCommand::ReleasePort { port_id: PortId(1) },
             BrokerCommand::ProbeLocks {
                 probe_id: ProbeId(1),
                 lock_names: vec!["tab-lock".to_string(), "worker-lock".to_string()],
@@ -1580,4 +1583,17 @@ fn completed_reset_outcomes_cap_at_100_and_refinish_moves_to_the_back_of_evictio
     assert!(!redelivered.contains(&"r2".to_string()));
     assert_eq!(redelivered.first().map(String::as_str), Some("r3"));
     assert_eq!(&redelivered[98..], &["r1".to_string(), "r101".to_string()]);
+}
+
+#[test]
+fn graceful_shutdown_releases_the_departed_tabs_port_without_closing_it() {
+    let mut broker = new_broker();
+    boot_leader_and_attached_follower(&mut broker);
+
+    let commands = send(&mut broker, 2, shutdown(), 40);
+
+    // Reference dropped so the shell's port map does not leak…
+    assert!(commands.contains(&BrokerCommand::ReleasePort { port_id: PortId(2) }));
+    // …but never force-closed on a graceful departure (JS parity).
+    assert!(!commands.contains(&BrokerCommand::ClosePort { port_id: PortId(2) }));
 }

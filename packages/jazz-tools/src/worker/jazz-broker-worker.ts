@@ -103,7 +103,9 @@ function flushQueuedEvents(): void {
     while (coreReady && core && queuedEvents.length > 0) {
       const event = queuedEvents.shift();
       if (!event) continue;
-      executeCommands(core.handle(event, Date.now()) as BrokerCommand[]);
+      // Per-event guard: one malformed queued message must not abort the
+      // flush and strand the valid events behind it.
+      executeCommands(handleCoreEvent(core, event));
     }
   } finally {
     flushing = false;
@@ -118,6 +120,11 @@ function executeCommands(commands: BrokerCommand[]): void {
         break;
       case "closePort":
         closePort(command.portId as PortId);
+        break;
+      case "releasePort":
+        // Drop the reference only: the port's listener keeps routing any late
+        // inbound messages (JS closure semantics), but posts to it stop.
+        ports.delete(command.portId as PortId);
         break;
       case "attachFollowerChannel":
         attachFollowerChannel(command);

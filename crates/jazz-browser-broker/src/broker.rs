@@ -87,6 +87,12 @@ pub enum BrokerCommand {
     ClosePort {
         port_id: PortId,
     },
+    /// Drop the shell's reference to a departed tab's port without closing
+    /// it: inbound listeners stay attached (matching the JS closure that
+    /// outlived the tab entry), but the broker will never post to it again.
+    ReleasePort {
+        port_id: PortId,
+    },
     #[serde(rename_all = "camelCase")]
     AttachFollowerChannel {
         leader_port_id: PortId,
@@ -1060,6 +1066,13 @@ impl BrokerCore {
         self.reelect_schema_fingerprint_if_unheld(&tab, now_ms, commands);
         if options.close_port {
             commands.push(BrokerCommand::ClosePort {
+                port_id: tab.port_id,
+            });
+        } else {
+            // The JS dropped its TabState.port reference here even when it
+            // did not close the port; without this the shell's port map holds
+            // every gracefully departed tab's MessagePort forever.
+            commands.push(BrokerCommand::ReleasePort {
                 port_id: tab.port_id,
             });
         }
