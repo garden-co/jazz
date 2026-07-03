@@ -58,6 +58,29 @@ fn content_row_members_for_bundle(
         .collect()
 }
 
+fn relation_edge_version_rows_for_bundle(
+    facts: &[ProgramFactEntry],
+) -> BTreeSet<(String, RowUuid, TxId)> {
+    facts
+        .iter()
+        .filter_map(|fact| match fact {
+            ProgramFactEntry::RelationEdge(edge) => Some(edge),
+            _ => None,
+        })
+        .flat_map(|edge| {
+            [
+                edge.source_version
+                    .as_ref()
+                    .map(|version| (edge.source_table.to_string(), edge.source_row, version.tx)),
+                edge.target_version
+                    .as_ref()
+                    .map(|version| (edge.target_table.to_string(), edge.target_row, version.tx)),
+            ]
+        })
+        .flatten()
+        .collect()
+}
+
 pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) subscription: SubscriptionKey,
     /// Peer inventory of transactions whose full row-version payload has
@@ -316,13 +339,15 @@ where
                 None
             })
             .collect::<BTreeSet<_>>();
+        let relation_edge_add_rows = relation_edge_version_rows_for_bundle(&program_fact_adds);
         let wanted_add_rows_by_tx = row_result_adds
             .iter()
-            .map(|(table, row_uuid, tx_id)| (*tx_id, (table.to_string(), *row_uuid)))
+            .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
+            .chain(relation_edge_add_rows)
             .fold(
                 BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),
-                |mut by_tx, (tx_id, row)| {
-                    by_tx.entry(tx_id).or_default().insert(row);
+                |mut by_tx, (table, row_uuid, tx_id)| {
+                    by_tx.entry(tx_id).or_default().insert((table, row_uuid));
                     by_tx
                 },
             );
