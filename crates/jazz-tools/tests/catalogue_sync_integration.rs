@@ -2496,7 +2496,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
 /// query is filtered by the same table SELECT policy, and Mallory's spoofed
 /// owner insert is rejected by the same table INSERT check.
 ///
-/// alice --insert blob asset--> server --row policy--> alice sees Bytea
+/// alice --insert blob asset--> server --row policy--> alice sees handle, then hydrates
 /// bob --query assets---------> server --row policy--x empty
 /// mallory --spoof owner-----> server --row policy--x rejected
 #[tokio::test]
@@ -2561,13 +2561,17 @@ async fn large_blob_values_follow_ordinary_row_permissions() {
         |rows| (rows.len() == 1 && rows[0].0 == asset_row_id).then_some(rows),
     )
     .await;
+    assert_eq!(alice_rows[0].1[0], Value::Text("alice".to_string()));
+    assert_eq!(alice_rows[0].1[1], Value::Text("alice.bin".to_string()));
+    let Value::LargeValue(handle) = &alice_rows[0].1[2] else {
+        panic!("large blob query should materialize as a handle");
+    };
     assert_eq!(
-        alice_rows[0].1,
-        vec![
-            Value::Text("alice".to_string()),
-            Value::Text("alice.bin".to_string()),
-            Value::Bytea(blob),
-        ]
+        alice
+            .hydrate_large_value(handle)
+            .await
+            .expect("hydrate alice blob"),
+        blob
     );
 
     let bob_rows = wait_for_query(
