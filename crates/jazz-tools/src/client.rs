@@ -1461,6 +1461,47 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
     }
 }
 
+fn aggregate_public_values(query: &Query, row: &jazz::node::CurrentRow) -> Result<Vec<Value>> {
+    let Some(aggregate) = &query.aggregate else {
+        return Ok(Vec::new());
+    };
+    let mut columns = Vec::new();
+    if let Some(group_by) = &aggregate.group_by {
+        columns.push(group_by.clone());
+    }
+    columns.extend(
+        aggregate
+            .outputs
+            .iter()
+            .map(|output| match output.function {
+                crate::public_api::query::AggregateFunction::Count => "count".to_owned(),
+                crate::public_api::query::AggregateFunction::Sum => {
+                    format!(
+                        "sum_{}",
+                        output
+                            .column
+                            .as_deref()
+                            .expect("sum aggregate has an input column")
+                    )
+                }
+            }),
+    );
+    let (descriptor, raw) = row.encoded_record();
+    let borrowed = jazz::groove::records::BorrowedRecord::new(raw, descriptor);
+    columns
+        .into_iter()
+        .map(|column| {
+            let idx = descriptor.field_index(&column).ok_or_else(|| {
+                JazzError::Query(format!("aggregate row missing column {column}"))
+            })?;
+            let value = borrowed
+                .get_idx(idx)
+                .map_err(|error| JazzError::Query(error.to_string()))?;
+            core_to_public_value(value)
+        })
+        .collect()
+}
+
 fn core_batch_id(tx_id: CoreTxId) -> BatchId {
     let mut bytes = *tx_id.node.0.as_bytes();
     bytes[..8].copy_from_slice(&tx_id.time.0.to_be_bytes());
@@ -1525,13 +1566,35 @@ impl JazzClient {
             || query.offset != 0
             || query.include_deleted
             || query.result_element_index.is_some()
+            || (query.aggregate.is_some() && query.select_columns.is_some())
         {
             return Err(JazzError::Query(
                 "JazzClient currently supports simple table queries only".to_string(),
             ));
         }
         let mut core_query = jazz::query::Query::from(query.table.as_str());
-        if let Some(columns) = query.select_columns.clone() {
+        if let Some(aggregate) = &query.aggregate {
+            let outputs = aggregate
+                .outputs
+                .iter()
+                .map(|output| match output.function {
+                    crate::public_api::query::AggregateFunction::Count => {
+                        jazz::query::Aggregate::count()
+                    }
+                    crate::public_api::query::AggregateFunction::Sum => {
+                        jazz::query::Aggregate::sum(
+                            output
+                                .column
+                                .as_deref()
+                                .expect("sum aggregate has an input column"),
+                        )
+                    }
+                });
+            core_query = core_query.aggregate(outputs);
+            if let Some(group_by) = &aggregate.group_by {
+                core_query = core_query.group_by(group_by.clone());
+            }
+        } else if let Some(columns) = query.select_columns.clone() {
             core_query = core_query.select(columns);
         }
         Ok(core_query)
@@ -1541,6 +1604,16 @@ impl JazzClient {
         query: &Query,
         rows: Vec<jazz::node::CurrentRow>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+        if query.aggregate.is_some() {
+            return rows
+                .into_iter()
+                .map(|row| {
+                    let row_id = ObjectId::from_uuid(row.row_uuid().0);
+                    let values = aggregate_public_values(query, &row)?;
+                    Ok((row_id, values))
+                })
+                .collect();
+        }
         let table = query.table.as_str();
         let schema = self.schema()?;
         let table_schema = schema

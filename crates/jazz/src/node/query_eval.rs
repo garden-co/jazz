@@ -35,7 +35,7 @@ use super::query_engine::{
     SourceRequirements, SourceResolutionError, SourceResolver, SourceRole, SourceRowShape,
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
     VersionIdentityFields, VersionedRowRefSchema, claim_param_field, left_field,
-    lower_query_program, right_field, route_param_field, user_column_field,
+    logical_user_column, lower_query_program, right_field, route_param_field, user_column_field,
 };
 use crate::protocol::{
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ReadViewKey, ReadViewSourceSpec,
@@ -202,6 +202,22 @@ fn fact_public_fields(
             fields.extend(schema.routing_param_fields.iter().cloned());
             Ok(fields)
         }
+        ProgramFactSchema::AggregateResult(schema) => {
+            let mut fields = vec![
+                schema.synthetic.table_field.clone(),
+                schema.synthetic.row_field.clone(),
+                schema.synthetic.revision_field.clone(),
+            ];
+            fields.extend(
+                schema
+                    .group_key_fields
+                    .iter()
+                    .chain(&schema.value_fields)
+                    .map(|field| field.name.clone()),
+            );
+            fields.extend(schema.routing_param_fields.iter().cloned());
+            Ok(fields)
+        }
         ProgramFactSchema::RelationEdges(schema) => {
             let mut fields = Vec::new();
             fields.extend(versioned_row_ref_fields(&schema.source));
@@ -250,6 +266,7 @@ fn fact_public_fields(
             }
             ProgramFactSchema::AuthorizedRows(_)
             | ProgramFactSchema::ResultMembership(_)
+            | ProgramFactSchema::AggregateResult(_)
             | ProgramFactSchema::RelationEdges(_)
             | ProgramFactSchema::VersionWitnesses(_)
             | ProgramFactSchema::ReplacementWitnesses(_) => unreachable!(),
@@ -271,6 +288,9 @@ fn output_routing_fields_for_query_eval(
             schema.routing_param_fields.clone()
         }
         super::query_engine::ProgramFactSchema::ResultMembership(schema) => {
+            schema.routing_param_fields.clone()
+        }
+        super::query_engine::ProgramFactSchema::AggregateResult(schema) => {
             schema.routing_param_fields.clone()
         }
         super::query_engine::ProgramFactSchema::SourceCoverage(schema) => {
@@ -1906,6 +1926,7 @@ fn normalized_aggregate_function(function: AggregateFunction) -> NormalizedAggre
     match function {
         AggregateFunction::Count => NormalizedAggregateFunction::Count,
         AggregateFunction::Sum => NormalizedAggregateFunction::Sum,
+        AggregateFunction::Avg => NormalizedAggregateFunction::Avg,
         AggregateFunction::Min => NormalizedAggregateFunction::Min,
         AggregateFunction::Max => NormalizedAggregateFunction::Max,
     }
@@ -1914,6 +1935,7 @@ fn normalized_aggregate_function(function: AggregateFunction) -> NormalizedAggre
 fn normalized_aggregate_output_type(aggregate: &Aggregate) -> ColumnType {
     match aggregate.function {
         AggregateFunction::Count => ColumnType::U64,
+        AggregateFunction::Avg => ColumnType::F64,
         // Aggregate lowering is currently reported as an unsupported
         // query-engine capability before Groove needs the exact result type.
         AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
@@ -3488,7 +3510,7 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let table = self.table(&shape.query().table)?.clone();
+        let table = self.query_output_table(shape.query())?;
         let program = self.compile_branch_query_program(
             branch_id,
             shape,
@@ -3500,7 +3522,11 @@ where
             .database
             .query_graph(lowered_app_rows_graph(&program)?)
             .map_err(Error::Groove)?;
-        self.materialize_inline_current_query_rows(&table, deltas)
+        if shape.query().aggregate.is_some() {
+            self.materialize_aggregate_query_rows(shape.query(), &table, deltas)
+        } else {
+            self.materialize_inline_current_query_rows(&table, deltas)
+        }
     }
 
     fn compile_query_program_request(
@@ -4239,7 +4265,7 @@ where
             None => None,
         };
         let policy = self.query_program_policy_context(identity);
-        let table_schema = self.table(&shape.query().table)?.clone();
+        let table_schema = self.query_output_table(shape.query())?;
         let deltas_result = match plan {
             None => self
                 .database
@@ -4269,13 +4295,18 @@ where
             },
         };
         let deltas = deltas_result?;
-        let mut rows = Vec::new();
-        for (record, weight) in deltas.iter() {
-            if weight > 0 {
-                let row = decode_current_row(&table_schema, record)?;
-                rows.push(self.materialize_current_row(&table_schema, row)?);
+        let mut rows = if shape.query().aggregate.is_some() {
+            self.materialize_aggregate_query_rows(shape.query(), &table_schema, deltas)?
+        } else {
+            let mut rows = Vec::new();
+            for (record, weight) in deltas.iter() {
+                if weight > 0 {
+                    let row = decode_current_row(&table_schema, record)?;
+                    rows.push(self.materialize_current_row(&table_schema, row)?);
+                }
             }
-        }
+            rows
+        };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
         self.apply_projection(query, &mut rows)?;
@@ -4423,9 +4454,12 @@ where
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let query = lowered_shape.query();
-        let table = self
-            .table_in_schema(&query.table, lowered_shape.schema_version())?
-            .clone();
+        let table = if query.aggregate.is_some() {
+            self.query_output_table(query)?
+        } else {
+            self.table_in_schema(&query.table, lowered_shape.schema_version())?
+                .clone()
+        };
         let binding = lowered_shape.bind(BTreeMap::new())?;
         let program =
             self.compile_include_deleted_query_program(&lowered_shape, &binding, tier, identity)?;
@@ -4433,7 +4467,11 @@ where
             .database
             .query_graph(lowered_app_rows_graph(&program)?)
             .map_err(Error::Groove)?;
-        self.materialize_include_deleted_query_rows(table, deltas)
+        if query.aggregate.is_some() {
+            self.materialize_aggregate_query_rows(query, &table, deltas)
+        } else {
+            self.materialize_include_deleted_query_rows(table, deltas)
+        }
     }
 
     fn materialize_historical_query_rows(
@@ -4480,6 +4518,43 @@ where
                 let row = decode_current_row(table, record)?;
                 rows.push(self.materialize_current_row(table, row)?);
             }
+        }
+        Ok(rows)
+    }
+
+    fn materialize_aggregate_query_rows(
+        &mut self,
+        _query: &crate::query::Query,
+        table: &TableSchema,
+        deltas: groove::ivm::RecordDeltas,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut rows = Vec::new();
+        for (index, (record, _weight)) in
+            deltas.iter().filter(|(_, weight)| *weight > 0).enumerate()
+        {
+            let mut cells = BTreeMap::new();
+            for field in record.descriptor().fields() {
+                let Some(name) = field.name.as_deref() else {
+                    continue;
+                };
+                let logical_name = logical_user_column(name);
+                if let Some(column) = table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == logical_name)
+                {
+                    let value =
+                        record.get_idx(record.descriptor().field_index(name).ok_or(
+                            Error::InvalidStoredValue("aggregate record field missing"),
+                        )?)?;
+                    cells.insert(column.name.clone(), value);
+                }
+            }
+            rows.push(current_row_from_cells(
+                table,
+                aggregate_row_uuid(index),
+                &cells,
+            )?);
         }
         Ok(rows)
     }
@@ -5013,7 +5088,6 @@ where
         rows: &mut Vec<CurrentRow>,
     ) -> Result<(), Error> {
         if query.aggregate.is_some() {
-            *rows = self.aggregate_query_rows(query, rows)?;
             self.apply_query_order(query, rows)?;
             apply_query_window(query, rows);
             return Ok(());
@@ -5022,6 +5096,15 @@ where
         // return a deterministic Vec. Re-apply ordering to the selected rows
         // without re-applying pagination.
         self.apply_query_order(query, rows)
+    }
+
+    fn query_output_table(&self, query: &crate::query::Query) -> Result<TableSchema, Error> {
+        let source_table = self.table(&query.table)?.clone();
+        if query.aggregate.is_some() {
+            aggregate_result_table(query, &source_table)
+        } else {
+            Ok(source_table)
+        }
     }
 
     pub(crate) fn apply_query_order(
@@ -5071,53 +5154,6 @@ where
             left.row_uuid().to_bytes().cmp(&right.row_uuid().to_bytes())
         });
         Ok(())
-    }
-
-    fn aggregate_query_rows(
-        &self,
-        query: &crate::query::Query,
-        rows: &[CurrentRow],
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let Some(aggregate) = &query.aggregate else {
-            return Ok(rows.to_vec());
-        };
-        let source_table = self.table(&query.table)?.clone();
-        let mut groups = BTreeMap::<String, (Option<Value>, Vec<CurrentRow>)>::new();
-        if let Some(group_by) = &aggregate.group_by {
-            for row in rows {
-                let value = query_order_value(row, &source_table, group_by);
-                let key = value
-                    .as_ref()
-                    .map(|value| format!("{value:?}"))
-                    .unwrap_or_else(|| "<null>".to_owned());
-                groups
-                    .entry(key)
-                    .or_insert_with(|| (value.clone(), Vec::new()))
-                    .1
-                    .push(row.clone());
-            }
-        } else {
-            groups.insert("<all>".to_owned(), (None, rows.to_vec()));
-        }
-
-        let aggregate_table = aggregate_result_table(query, &source_table)?;
-        groups
-            .into_values()
-            .enumerate()
-            .map(|(idx, (group_value, rows))| {
-                let mut cells = BTreeMap::new();
-                if let (Some(group_by), Some(value)) = (&aggregate.group_by, group_value) {
-                    cells.insert(group_by.clone(), value);
-                }
-                for aggregate in &aggregate.aggregates {
-                    cells.insert(
-                        aggregate.alias.clone(),
-                        aggregate_value(aggregate, &source_table, &rows)?,
-                    );
-                }
-                current_row_from_cells(&aggregate_table, aggregate_row_uuid(idx), &cells)
-            })
-            .collect()
     }
 
     fn apply_projection(
@@ -5303,6 +5339,12 @@ where
         )?;
         transitions.adds.extend(snapshot_transitions.adds);
         transitions.removes.extend(snapshot_transitions.removes);
+        transitions
+            .program_fact_adds
+            .extend(snapshot_transitions.program_fact_adds);
+        transitions
+            .program_fact_removes
+            .extend(snapshot_transitions.program_fact_removes);
         loop {
             match subscription.try_recv() {
                 Ok(deltas) => {
@@ -5314,6 +5356,12 @@ where
                     )?;
                     transitions.adds.extend(delta_transitions.adds);
                     transitions.removes.extend(delta_transitions.removes);
+                    transitions
+                        .program_fact_adds
+                        .extend(delta_transitions.program_fact_adds);
+                    transitions
+                        .program_fact_removes
+                        .extend(delta_transitions.program_fact_removes);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -6582,67 +6630,7 @@ fn aggregate_result_column_type(
                 .map(|column| column.column_type.clone())
                 .ok_or(Error::InvalidStoredValue("aggregate input column missing"))
         }
-    }
-}
-
-fn aggregate_value(
-    aggregate: &Aggregate,
-    source_table: &TableSchema,
-    rows: &[CurrentRow],
-) -> Result<Value, Error> {
-    match aggregate.function {
-        AggregateFunction::Count => Ok(Value::U64(rows.len() as u64)),
-        AggregateFunction::Sum => {
-            let column = aggregate
-                .column
-                .as_deref()
-                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
-            let mut sum_u64 = 0_u64;
-            let mut sum_f64 = 0.0_f64;
-            let mut saw_f64 = false;
-            for row in rows {
-                match query_order_value(row, source_table, column) {
-                    Some(Value::U8(value)) => sum_u64 += value as u64,
-                    Some(Value::U16(value)) => sum_u64 += value as u64,
-                    Some(Value::U32(value)) => sum_u64 += value as u64,
-                    Some(Value::U64(value)) => sum_u64 += value,
-                    Some(Value::F64(value)) => {
-                        saw_f64 = true;
-                        sum_f64 += value;
-                    }
-                    Some(_) | None => {}
-                }
-            }
-            if saw_f64 {
-                Ok(Value::F64(sum_f64 + sum_u64 as f64))
-            } else {
-                Ok(Value::U64(sum_u64))
-            }
-        }
-        AggregateFunction::Min | AggregateFunction::Max => {
-            let column = aggregate
-                .column
-                .as_deref()
-                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
-            let mut selected = None::<Value>;
-            for value in rows
-                .iter()
-                .filter_map(|row| query_order_value(row, source_table, column))
-            {
-                let replace = selected.as_ref().is_none_or(|current| {
-                    let ordering = compare_order_values(&value, current);
-                    match aggregate.function {
-                        AggregateFunction::Min => ordering == Ordering::Less,
-                        AggregateFunction::Max => ordering == Ordering::Greater,
-                        AggregateFunction::Count | AggregateFunction::Sum => false,
-                    }
-                });
-                if replace {
-                    selected = Some(value);
-                }
-            }
-            Ok(selected.unwrap_or(Value::Nullable(None)))
-        }
+        AggregateFunction::Avg => Ok(ColumnType::F64),
     }
 }
 

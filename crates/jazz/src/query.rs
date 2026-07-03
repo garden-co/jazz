@@ -559,6 +559,12 @@ impl Query {
         self
     }
 
+    /// Average a numeric result column.
+    pub fn avg(mut self, column: impl Into<String>) -> Self {
+        self.aggregate = Some(Box::new(AggregateQuery::new([Aggregate::avg(column)])));
+        self
+    }
+
     /// Find the minimum value for an orderable result column.
     pub fn min(mut self, column: impl Into<String>) -> Self {
         self.aggregate = Some(Box::new(AggregateQuery::new([Aggregate::min(column)])));
@@ -914,6 +920,16 @@ impl Aggregate {
         }
     }
 
+    /// AVG(column).
+    pub fn avg(column: impl Into<String>) -> Self {
+        let column = column.into();
+        Self {
+            function: AggregateFunction::Avg,
+            alias: format!("avg_{column}"),
+            column: Some(column),
+        }
+    }
+
     /// MIN(column).
     pub fn min(column: impl Into<String>) -> Self {
         let column = column.into();
@@ -950,6 +966,8 @@ pub enum AggregateFunction {
     Count,
     /// Sum numeric values.
     Sum,
+    /// Average numeric values.
+    Avg,
     /// Minimum orderable value.
     Min,
     /// Maximum orderable value.
@@ -1669,7 +1687,7 @@ fn validate_aggregate(table: &TableSchema, aggregate: &AggregateQuery) -> Result
                     column_type(table, column)?;
                 }
             }
-            AggregateFunction::Sum => {
+            AggregateFunction::Sum | AggregateFunction::Avg => {
                 let Some(column) = &aggregate.column else {
                     return Err(QueryError::OperandTypeMismatch);
                 };
@@ -2250,6 +2268,7 @@ fn canonical_aggregate_key(aggregate: &Aggregate) -> Vec<u8> {
     bytes.push(match aggregate.function {
         AggregateFunction::Count => b'c',
         AggregateFunction::Sum => b's',
+        AggregateFunction::Avg => b'a',
         AggregateFunction::Min => b'n',
         AggregateFunction::Max => b'x',
     });
