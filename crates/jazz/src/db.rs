@@ -26,7 +26,7 @@ use thiserror::Error;
 use crate::ids::{AuthorId, NodeUuid, RowUuid};
 pub use crate::node::CommitUnitTrust;
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, LargeValueEditCommit, LargeValueEditOp,
+    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlanHandle,
     RelationEdge, RelationSnapshot, RowProvenance,
 };
@@ -2420,6 +2420,14 @@ where
         self.node.set_scheduler(scheduler);
     }
 
+    /// Configure automatic edge-cache byte-budget eviction.
+    ///
+    /// `None` disables automatic eviction and preserves the historical manual
+    /// `evict_cold` behavior.
+    pub fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
+        self.node.set_edge_cache_budget(budget);
+    }
+
     /// Ask the installed scheduler to service pending peer-connection work.
     pub fn schedule_tick(&self, urgency: TickUrgency) {
         self.node.schedule_tick(urgency);
@@ -2511,6 +2519,7 @@ where
     write_state_waiters: WriteStateWaiters,
     next_write_state_waiter_id: Cell<u64>,
     next_subscription_nonce: Cell<u64>,
+    edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
 }
 
 impl<S> Node<S>
@@ -2530,6 +2539,7 @@ where
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
+            edge_cache_budget: Cell::new(None),
         }
     }
 
@@ -2562,6 +2572,10 @@ where
 
     fn set_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
         *self.scheduler.borrow_mut() = scheduler;
+    }
+
+    fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
+        self.edge_cache_budget.set(budget);
     }
 
     fn schedule_tick(&self, urgency: TickUrgency) {
@@ -2802,6 +2816,15 @@ where
         for connection in self.connections.borrow().iter() {
             let next = connection.borrow_mut().tick()?;
             stats.subscription_events += next.subscription_events;
+        }
+        if let Some(budget) = self.edge_cache_budget.get() {
+            let mut pins = crate::peer::PeerEvictionPins::default();
+            for connection in self.connections.borrow().iter() {
+                pins.extend(connection.borrow().eviction_pins());
+            }
+            self.node
+                .borrow_mut()
+                .enforce_edge_cache_budget(&pins, budget)?;
         }
         Ok(stats)
     }
@@ -3926,6 +3949,13 @@ where
         let next = self.next_now_ms.get();
         self.next_now_ms.set(next + 1);
         next
+    }
+
+    fn eviction_pins(&self) -> crate::peer::PeerEvictionPins {
+        match &self.link {
+            ConnectionLink::Subscriber { peer, .. } => peer.eviction_pins(),
+            ConnectionLink::Upstream { .. } => crate::peer::PeerEvictionPins::default(),
+        }
     }
 }
 

@@ -98,6 +98,16 @@ impl OrderedKvStorage for MemoryStorage {
         self.with_cf(cf, |values| values.get(key).cloned())
     }
 
+    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+        self.with_cf(cf, |values| {
+            values
+                .iter()
+                .map(|(key, value)| key.len().saturating_add(value.len()) as u64)
+                .sum::<u64>()
+        })
+        .map(Some)
+    }
+
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         let values = inner
@@ -246,5 +256,14 @@ mod tests {
             target.get("other", b"stale"),
             Err(Error::ColumnFamilyNotFound(_))
         ));
+    }
+
+    #[test]
+    fn approximate_class_bytes_sums_keys_and_values_exactly() {
+        let storage = MemoryStorage::new(&["rows"]);
+        storage.set("rows", b"a", b"one").unwrap();
+        storage.set("rows", b"bb", b"two").unwrap();
+
+        assert_eq!(storage.approximate_class_bytes("rows").unwrap(), Some(9));
     }
 }

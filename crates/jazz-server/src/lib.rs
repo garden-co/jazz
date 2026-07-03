@@ -25,6 +25,7 @@ use jazz::groove::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, RowUuid, SchemaVersionId};
+use jazz::node::EdgeCacheBudget;
 use jazz::protocol::{CatalogueAck, CurrentWriteSchema, SchemaVersion, SyncMessage};
 use jazz::schema::JazzSchema;
 use jazz::wire::{TransportError, WireTransport};
@@ -81,6 +82,8 @@ pub struct InMemoryServerShellConfig {
     pub identity: DbIdentity,
     /// Optional deterministic row-id seed for ABI writes.
     pub row_id_seed: Option<u64>,
+    /// Optional edge-cache byte budget. `None` disables automatic eviction.
+    pub edge_cache_budget: Option<EdgeCacheBudget>,
 }
 
 impl InMemoryServerShellConfig {
@@ -90,12 +93,19 @@ impl InMemoryServerShellConfig {
             schema,
             identity,
             row_id_seed: None,
+            edge_cache_budget: None,
         }
     }
 
     /// Set a deterministic row-id seed for server-side ABI writes.
     pub fn with_row_id_seed(mut self, row_id_seed: u64) -> Self {
         self.row_id_seed = Some(row_id_seed);
+        self
+    }
+
+    /// Configure automatic edge-cache eviction by byte budget.
+    pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
+        self.edge_cache_budget = Some(budget);
         self
     }
 }
@@ -233,6 +243,14 @@ impl fmt::Debug for ServerSessionState {
 }
 
 impl ShellDb {
+    fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
+        match self {
+            Self::Memory(db) => db.set_edge_cache_budget(budget),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.set_edge_cache_budget(budget),
+        }
+    }
+
     fn publish_schema(&self, schema: SchemaVersion) -> ShellResult<Vec<SyncMessage>> {
         match self {
             Self::Memory(db) => db.publish_schema(schema).map_err(Into::into),
@@ -367,6 +385,7 @@ impl InMemoryServerShell {
         config: InMemoryServerShellConfig,
         storage_config: StorageConfig,
     ) -> ShellResult<Self> {
+        let edge_cache_budget = config.edge_cache_budget;
         let db = match &storage_config {
             StorageConfig::InMemory => {
                 let refs = config.schema.column_families();
@@ -404,6 +423,7 @@ impl InMemoryServerShell {
                 });
             }
         };
+        db.set_edge_cache_budget(edge_cache_budget);
 
         Ok(Self {
             db,

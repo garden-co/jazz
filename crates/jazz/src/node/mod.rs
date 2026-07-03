@@ -75,7 +75,7 @@ use content_store::ContentStore;
 use open_tx::*;
 use text_oplog::{Content as TextContent, Op as TextOp};
 
-pub use eviction::{EdgeCacheClass, EvictColdReport};
+pub use eviction::{EdgeCacheBudget, EdgeCacheBudgetReport, EdgeCacheClass, EvictColdReport};
 
 #[cfg(test)]
 mod tests;

@@ -112,6 +112,13 @@ bounded only by an optional staleness-horizon knob (default off/unbounded). A
 cancelled scope, or a scope missing after restart, no longer satisfies the gate;
 validation defers until the scope rehydrates.
 
+Deferred edge-fate gate state is in-memory by design. Restart drops deferred
+fate entries and their retained permission-scope subscription refs; recovery is
+the client's outbox redelivering any unit that has not received fate at its
+target tier. By contrast, once an edge has assigned an edge-tier accepted fate,
+that transaction and its row versions are durable edge state and survive restart
+without client redelivery (`INV-EDGE-9`).
+
 `TxKind::Exclusive` acceptance is **core-only** — the single serialization point
 (`INV-EDGE-6`, ch. 3). An edge may locally early-reject a provable conflict but
 never _accepts_ an exclusive transaction. Fate never regresses: once `Accepted`,
@@ -177,9 +184,12 @@ an acceptance gate (§9.5), and parked families (`INV-EDGE-14`, `INV-EDGE-15`).
 
 Refetch of evicted state is a **payload-inventory resubscribe**. The edge
 re-registers the scope and receives only what its payload inventory no longer
-holds (ch. 8). This milestone builds the pin set and the refetch path; an actual
-size/LRU eviction _trigger_ is deferred — the pin set without a trigger is safe,
-a trigger without the pin set is not.
+holds (ch. 8). The v1 trigger is an optional edge byte budget: absent budget
+means eviction is disabled. When metered cache bytes exceed the budget, the edge
+evicts to a fixed low-water mark using write/settle recency as the LRU
+approximation: least-recently-written unpinned row versions first. Direct
+large-value content/checkpoint bytes remain regenerable cold content under the
+same budget, while metadata and all pin roots survive.
 
 ## Open questions
 
@@ -199,16 +209,13 @@ a trigger without the pin set is not.
   off/unbounded): once a scope has delivered its first settled result, how stale
   its data may be before acceptance must re-gate. Decided in prose; no config type
   or enforcement point yet.
-- 🔶 **Restart/rehydration** (`INV-EDGE-9`) — decided in prose (after restart, a
-  scope no longer satisfies the gate until it rehydrates; validation defers until
-  then) but untested.
-- 🔶 **Eviction trigger** — decided (2026-07-02): the v1 trigger is a **storage
-  size budget with LRU order** — an edge evicts least-recently-read unpinned
-  state when over budget. Age/idle horizons are explicitly not v1 triggers
-  (silent age-based disappearance is surprising); richer policies stay future
-  work. The pin set and refetch path (§9.8) are built; the budget config type
-  and enforcement point are not — that implementation is the remaining open
-  work item.
+- ✅ **Restart/rehydration** (`INV-EDGE-9`) — deferred edge-fate gates are
+  in-memory by design; restart recovery is client outbox redelivery for unfated
+  units, while edge-accepted units survive in edge storage.
+- 🔶 **True read-recency LRU** — v1 eviction uses write/settle recency because it
+  is already present in history. True least-recently-read eviction would require
+  per-read metadata writes; that is a product-data decision, not a correctness
+  requirement for the v1 byte-budget trigger.
 - 🔶 **Serving while disconnected** — decided (2026-07-02): a disconnected edge
   **keeps serving edge-tier state**, including accepting mergeable
   transactions where it is the fate authority for the scope — edge-tier
