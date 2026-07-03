@@ -6,6 +6,13 @@ stand behind durability. This chapter defines that trust ladder and the topology
 that follows from it, building on transactions (ch. 3), merging (ch. 4), and sync
 (ch. 8).
 
+Fate authority is a host-wired role, not a property inferred from data or node
+contents. The core accept path and the edge-authority ingest entry point are the
+places that assign fates. A node receiving an unfated commit unit through an
+ordinary sync application path remains a non-authority receiver for that unit:
+it stages or parks the unit pending a remote fate and does not create merge
+versions merely because it has the payload (`INV-TX-23`).
+
 ## 9.1 The role ladder
 
 Trust is the axis:

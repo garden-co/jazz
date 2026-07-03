@@ -114,6 +114,13 @@ invisible outside the transaction (`INV-TX-2`).
 
 ## 3.6 Authority admission
 
+Fate authority is **structural**. A node acts as fate authority exactly when the
+host wires it as one: the core accept path for global authority, or the
+edge-authority ingest entry point for edge-decided mergeable fates. There is no
+row-content inference, topology guess, or ambient `is_authority` flag that turns
+ordinary sync receipt into acceptance authority. This decision was recorded by
+Anselm on 2026-07-03.
+
 Authority admission ensures that a verdict is based on complete inputs and on
 the same checks for every commit unit. The fate authority first parks — and does
 not decide — any unit that is missing parent transactions, schema versions, or

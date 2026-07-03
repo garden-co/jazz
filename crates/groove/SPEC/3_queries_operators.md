@@ -44,7 +44,7 @@ _Further invariants._ `INV-QUERY-19` — a `BindingSourceOp` appears only inside
 prepared shape (ch. 5); a plain, non-prepared query — a parameterless subscription
 or one-shot read, still the common case — never evaluates one.
 
-_Target amendment (unified arrangement model, ch. 4 §4.6)._ A source operator
+_Implemented v1 amendment (unified arrangement model, ch. 4 §4.6)._ A source operator
 MAY hydrate from a **static scan spec** (point / prefix / range over an
 arrangement key) supplied at graph construction, instead of a full scan. The
 scan spec participates in `NodeDescriptor` identity. Scan specs are static
