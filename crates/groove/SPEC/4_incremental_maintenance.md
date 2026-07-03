@@ -136,6 +136,93 @@ recursive evaluation stops with `RecursiveIterationLimit` when the frontier is
 still non-empty after `max_iters` (ch. 6). `INV-TICK-20` — contextual recursive
 child state is not persisted in `operator_states` after recompute (ch. 6).
 
+## 4.6 The unified arrangement model (target)
+
+Every keyed structure in groove is one thing: an **arrangement** — an ordered
+keyed store of records with three orthogonal attributes:
+
+- **persistence** — `resident` (in-memory) or `durable` (column-family-backed,
+  committed in the same storage batch as base writes).
+- **covering** — `pk-ref` (values are primary-key references into a base
+  arrangement; probes take a second hop) or `covering` (values are full record
+  bytes; probes are self-contained at the cost of duplicated bytes).
+- **delta-implicitness** — `implicit-1` (set semantics guaranteed by
+  construction: presence is weight 1, deletes are plain deletes) or `explicit`
+  (stored integer weights; required at and below any weight-multiplying
+  operator — joins, bag unions, collapsing projections).
+
+Under this model the existing structures are points in one space, not parallel
+systems:
+
+| structure              | persistence | covering | weights    | key              |
+| ---------------------- | ----------- | -------- | ---------- | ---------------- |
+| base/current table     | durable     | covering | implicit-1 | primary key      |
+| declared index         | durable     | pk-ref   | implicit-1 | declared columns |
+| join/operator state    | resident    | covering | explicit   | join key         |
+| recursion scoped state | resident    | covering | explicit   | scope-qualified  |
+
+**No parallel paths.** Table stores and traditional index maintenance MUST be
+thin wrappers over the arrangement abstraction; a conformant implementation
+has one write path, one probe interface, and one identity scheme
+(`ArrangementKey`) for all of them (`INV-ARR-1`, target).
+
+**All arrangements are ordered.** The arrangement interface is the ordered-KV
+contract (ch. 2 `OrderedKvStorage`; the in-memory implementation backs
+`resident`). Ordering buys uniform range probes (range-parameter bindings
+probe the same arrangement as equality bindings) and deterministic iteration.
+The accepted cost is O(log n) point probes for resident state where a hash map
+was O(1); if measurement ever shows this on a hot path, a hash-accelerated
+resident variant may be added **behind the same interface**, never as a
+parallel path (`INV-ARR-2`, target).
+
+**The binding-boundary keying rule.** Everything upstream of a binding join is
+binding-independent by construction. Graph construction SHOULD maximize the
+binding-free prefix (parameterized joins placed as far downstream as
+semantics allow), and at the binding boundary the binding-independent side is
+arranged **keyed by the parameter column(s)**, so one shared arrangement
+serves every binding of every structurally identical shape prefix as a
+point/prefix/range probe (`INV-ARR-3`, target).
+
+**The persist-the-frontier rule.** The durable arrangement set is selected
+deterministically — no cost model, no statistics:
+
+1. base/current tables (durable by construction);
+2. declared indexes (developer-anticipated boundary arrangements);
+3. the maximal binding-free, set-semantic (`implicit-1`) frontier of every
+   prepared shape — boundary arrangements are retained while any prepared
+   shape references them (today that is the database lifetime, `INV-SHAPE-16`;
+   if shape TTL/GC later relaxes that, an unreferenced durable arrangement
+   first stops being maintained and is marked stale-at-position — resurrection
+   catches up from the per-table change watermark — with byte deletion a
+   separate lazy reclamation step). Persisting the frontier converts
+   restart/re-prepare rebuild scans into loads.
+
+Weight-multiplying downstream state (join outputs, result-sized operator
+state) is NOT persisted by default: it is recomputed from persisted inputs.
+This bounds durable write amplification to base tables plus the distinct
+`(input, key-shape)` boundary arrangements across all prepared shapes,
+deduplicated by arrangement identity (`INV-ARR-4`, target).
+
+The `implicit-1` restriction on the persisted frontier is staging, not
+doctrine. Concrete frontier inhabitants beyond plain tables/indexes, in v1
+scope: tier-visible-current materializations (the arg-max/anti-join stack every
+shape shares per table+tier — the global-current tables are the hand-built
+precedent), literal-filter prefixes (workload-derived partial indexes), and
+lens-projected current rows (the migration read-path materialization). The
+known high-value intermediates that multiplicity excludes from v1 — policy
+grant closures and reachability closures, both keyed by subject/seed and
+shared across all identities — are the motivating cases for a later
+explicit-weight durable arrangement extension (requires the weight-bearing
+storage format: merge-operator/tombstone compaction).
+
+**Incremental restart.** A durable arrangement hydrates from its own persisted
+form, not by rescanning its inputs (`INV-ARR-5`, target).
+
+Terminology: _arrangement_ is the spec term everywhere; "index" remains
+acceptable user-facing shorthand for the declared durable pk-ref case.
+"Covering" replaces ad-hoc "full record vs PK" phrasing. A _boundary
+arrangement_ is the param-keyed arrangement at a shape's binding join.
+
 ## Open questions
 
 No open questions in this chapter.

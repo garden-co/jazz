@@ -188,6 +188,24 @@ the custom encoded record bytes. Relation/path lowering emits non-lossy path
 facts rather than hiding edge kind, versions, depth, branch alternative, order,
 role, or hole state in opaque revisions.
 
+## 14.6 Access-path selection (target)
+
+The source resolver selects access paths by deterministic rule, never by cost
+model or statistics:
+
+1. equality on a primary-key prefix → point/prefix scan spec;
+2. equality on a declared/derived boundary-arrangement key → arrangement probe;
+3. global-sequence-bounded reads (historical cuts, branch bases, reconnect
+   enumeration) → range scan spec over the `by_table_global_seq` arrangement;
+4. otherwise → full scan, loudly counted (full-scan counters are part of the
+   operational surface, ch. 17).
+
+v1 consumers, in order: one-shot filtered reads; position-bounded historical
+and branch-cut reads (this is what makes branch `at()` and historical
+reachable _bounded_ rather than gated); dry-run policy probes; recursion seed
+hydration. Prepared-shape steady-state probing is the later overlay-probe
+phase (groove ch. 4 §4.6).
+
 ## Open questions
 
 - ✅ **Policy lowering** (`INV-LOWER-20`). Read policy now lowers through
