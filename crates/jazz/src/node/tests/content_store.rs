@@ -1,4 +1,5 @@
 use crate::ids::AuthorId;
+use crate::json_merge::{JSON_MERGE_STRATEGY_ID, JSON_MERGE_STRATEGY_VERSION, JsonMergeStrategy};
 use crate::node::EdgeCacheClass;
 use crate::peer::PeerEvictionPins;
 use crate::schema::{CONTENT_META_STORE, TextMergeSpec};
@@ -516,6 +517,102 @@ fn text_large_value_schema_with_strategy(strategy_id: &str) -> JazzSchema {
     )])
 }
 
+fn json_document_schema(config: &[u8]) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "docs",
+        [crate::schema::ColumnSchema::text("body").with_text_merge_spec(TextMergeSpec::new(
+            JSON_MERGE_STRATEGY_ID,
+            JSON_MERGE_STRATEGY_VERSION,
+            config.to_vec(),
+        ))],
+    )])
+}
+
+#[test]
+fn json_document_whole_value_writes_are_canonicalized() {
+    let schema = json_document_schema(br#"{"paths":{}}"#);
+    let (_dir, mut node) = open_node_with_schema(node(0xb0), schema.clone());
+    node.register_text_merge_strategy(Arc::new(JsonMergeStrategy));
+
+    let row_uuid = row(0xb0);
+    let tx_id = node
+        .commit_mergeable(
+            MergeableCommit::new("docs", row_uuid, 10)
+                .made_by(user(0xa1))
+                .cell("body", Value::Bytes(br#"{"b":2,"a":1}"#.to_vec())),
+        )
+        .unwrap();
+    node.finalize_local_mergeable_commit(tx_id).unwrap();
+
+    assert_eq!(
+        hydrated_large_value_cell(&mut node, &schema.tables[0], "body"),
+        br#"{"a":1,"b":2}"#.to_vec()
+    );
+}
+
+#[test]
+fn canonicalize_hook_runs_for_whole_value_writes() {
+    let schema = text_large_value_schema_with_strategy("test.uppercase");
+    let (_dir, mut node) = open_node_with_schema(node(0xa0), schema.clone());
+    node.register_text_merge_strategy(Arc::new(
+        crate::merge_strategy::testing::UppercaseCanonicalStrategy,
+    ));
+
+    let row_uuid = row(0xa0);
+    let tx_id = node
+        .commit_mergeable(
+            MergeableCommit::new("docs", row_uuid, 10)
+                .made_by(user(0xa1))
+                .cell("body", Value::Bytes(b"abc".to_vec())),
+        )
+        .unwrap();
+    node.finalize_local_mergeable_commit(tx_id).unwrap();
+
+    assert_eq!(
+        hydrated_large_value_cell(&mut node, &schema.tables[0], "body"),
+        b"ABC".to_vec()
+    );
+}
+
+#[test]
+fn canonicalize_hook_error_rejects_whole_value_write() {
+    let schema = text_large_value_schema_with_strategy("test.reject-canonical");
+    let (_dir, mut node) = open_node_with_schema(node(0xa2), schema);
+    node.register_text_merge_strategy(Arc::new(
+        crate::merge_strategy::testing::RejectingCanonicalStrategy,
+    ));
+
+    let err = node
+        .commit_mergeable(
+            MergeableCommit::new("docs", row(0xa2), 10)
+                .made_by(user(0xa1))
+                .cell("body", Value::Bytes(b"abc".to_vec())),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::InvalidMergeableCommit("format canonicalization failed")
+    ));
+}
+
+#[test]
+fn op_edits_on_format_declared_columns_are_rejected() {
+    let schema = text_large_value_schema_with_strategy("test.uppercase");
+    let (_dir, mut node) = open_node_with_schema(node(0xa3), schema);
+
+    let err = node
+        .commit_large_value_edit(
+            LargeValueEditCommit::new("docs", row(0xa3), "body", 10)
+                .made_by(user(0xa1))
+                .insert(0, b"abc"),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::InvalidMergeableCommit("op edits on format-declared columns not supported yet")
+    ));
+}
+
 fn append_large_value_edits(
     node: &mut NodeState<RocksDbStorage>,
     row_uuid: RowUuid,
@@ -635,27 +732,27 @@ fn authority_text_merge_dispatches_registered_rung3_strategy_and_records_spec_ha
         crate::merge_strategy::testing::PreferLongerStrategy::new(calls.clone()),
     ));
 
-    let base_unit = commit_large_value_edit_unit(
+    let base_unit = commit_large_value_unit(
         &mut base_writer,
-        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+        MergeableCommit::new("docs", row_uuid, 10)
             .made_by(user(0xa1))
-            .insert(0, b"abc"),
+            .cell("body", Value::Bytes(b"abc".to_vec())),
     );
     apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
     apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
     apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
 
-    let left = commit_large_value_edit_unit(
+    let left = commit_large_value_unit(
         &mut left_writer,
-        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+        MergeableCommit::new("docs", row_uuid, 20)
             .made_by(user(0xa1))
-            .insert(1, b"LEFT-LONG"),
+            .cell("body", Value::Bytes(b"aLEFT-LONGbc".to_vec())),
     );
-    let right = commit_large_value_edit_unit(
+    let right = commit_large_value_unit(
         &mut right_writer,
-        LargeValueEditCommit::new("docs", row_uuid, "body", 21)
+        MergeableCommit::new("docs", row_uuid, 21)
             .made_by(user(0xa2))
-            .insert(1, b"R"),
+            .cell("body", Value::Bytes(b"aRbc".to_vec())),
     );
     apply_large_value_unit(&mut core, &left_writer, left);
     apply_large_value_unit(&mut core, &right_writer, right);
@@ -732,6 +829,135 @@ fn mismatched_rung3_text_strategy_metadata_falls_back_to_builtin_char_walk() {
     assert_eq!(strategy.version, 1);
 }
 
+#[test]
+fn registered_json_strategy_merges_and_records_json_strategy_metadata() {
+    let schema = json_document_schema(br#"{"paths":{"tags":"set"}}"#);
+    let row_uuid = row(0xb1);
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(0xb2), schema.clone());
+    let (_left_dir, mut left_writer) = open_node_with_schema(node(0xb3), schema.clone());
+    let (_right_dir, mut right_writer) = open_node_with_schema(node(0xb4), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xb5), schema.clone());
+    for node in [&mut base_writer, &mut left_writer, &mut right_writer, &mut core] {
+        node.register_text_merge_strategy(Arc::new(JsonMergeStrategy));
+    }
+
+    let base_unit = commit_large_value_unit(
+        &mut base_writer,
+        MergeableCommit::new("docs", row_uuid, 10)
+            .made_by(user(0xa1))
+            .cell("body", Value::Bytes(br#"{"count":1,"tags":["a"]}"#.to_vec())),
+    );
+    apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
+
+    let left = commit_large_value_unit(
+        &mut left_writer,
+        MergeableCommit::new("docs", row_uuid, 20)
+            .made_by(user(0xa1))
+            .cell("body", Value::Bytes(br#"{"count":2,"tags":["a","b"]}"#.to_vec())),
+    );
+    let right = commit_large_value_unit(
+        &mut right_writer,
+        MergeableCommit::new("docs", row_uuid, 21)
+            .made_by(user(0xa2))
+            .cell("body", Value::Bytes(br#"{"count":1,"tags":["a","c"]}"#.to_vec())),
+    );
+    apply_large_value_unit(&mut core, &left_writer, left);
+    apply_large_value_unit(&mut core, &right_writer, right);
+
+    let merge = core
+        .query_all_versions()
+        .unwrap()
+        .into_iter()
+        .find(|version| {
+            version.row_uuid() == row_uuid
+                && core.version_tx_id(version).unwrap().node == node(0xb5)
+                && version.parents().len() == 2
+        })
+        .expect("core should create a json strategy merge version");
+    assert_eq!(
+        core.materialize_large_value_column(&schema.tables[0], &merge, "body")
+            .unwrap(),
+        br#"{"count":2,"tags":["a","b","c"]}"#.to_vec()
+    );
+    let merge_tx = core
+        .query_transaction(core.version_tx_id(&merge).unwrap())
+        .unwrap()
+        .expect("merge transaction should be recorded");
+    let strategy = merge_tx
+        .tx
+        .merge_strategy
+        .expect("json merge should record strategy");
+    assert_eq!(strategy.id, JSON_MERGE_STRATEGY_ID);
+    assert_eq!(strategy.version, JSON_MERGE_STRATEGY_VERSION);
+    assert_eq!(
+        strategy.column_spec_hash,
+        schema.tables[0].columns[0]
+            .text_merge_spec
+            .as_ref()
+            .unwrap()
+            .spec_hash()
+    );
+}
+
+#[test]
+fn invalid_json_strategy_parse_failure_degrades_to_builtin_char_walk() {
+    let schema = json_document_schema(br#"{"paths":{}}"#);
+    let row_uuid = row(0xb6);
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(0xb7), schema.clone());
+    let (_left_dir, mut left_writer) = open_node_with_schema(node(0xb8), schema.clone());
+    let (_right_dir, mut right_writer) = open_node_with_schema(node(0xb9), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xba), schema.clone());
+    core.register_text_merge_strategy(Arc::new(JsonMergeStrategy));
+
+    let base_unit = commit_large_value_unit(
+        &mut base_writer,
+        MergeableCommit::new("docs", row_uuid, 10)
+            .made_by(user(0xa1))
+            .cell("body", Value::Bytes(br#"{"a":1}"#.to_vec())),
+    );
+    apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
+
+    let left = commit_large_value_unit(
+        &mut left_writer,
+        MergeableCommit::new("docs", row_uuid, 20)
+            .made_by(user(0xa1))
+            .cell("body", Value::Bytes(br#"{"a":"#.to_vec())),
+    );
+    let right = commit_large_value_unit(
+        &mut right_writer,
+        MergeableCommit::new("docs", row_uuid, 21)
+            .made_by(user(0xa2))
+            .cell("body", Value::Bytes(br#"{"a":2}"#.to_vec())),
+    );
+    apply_large_value_unit(&mut core, &left_writer, left);
+    apply_large_value_unit(&mut core, &right_writer, right);
+
+    let merge = core
+        .query_all_versions()
+        .unwrap()
+        .into_iter()
+        .find(|version| {
+            version.row_uuid() == row_uuid
+                && core.version_tx_id(version).unwrap().node == node(0xba)
+                && version.parents().len() == 2
+        })
+        .expect("core should create a fallback merge version");
+    let merge_tx = core
+        .query_transaction(core.version_tx_id(&merge).unwrap())
+        .unwrap()
+        .expect("merge transaction should be recorded");
+    let strategy = merge_tx
+        .tx
+        .merge_strategy
+        .expect("fallback merge should record builtin strategy");
+    assert_eq!(strategy.id, "builtin.text-rle-v1");
+    assert_eq!(core.sync_metrics().rung3_text_merge_fallbacks, 1);
+}
+
 fn rung3_fallback_text_merge(
     strategy_id: &str,
     strategy_impl: Arc<dyn crate::merge_strategy::MergeStrategy>,
@@ -745,27 +971,27 @@ fn rung3_fallback_text_merge(
     let (_core_dir, mut core) = open_node_with_schema(core_node, schema.clone());
     core.register_text_merge_strategy(strategy_impl);
 
-    let base_unit = commit_large_value_edit_unit(
+    let base_unit = commit_large_value_unit(
         &mut base_writer,
-        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+        MergeableCommit::new("docs", row_uuid, 10)
             .made_by(user(0xa1))
-            .insert(0, b"abc"),
+            .cell("body", Value::Bytes(b"abc".to_vec())),
     );
     apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
     apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
     apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
 
-    let left = commit_large_value_edit_unit(
+    let left = commit_large_value_unit(
         &mut left_writer,
-        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+        MergeableCommit::new("docs", row_uuid, 20)
             .made_by(user(0xa1))
-            .insert(1, b"LEFT"),
+            .cell("body", Value::Bytes(b"aLEFTbc".to_vec())),
     );
-    let right = commit_large_value_edit_unit(
+    let right = commit_large_value_unit(
         &mut right_writer,
-        LargeValueEditCommit::new("docs", row_uuid, "body", 21)
+        MergeableCommit::new("docs", row_uuid, 21)
             .made_by(user(0xa2))
-            .insert(1, b"RIGHT"),
+            .cell("body", Value::Bytes(b"aRIGHTbc".to_vec())),
     );
     apply_large_value_unit(&mut core, &left_writer, left);
     apply_large_value_unit(&mut core, &right_writer, right);
