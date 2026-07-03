@@ -3828,17 +3828,34 @@ where
         index: &str,
         prefix: &[Value],
     ) -> Result<GraphBuilder, Error> {
-        let storage_table = global_current_table_name(&table.name);
-        let rows = self
-            .database
-            .index_scan_raw(&storage_table, index, prefix)?
-            .into_iter()
-            .map(|raw| raw.record().raw().to_vec())
-            .collect::<Vec<_>>();
         Ok(GraphBuilder::inline_records(
             table.global_current_storage_tables()[0].record_schema(),
-            rows,
+            self.global_current_row_records_for_index_scan(table, index, prefix)?,
         ))
+    }
+
+    fn global_current_row_records_for_index_scan(
+        &self,
+        table: &TableSchema,
+        index: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let storage_table = global_current_table_name(&table.name);
+        self.encoded_records_for_index_scan(&storage_table, index, prefix)
+    }
+
+    fn encoded_records_for_index_scan(
+        &self,
+        storage_table: &str,
+        index: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        Ok(self
+            .database
+            .index_scan_raw(storage_table, index, prefix)?
+            .into_iter()
+            .map(|raw| raw.record().raw().to_vec())
+            .collect())
     }
 
     fn compile_historical_query_program(
