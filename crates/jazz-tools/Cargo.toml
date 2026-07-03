@@ -36,7 +36,8 @@ server = [
   "dep:reqwest",
 ]
 cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc"]
-test-utils = ["server", "client", "sqlite"]
+sync-autopsy = ["jazz/sync-autopsy"]
+test-utils = ["server", "client", "sqlite", "sync-autopsy"]
 test = ["test-utils", "cli"]
 otel-core = [
   "server",

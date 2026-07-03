@@ -907,7 +907,11 @@ impl ClientDb {
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
-                    if inner.borrow().db.tick().is_err() {
+                    if let Err(error) = inner.borrow().db.tick() {
+                        #[cfg(feature = "sync-autopsy")]
+                        jazz::db::sync_autopsy::record(format!(
+                            "client tick driver exited after db.tick error: {error}"
+                        ));
                         return;
                     }
                 }

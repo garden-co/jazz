@@ -1078,6 +1078,7 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
 
+    register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     let err = reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription,

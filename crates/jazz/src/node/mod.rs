@@ -3046,6 +3046,8 @@ pub struct SyncMetrics {
     pub parked_catalogue_shapes: u64,
     /// Parked shape registrations later resolved by catalogue arrival.
     pub parked_catalogue_shapes_resolved: u64,
+    /// Per-subscription messages dropped because the subscription is no longer registered locally.
+    pub dropped_detached_subscription_messages: u64,
 }
 
 /// Deterministic counters for query-engine read authorization.

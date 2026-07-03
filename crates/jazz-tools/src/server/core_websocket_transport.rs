@@ -161,6 +161,11 @@ impl Drop for WebSocketTransport {
 
 impl WireTransport for WebSocketTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        #[cfg(feature = "sync-autopsy")]
+        jazz::db::sync_autopsy::record(format!(
+            "client websocket queue outbound frame bytes={}",
+            frame.len()
+        ));
         self.outbound
             .send(frame)
             .map_err(|_| TransportError::Failed("websocket pump is closed".to_owned()))?;
@@ -169,7 +174,18 @@ impl WireTransport for WebSocketTransport {
     }
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-        self.inbound.lock().ok()?.pop_front()
+        let mut inbound = self.inbound.lock().ok()?;
+        let before = inbound.len();
+        let frame = inbound.pop_front();
+        if let Some(frame) = &frame {
+            #[cfg(feature = "sync-autopsy")]
+            jazz::db::sync_autopsy::record(format!(
+                "client websocket pop inbound before={before} after={} bytes={}",
+                inbound.len(),
+                frame.len()
+            ));
+        }
+        frame
     }
 }
 
@@ -245,6 +261,12 @@ async fn run_ws_pump(
                 let Ok(bytes) = postcard::to_allocvec(&batch) else {
                     continue;
                 };
+                #[cfg(feature = "sync-autopsy")]
+                jazz::db::sync_autopsy::record(format!(
+                    "client websocket send batch frames={} bytes={}",
+                    batch.len(),
+                    bytes.len()
+                ));
                 if ws.send(Message::Binary(bytes)).await.is_err() {
                     return;
                 }
@@ -259,7 +281,15 @@ async fn run_ws_pump(
                 let Ok(mut queue) = inbound.lock() else {
                     return;
                 };
+                let before = queue.len();
+                let frame_count = frames.len();
                 queue.extend(frames);
+                #[cfg(feature = "sync-autopsy")]
+                jazz::db::sync_autopsy::record(format!(
+                    "client websocket received batch frames={frame_count} inbound_before={before} inbound_after={} bytes={}",
+                    queue.len(),
+                    bytes.len()
+                ));
                 drop(queue);
                 wake();
             }

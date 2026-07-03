@@ -490,6 +490,22 @@ where
             program_fact_adds,
             program_fact_removes,
         } = update;
+        let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
+            Ok(binding_view_key) => binding_view_key,
+            Err(Error::InvalidStoredValue(
+                "subscription referenced unregistered shape"
+                | "subscription referenced unregistered binding",
+            )) => {
+                // Subscription teardown races in-flight traffic by design:
+                // unsubscribe is asynchronous, so per-subscription messages
+                // arriving after detach are normal protocol life, not
+                // corruption. The receiver cannot distinguish late-detached
+                // from never-registered keys, so both are benign drops.
+                self.sync_metrics.dropped_detached_subscription_messages += 1;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let incoming_bundle_tx_ids = version_bundles
             .iter()
             .map(|bundle| bundle.tx.tx_id)
@@ -533,7 +549,6 @@ where
             &peer_complete_tx_payload_refs,
             &row_result_adds,
         )?;
-        let binding_view_key = self.binding_view_key_for_subscription(subscription)?;
         if reset_result_set {
             self.query.settled_result_sets.remove(&binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
