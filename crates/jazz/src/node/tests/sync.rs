@@ -1266,6 +1266,125 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
 }
 
 #[test]
+fn known_state_removal_without_local_body_clears_membership_without_repair() {
+    // Internal protocol coverage: public APIs can observe revocation convergence,
+    // but cannot assert that the receiver does not issue FetchRowVersions for a
+    // removal whose body is policy-invisible.
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(7);
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let binding_view_key = BindingViewKey::from_canonical_subscription_key(subscription);
+
+    let (visible_tx, visible_unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("visible")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = visible_unit else {
+        panic!("expected commit unit");
+    };
+    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    let initial = core.view_update_for_current_rows("todos").unwrap();
+    reader.apply_sync_message(initial).unwrap();
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("visible"))])
+    );
+
+    let invisible_tx = TxId::new(TxTime(999), node(44));
+    let removal = SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(2),
+        reset_result_set: false,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: vec![crate::protocol::ResultMemberEntry::row((
+            groove::Intern::from("todos".to_owned()),
+            row_uuid,
+            invisible_tx,
+        ))],
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    assert!(
+        reader
+            .missing_known_state_row_version_refs(&removal)
+            .unwrap()
+            .is_empty(),
+        "removals must not request repair bodies because the removed version may be policy-invisible"
+    );
+    reader.apply_sync_message(removal).unwrap();
+    assert!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        reader.settled_through_for_binding_view(binding_view_key),
+        Some(GlobalSeq(2))
+    );
+    assert_ne!(visible_tx, invisible_tx);
+}
+
+#[test]
+fn known_state_removal_for_never_known_row_is_noop_but_settles() {
+    // Internal protocol coverage: this pins the receiver-side membership update
+    // rule directly; public queries only observe the final empty set.
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(8);
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let binding_view_key = BindingViewKey::from_canonical_subscription_key(subscription);
+
+    let removal = SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(3),
+        reset_result_set: false,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: vec![crate::protocol::ResultMemberEntry::row((
+            groove::Intern::from("todos".to_owned()),
+            row_uuid,
+            TxId::new(TxTime(1000), node(45)),
+        ))],
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+
+    assert!(
+        reader
+            .missing_known_state_row_version_refs(&removal)
+            .unwrap()
+            .is_empty()
+    );
+    reader.apply_sync_message(removal).unwrap();
+    assert!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        reader.settled_through_for_binding_view(binding_view_key),
+        Some(GlobalSeq(3))
+    );
+}
+
+#[test]
 fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
