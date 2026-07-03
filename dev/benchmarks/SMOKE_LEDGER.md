@@ -17242,3 +17242,401 @@ JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution
 {"acceptance_p50_us":4419,"acceptance_p95_us":5311,"api_surface":"db","driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s9-smoke","scenario":"s9_durable_execution","seed":1493172225}
 {"driver":"synchronous","git_dirty":true,"hydration_bytes":9420,"hydration_floor_bytes":9420,"hydration_rows":8,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s9-smoke","scenario":"s9_durable_execution","scope":"workflow_table_surface","seed":1493172225}
 ```
+
+---
+
+## Profile Run 2026-07-03T17:01:14Z - profile-default-cf-item0
+
+- result: `pass`
+- git: `9becbace0`
+- dirty: `false`
+- profile_dir: `dev/benchmarks/profiles/20260703T164906Z`
+- result_dir: `dev/benchmarks/results/20260703T164906Z`
+- command: `JAZZ_PROFILE_SIZE=default dev/benchmarks/profile.sh`
+
+### Profile Runs
+
+| Scenario            | Status | Wall Time | JSONL                                                               |
+| ------------------- | ------ | --------: | ------------------------------------------------------------------- |
+| s1_saas             | `pass` |  136.757s | `dev/benchmarks/results/20260703T164906Z/s1_saas.jsonl`             |
+| s3_permissions      | `pass` |  143.787s | `dev/benchmarks/results/20260703T164906Z/s3_permissions.jsonl`      |
+| s4_order_processing | `pass` |  170.334s | `dev/benchmarks/results/20260703T164906Z/s4_order_processing.jsonl` |
+
+### Top-10 Self-Time Tables
+
+#### s1_saas\_\_deterministic_execute
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         1472 | 76.83% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |           77 |  4.02% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    3 |           37 |  1.93% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|    4 |           34 |  1.77% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    5 |           22 |  1.15% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    6 |           17 |  0.89% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    7 |           16 |  0.84% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    8 |           12 |  0.63% | `groove::ivm::runtime::join::apply_join_delta_to_index`                                                          |
+|    9 |           10 |  0.52% | `core::hash::BuildHasher::hash_one`                                                                              |
+|   10 |           10 |  0.52% | `groove::records::RecordDescriptor::create`                                                                      |
+
+Samples: 1916; elapsed: 2.515s; frequency_hz: 997
+
+#### s1_saas\_\_high_fan_out_hydration
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         9582 | 37.27% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |         3754 | 14.60% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    3 |         1822 |  7.09% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    4 |         1401 |  5.45% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    5 |          789 |  3.07% | `jazz::node::maintained_subscription_view::MaintainedSubscriptionView::apply_decoded_deltas`                     |
+|    6 |          673 |  2.62% | `groove::ivm::runtime::join::join_keys`                                                                          |
+|    7 |          590 |  2.30% | `groove::ivm::runtime::join::append_join_deltas`                                                                 |
+|    8 |          535 |  2.08% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    9 |          526 |  2.05% | `groove::records::RecordDescriptor::field_span`                                                                  |
+|   10 |          407 |  1.58% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+
+Samples: 25708; elapsed: 49.917s; frequency_hz: 997
+
+#### s1_saas\_\_reconnect
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |        28698 | 69.75% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |         1385 |  3.37% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |         1272 |  3.09% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|    4 |         1128 |  2.74% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |         1060 |  2.58% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    6 |          633 |  1.54% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |          623 |  1.51% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    8 |          581 |  1.41% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    9 |          558 |  1.36% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|   10 |          449 |  1.09% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                        |
+
+Samples: 41144; elapsed: 64.993s; frequency_hz: 997
+
+#### s1_saas\_\_subscriber_sweep
+
+| Rank | Self Samples | Self % | Function                                                                                                                                                                                                                                            |
+| ---: | -----------: | -----: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    1 |          765 | 30.18% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)`                                                                                                                                    |
+|    2 |          244 |  9.63% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                                                                                                                                                       |
+|    3 |          203 |  8.01% | `core::hash::BuildHasher::hash_one`                                                                                                                                                                                                                 |
+|    4 |          127 |  5.01% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                                                                                                                                                     |
+|    5 |          119 |  4.69% | `<alloc::string::String as core::clone::Clone>::clone`                                                                                                                                                                                              |
+|    6 |          119 |  4.69% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                                                                                                                                                          |
+|    7 |           95 |  3.75% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                                                                                                                                                           |
+|    8 |           90 |  3.55% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                                                                                                                                                        |
+|    9 |           63 |  2.49% | `alloc::collections::btree::map::entry::Entry<K,V,A>::or_default`                                                                                                                                                                                   |
+|   10 |           60 |  2.37% | `alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing` |
+
+Samples: 2535; elapsed: 5.802s; frequency_hz: 997
+
+#### s1_saas\_\_threaded_execute
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         3033 | 64.95% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          537 | 11.50% | `std::sync::mpmc::waker::SyncWaker::notify`                                                                      |
+|    3 |           92 |  1.97% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    4 |           62 |  1.33% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    5 |           61 |  1.31% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    6 |           60 |  1.28% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|    7 |           48 |  1.03% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    8 |           37 |  0.79% | `<groove::ivm::graph::GraphNode as core::clone::Clone>::clone`                                                   |
+|    9 |           29 |  0.62% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|   10 |           28 |  0.60% | `internment::container::Arena::with`                                                                             |
+
+Samples: 4670; elapsed: 11.324s; frequency_hz: 997
+
+#### s3_permissions\_\_block_tree
+
+| Rank | Self Samples | Self % | Function                                                                                                                                                                                                                                            |
+| ---: | -----------: | -----: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    1 |         6031 | 64.00% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)`                                                                                                                                    |
+|    2 |          848 |  9.00% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                                                                                                                                                       |
+|    3 |          315 |  3.34% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                                                                                                                                                                  |
+|    4 |          185 |  1.96% | `alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing` |
+|    5 |          125 |  1.33% | `groove::ivm::runtime::join::append_join_deltas`                                                                                                                                                                                                    |
+|    6 |          119 |  1.26% | `jazz::node::codec::global_change_values`                                                                                                                                                                                                           |
+|    7 |          118 |  1.25% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                                                                                                                                                               |
+|    8 |          114 |  1.21% | `groove::db::Database<S>::commit_batch`                                                                                                                                                                                                             |
+|    9 |          110 |  1.17% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                                                                                                                                                     |
+|   10 |           92 |  0.98% | `groove::records::RecordDescriptor::project_record_raw`                                                                                                                                                                                             |
+
+Samples: 9424; elapsed: 11.857s; frequency_hz: 997
+
+#### s3_permissions\_\_block_tree_headline
+
+| Rank | Self Samples | Self % | Function                                                                                                                                                                                                                                            |
+| ---: | -----------: | -----: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    1 |         2894 | 28.05% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                                                                                                                                                       |
+|    2 |         1187 | 11.50% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                                                                                                                                                                  |
+|    3 |          396 |  3.84% | `groove::ivm::runtime::join::append_join_deltas`                                                                                                                                                                                                    |
+|    4 |          254 |  2.46% | `groove::records::RecordDescriptor::project_record_raw`                                                                                                                                                                                             |
+|    5 |          239 |  2.32% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                                                                                                                                                     |
+|    6 |          236 |  2.29% | `groove::ivm::runtime::consolidate_deltas`                                                                                                                                                                                                          |
+|    7 |          220 |  2.13% | `core::hash::BuildHasher::hash_one`                                                                                                                                                                                                                 |
+|    8 |          214 |  2.07% | `jazz::node::maintained_subscription_view::MaintainedSubscriptionView::apply_decoded_deltas`                                                                                                                                                        |
+|    9 |          208 |  2.02% | `alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing` |
+|   10 |          179 |  1.73% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                                                                                                                                                               |
+
+Samples: 10318; elapsed: 20.581s; frequency_hz: 997
+
+#### s3_permissions\_\_db_surface
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         2836 | 82.39% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |           66 |  1.92% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    3 |           40 |  1.16% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    4 |           34 |  0.99% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    5 |           30 |  0.87% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|    6 |           27 |  0.78% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |           23 |  0.67% | `groove::ivm::runtime::join::join_keys`                                                                          |
+|    8 |           23 |  0.67% | `groove::records::RecordDescriptor::field_span`                                                                  |
+|    9 |           20 |  0.58% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|   10 |           14 |  0.41% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+
+Samples: 3442; elapsed: 4.780s; frequency_hz: 997
+
+#### s3_permissions\_\_deterministic_run
+
+| Rank | Self Samples | Self % | Function                                                                                                                                                                                                                                            |
+| ---: | -----------: | -----: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    1 |        29536 | 75.55% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)`                                                                                                                                    |
+|    2 |         1387 |  3.55% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                                                                                                                                                       |
+|    3 |          764 |  1.95% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                                                                                                                                                                  |
+|    4 |          707 |  1.81% | `groove::records::RecordDescriptor::project_record_raw`                                                                                                                                                                                             |
+|    5 |          486 |  1.24% | `core::hash::BuildHasher::hash_one`                                                                                                                                                                                                                 |
+|    6 |          407 |  1.04% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                                                                                                                                                     |
+|    7 |          376 |  0.96% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                                                                                                                                                               |
+|    8 |          347 |  0.89% | `alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing` |
+|    9 |          334 |  0.85% | `<alloc::string::String as core::clone::Clone>::clone`                                                                                                                                                                                              |
+|   10 |          288 |  0.74% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                                                                                                                                                          |
+
+Samples: 39095; elapsed: 51.989s; frequency_hz: 997
+
+#### s3_permissions\_\_threaded_run
+
+| Rank | Self Samples | Self % | Function                                                                                                                                                                                                                                            |
+| ---: | -----------: | -----: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    1 |        29360 | 76.98% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)`                                                                                                                                    |
+|    2 |         1077 |  2.82% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                                                                                                                                                       |
+|    3 |          763 |  2.00% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                                                                                                                                                                  |
+|    4 |          699 |  1.83% | `groove::records::RecordDescriptor::project_record_raw`                                                                                                                                                                                             |
+|    5 |          551 |  1.44% | `core::hash::BuildHasher::hash_one`                                                                                                                                                                                                                 |
+|    6 |          418 |  1.10% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                                                                                                                                                     |
+|    7 |          317 |  0.83% | `<alloc::string::String as core::clone::Clone>::clone`                                                                                                                                                                                              |
+|    8 |          294 |  0.77% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                                                                                                                                                          |
+|    9 |          287 |  0.75% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                                                                                                                                                               |
+|   10 |          248 |  0.65% | `alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing` |
+
+Samples: 38142; elapsed: 51.978s; frequency_hz: 997
+
+#### s4_order_processing\_\_contention_high
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         8948 | 69.31% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          544 |  4.21% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |          486 |  3.76% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    4 |          391 |  3.03% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          254 |  1.97% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |          223 |  1.73% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    7 |          213 |  1.65% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    8 |          209 |  1.62% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    9 |          114 |  0.88% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|   10 |           79 |  0.61% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+
+Samples: 12910; elapsed: 20.353s; frequency_hz: 997
+
+#### s4_order_processing\_\_contention_hot_items
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         2221 | 73.23% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |           92 |  3.03% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |           91 |  3.00% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    4 |           86 |  2.84% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |           67 |  2.21% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |           56 |  1.85% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |           30 |  0.99% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    8 |           24 |  0.79% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    9 |           20 |  0.66% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|   10 |           19 |  0.63% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+
+Samples: 3033; elapsed: 4.281s; frequency_hz: 997
+
+#### s4_order_processing\_\_contention_low
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         2500 | 74.83% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          139 |  4.16% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |           59 |  1.77% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    4 |           55 |  1.65% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    5 |           53 |  1.59% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    6 |           53 |  1.59% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    7 |           48 |  1.44% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    8 |           35 |  1.05% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    9 |           25 |  0.75% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|   10 |           23 |  0.69% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+
+Samples: 3341; elapsed: 4.899s; frequency_hz: 997
+
+#### s4_order_processing\_\_contention_medium
+
+| Rank | Self Samples | Self % | Function                                                                                                                                                                                                                                            |
+| ---: | -----------: | -----: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    1 |         4717 | 75.63% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)`                                                                                                                                    |
+|    2 |          183 |  2.93% | `core::hash::BuildHasher::hash_one`                                                                                                                                                                                                                 |
+|    3 |          150 |  2.41% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                                                                                                                                                     |
+|    4 |          124 |  1.99% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                                                                                                                                                          |
+|    5 |           98 |  1.57% | `<alloc::string::String as core::clone::Clone>::clone`                                                                                                                                                                                              |
+|    6 |           88 |  1.41% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                                                                                                                                                       |
+|    7 |           79 |  1.27% | `groove::ivm::graph::IvmGraph::node`                                                                                                                                                                                                                |
+|    8 |           69 |  1.11% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                                                                                                                                                        |
+|    9 |           66 |  1.06% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                                                                                                                                                               |
+|   10 |           38 |  0.61% | `alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing` |
+
+Samples: 6237; elapsed: 9.511s; frequency_hz: 997
+
+#### s4_order_processing\_\_scale_out_1w
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         1414 | 84.72% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |           25 |  1.50% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |           21 |  1.26% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    4 |           20 |  1.20% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    5 |           16 |  0.96% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    6 |           11 |  0.66% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    7 |            9 |  0.54% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    8 |            8 |  0.48% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    9 |            7 |  0.42% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|   10 |            7 |  0.42% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+
+Samples: 1669; elapsed: 2.448s; frequency_hz: 997
+
+#### s4_order_processing\_\_scale_out_2w
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         2403 | 80.05% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |           53 |  1.77% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |           51 |  1.70% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    4 |           48 |  1.60% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |           40 |  1.33% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    6 |           31 |  1.03% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    7 |           29 |  0.97% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    8 |           26 |  0.87% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    9 |           19 |  0.63% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|   10 |           12 |  0.40% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+
+Samples: 3002; elapsed: 4.440s; frequency_hz: 997
+
+#### s4_order_processing\_\_scale_out_4w
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         4671 | 75.57% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          127 |  2.05% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |          126 |  2.04% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    4 |          117 |  1.89% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          111 |  1.80% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    6 |           75 |  1.21% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |           53 |  0.86% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    8 |           51 |  0.83% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    9 |           51 |  0.83% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|   10 |           47 |  0.76% | `groove::ivm::runtime::join::apply_join_delta_to_index`                                                          |
+
+Samples: 6181; elapsed: 8.863s; frequency_hz: 997
+
+#### s4_order_processing\_\_scale_out_8w
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         9486 | 62.13% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          562 |  3.68% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |          533 |  3.49% | `jazz::node::maintained_subscription_view::MaintainedSubscriptionView::apply_decoded_deltas`                     |
+|    4 |          530 |  3.47% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    5 |          336 |  2.20% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    6 |          313 |  2.05% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    7 |          232 |  1.52% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                        |
+|    8 |          224 |  1.47% | `groove::ivm::runtime::join::apply_join_delta_to_index`                                                          |
+|    9 |          212 |  1.39% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|   10 |          211 |  1.38% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+
+Samples: 15267; elapsed: 22.488s; frequency_hz: 997
+
+#### s4_order_processing\_\_slo
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         2180 | 67.22% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          106 |  3.27% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |           91 |  2.81% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    4 |           82 |  2.53% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |           66 |  2.04% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    6 |           63 |  1.94% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    7 |           59 |  1.82% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                        |
+|    8 |           55 |  1.70% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    9 |           50 |  1.54% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|   10 |           36 |  1.11% | `groove::ivm::runtime::join::apply_join_delta_to_index`                                                          |
+
+Samples: 3243; elapsed: 4.448s; frequency_hz: 997
+
+#### s4_order_processing\_\_sqlite_reference
+
+| Rank | Self Samples | Self % | Function                   |
+| ---: | -----------: | -----: | -------------------------- |
+|    1 |            1 | 25.00% | `_sqlite3BtreeTableMoveto` |
+|    2 |            1 | 25.00% | `_sqlite3MemMalloc`        |
+|    3 |            1 | 25.00% | `_sqlite3RowidConstraint`  |
+|    4 |            1 | 25.00% | `_sqlite3VdbeExec`         |
+
+Samples: 4; elapsed: 0.009s; frequency_hz: 997
+
+#### s4_order_processing\_\_throughput_propagation_inclusive
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |        19271 | 66.47% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          804 |  2.77% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |          715 |  2.47% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    4 |          585 |  2.02% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          555 |  1.91% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                        |
+|    6 |          432 |  1.49% | `groove::ivm::runtime::join::apply_join_delta_to_index`                                                          |
+|    7 |          410 |  1.41% | `jazz::node::maintained_subscription_view::MaintainedSubscriptionView::apply_decoded_deltas`                     |
+|    8 |          391 |  1.35% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    9 |          388 |  1.34% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|   10 |          375 |  1.29% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+
+Samples: 28992; elapsed: 42.504s; frequency_hz: 997
+
+#### s4_order_processing\_\_throughput_settlement
+
+| Rank | Self Samples | Self % | Function                                                                                                                                                                                                                                            |
+| ---: | -----------: | -----: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    1 |        19916 | 69.84% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)`                                                                                                                                    |
+|    2 |          788 |  2.76% | `core::hash::BuildHasher::hash_one`                                                                                                                                                                                                                 |
+|    3 |          695 |  2.44% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                                                                                                                                                     |
+|    4 |          558 |  1.96% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                                                                                                                                                          |
+|    5 |          532 |  1.87% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                                                                                                                                                           |
+|    6 |          440 |  1.54% | `<alloc::string::String as core::clone::Clone>::clone`                                                                                                                                                                                              |
+|    7 |          412 |  1.44% | `groove::ivm::runtime::join::apply_join_delta_to_index`                                                                                                                                                                                             |
+|    8 |          367 |  1.29% | `groove::ivm::graph::IvmGraph::node`                                                                                                                                                                                                                |
+|    9 |          353 |  1.24% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                                                                                                                                                       |
+|   10 |          344 |  1.21% | `alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing` |
+
+Samples: 28518; elapsed: 42.685s; frequency_hz: 997
+
+## CF item 0 medium JSONL receipt run: 20260703T170138Z
+
+- Baseline JSONL run: `20260703T075746Z`
+- Current JSONL run: `20260703T170138Z`
+- Result artifacts: `dev/benchmarks/results/20260703T170138Z/`
+- Logs: `target/benchmark-cf-receipts/20260703T170138Z/`
+- Commands: `cargo bench -p jazz-sim --bench s2_canvas`, `s5_durable_stream`, `s6_text_traces` at default size.
+- Report: `/Users/anselm/CF-RECEIPTS-2026-07-03.md`
