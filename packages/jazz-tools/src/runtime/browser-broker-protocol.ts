@@ -11,11 +11,6 @@ import type { BrowserBrokerUnsupportedCode } from "./browser-broker-errors.js";
 export const BROKER_CONTROL_PROTOCOL_VERSION = "jazz-browser-broker-v3";
 export const BROWSER_STORAGE_FORMAT_VERSION = "opfs-btree-v1";
 
-// Liveness defaults shared by the broker worker and the tab client — a drift
-// between the two desynchronizes ping cadence from eviction timing.
-export const DEFAULT_BROKER_PING_INTERVAL_MS = 1_000;
-export const DEFAULT_BROKER_PONG_TIMEOUT_MS = 3_000;
-
 export function normalizePositiveTimeout(value: unknown, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return fallback;
@@ -49,12 +44,6 @@ export type BrowserBrokerRole = "leader" | "follower";
 
 export interface BrokerInstanceMessage {
   brokerInstanceId: string;
-}
-
-export interface BrowserBrokerCandidate {
-  tabId: string;
-  visibility: BrowserBrokerVisibility;
-  lastVisibleAt: number;
 }
 
 export interface BrowserBrokerFingerprintInput {
@@ -296,32 +285,6 @@ export function detectBrowserBrokerMissingCapabilities(
   }
 
   return missing;
-}
-
-export function selectLeaderCandidate(
-  candidates: readonly BrowserBrokerCandidate[],
-): BrowserBrokerCandidate | null {
-  const visible = candidates.filter((candidate) => candidate.visibility === "visible");
-  const pool = visible.length > 0 ? visible : candidates;
-  let selected: BrowserBrokerCandidate | null = null;
-
-  for (const candidate of pool) {
-    if (!selected) {
-      selected = candidate;
-      continue;
-    }
-
-    if (candidate.lastVisibleAt > selected.lastVisibleAt) {
-      selected = candidate;
-      continue;
-    }
-
-    if (candidate.lastVisibleAt === selected.lastVisibleAt && candidate.tabId > selected.tabId) {
-      selected = candidate;
-    }
-  }
-
-  return selected;
 }
 
 // Leadership ids increase monotonically per namespace. "Stale" means the
