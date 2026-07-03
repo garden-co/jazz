@@ -71,7 +71,7 @@ fn user_client_context(
 /// same table INSERT check.
 ///
 /// ```text
-/// alice   --insert blob asset--> server --row policy--> alice sees Bytea
+/// alice   --insert blob asset--> server --row policy--> alice sees handle, then hydrates
 /// bob     --query assets-------> server --row policy--x empty
 /// mallory --spoof owner-------> server --row policy--x rejected
 /// ```
@@ -154,13 +154,17 @@ async fn large_blob_values_follow_ordinary_row_permissions() {
                 |rows| (rows.len() == 1 && rows[0].0 == asset_row_id).then_some(rows),
             )
             .await;
+            assert_eq!(alice_rows[0].1[0], Value::Uuid(alice_owner_id));
+            assert_eq!(alice_rows[0].1[1], Value::Text("alice.bin".to_string()));
+            let Value::LargeValue(handle) = &alice_rows[0].1[2] else {
+                panic!("large blob query should materialize as a handle");
+            };
             assert_eq!(
-                alice_rows[0].1,
-                vec![
-                    Value::Uuid(alice_owner_id),
-                    Value::Text("alice.bin".to_string()),
-                    Value::Bytea(blob),
-                ]
+                alice
+                    .hydrate_large_value(handle)
+                    .await
+                    .expect("hydrate alice blob"),
+                blob
             );
 
             let bob_rows = wait_for_query(

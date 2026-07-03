@@ -189,6 +189,10 @@ enum WriteStateWaiterNotify {
 enum PendingUpstreamCommand {
     Subscribe(PendingUpstreamSubscription),
     Unsubscribe(SubscriptionKey),
+    FetchContentExtent {
+        owner: LargeValueOwnerRef,
+        extent: crate::node::content_store::Extent,
+    },
     SessionClaims {
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
@@ -529,6 +533,48 @@ where
             .borrow_mut()
             .row_provenance(row)
             .map_err(Into::into)
+    }
+
+    /// Read the bytes behind a materialized large-value handle.
+    ///
+    /// This is explicit content access: ordinary row reads return handles and
+    /// never pull extent bytes. If the referenced extents are not hydrated
+    /// locally, this returns a protocol error whose source is the node's
+    /// `MissingContentExtent` condition.
+    pub fn hydrate_large_value_handle(&self, handle: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut attempts = 0usize;
+        loop {
+            let result = {
+                self.node
+                    .node
+                    .borrow_mut()
+                    .hydrate_large_value_handle(handle)
+            };
+            match result {
+                Ok(bytes) => return Ok(bytes),
+                Err(crate::node::Error::MissingContentExtent(extent)) if attempts < 16 => {
+                    attempts += 1;
+                    self.node.queue_content_extent_fetch(extent);
+                    for _ in 0..64 {
+                        self.tick()?;
+                        let result = {
+                            self.node
+                                .node
+                                .borrow_mut()
+                                .hydrate_large_value_handle(handle)
+                        };
+                        match result {
+                            Ok(bytes) => return Ok(bytes),
+                            Err(crate::node::Error::MissingContentExtent(_)) => {
+                                std::thread::yield_now();
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     /// Read local settled history at an exact global sequence cut.
@@ -2344,6 +2390,9 @@ where
         let mut parent = None;
         if let Some(existing) = self.local_row_for_identity(table, row, identity)? {
             for column in &table_schema.columns {
+                if column.large_value.is_some() {
+                    continue;
+                }
                 if let Some(value) = existing.cell(table_schema, &column.name) {
                     cells.insert(column.name.clone(), value);
                 }
@@ -2520,6 +2569,16 @@ where
 
     fn schedule_tick(&self, urgency: TickUrgency) {
         schedule_tick_in(&self.scheduler, urgency);
+    }
+
+    fn queue_content_extent_fetch(&self, extent: crate::node::content_store::Extent) {
+        self.upstream_subscriptions
+            .borrow_mut()
+            .push(PendingUpstreamCommand::FetchContentExtent {
+                owner: LargeValueOwnerRef::current_row(extent.row),
+                extent,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
     }
 
     fn register_write_state_waiter(&self, tx_id: TxId) -> WriteStateChange {
@@ -3330,6 +3389,16 @@ where
                                 return Err(transport_error(error));
                             }
                         }
+                        PendingUpstreamCommand::FetchContentExtent { owner, extent } => {
+                            if let Err(error) =
+                                self.transport.send(SyncMessage::FetchContentExtent {
+                                    owner: owner.clone(),
+                                    extent: extent.clone(),
+                                })
+                            {
+                                return Err(transport_error(error));
+                            }
+                        }
                         PendingUpstreamCommand::SessionClaims { identity, claims } => {
                             if let Err(error) = self.transport.send(SyncMessage::SessionClaims {
                                 identity: *identity,
@@ -3663,6 +3732,13 @@ where
                                 self.transport.send(response).map_err(transport_error)?;
                             }
                         }
+                        SyncMessage::FetchContentExtent { owner, extent } => {
+                            let response = {
+                                let mut node = self.node.borrow_mut();
+                                peer.serve_content_extents(&mut node, owner.row, vec![extent])?
+                            };
+                            self.transport.send(response).map_err(transport_error)?;
+                        }
                         other => {
                             if let SyncMessage::ContentExtents { extents } = &other
                                 && let Err(message) = validate_content_extents(extents)
@@ -3894,7 +3970,10 @@ fn send_with_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let extents = node.borrow().content_refs_in_sync_message(&message)?;
+    let extents = match &message {
+        SyncMessage::ViewUpdate { .. } => BTreeSet::new(),
+        _ => node.borrow().content_refs_in_sync_message(&message)?,
+    };
     let mut extents_by_row = BTreeMap::new();
     for extent in extents {
         extents_by_row

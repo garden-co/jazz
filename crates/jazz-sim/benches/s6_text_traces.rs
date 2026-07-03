@@ -821,10 +821,7 @@ fn run_point_in_time_reads(trace: &Trace) -> Vec<PointInTimeSummary> {
             let actual = rows
                 .into_iter()
                 .find(|row| row.row_uuid() == doc_row())
-                .and_then(|row| match row.cell(&table, "text").unwrap() {
-                    Value::Bytes(text) => String::from_utf8(text).ok(),
-                    _ => None,
-                })
+                .and_then(|row| node_text_value(&mut node, row.cell(&table, "text").unwrap()))
                 .unwrap_or_default();
             assert_eq!(actual, doc, "point-in-time prefix {target}");
             summaries.push(PointInTimeSummary {
@@ -1456,14 +1453,13 @@ fn open_history_complete_node(
 fn read_doc(node: &mut NodeState<RocksDbStorage>) -> String {
     let schema = schema();
     let table = table_schema(&schema, DOCS);
-    node.current_rows(DOCS, DurabilityTier::Local)
+    let cell = node
+        .current_rows(DOCS, DurabilityTier::Local)
         .unwrap()
         .into_iter()
         .find(|row| row.row_uuid() == doc_row())
-        .and_then(|row| match row.cell(table, "text").unwrap() {
-            Value::Bytes(text) => String::from_utf8(text).ok(),
-            _ => None,
-        })
+        .and_then(|row| row.cell(table, "text"));
+    cell.and_then(|value| node_text_value(node, value))
         .unwrap_or_default()
 }
 
@@ -1475,11 +1471,28 @@ fn read_db_doc(db: &Db<RocksDbStorage>, schema: &JazzSchema) -> String {
         .expect("db read docs")
         .into_iter()
         .find(|row| row.row_uuid() == doc_row())
-        .and_then(|row| match row.cell(table, "text").unwrap() {
-            Value::Bytes(text) => String::from_utf8(text).ok(),
-            _ => None,
-        })
+        .and_then(|row| db_text_value(db, row.cell(table, "text").unwrap()))
         .unwrap_or_default()
+}
+
+fn node_text_value(node: &mut NodeState<RocksDbStorage>, value: Value) -> Option<String> {
+    match value {
+        Value::Bytes(handle) => node
+            .hydrate_large_value_handle(&handle)
+            .ok()
+            .and_then(|text| String::from_utf8(text).ok()),
+        _ => None,
+    }
+}
+
+fn db_text_value(db: &Db<RocksDbStorage>, value: Value) -> Option<String> {
+    match value {
+        Value::Bytes(handle) => db
+            .hydrate_large_value_handle(&handle)
+            .ok()
+            .and_then(|text| String::from_utf8(text).ok()),
+        _ => None,
+    }
 }
 
 fn commit_unit_bytes(update: &SyncMessage) -> u64 {
@@ -1538,7 +1551,10 @@ fn collect_extents_from_versions<'a>(
         let Some(Value::Bytes(payload)) = version.cell_at(0) else {
             continue;
         };
-        let Ok(ops) = text_oplog::decode(&payload) else {
+        let payload = payload
+            .strip_prefix(b"JTXTREF1")
+            .unwrap_or(payload.as_slice());
+        let Ok(ops) = text_oplog::decode(payload) else {
             continue;
         };
         for op in ops {

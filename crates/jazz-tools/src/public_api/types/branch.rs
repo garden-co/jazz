@@ -234,6 +234,11 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
             hasher.update(&(v.len() as u64).to_le_bytes());
             hasher.update(v);
         }
+        Value::LargeValue(v) => {
+            hasher.update(&[13]);
+            hasher.update(&(v.as_bytes().len() as u64).to_le_bytes());
+            hasher.update(v.as_bytes());
+        }
         Value::Array(values) => {
             hasher.update(&[7]);
             hasher.update(&(values.len() as u64).to_le_bytes());

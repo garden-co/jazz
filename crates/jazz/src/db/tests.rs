@@ -206,6 +206,22 @@ where
     db.one(&prepared).unwrap()
 }
 
+fn prepared_large_value_cell<S>(
+    db: &Db<S>,
+    query: &Query,
+    table: &TableSchema,
+    column: &str,
+) -> Vec<u8>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let row = prepared_one(db, query).expect("expected one row");
+    let Some(Value::Bytes(handle)) = row.cell(table, column) else {
+        panic!("expected large-value handle in {column}");
+    };
+    db.hydrate_large_value_handle(&handle).unwrap()
+}
+
 fn prepared_all<S>(db: &Db<S>, query: &Query, opts: ReadOpts) -> Vec<CurrentRow>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -3583,10 +3599,16 @@ fn db_sync_surface_round_trips_blob_large_value_to_reader() {
     assert_eq!(added.len(), 1);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
-    assert_eq!(
-        prepared_read(&reader, &query)[0].cell(table, "data"),
-        Some(Value::Bytes(payload))
-    );
+    let handle = prepared_read(&reader, &query)[0].cell(table, "data");
+    let Some(Value::Bytes(handle)) = handle else {
+        panic!("expected large-value handle");
+    };
+    reader
+        .hydrate_large_value_handle(&handle)
+        .expect_err("large-value handle should be unhydrated before explicit fetch response");
+    server.tick().unwrap();
+    reader.tick().unwrap();
+    assert_eq!(reader.hydrate_large_value_handle(&handle).unwrap(), payload);
 }
 
 #[test]
@@ -3753,9 +3775,12 @@ fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
     let alice_rows = prepared_all(&alice_db, &query, global_subscribe_opts());
     assert_eq!(alice_rows.len(), 1);
     assert_eq!(alice_rows[0].row_uuid(), asset);
+    let Some(Value::Bytes(handle)) = alice_rows[0].cell(table, "data") else {
+        panic!("expected large-value handle");
+    };
     assert_eq!(
-        alice_rows[0].cell(table, "data"),
-        Some(Value::Bytes(payload))
+        alice_db.hydrate_large_value_handle(&handle).unwrap(),
+        payload
     );
 
     let (bob_transport, server_bob_transport) = duplex();
@@ -4890,10 +4915,8 @@ fn db_large_text_values_round_trip_across_edit_chain() {
         .unwrap();
     let note = write.row_uuid();
     assert_eq!(
-        prepared_one(&db, &Query::from("notes"))
-            .unwrap()
-            .cell(table, "body"),
-        Some(Value::Bytes(b"hello".to_vec()))
+        prepared_large_value_cell(&db, &Query::from("notes"), table, "body"),
+        b"hello".to_vec()
     );
 
     for value in [
@@ -4909,10 +4932,8 @@ fn db_large_text_values_round_trip_across_edit_chain() {
         )
         .unwrap();
         assert_eq!(
-            prepared_one(&db, &Query::from("notes"))
-                .unwrap()
-                .cell(table, "body"),
-            Some(Value::Bytes(value))
+            prepared_large_value_cell(&db, &Query::from("notes"), table, "body"),
+            value
         );
     }
 }
@@ -4952,10 +4973,8 @@ fn db_large_blob_values_round_trip_binary_from_empty_parent() {
         .unwrap();
     let file = write.row_uuid();
     assert_eq!(
-        prepared_one(&db, &Query::from("files"))
-            .unwrap()
-            .cell(table, "data"),
-        Some(Value::Bytes(first))
+        prepared_large_value_cell(&db, &Query::from("files"), table, "data"),
+        first
     );
 
     db.update(
@@ -4965,10 +4984,8 @@ fn db_large_blob_values_round_trip_binary_from_empty_parent() {
     )
     .unwrap();
     assert_eq!(
-        prepared_one(&db, &Query::from("files"))
-            .unwrap()
-            .cell(table, "data"),
-        Some(Value::Bytes(second))
+        prepared_large_value_cell(&db, &Query::from("files"), table, "data"),
+        second
     );
 }
 
@@ -5012,10 +5029,8 @@ fn db_text_edit_ops_materialize_expected_value() {
     .unwrap();
 
     assert_eq!(
-        prepared_one(&db, &Query::from("notes"))
-            .unwrap()
-            .cell(table, "body"),
-        Some(Value::Bytes(b"hello, ops".to_vec()))
+        prepared_large_value_cell(&db, &Query::from("notes"), table, "body"),
+        b"hello, ops".to_vec()
     );
 }
 
@@ -5077,10 +5092,8 @@ fn db_text_dump_and_edit_paths_interleave() {
         .unwrap();
 
     assert_eq!(
-        prepared_one(&db, &Query::from("notes"))
-            .unwrap()
-            .cell(table, "body"),
-        Some(Value::Bytes(b"BEGIN end".to_vec()))
+        prepared_large_value_cell(&db, &Query::from("notes"), table, "body"),
+        b"BEGIN end".to_vec()
     );
 }
 
@@ -5133,10 +5146,8 @@ fn db_blob_edit_ops_handle_binary_and_multibyte_bytes() {
     expected.extend_from_slice(b"z");
     expected.extend_from_slice("✓".as_bytes());
     assert_eq!(
-        prepared_one(&db, &Query::from("files"))
-            .unwrap()
-            .cell(table, "data"),
-        Some(Value::Bytes(expected))
+        prepared_large_value_cell(&db, &Query::from("files"), table, "data"),
+        expected
     );
 }
 
