@@ -9,11 +9,13 @@ use super::codec::{
 };
 use super::query_engine::{
     AggregateResultSchema, OutputTerminalSchema, ProgramFactKey, ProgramFactSchema,
-    ProgramFactTerminal, QueryProgram, ResultMembershipSchema, VersionWitnessSchema,
+    ProgramFactTerminal, QueryProgram, RelationEdgeSchema, ResultMembershipSchema,
+    ResultMembershipVersionSchema, VersionWitnessSchema, VersionedRowRefSchema,
 };
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
-    ProgramFactEntry, RealRowMemberEntry, ResultMemberEntry, ResultMemberPayloadEntry,
+    ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
+    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry,
 };
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
@@ -100,6 +102,7 @@ pub(crate) enum DecodedMaintainedEvent {
     VersionDeletion(VersionRow),
     ReplacementContent(VersionRow),
     ReplacementDeletion(VersionRow),
+    RelationEdge(RelationEdgeEntry),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -115,6 +118,7 @@ enum MaintainedTerminalKind {
     VersionDeletion(VersionWitnessSchema),
     ReplacementContent(VersionWitnessSchema),
     ReplacementDeletion(VersionWitnessSchema),
+    RelationEdge(RelationEdgeSchema),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -122,6 +126,7 @@ enum EventIdentity {
     Result(ResultMemberEntry),
     Version(VersionIdentity),
     Replacement(ReplacementKey, VersionIdentity),
+    ProgramFact(ProgramFactEntry),
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +140,7 @@ enum NetEvent {
     ),
     Version(VersionIdentity, VersionRow),
     Replacement(ReplacementKey, VersionIdentity, VersionRow),
+    ProgramFact(ProgramFactEntry),
 }
 
 impl MaintainedSubscriptionView {
@@ -216,6 +222,9 @@ impl MaintainedSubscriptionView {
                     let key = ReplacementKey::for_row(&row, VersionLayer::Deletion);
                     NetEvent::Replacement(key, identity, row)
                 }
+                DecodedMaintainedEvent::RelationEdge(edge) => {
+                    NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
+                }
             };
             let identity = net_event.identity();
             net.entry(identity)
@@ -249,6 +258,13 @@ impl MaintainedSubscriptionView {
                 NetEvent::Replacement(key, identity, row) => {
                     self.replacements
                         .apply_delta(key, identity, row, weight, node_aliases)?;
+                }
+                NetEvent::ProgramFact(fact) => {
+                    if weight > 0 {
+                        transitions.program_fact_adds.push(fact);
+                    } else {
+                        transitions.program_fact_removes.push(fact);
+                    }
                 }
             }
         }
@@ -419,6 +435,11 @@ impl MaintainedTerminalSchemas {
                     ProgramFactSchema::AggregateResult(schema),
                 ) => Some(MaintainedTerminalKind::AggregateResult(schema.clone())),
                 (
+                    ProgramFactKey::RelationEdges,
+                    ProgramFactTerminal::Primary,
+                    ProgramFactSchema::RelationEdges(schema),
+                ) => Some(MaintainedTerminalKind::RelationEdge(schema.clone())),
+                (
                     ProgramFactKey::VersionWitnesses,
                     ProgramFactTerminal::VersionWitnessDeletion,
                     ProgramFactSchema::VersionWitnesses(schema),
@@ -583,7 +604,92 @@ fn decode_typed_terminal_record(
             decode_typed_version_witness(record, schema, tables)
                 .map(DecodedMaintainedEvent::ReplacementDeletion)
         }
+        MaintainedTerminalKind::RelationEdge(schema) => {
+            decode_typed_relation_edge(record, schema, tables, node_aliases)
+                .map(DecodedMaintainedEvent::RelationEdge)
+        }
     }
+}
+
+fn decode_typed_relation_edge(
+    record: BorrowedRecord<'_>,
+    schema: &RelationEdgeSchema,
+    tables: &TableSchemas,
+    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+) -> Result<RelationEdgeEntry, super::Error> {
+    let source_table = table_name_from_versioned_ref(record, &schema.source, tables)?;
+    let target_table = table_name_from_versioned_ref(record, &schema.target, tables)?;
+    let path = match record.get_idx(field_idx(record, &schema.path_field)?)? {
+        Value::String(value) => value,
+        _ => {
+            return Err(super::Error::InvalidStoredValue(
+                "relation edge path field must be string",
+            ));
+        }
+    };
+    Ok(RelationEdgeEntry {
+        path,
+        source_table: source_table.clone().into(),
+        source_row: RowUuid(record.get_uuid(field_idx(record, &schema.source.row.row_field)?)?),
+        target_table: target_table.clone().into(),
+        target_row: RowUuid(record.get_uuid(field_idx(record, &schema.target.row.row_field)?)?),
+        kind: Some(crate::protocol::RelationEdgeKind::Relation),
+        source_version: decode_relation_edge_version(record, &schema.source, node_aliases)?,
+        target_version: decode_relation_edge_version(record, &schema.target, node_aliases)?,
+        depth: None,
+        edge_id: None,
+        branch: None,
+        role: Some(crate::protocol::RelationEdgeRole::Terminal),
+        order: None,
+        hole_state: None,
+    })
+}
+
+fn table_name_from_versioned_ref(
+    record: BorrowedRecord<'_>,
+    schema: &VersionedRowRefSchema,
+    tables: &TableSchemas,
+) -> Result<String, super::Error> {
+    let table_name = match record.get_idx(field_idx(record, &schema.row.table_field)?)? {
+        Value::String(value) => value,
+        _ => {
+            return Err(super::Error::InvalidStoredValue(
+                "relation edge table field must be string",
+            ));
+        }
+    };
+    tables
+        .get(&table_name)
+        .ok_or(super::Error::InvalidStoredValue(
+            "relation edge table_name must exist",
+        ))?;
+    Ok(table_name)
+}
+
+fn decode_relation_edge_version(
+    record: BorrowedRecord<'_>,
+    schema: &VersionedRowRefSchema,
+    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+) -> Result<Option<RowVersionRefEntry>, super::Error> {
+    let Some(ResultMembershipVersionSchema::Content(version)) = &schema.version else {
+        return Ok(None);
+    };
+    let tx_time = TxTime(record_u64(record, &version.tx_time_field)?);
+    let tx_node_alias = NodeAlias(record_u64(record, &version.tx_node_field)?);
+    let tx_node = node_aliases
+        .iter()
+        .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
+        .ok_or(super::Error::InvalidStoredValue(
+            "relation edge tx node alias must exist",
+        ))?;
+    Ok(Some(RowVersionRefEntry {
+        tx: TxId::new(tx_time, tx_node),
+        schema_version: None,
+        layer: ResultRowLayer::Content,
+        batch: None,
+        branch_or_prefix: None,
+        row_digest: None,
+    }))
 }
 
 fn validate_witness_event_kind(
@@ -887,6 +993,7 @@ impl NetEvent {
             Self::Replacement(key, identity, _) => {
                 EventIdentity::Replacement(key.clone(), identity.clone())
             }
+            Self::ProgramFact(fact) => EventIdentity::ProgramFact(fact.clone()),
         }
     }
 }
