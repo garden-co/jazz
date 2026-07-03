@@ -3063,6 +3063,12 @@ pub struct QueryEngineReadMetrics {
     pub policy_authorization_graphs: u64,
     /// Source graphs filtered by query-engine authorization terminals.
     pub policy_authorized_source_joins: u64,
+    /// Visible-current source resolutions that used a static primary-key scan.
+    pub source_primary_key_scans: u64,
+    /// Visible-current source resolutions that used a declared secondary index.
+    pub source_index_probes: u64,
+    /// Visible-current source resolutions that fell back to a full source scan.
+    pub source_full_scans: u64,
 }
 
 /// Deterministic counters for large-value materialization and checkpoint use.

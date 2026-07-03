@@ -1,3 +1,143 @@
+fn access_path_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "docs",
+        [
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("status", ColumnType::String),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )
+    .with_indexed_column("owner")])
+}
+
+fn access_path_doc_cells(owner: AuthorId, status: &str, body: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("status".to_owned(), Value::String(status.to_owned())),
+        ("body".to_owned(), Value::String(body.to_owned())),
+    ])
+}
+
+fn seed_access_path_docs(
+    writer: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState<RocksDbStorage>,
+) -> (RowUuid, RowUuid, AuthorId) {
+    let owner_a = user(0xa1);
+    let owner_b = user(0xb2);
+    let first = row(0x11);
+    let second = row(0x22);
+    commit_mergeable_global(
+        writer,
+        core,
+        MergeableCommit::new("docs", first, 10)
+            .cells(access_path_doc_cells(owner_a, "open", "first")),
+    );
+    commit_mergeable_global(
+        writer,
+        core,
+        MergeableCommit::new("docs", second, 11)
+            .cells(access_path_doc_cells(owner_b, "closed", "second")),
+    );
+    (first, second, owner_a)
+}
+
+fn query_rows_by_uuid(
+    node: &mut NodeState<RocksDbStorage>,
+    query: Query,
+    tier: DurabilityTier,
+) -> (Vec<RowUuid>, QueryEngineReadMetrics) {
+    let shape = query.validate(&node.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    node.reset_query_engine_read_metrics();
+    let rows = node
+        .query_rows_for_link(&shape, &binding, tier, AuthorId::SYSTEM)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    (rows, node.query_engine_read_metrics().clone())
+}
+
+#[test]
+fn one_shot_filtered_read_uses_primary_key_scan_for_id_equality() {
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let (first, _second, _owner) = seed_access_path_docs(&mut writer, &mut core);
+    let query = Query::from("docs").filter(eq(col("id"), lit(Value::Uuid(first.0))));
+
+    let (selected, selected_metrics) =
+        query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
+    let (forced_full, forced_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+
+    assert_eq!(selected, forced_full);
+    assert_eq!(selected, vec![first]);
+    assert_eq!(selected_metrics.source_primary_key_scans, 1);
+    assert_eq!(selected_metrics.source_index_probes, 0);
+    assert_eq!(selected_metrics.source_full_scans, 0);
+    assert_eq!(forced_metrics.source_full_scans, 1);
+}
+
+#[test]
+fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let query = Query::from("docs").filter(eq(col("owner"), lit(Value::Uuid(owner.0))));
+
+    let (selected, selected_metrics) =
+        query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
+    let (forced_full, forced_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+
+    assert_eq!(selected, forced_full);
+    assert_eq!(selected, vec![first]);
+    assert_eq!(selected_metrics.source_primary_key_scans, 0);
+    assert_eq!(selected_metrics.source_index_probes, 1);
+    assert_eq!(selected_metrics.source_full_scans, 0);
+    assert_eq!(forced_metrics.source_full_scans, 1);
+}
+
+#[test]
+fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let query = Query::from("docs")
+        .filter(eq(col("owner"), lit(Value::Uuid(owner.0))))
+        .filter(eq(col("status"), lit("open")));
+
+    let (selected, selected_metrics) =
+        query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
+    let (forced_full, _forced_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+
+    assert_eq!(selected, forced_full);
+    assert_eq!(selected, vec![first]);
+    assert_eq!(selected_metrics.source_index_probes, 1);
+    assert_eq!(selected_metrics.source_full_scans, 0);
+}
+
+#[test]
+fn one_shot_filtered_read_counts_full_scan_for_unindexed_filter() {
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let (_first, second, _owner) = seed_access_path_docs(&mut writer, &mut core);
+    let query = Query::from("docs").filter(eq(col("status"), lit("closed")));
+
+    let (selected, selected_metrics) =
+        query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
+    let (forced_full, forced_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+
+    assert_eq!(selected, forced_full);
+    assert_eq!(selected, vec![second]);
+    assert_eq!(selected_metrics.source_primary_key_scans, 0);
+    assert_eq!(selected_metrics.source_index_probes, 0);
+    assert_eq!(selected_metrics.source_full_scans, 1);
+    assert_eq!(forced_metrics.source_full_scans, 1);
+}
+
 #[test]
 fn whole_table_predicate_probe_uses_table_change_watermark() {
     let schema = JazzSchema::new([

@@ -9,7 +9,7 @@ use super::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use groove::ivm::RoutedMultisinkTerminal;
+use groove::ivm::{LiteralValue, RoutedMultisinkTerminal, StaticScanSpec};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
 use groove::records::{EnumSchema, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
@@ -45,10 +45,10 @@ use crate::protocol::{
 use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES};
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
-    Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery, ShapeId,
-    ValidatedQuery,
+    Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
+    QueryError, ShapeId, ValidatedQuery,
 };
-use crate::schema::{ColumnSchema, branch_metadata_table_schema};
+use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 
@@ -386,12 +386,19 @@ struct CurrentQuerySourceResolver<'a, S> {
     node: &'a mut NodeState<S>,
     read_view: &'a ReadView<RequestedSourceStage>,
     inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+    access_paths: BTreeMap<SourceId, CurrentAccessPath>,
 }
 
 struct CurrentSourceGraph {
     graph: GraphBuilder,
     descriptor: RecordDescriptor,
     metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+}
+
+#[derive(Clone, Debug)]
+enum CurrentAccessPath {
+    PrimaryKey(Vec<Value>),
+    Index { index: String, prefix: Vec<Value> },
 }
 
 impl<S> SourceResolver for CurrentQuerySourceResolver<'_, S>
@@ -814,6 +821,14 @@ where
                 BTreeSet::new(),
             )
         } else {
+            let selected_base = self.selected_global_current_source_graph(
+                request,
+                &table,
+                graph_tier.expect("visible current source has a tier"),
+            )?;
+            if selected_base.is_none() {
+                self.node.query_engine_read_metrics.source_full_scans += 1;
+            }
             resolved_current_source_graph(
                 self.node,
                 &table,
@@ -821,6 +836,7 @@ where
                 &request.requirements,
                 &request.authorization,
                 self.read_view.policy_schema,
+                selected_base,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
         };
@@ -860,6 +876,37 @@ impl<S> CurrentQuerySourceResolver<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn selected_global_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+    ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
+        if tier != DurabilityTier::Global {
+            return Ok(None);
+        }
+        let Some(access_path) = self.access_paths.get(&request.source).cloned() else {
+            return Ok(None);
+        };
+        match access_path {
+            CurrentAccessPath::PrimaryKey(prefix) => {
+                self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                Ok(Some(GraphBuilder::table_scan(
+                    global_current_table_name(&table.name),
+                    static_scan_for_prefix(prefix, 1),
+                )))
+            }
+            CurrentAccessPath::Index { index, prefix } => {
+                let rows = self
+                    .node
+                    .global_current_rows_for_index_scan(table, &index, &prefix)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                self.node.query_engine_read_metrics.source_index_probes += 1;
+                Ok(Some(rows))
+            }
+        }
+    }
+
     fn deletion_register_source_for_request(
         &self,
         request: &SourceRequest,
@@ -1112,6 +1159,7 @@ fn resolved_current_source_graph<S>(
     requirements: &SourceRequirements,
     authorization: &SourceAuthorizationRequest,
     policy_schema: SchemaVersionId,
+    selected_base: Option<GraphBuilder>,
 ) -> Result<
     (
         GraphBuilder,
@@ -1195,7 +1243,13 @@ where
     let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
     let (base, routing_fields) = match authorization {
         SourceAuthorizationRequest::System => {
-            let graph = if needs_version_witnesses {
+            let graph = if let Some(selected_base) = selected_base.clone() {
+                selected_base.project_fields(storage_to_canonical_current_source_fields(
+                    table,
+                    needs_version_witnesses,
+                    needs_settle_position,
+                ))
+            } else if needs_version_witnesses {
                 node.maintained_view_content_current_with_version(table, tier)?
                     .project_fields(storage_to_canonical_current_source_fields(
                         table,
@@ -1236,7 +1290,10 @@ where
                 needs_version_witnesses,
                 needs_settle_position,
             );
-            let base = node.maintained_view_content_current_with_version(table, tier)?;
+            let base = match selected_base {
+                Some(selected_base) => selected_base,
+                None => node.maintained_view_content_current_with_version(table, tier)?,
+            };
             let storage_graph = node.policy_filtered_current_source_graph_via_query_engine(
                 policy_request,
                 base.clone(),
@@ -1747,6 +1804,99 @@ fn normalize_predicates(
             .map(|predicate| normalize_predicate(source, predicate))
             .collect::<Result<Vec<_>, Error>>()
             .map(NormalizedPredicateExpr::And),
+    }
+}
+
+fn root_literal_equalities(
+    query: &JazzQuery,
+    binding: &Binding,
+) -> Result<BTreeMap<String, Value>, Error> {
+    let mut equalities = BTreeMap::new();
+    for predicate in &query.filters {
+        collect_root_literal_equalities(predicate, binding, &mut equalities)?;
+    }
+    Ok(equalities)
+}
+
+fn collect_root_literal_equalities(
+    predicate: &Predicate,
+    binding: &Binding,
+    equalities: &mut BTreeMap<String, Value>,
+) -> Result<(), Error> {
+    match predicate {
+        Predicate::All(predicates) => {
+            for predicate in predicates {
+                collect_root_literal_equalities(predicate, binding, equalities)?;
+            }
+        }
+        Predicate::Eq(left, right) => {
+            if let Some((field, value)) = root_equality_literal(left, right, binding)? {
+                equalities.entry(field).or_insert(value);
+            } else if let Some((field, value)) = root_equality_literal(right, left, binding)? {
+                equalities.entry(field).or_insert(value);
+            }
+        }
+        Predicate::Any(_)
+        | Predicate::Not(_)
+        | Predicate::Ne(_, _)
+        | Predicate::In(_, _)
+        | Predicate::Gt(_, _)
+        | Predicate::Gte(_, _)
+        | Predicate::Lt(_, _)
+        | Predicate::Lte(_, _)
+        | Predicate::Contains(_, _)
+        | Predicate::IsNull(_) => {}
+    }
+    Ok(())
+}
+
+fn root_equality_literal(
+    field: &Operand,
+    value: &Operand,
+    binding: &Binding,
+) -> Result<Option<(String, Value)>, Error> {
+    let Operand::Column(column) = field else {
+        return Ok(None);
+    };
+    let value = match value {
+        Operand::Literal(value) => value.clone(),
+        Operand::Param(name) => binding
+            .values()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| QueryError::MissingParam(name.clone()))?,
+        Operand::Column(_) | Operand::Claim(_) => return Ok(None),
+    };
+    Ok(Some((column.clone(), value)))
+}
+
+fn select_current_access_path(
+    table: &TableSchema,
+    equalities: &BTreeMap<String, Value>,
+) -> Option<CurrentAccessPath> {
+    if let Some(value) = equalities.get("id").cloned() {
+        return Some(CurrentAccessPath::PrimaryKey(vec![value]));
+    }
+    for column in table.global_current_indexed_columns() {
+        if let Some(value) = equalities.get(&column).cloned() {
+            return Some(CurrentAccessPath::Index {
+                index: global_current_index_name(&column),
+                prefix: vec![Value::Nullable(Some(Box::new(value)))],
+            });
+        }
+    }
+    None
+}
+
+fn static_scan_for_prefix(prefix: Vec<Value>, full_key_len: usize) -> StaticScanSpec {
+    let values = prefix
+        .into_iter()
+        .map(LiteralValue::from)
+        .collect::<Vec<_>>();
+    if values.len() == full_key_len {
+        StaticScanSpec::Point(values)
+    } else {
+        StaticScanSpec::Prefix(values)
     }
 }
 
@@ -3345,6 +3495,75 @@ where
         self.compile_query_program_request(request)
     }
 
+    fn compile_current_query_program_for_one_shot_read(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        settled_binding_view: Option<BindingViewKey>,
+    ) -> Result<QueryProgram, Error> {
+        let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
+        let request = self.current_query_program_request(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::AppRows,
+            &ReadViewSpec::default(),
+            settled_binding_view,
+        )?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+    }
+
+    fn one_shot_access_paths(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        if tier != DurabilityTier::Global {
+            return Ok(BTreeMap::new());
+        }
+        let query = shape.query();
+        if !query.joins.is_empty()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+        {
+            return Ok(BTreeMap::new());
+        }
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let equalities = root_literal_equalities(query, binding)?;
+        let Some(access_path) = select_current_access_path(&table, &equalities) else {
+            return Ok(BTreeMap::new());
+        };
+        Ok(BTreeMap::from([(
+            root_source_id(&query.table),
+            access_path,
+        )]))
+    }
+
+    fn global_current_rows_for_index_scan(
+        &self,
+        table: &TableSchema,
+        index: &str,
+        prefix: &[Value],
+    ) -> Result<GraphBuilder, Error> {
+        let storage_table = global_current_table_name(&table.name);
+        let rows = self
+            .database
+            .index_scan_raw(&storage_table, index, prefix)?
+            .into_iter()
+            .map(|raw| raw.record().raw().to_vec())
+            .collect::<Vec<_>>();
+        Ok(GraphBuilder::inline_records(
+            table.global_current_storage_tables()[0].record_schema(),
+            rows,
+        ))
+    }
+
     fn compile_historical_query_program(
         &mut self,
         shape: &ValidatedQuery,
@@ -3507,7 +3726,19 @@ where
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<QueryProgram, Error> {
-        self.compile_query_program_request_with_inline_sources(request, BTreeMap::new())
+        self.compile_query_program_request_with_access_paths(request, BTreeMap::new())
+    }
+
+    fn compile_query_program_request_with_access_paths(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources_and_access_paths(
+            request,
+            BTreeMap::new(),
+            access_paths,
+        )
     }
 
     fn compile_query_program_request_with_inline_sources(
@@ -3515,11 +3746,25 @@ where
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources_and_access_paths(
+            request,
+            inline_sources,
+            BTreeMap::new(),
+        )
+    }
+
+    fn compile_query_program_request_with_inline_sources_and_access_paths(
+        &mut self,
+        request: QueryProgramRequest,
+        inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<QueryProgram, Error> {
         let read_view = request.reads.primary.clone();
         let mut resolver = CurrentQuerySourceResolver {
             node: self,
             read_view: &read_view,
             inline_sources,
+            access_paths,
         };
         lower_query_program(request, &mut resolver)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))
@@ -4200,13 +4445,11 @@ where
         let program = if prepared_plan.is_some() {
             None
         } else {
-            Some(self.compile_current_query_program_with_settled_view(
+            Some(self.compile_current_query_program_for_one_shot_read(
                 shape,
                 binding,
                 tier,
                 identity,
-                CurrentQueryProgramOutput::AppRows,
-                &ReadViewSpec::default(),
                 settled_binding_view,
             )?)
         };
