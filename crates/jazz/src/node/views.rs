@@ -797,7 +797,7 @@ where
         Ok((shape, binding))
     }
 
-    fn version_bundle_for_maintained_view_versions_with_tx(
+    pub(super) fn version_bundle_for_maintained_view_versions_with_tx(
         &mut self,
         stored_tx: &StoredTransaction,
         tx_versions: &[VersionRow],

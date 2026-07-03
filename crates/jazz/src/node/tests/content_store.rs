@@ -1132,6 +1132,82 @@ fn out_of_order_text_unit_resolves_after_parent_arrives() {
 }
 
 #[test]
+fn text_view_update_repair_fetches_missing_ancestor_chain() {
+    let schema = text_large_value_schema();
+    let row_uuid = row(0x77);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x77), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x78), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x79), schema.clone());
+
+    let base_unit = commit_large_value_edit_unit(
+        &mut writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+            .made_by(user(0xa1))
+            .insert(0, b"abc"),
+    );
+    let child_unit = commit_large_value_edit_unit(
+        &mut writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+            .made_by(user(0xa1))
+            .insert(1, b"X"),
+    );
+    let SyncMessage::CommitUnit { tx: base_tx, .. } = &base_unit else {
+        panic!("expected base commit unit");
+    };
+    let SyncMessage::CommitUnit { tx: child_tx, .. } = &child_unit else {
+        panic!("expected child commit unit");
+    };
+    let base_ref = crate::protocol::RowVersionRef::new("docs", row_uuid, base_tx.tx_id);
+
+    apply_large_value_unit(&mut core, &writer, base_unit.clone());
+    apply_large_value_unit(&mut core, &writer, child_unit.clone());
+
+    let update = core.view_update_for_current_rows("docs").unwrap();
+    let missing = reader
+        .missing_known_state_row_version_refs(&update)
+        .unwrap();
+    assert_eq!(missing, vec![base_ref.clone()]);
+
+    let mut peer = crate::peer::PeerState::relay();
+    let messages = peer
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: missing.clone(),
+            },
+        )
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
+        panic!("expected row-version payloads");
+    };
+    assert_eq!(version_bundles.len(), 1);
+    assert_eq!(version_bundles[0].tx.tx_id, base_tx.tx_id);
+    assert!(version_bundles[0]
+        .versions
+        .iter()
+        .any(|version| version.row_uuid() == row_uuid));
+
+    for extent in large_value_extents(&core, &base_unit)
+        .into_iter()
+        .chain(large_value_extents(&core, &child_unit))
+    {
+        reader
+            .content_store()
+            .put_extent(&extent.extent, &extent.bytes)
+            .unwrap();
+    }
+    reader
+        .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
+        .unwrap();
+    reader.apply_sync_message(update).unwrap();
+    assert!(reader.query_transaction(child_tx.tx_id).unwrap().is_some());
+    assert_eq!(
+        hydrated_large_value_cell(&mut reader, &schema.tables[0], "body"),
+        b"aXbc".to_vec()
+    );
+}
+
+#[test]
 fn text_edit_history_rehydrates_materialized_text_after_reopen() {
     let schema = text_large_value_schema();
     let row_uuid = row(0x79);
