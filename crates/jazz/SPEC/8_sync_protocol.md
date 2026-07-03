@@ -251,6 +251,22 @@ on the historical count-only batch limit. If a single encoded `WireFrame` cannot
 fit the budget, the sender must fail loudly rather than truncate or silently
 drop it.
 
+**Wire encoding posture (target optimization guidance).** High-rate serial
+transactions (keystroke-grade chains: same author, same row, near-monotone
+times) make consecutive sync messages highly redundant. The wire harvests that
+redundancy generically, in two layers, rather than by introducing run-shaped
+message semantics: (1) **per-connection stream compression** — a compression
+context that persists across frames on one transport, so cross-message
+repetition (subscription keys, row ids, authors, adjacent timestamps)
+compresses without any wire-format change; and (2) **columnar `ViewUpdate`
+internals** — a reserved append-only message variant whose member/bundle
+payloads are column-encoded (the groove ch. 2 §2.9 window codec applied to a
+message body). A lone single-edit transaction with nothing before or after it
+pays full framing and transaction overhead by design — it is lone precisely
+when there is nothing to amortize against. Windowed _storage_ representation
+(groove ch. 2 §2.9) is never a wire obligation: the wire ships logical
+messages; storage and transport each compress in their own layer.
+
 ## 8.9 Edge mergeable fate deferral and permission-scope subscriptions
 
 An edge that acts as mergeable fate authority needs the relevant policy data
