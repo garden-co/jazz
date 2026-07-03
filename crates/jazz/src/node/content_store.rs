@@ -132,8 +132,7 @@ where
     pub fn contains(&self, extent: &Extent) -> Result<bool, Error> {
         match self.read(extent) {
             Ok(_) => Ok(true),
-            Err(Error::InvalidStoredValue("content extent is incomplete"))
-            | Err(Error::InvalidStoredValue("content extent has a gap")) => Ok(false),
+            Err(Error::MissingContentExtent(_)) => Ok(false),
             Err(err) => Err(err),
         }
     }
@@ -161,7 +160,7 @@ where
                 _ => return Err(Error::InvalidStoredValue("invalid content extent offset")),
             };
             if offset != extent.offset + u64::try_from(out.len()).unwrap_or(u64::MAX) {
-                return Err(Error::InvalidStoredValue("content extent has a gap"));
+                return Err(Error::MissingContentExtent(extent.clone()));
             }
             match entry.value.get("bytes")? {
                 Value::Bytes(bytes) => out.extend_from_slice(&bytes),
@@ -172,7 +171,7 @@ where
             }
         }
         if u64::try_from(out.len()).unwrap_or(u64::MAX) != extent.len {
-            return Err(Error::InvalidStoredValue("content extent is incomplete"));
+            return Err(Error::MissingContentExtent(extent.clone()));
         }
         Ok(out)
     }

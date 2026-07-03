@@ -2174,7 +2174,18 @@ where
             let Some(Value::Bytes(payload)) = version.cell(table, &column.name)? else {
                 continue;
             };
-            for extent in content_refs_in_ops(text_oplog::decode(&payload)?) {
+            let extent_payload = match column.large_value {
+                Some(LargeValueKind::Text) => {
+                    let Some(extent_payload) = payload.strip_prefix(super::TEXT_EXTENT_OPS_MAGIC)
+                    else {
+                        continue;
+                    };
+                    extent_payload
+                }
+                Some(LargeValueKind::Blob) => &payload,
+                None => continue,
+            };
+            for extent in content_refs_in_ops(text_oplog::decode(extent_payload)?) {
                 if &extent == target {
                     return Ok(true);
                 }
@@ -2219,7 +2230,13 @@ where
                     continue;
                 };
                 match column.large_value {
-                    Some(LargeValueKind::Text) => {}
+                    Some(LargeValueKind::Text) => {
+                        if let Some(extent_payload) =
+                            payload.strip_prefix(super::TEXT_EXTENT_OPS_MAGIC)
+                        {
+                            refs.extend(content_refs_in_ops(text_oplog::decode(extent_payload)?));
+                        }
+                    }
                     Some(LargeValueKind::Blob) => {
                         refs.extend(content_refs_in_ops(text_oplog::decode(&payload)?));
                     }
@@ -2403,15 +2420,19 @@ where
         if self.query_transaction(merge_tx_id)?.is_some() {
             return Ok(());
         }
-        let uses_text_strategy = cells.keys().any(|column| {
-            column_large_value_kind(&table_schema, column).ok() == Some(LargeValueKind::Text)
-        });
+        let merge_large_value_kind = cells
+            .keys()
+            .find_map(|column| column_large_value_kind(&table_schema, column).ok());
         let mut merge_commit = MergeableCommit::new(table, row_uuid, made_at.physical_ms())
             .parents(parents)
             .cells(cells);
-        if uses_text_strategy {
+        if let Some(kind) = merge_large_value_kind {
             merge_commit = merge_commit.merge_strategy(RecordedMergeStrategy {
-                id: "builtin.text-rle-v1".to_owned(),
+                id: match kind {
+                    LargeValueKind::Text => "builtin.text-rle-v1",
+                    LargeValueKind::Blob => "builtin.large-value-oplog-v1",
+                }
+                .to_owned(),
                 version: 1,
             });
         }
@@ -2810,7 +2831,7 @@ where
             let Some(Value::Bytes(payload)) = version.cell(table_schema, column)? else {
                 continue;
             };
-            ops.push((tx_id, decode_plain_text_op(&payload)?));
+            ops.push((tx_id, self.decode_text_storage_op(&payload)?));
         }
         Ok(ops)
     }
