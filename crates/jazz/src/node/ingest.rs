@@ -3230,12 +3230,19 @@ where
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
         let versions = self.query_row_versions(table, row_uuid)?;
-        let candidate_indices = versions
-            .iter()
-            .enumerate()
-            .filter(|(_, version)| version.layer() == VersionLayer::Content)
-            .map(|(idx, _)| idx)
-            .collect::<Vec<_>>();
+        let mut candidate_indices = Vec::new();
+        for (idx, version) in versions.iter().enumerate() {
+            if version.layer() != VersionLayer::Content {
+                continue;
+            }
+            let tx_id = self.version_tx_id(version)?;
+            let Some(tx) = self.query_transaction(tx_id)? else {
+                continue;
+            };
+            if matches!(tx.fate, Fate::Pending | Fate::Accepted) {
+                candidate_indices.push(idx);
+            }
+        }
         let head_indices = content_head_indices(&versions, &candidate_indices, &self.node_aliases);
         let mut heads = BTreeSet::new();
         for idx in head_indices {

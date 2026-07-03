@@ -23,6 +23,7 @@ use crate::schema::{
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType,
 };
 use crate::storage::{MemoryStorage, RocksDbStorage, StorageLayout};
+use crate::window_codec::TARGET_RECORDS_PER_WINDOW;
 
 fn albums_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
@@ -1193,6 +1194,184 @@ fn subscribe_sends_empty_hydration_snapshot_without_writes() {
 }
 
 #[test]
+fn history_windows_are_transparent_to_subscription_hydration() {
+    let mut database = jazz_docs_history_database();
+    let row_count = 260;
+    seed_jazz_docs_history(&mut database, 0, row_count);
+
+    database
+        .consolidate_table_windows("jazz_docs_history", TARGET_RECORDS_PER_WINDOW)
+        .unwrap();
+    assert!(
+        database
+            .storage
+            .prefix("jazz_docs_history", b"")
+            .unwrap()
+            .len()
+            < row_count as usize
+    );
+
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
+        .unwrap();
+    let rows = subscription.recv().unwrap();
+    assert_eq!(rows.deltas.len(), row_count as usize);
+
+    let indexed = database
+        .index_scan_raw(
+            "jazz_docs_history",
+            "by_tx",
+            &[Value::U64(128), Value::U64(7)],
+        )
+        .unwrap();
+    assert_eq!(indexed.len(), 1);
+}
+
+#[test]
+fn post_tick_history_consolidation_preserves_live_subscription_deltas_and_hydration() {
+    let mut control = jazz_docs_history_database();
+    let mut consolidated = jazz_docs_history_database();
+    seed_jazz_docs_history(&mut control, 0, 260);
+    seed_jazz_docs_history(&mut consolidated, 0, 260);
+
+    let control_live = control
+        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
+        .unwrap();
+    let consolidated_live = consolidated
+        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
+        .unwrap();
+    assert_eq!(
+        control_live.recv().unwrap(),
+        consolidated_live.recv().unwrap()
+    );
+    control.flush().unwrap();
+    consolidated.flush().unwrap();
+
+    let report = consolidated
+        .consolidate_history_windows(TARGET_RECORDS_PER_WINDOW, 2)
+        .unwrap();
+    assert_eq!(report.windows, 1);
+    assert_eq!(report.records, TARGET_RECORDS_PER_WINDOW);
+
+    seed_jazz_docs_history(&mut control, 260, 1);
+    seed_jazz_docs_history(&mut consolidated, 260, 1);
+    assert_eq!(
+        control_live.recv().unwrap(),
+        consolidated_live.recv().unwrap()
+    );
+
+    let control_fresh = control
+        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
+        .unwrap();
+    let consolidated_fresh = consolidated
+        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
+        .unwrap();
+    assert_eq!(
+        control_fresh.recv().unwrap(),
+        consolidated_fresh.recv().unwrap()
+    );
+}
+
+#[test]
+fn history_consolidation_visits_direct_record_stores() {
+    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+        "jazz_docs_history",
+        RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("tx_time", ValueType::U64),
+            ("tx_node_id", ValueType::Uuid),
+        ]),
+        RecordDescriptor::new([("body", ValueType::Bytes)]),
+    ));
+    let storage = MemoryStorage::new(&schema.column_families());
+    let database = Database::new(schema, storage).unwrap();
+    let store = database.direct_record_store("jazz_docs_history").unwrap();
+    let row = uuid::Uuid::from_u128(7);
+    let node = uuid::Uuid::from_u128(9);
+    for idx in 0..(TARGET_RECORDS_PER_WINDOW + 3) {
+        store
+            .set(
+                &[Value::Uuid(row), Value::U64(idx as u64), Value::Uuid(node)],
+                &[Value::Bytes(vec![idx as u8])],
+            )
+            .unwrap();
+    }
+
+    let report = database
+        .consolidate_history_windows(TARGET_RECORDS_PER_WINDOW, 2)
+        .unwrap();
+
+    assert_eq!(
+        report,
+        WindowConsolidation {
+            windows: 1,
+            records: TARGET_RECORDS_PER_WINDOW
+        }
+    );
+    assert_eq!(
+        store
+            .get(&[
+                Value::Uuid(row),
+                Value::U64((TARGET_RECORDS_PER_WINDOW + 2) as u64),
+                Value::Uuid(node),
+            ])
+            .unwrap()
+            .unwrap()
+            .get("body")
+            .unwrap(),
+        Value::Bytes(vec![(TARGET_RECORDS_PER_WINDOW + 2) as u8])
+    );
+}
+
+fn jazz_docs_history_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "jazz_docs_history",
+        [
+            ColumnSchema::new("row_uuid", ColumnType::Uuid),
+            ColumnSchema::new("tx_time", ColumnType::U64),
+            ColumnSchema::new("tx_node", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::uuid("row_uuid"),
+        PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("tx_node", IntegerKeyType::U64),
+    ]))
+    .with_index(IndexSchema::new(
+        "by_tx",
+        ["tx_time", "tx_node", "row_uuid"],
+    ))])
+}
+
+fn jazz_docs_history_database() -> Database<MemoryStorage> {
+    let schema = jazz_docs_history_schema();
+    let layout = StorageLayout::jazz_class_v1();
+    let physical_cfs = layout.physical_column_families(schema.column_families());
+    let physical_cf_refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = MemoryStorage::new(&physical_cf_refs);
+    Database::new_with_storage_layout(schema, storage, layout).unwrap()
+}
+
+fn seed_jazz_docs_history(database: &mut Database<MemoryStorage>, start_idx: u64, row_count: u64) {
+    let mut batch = database.open_batch();
+    for idx in start_idx..start_idx + row_count {
+        batch.insert(
+            "jazz_docs_history",
+            vec![
+                Value::Uuid(uuid::Uuid::from_u128(
+                    0xaaaaaaaa_aaaa_aaaa_aaaa_aaaaaaaaaaaa,
+                )),
+                Value::U64(100 + idx),
+                Value::U64(7),
+                Value::String(format!("payload-{idx}")),
+            ],
+        );
+    }
+    database.commit_batch(batch).unwrap();
+}
+
+#[test]
 fn rejects_unknown_tables() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
@@ -1238,7 +1417,10 @@ fn final_atomic_commit_failure_leaves_base_rows_unwritten_and_poisons_database()
 
     assert!(matches!(
         database.commit_batch(batch),
-        Err(Error::Storage(crate::storage::Error::ColumnFamilyNotFound(cf))) if cf == "indices"
+        Err(Error::Storage(error)) if matches!(
+            error.as_ref(),
+            crate::storage::Error::ColumnFamilyNotFound(cf) if cf == "indices"
+        )
     ));
     assert_eq!(
         database

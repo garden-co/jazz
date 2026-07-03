@@ -23,12 +23,12 @@ use crate::ivm::{
 use crate::queries::Query;
 use crate::records::{self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, Value};
 use crate::schema::{
-    ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
+    ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     PrimaryKeyColumn, PrimaryKeyType, TableSchema,
 };
 use crate::storage::{
     LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StorageLayout,
-    WriteOperation,
+    WindowConsolidation, WriteOperation, is_windowed_history_table,
 };
 use thiserror::Error;
 
@@ -837,7 +837,8 @@ where
             encode_primary_key_part(&mut key_prefix, value);
         }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let store = RecordStore::new(&storage, table, descriptor);
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
         Ok(store
             .prefix(&key_prefix)?
             .into_iter()
@@ -877,7 +878,8 @@ where
             encode_primary_key_part(&mut key_prefix, value);
         }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let store = RecordStore::new(&storage, table, descriptor);
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
         Ok(store
             .prefix(&key_prefix)?
             .into_iter()
@@ -929,7 +931,8 @@ where
             encode_primary_key_part(&mut end_key, value);
         }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let store = RecordStore::new(&storage, table, descriptor);
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
         Ok(store
             .range(&start_key, &end_key)?
             .into_iter()
@@ -969,7 +972,8 @@ where
             encode_primary_key_part(&mut key_prefix, value);
         }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let store = RecordStore::new(&storage, table, descriptor);
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
         Ok(store
             .last_with_prefix(&key_prefix)?
             .map(|(key, value)| EncodedKeyValue::new(key, value, descriptor)))
@@ -1024,10 +1028,103 @@ where
             return Ok(None);
         }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let store = RecordStore::new(&storage, table, descriptor);
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
         Ok(store
             .last_with_prefix_before_or_at(&key_prefix, &upper_key)?
             .map(|(key, value)| EncodedKeyValue::new(key, value, descriptor)))
+    }
+
+    /// Consolidate plain records for an opted-in physical record store into
+    /// bounded codec windows.
+    ///
+    /// This is deliberately explicit for now: hot writes still land as plain
+    /// records, and future flush/checkpoint plumbing can call this at a safe
+    /// consolidation boundary.
+    pub fn consolidate_table_windows(
+        &self,
+        table: &str,
+        max_records: usize,
+    ) -> Result<WindowConsolidation, Error> {
+        let table_schema = self.table(table)?;
+        let Some(primary_key) = table_schema.primary_key.as_ref() else {
+            return Err(Error::MissingPrimaryKey(table.to_owned()));
+        };
+        let descriptor = self
+            .ivm_runtime
+            .table_descriptor(table)
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(&self.storage, table, Some(key_descriptor), descriptor);
+        store.consolidate_windows(max_records).map_err(Error::from)
+    }
+
+    /// Consolidate at most `max_windows` codec windows across opted-in history
+    /// tables in this schema.
+    ///
+    /// This is intended for caller-owned post-tick maintenance: the write path
+    /// remains plain-record first, and this bounded pass rewrites old runs in
+    /// atomic storage batches between runtime ticks.
+    pub fn consolidate_history_windows(
+        &self,
+        max_records_per_window: usize,
+        max_windows: usize,
+    ) -> Result<WindowConsolidation, Error> {
+        let mut remaining_windows = max_windows;
+        let mut total = WindowConsolidation::default();
+        if max_records_per_window == 0 || max_windows == 0 {
+            return Ok(total);
+        }
+        for table in &self.ivm_runtime.schema().tables {
+            if remaining_windows == 0 {
+                break;
+            }
+            if !is_windowed_history_table(&table.name) {
+                continue;
+            }
+            let Some(primary_key) = table.primary_key.as_ref() else {
+                continue;
+            };
+            let Some(descriptor) = self.ivm_runtime.table_descriptor(&table.name) else {
+                continue;
+            };
+            let key_descriptor = primary_key_descriptor(primary_key);
+            let store = record_store_for_table(
+                &self.storage,
+                &table.name,
+                Some(key_descriptor),
+                descriptor,
+            );
+            let next = store
+                .consolidate_full_windows_bounded(max_records_per_window, remaining_windows)
+                .map_err(Error::from)?;
+            remaining_windows = remaining_windows.saturating_sub(next.windows);
+            total.windows += next.windows;
+            total.records += next.records;
+        }
+        for store in &self.ivm_runtime.schema().direct_record_stores {
+            if remaining_windows == 0 {
+                break;
+            }
+            if !is_windowed_history_table(&store.name) {
+                continue;
+            }
+            let key_descriptor = RecordDescriptor::new(store.key.clone());
+            let descriptor = RecordDescriptor::new(store.value.clone());
+            let record_store = record_store_for_table(
+                &self.storage,
+                &store.name,
+                Some(key_descriptor),
+                &descriptor,
+            );
+            let next = record_store
+                .consolidate_full_windows_bounded(max_records_per_window, remaining_windows)
+                .map_err(Error::from)?;
+            remaining_windows = remaining_windows.saturating_sub(next.windows);
+            total.windows += next.windows;
+            total.records += next.records;
+        }
+        Ok(total)
     }
 
     /// Return encoded records whose explicit schema index exactly matches the
@@ -1159,7 +1256,11 @@ where
             .table_descriptor(table)
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let store = RecordStore::new(&storage, table, descriptor);
+        let key_descriptor = table_schema
+            .primary_key
+            .as_ref()
+            .map(primary_key_descriptor);
+        let store = record_store_for_table(&storage, table, key_descriptor, descriptor);
         let index_descriptor = index_record_descriptor();
         let mut records = Vec::new();
         for (storage_key, persisted_record) in raw_entries {
@@ -1350,7 +1451,13 @@ where
         let stores = pending_writes
             .iter()
             .zip(&descriptors)
-            .map(|(write, descriptor)| RecordStore::new(&self.storage, write.table(), descriptor))
+            .map(|(write, descriptor)| {
+                let key_descriptor = self
+                    .table(write.table())
+                    .ok()
+                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
+                record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
+            })
             .collect::<Vec<_>>();
         let table_deltas = compute_table_deltas(&pending_writes, &stores)?;
         let base_operations = pending_writes
@@ -1385,7 +1492,7 @@ where
             // policy is to make the Database instance fatal on final commit
             // failure rather than serve possibly torn in-memory state.
             self.poisoned = true;
-            return Err(Error::Storage(error));
+            return Err(Error::from(error));
         }
         let storage_write_time = storage_start.elapsed();
         self.last_tick_metrics = Some(tick.clone());
@@ -1525,14 +1632,14 @@ where
         let record = self.value.create(value)?;
         self.storage
             .write_many(&[WriteOperation::set(&self.name, &key, &record)])
-            .map_err(Error::Storage)
+            .map_err(Error::from)
     }
 
     pub fn get(&self, key: &[Value]) -> Result<Option<Record<'_>>, Error> {
         let key = self.key_bytes(key)?;
         Ok(self
-            .storage
-            .get(&self.name, &key)?
+            .record_store()
+            .get_raw(&key)?
             .map(|record| self.value.bind_owned(record)))
     }
 
@@ -1540,14 +1647,14 @@ where
         let key = self.key_bytes(key)?;
         self.storage
             .write_many(&[WriteOperation::delete(&self.name, &key)])
-            .map_err(Error::Storage)
+            .map_err(Error::from)
     }
 
     pub fn range(&self, start: &[Value], end: &[Value]) -> Result<Vec<Record<'_>>, Error> {
         let start = self.key_prefix_bytes(start)?;
         let end = self.key_prefix_bytes(end)?;
-        self.storage
-            .range(&self.name, &start, &end)?
+        self.record_store()
+            .range(&start, &end)?
             .into_iter()
             .map(|(_, value)| Ok(self.value.bind_owned(value)))
             .collect()
@@ -1560,8 +1667,8 @@ where
     ) -> Result<Vec<DirectRecordStoreEntry<'_>>, Error> {
         let start = self.key_prefix_bytes(start)?;
         let end = self.key_prefix_bytes(end)?;
-        self.storage
-            .range(&self.name, &start, &end)?
+        self.record_store()
+            .range(&start, &end)?
             .into_iter()
             .map(|(key, value)| {
                 Ok(DirectRecordStoreEntry {
@@ -1574,8 +1681,8 @@ where
 
     pub fn prefix(&self, prefix: &[Value]) -> Result<Vec<Record<'_>>, Error> {
         let prefix = self.key_prefix_bytes(prefix)?;
-        self.storage
-            .prefix(&self.name, &prefix)?
+        self.record_store()
+            .prefix(&prefix)?
             .into_iter()
             .map(|(_, value)| Ok(self.value.bind_owned(value)))
             .collect()
@@ -1586,8 +1693,8 @@ where
         prefix: &[Value],
     ) -> Result<Vec<DirectRecordStoreEntry<'_>>, Error> {
         let prefix = self.key_prefix_bytes(prefix)?;
-        self.storage
-            .prefix(&self.name, &prefix)?
+        self.record_store()
+            .prefix(&prefix)?
             .into_iter()
             .map(|(key, value)| {
                 Ok(DirectRecordStoreEntry {
@@ -1621,7 +1728,7 @@ where
             .iter()
             .map(OwnedWriteOperation::as_write_operation)
             .collect::<Vec<_>>();
-        self.storage.write_many(&borrowed).map_err(Error::Storage)
+        self.storage.write_many(&borrowed).map_err(Error::from)
     }
 
     fn key_bytes(&self, values: &[Value]) -> Result<Vec<u8>, Error> {
@@ -1656,6 +1763,14 @@ where
             encode_primary_key_part(&mut bytes, value);
         }
         Ok(bytes)
+    }
+
+    fn record_store(&self) -> RecordStore<'_, LayoutStorage<S>> {
+        if is_windowed_history_table(&self.name) {
+            RecordStore::new_windowed(self.storage, &self.name, self.key, &self.value)
+        } else {
+            RecordStore::new(self.storage, &self.name, &self.value)
+        }
     }
 
     fn decode_key(&self, key: &[u8]) -> Result<Vec<Value>, Error> {
@@ -2266,6 +2381,33 @@ where
     }
 
     Ok(consolidate_table_deltas(table_deltas))
+}
+
+fn record_store_for_table<'a, S>(
+    storage: &'a S,
+    table: &'a str,
+    key_descriptor: Option<RecordDescriptor>,
+    descriptor: &'a RecordDescriptor,
+) -> RecordStore<'a, S>
+where
+    S: OrderedKvStorage,
+{
+    if is_windowed_history_table(table)
+        && let Some(key_descriptor) = key_descriptor
+    {
+        RecordStore::new_windowed(storage, table, key_descriptor, descriptor)
+    } else {
+        RecordStore::new(storage, table, descriptor)
+    }
+}
+
+fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
+    RecordDescriptor::new(primary_key.columns.iter().map(|column| {
+        (
+            column.column.clone(),
+            column.key_type.column_type().value_type(),
+        )
+    }))
 }
 
 fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
@@ -3028,11 +3170,17 @@ pub enum Error {
     #[error("invalid direct record store key: {0}")]
     InvalidDirectRecordStoreKey(String),
     #[error(transparent)]
-    Storage(#[from] crate::storage::Error),
+    Storage(Box<crate::storage::Error>),
     #[error("table not found: {0}")]
     TableNotFound(String),
     #[error("unknown query parameter binding: {0}")]
     UnknownParameter(String),
+}
+
+impl From<crate::storage::Error> for Error {
+    fn from(error: crate::storage::Error) -> Self {
+        Self::Storage(Box::new(error))
+    }
 }
 
 #[cfg(test)]

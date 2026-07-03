@@ -24,8 +24,11 @@ use crate::ivm::{
     TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
 };
 use crate::records::{self, BorrowedRecord, RecordDescriptor, Value, ValueType};
-use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
-use crate::storage::{OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay};
+use crate::schema::{DatabaseSchema, IndexSchema, PrimaryKey, TableSchema};
+use crate::storage::{
+    OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
+    is_windowed_history_table,
+};
 use thiserror::Error;
 
 mod join;
@@ -2819,6 +2822,37 @@ fn descriptor_field_names(descriptor: &RecordDescriptor) -> Result<Vec<String>, 
         .collect()
 }
 
+pub(super) fn record_store_for_table<'a, S>(
+    storage: &'a S,
+    table: &'a TableSchema,
+    descriptor: &'a RecordDescriptor,
+) -> RecordStore<'a, S>
+where
+    S: OrderedKvStorage,
+{
+    if is_windowed_history_table(&table.name)
+        && let Some(primary_key) = &table.primary_key
+    {
+        RecordStore::new_windowed(
+            storage,
+            &table.name,
+            primary_key_descriptor(primary_key),
+            descriptor,
+        )
+    } else {
+        RecordStore::new(storage, &table.name, descriptor)
+    }
+}
+
+fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
+    RecordDescriptor::new(primary_key.columns.iter().map(|column| {
+        (
+            column.column.clone(),
+            column.key_type.column_type().value_type(),
+        )
+    }))
+}
+
 fn validate_public_output_fields(
     source: &RecordDescriptor,
     public_output: &RecordDescriptor,
@@ -5017,6 +5051,7 @@ where
             }
             let scope = self.context.scope.child(node);
             let next = recompute_recursive(
+                self.schema,
                 self.graph,
                 node,
                 recursive,

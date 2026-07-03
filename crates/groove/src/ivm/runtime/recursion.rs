@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
 use crate::records::RecordDescriptor;
-use crate::storage::{OrderedKvStorage, RecordStore};
+use crate::storage::OrderedKvStorage;
 
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
@@ -148,6 +148,7 @@ where
         // DRed or DBSP-style nested negative deltas.
         runtime.metrics.recursive_recomputes += 1;
         let next = recompute_recursive(
+            runtime.schema,
             runtime.graph,
             node,
             recursive,
@@ -323,7 +324,7 @@ where
 }
 
 pub(super) fn snapshot_table_deltas(
-    _schema: &crate::schema::DatabaseSchema,
+    schema: &crate::schema::DatabaseSchema,
     graph: &IvmGraph,
     storage: &impl OrderedKvStorage,
     root: NodeId,
@@ -333,7 +334,10 @@ pub(super) fn snapshot_table_deltas(
     tables
         .into_iter()
         .map(|(source, descriptor)| {
-            let store = RecordStore::new(storage, &source.table, &descriptor);
+            let table_schema = schema
+                .table(&source.table)
+                .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
+            let store = super::record_store_for_table(storage, table_schema, &descriptor);
             let mut deltas = Vec::new();
             let mut visit = |_: &[u8], record: &[u8]| {
                 deltas.push(RecordDelta {
@@ -469,6 +473,7 @@ fn collect_anti_join_right_table_sources(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn recompute_recursive(
+    schema: &crate::schema::DatabaseSchema,
     graph: &IvmGraph,
     node: NodeId,
     recursive: &RecursiveOp,
@@ -487,6 +492,7 @@ pub(super) fn recompute_recursive(
     };
 
     let mut snapshot = HydrationEvaluator {
+        schema,
         graph,
         storage,
         binding_snapshots,
@@ -514,6 +520,7 @@ pub(super) fn recompute_recursive(
             frontier,
         );
         let mut snapshot = HydrationEvaluator {
+            schema,
             graph,
             storage,
             binding_snapshots,
@@ -563,6 +570,7 @@ fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), Ivm
 
 /// Full-snapshot evaluator used by recursive recompute fallback.
 struct HydrationEvaluator<'a, S> {
+    schema: &'a crate::schema::DatabaseSchema,
     graph: &'a IvmGraph,
     storage: &'a S,
     binding_snapshots: &'a HashMap<String, RecordDeltas>,
@@ -792,6 +800,7 @@ where
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));
                 };
                 let accumulated = recompute_recursive(
+                    self.schema,
                     self.graph,
                     node,
                     recursive,
@@ -822,7 +831,11 @@ where
         table: &TableSourceOp,
         output_desc: RecordDescriptor,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let store = RecordStore::new(self.storage, &table.table, &output_desc);
+        let table_schema = self
+            .schema
+            .table(&table.table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.table.clone()))?;
+        let store = super::record_store_for_table(self.storage, table_schema, &output_desc);
         let mut deltas = Vec::new();
         store.scan_prefix(b"", &mut |_, record| {
             deltas.push(RecordDelta {
