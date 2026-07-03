@@ -212,51 +212,80 @@ const TEMPLATE = `
   aria-label="Open Jazz inspector" aria-haspopup="dialog" aria-controls="jzov-dock" aria-expanded="false"
 >${JAZZ_MARK}</button>`;
 
-// Constructed once and shared by adoptedStyleSheets, so the (large) CSS is
-// parsed a single time rather than re-injected as a <style> per mount.
-let sheet: CSSStyleSheet | undefined;
-function overlayStyleSheet(): CSSStyleSheet {
-  if (!sheet) {
-    sheet = new CSSStyleSheet();
-    sheet.replaceSync(STYLE);
+/**
+ * Owns which (db, iframe window) pair the published window.__jazzInspectorHost
+ * handle is installed for. The db arrives via startInspectorOverlay() — and
+ * changes when the host recreates its Db on login/logout, which must repoint
+ * the handle at the new Db instead of leaving the overlay bound to a shut-down
+ * one forever. The iframe window is captured by connectedCallback. Binding is
+ * idempotent: providers call startInspectorOnce(db) on every effect run
+ * (StrictMode remounts included), and repeat calls with an unchanged pair must
+ * not tear down and reinstall the handle they just installed. Keeping the
+ * bound pair and its disposer in one object makes the invariant structural:
+ * a disposer exists iff a pair is bound.
+ */
+class HostBinding {
+  #db: Db | undefined;
+  #iframeWindow: Window | undefined;
+  #bound: { db: Db; iframeWindow: Window; dispose: () => void } | undefined;
+
+  setDb(db: Db): void {
+    this.#db = db;
+    this.#rebind();
   }
-  return sheet;
+
+  setIframeWindow(iframeWindow: Window | undefined): void {
+    this.#iframeWindow = iframeWindow;
+    this.#rebind();
+  }
+
+  /** Tear down the published handle (the overlay element disconnected). */
+  unbind(): void {
+    this.#iframeWindow = undefined;
+    this.#dispose();
+  }
+
+  #rebind(): void {
+    if (
+      this.#bound &&
+      this.#bound.db === this.#db &&
+      this.#bound.iframeWindow === this.#iframeWindow
+    ) {
+      return;
+    }
+    this.#dispose();
+    if (!this.#db || !this.#iframeWindow) return;
+    this.#bound = {
+      db: this.#db,
+      iframeWindow: this.#iframeWindow,
+      dispose: installInspectorHost(this.#db, this.#iframeWindow, window.location.origin),
+    };
+  }
+
+  #dispose(): void {
+    this.#bound?.dispose();
+    this.#bound = undefined;
+  }
 }
 
-// The host app's Db, set by startInspectorOverlay() before the element mounts,
-// so connectedCallback can publish the host handle for the iframe.
-let hostDb: Db | undefined;
-// The overlay iframe's window, captured once by connectedCallback, and the
-// disposer for the handle currently bound to it. Rebinding (see bindHost())
-// lets a later startInspectorOverlay() call — e.g. after the host recreates
-// its Db on login/logout — repoint the published handle at the new Db instead
-// of leaving the overlay bound to a shut-down one forever.
-let hostIframeWindow: Window | undefined;
-let disposeHost: (() => void) | undefined;
-// The pair the installed handle was built from, so bindHost() is idempotent:
-// providers call startInspectorOnce(db) on every effect run (StrictMode remounts
-// included), and repeat calls with an unchanged db must not tear down and
-// reinstall the handle they just installed.
-let boundDb: Db | undefined;
-let boundIframeWindow: Window | undefined;
-
-function bindHost(): void {
-  if (disposeHost && boundDb === hostDb && boundIframeWindow === hostIframeWindow) return;
-  disposeHost?.();
-  disposeHost = undefined;
-  boundDb = undefined;
-  boundIframeWindow = undefined;
-  if (!hostDb || !hostIframeWindow) return;
-  disposeHost = installInspectorHost(hostDb, hostIframeWindow, window.location.origin);
-  boundDb = hostDb;
-  boundIframeWindow = hostIframeWindow;
-}
+const hostBinding = new HostBinding();
 
 // The overlay chrome: a floating toggle + a bottom dock hosting the inspector
 // iframe, isolated from the host page by its shadow root. All listeners are
 // registered against #ac.signal so disconnectedCallback() removes them at once.
 class JazzInspectorOverlay extends HTMLElement {
   #ac: AbortController | undefined;
+
+  // Constructed once and shared by adoptedStyleSheets, so the (large) CSS is
+  // parsed a single time rather than re-injected as a <style> per mount.
+  static #sheet: CSSStyleSheet | undefined;
+  static #styleSheet(): CSSStyleSheet {
+    if (!JazzInspectorOverlay.#sheet) {
+      JazzInspectorOverlay.#sheet = new CSSStyleSheet();
+      JazzInspectorOverlay.#sheet.replaceSync(STYLE);
+    }
+    return JazzInspectorOverlay.#sheet;
+  }
 
   connectedCallback(): void {
     // Build the shadow tree once (keeps the iframe alive across moves), but
@@ -265,7 +294,7 @@ class JazzInspectorOverlay extends HTMLElement {
     let root = this.shadowRoot;
     if (!root) {
       root = this.attachShadow({ mode: "open" });
-      root.adoptedStyleSheets = [overlayStyleSheet()];
+      root.adoptedStyleSheets = [JazzInspectorOverlay.#styleSheet()];
       root.innerHTML = TEMPLATE;
     }
     this.#ac?.abort();
@@ -418,17 +447,8 @@ class JazzInspectorOverlay extends HTMLElement {
     // Publish the host handle + push the active-subscription list to the iframe.
     // The overlay reads the config off window.__jazzInspectorHost and opens its
     // own worker connection; we only push the stack-less subscription list.
-    hostIframeWindow = iframe.contentWindow ?? undefined;
-    bindHost();
-    signal.addEventListener(
-      "abort",
-      () => {
-        disposeHost?.();
-        disposeHost = undefined;
-        hostIframeWindow = undefined;
-      },
-      { once: true },
-    );
+    hostBinding.setIframeWindow(iframe.contentWindow ?? undefined);
+    signal.addEventListener("abort", () => hostBinding.unbind(), { once: true });
 
     // The in-iframe Close button posts up here (same-origin).
     window.addEventListener(
@@ -465,13 +485,12 @@ function mount(): void {
  * connectedCallback, which publishes the host handle (window.__jazzInspectorHost)
  * and pushes the active subscription list to the iframe; the overlay opens its
  * own worker connection from the published config. Safe to call again — with an
- * unchanged db bindHost() is a no-op, and with a new db (e.g. the host recreated
- * its client on login/logout) it rebinds the already-mounted iframe. No-op at
- * module load — providers call this from a dev-only dynamic import, so it's
- * absent from prod builds.
+ * unchanged db the binding is a no-op, and with a new db (e.g. the host
+ * recreated its client on login/logout) it rebinds the already-mounted iframe.
+ * No-op at module load — providers call this from a dev-only dynamic import, so
+ * it's absent from prod builds.
  */
 export function startInspectorOverlay(db: Db): void {
-  hostDb = db;
+  hostBinding.setDb(db);
   mount();
-  bindHost();
 }
