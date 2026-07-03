@@ -44,6 +44,21 @@ pub struct MergeStrategyInput {
     pub right: MergeSide,
 }
 
+/// Strategy input for write-time canonicalization of a whole authored value.
+#[derive(Clone, Debug)]
+pub struct CanonicalizeInput {
+    /// Schema version containing the column declaration.
+    pub schema_version: SchemaVersionId,
+    /// Table name for diagnostics and deterministic strategy choices.
+    pub table: String,
+    /// Column name for diagnostics and deterministic strategy choices.
+    pub column: String,
+    /// Declared column merge spec.
+    pub spec: TextMergeSpec,
+    /// Hash of [`Self::spec`] in force for this column.
+    pub spec_hash: ColumnSpecHash,
+}
+
 /// Rung-3 strategy output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MergeStrategyOutput {
@@ -76,6 +91,22 @@ pub trait MergeStrategy: Send + Sync {
     /// allows the strategy to produce a replacement op.
     fn structural_proximity(&self, _input: &MergeStrategyInput) -> bool {
         false
+    }
+
+    /// Canonicalize a whole authored value before storage.
+    ///
+    /// Returning `Ok(None)` leaves bytes exactly as authored; this is also what
+    /// happens when a node lacks a registered strategy for the declared spec.
+    /// Returning `Err` rejects the local authoring write loudly. This hook is
+    /// intentionally whole-value only: op-stream edits on format-declared
+    /// columns are rejected by the write path until op-preserving
+    /// canonicalization has a reviewed design.
+    fn canonicalize(
+        &self,
+        _authored: &[u8],
+        _input: &CanonicalizeInput,
+    ) -> Result<Option<Vec<u8>>, TextMergeError> {
+        Ok(None)
     }
 
     /// Merge two concurrent sides and return an op against `input.base`.
@@ -268,6 +299,69 @@ pub mod testing {
         }
     }
 
+    /// Test-only strategy that uppercases whole-value writes.
+    pub struct UppercaseCanonicalStrategy;
+
+    impl MergeStrategy for UppercaseCanonicalStrategy {
+        fn id(&self) -> &str {
+            "test.uppercase"
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn canonicalize(
+            &self,
+            authored: &[u8],
+            _input: &CanonicalizeInput,
+        ) -> Result<Option<Vec<u8>>, TextMergeError> {
+            Ok(Some(
+                authored
+                    .iter()
+                    .map(|byte| byte.to_ascii_uppercase())
+                    .collect(),
+            ))
+        }
+
+        fn merge(&self, input: &MergeStrategyInput) -> Result<MergeStrategyOutput, TextMergeError> {
+            Ok(MergeStrategyOutput {
+                op_against_base: diff(&input.base, &input.left.materialized),
+                strategy_id: self.id().to_owned(),
+                strategy_version: self.version(),
+            })
+        }
+    }
+
+    /// Test-only strategy that rejects whole-value writes.
+    pub struct RejectingCanonicalStrategy;
+
+    impl MergeStrategy for RejectingCanonicalStrategy {
+        fn id(&self) -> &str {
+            "test.reject-canonical"
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn canonicalize(
+            &self,
+            _authored: &[u8],
+            _input: &CanonicalizeInput,
+        ) -> Result<Option<Vec<u8>>, TextMergeError> {
+            Err(TextMergeError::StrategyInputInvalid)
+        }
+
+        fn merge(&self, input: &MergeStrategyInput) -> Result<MergeStrategyOutput, TextMergeError> {
+            Ok(MergeStrategyOutput {
+                op_against_base: diff(&input.base, &input.left.materialized),
+                strategy_id: self.id().to_owned(),
+                strategy_version: self.version(),
+            })
+        }
+    }
+
     #[test]
     fn intention_case_runs_against_any_strategy() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -294,5 +388,21 @@ pub mod testing {
         )
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn default_canonicalize_hook_is_noop() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let strategy = PreferLongerStrategy::new(calls);
+        let spec = TextMergeSpec::new("test.prefer-longer", 1, b"trigger".to_vec());
+        let input = CanonicalizeInput {
+            schema_version: SchemaVersionId(uuid::Uuid::from_u128(1)),
+            table: "intention".to_owned(),
+            column: "body".to_owned(),
+            spec_hash: spec.spec_hash(),
+            spec,
+        };
+
+        assert_eq!(strategy.canonicalize(b"as-authored", &input).unwrap(), None);
     }
 }
