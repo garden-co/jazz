@@ -311,6 +311,10 @@ impl OrderedKvStorage for RocksDbStorage {
 
         Ok(self.db.write_opt(&batch, &self.write_options)?)
     }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        Some(self.column_families.iter().cloned().collect())
+    }
 }
 
 fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {

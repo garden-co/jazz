@@ -14,6 +14,7 @@ use groove::schema::{
     DirectRecordStoreSchema, IndexSchema as GrooveIndexSchema, IntegerKeyType, PrimaryKey,
     PrimaryKeyColumn, TableSchema as GrooveTableSchema,
 };
+use groove::storage::StorageLayout;
 
 use crate::ids::{BranchId, SchemaVersionId};
 use crate::merge_strategy::ColumnSpecHash;
@@ -210,12 +211,17 @@ impl JazzSchema {
     /// Return the required RocksDB column-family names.
     pub fn column_families(&self) -> Vec<String> {
         let lowered = self.lower_to_groove();
-        lowered
-            .column_families()
-            .into_iter()
-            .chain(std::iter::once("indices"))
-            .map(str::to_owned)
-            .collect()
+        StorageLayout::jazz_class_v1().physical_column_families(
+            lowered
+                .column_families()
+                .into_iter()
+                .chain(std::iter::once("indices")),
+        )
+    }
+
+    /// Return physical storage column-family names for Jazz's class-CF layout.
+    pub fn physical_column_families(&self) -> Vec<String> {
+        self.column_families()
     }
 
     /// Return all storage tables used by Jazz.
