@@ -202,6 +202,9 @@ where
         if !self.branch_write_policy_allows(branch_id, commit.made_by, &mut context)? {
             return Err(Error::AuthorizationDenied);
         }
+        for parent in &commit.parents {
+            self.merge_tx_time(parent.time);
+        }
         let made_at = self.mint_tx_time(commit.now_ms);
         self.commit_mergeable_on_branch_at(branch_id, commit, made_at)
     }

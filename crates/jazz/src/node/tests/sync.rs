@@ -768,13 +768,15 @@ fn originating_causality_rejection_retains_child_payload() {
         u64::MAX - SKEW_TOLERANCE_MS,
     )
     .unwrap();
-    let (child, unit) = writer
-        .commit_mergeable_unit(
+    let child = writer
+        .commit_mergeable_at(
             MergeableCommit::new("todos", row, 101)
                 .parents(vec![parent])
                 .cells(title_cells("child")),
+            TxTime::from(101),
         )
         .unwrap();
+    let unit = writer.commit_unit_for(child).unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
