@@ -26,7 +26,6 @@ import { normalizeSchemaHashInput } from "./schema-utils.js";
 import {
   computeSchemaHash,
   deploy as deployCatalogue,
-  MigrationHashMismatchError,
   MissingMigrationError,
   pushMigration as pushCatalogueMigration,
   pushPermissions as pushCataloguePermissions,
@@ -897,9 +896,9 @@ async function findMigrationFile(
   migrationsDir: string,
   fromHash: string,
   toHash: string,
-): Promise<string> {
+): Promise<string | undefined> {
   if (!(await pathExists(migrationsDir))) {
-    throw new Error(`No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}.`);
+    return undefined;
   }
 
   const fromShortHash = shortSchemaHash(fromHash);
@@ -914,7 +913,7 @@ async function findMigrationFile(
     );
 
   if (matches.length === 0) {
-    throw new Error(`No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}.`);
+    return undefined;
   }
 
   if (matches.length > 1) {
@@ -1016,20 +1015,6 @@ async function resolveRemoteHistoricalSchema(
   }
 }
 
-async function resolveHistoricalSchema(
-  migrationsDir: string,
-  hash: string,
-  label: string,
-  appId: string,
-  serverUrl: string,
-  adminSecret: string,
-): Promise<ResolvedSchemaInput> {
-  return (
-    (await resolveLocalHistoricalSchema(migrationsDir, hash, label)) ??
-    resolveRemoteHistoricalSchema(migrationsDir, hash, label, appId, serverUrl, adminSecret)
-  );
-}
-
 /**
  * Publishes the migration that connects two schemas.
  *
@@ -1043,110 +1028,33 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
   });
   const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
   const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
-  let filePath: string | null = null;
+  const filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
 
-  try {
-    filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !error.message.startsWith(`No migration file found in ${options.migrationsDir}`)
-    ) {
-      throw error;
-    }
-  }
-
-  if (!filePath) {
-    const fromSchema = await resolveHistoricalSchema(
-      options.migrationsDir,
-      fromHash,
-      "fromHash",
-      options.appId,
-      options.serverUrl,
-      options.adminSecret,
-    );
-    const toSchema = await resolveHistoricalSchema(
-      options.migrationsDir,
-      toHash,
-      "toHash",
-      options.appId,
-      options.serverUrl,
-      options.adminSecret,
-    );
-
-    let result: PushMigrationResult;
-    try {
-      result = await pushCatalogueMigration({
-        appId: options.appId,
-        serverUrl: options.serverUrl,
-        adminSecret: options.adminSecret,
-        fromHash,
-        toHash,
-        knownSchemaHashes: hashes,
-        fromSchema: fromSchema.schema,
-        toSchema: toSchema.schema,
-      });
-    } catch (error) {
-      if (error instanceof MissingMigrationError) {
-        throw new Error(
-          noMigrationFileMessage(
-            options.appId,
-            options.migrationsDir,
-            error.fromHash,
-            error.toHash,
-          ),
-        );
-      }
-      throw error;
-    }
-
-    emit(options, {
-      type: "migration-published",
-      fromHash: result.fromHash,
-      toHash: result.toHash,
-    });
-    return result;
-  }
-
-  const migration = await loadDefinedMigration(filePath);
-
-  if (migration.forward.length === 0) {
-    const fromSchema = await resolveHistoricalSchema(
-      options.migrationsDir,
-      fromHash,
-      "fromHash",
-      options.appId,
-      options.serverUrl,
-      options.adminSecret,
-    );
-    const toSchema = await resolveHistoricalSchema(
-      options.migrationsDir,
-      toHash,
-      "toHash",
-      options.appId,
-      options.serverUrl,
-      options.adminSecret,
-    );
-
-    if (schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
-      throw new Error(`Migration ${basename(filePath)} has no steps. Fill in migrate before push.`);
-    }
-  }
+  const migration = filePath ? await loadDefinedMigration(filePath) : null;
 
   let result: PushMigrationResult;
   try {
-    result = await pushCatalogueMigration({
-      appId: options.appId,
-      serverUrl: options.serverUrl,
-      adminSecret: options.adminSecret,
-      fromHash,
-      toHash,
-      knownSchemaHashes: hashes,
-      migration,
-    });
+    result = await pushCatalogueMigration(
+      migration
+        ? {
+            appId: options.appId,
+            serverUrl: options.serverUrl,
+            adminSecret: options.adminSecret,
+            migration,
+          }
+        : {
+            appId: options.appId,
+            serverUrl: options.serverUrl,
+            adminSecret: options.adminSecret,
+            fromHash,
+            toHash,
+          },
+    );
   } catch (error) {
-    if (error instanceof MigrationHashMismatchError) {
-      throw new Error(migrationFileHashMismatchMessage(filePath, error));
+    if (error instanceof MissingMigrationError) {
+      throw new Error(
+        noMigrationFileMessage(options.appId, options.migrationsDir, error.fromHash, error.toHash),
+      );
     }
     throw error;
   }
@@ -1173,13 +1081,6 @@ function noMigrationFileMessage(
   toHash: string,
 ): string {
   return `No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}. Run \`jazz-tools migrations create ${appId} --fromHash ${shortSchemaHash(fromHash)} --toHash ${shortSchemaHash(toHash)}\` first.`;
-}
-
-function migrationFileHashMismatchMessage(
-  filePath: string,
-  error: MigrationHashMismatchError,
-): string {
-  return `Migration ${basename(filePath)} exports ${error.actualFromHash} -> ${error.actualToHash}, expected ${shortSchemaHash(error.expectedFromHash)} -> ${shortSchemaHash(error.expectedToHash)}.`;
 }
 
 function emitDeployResult(
@@ -1273,18 +1174,7 @@ async function resolveProjectDeployMigration(
     return {};
   }
 
-  let filePath: string | null = null;
-
-  try {
-    filePath = await findMigrationFile(migrationsDir, head.schemaHash, toHash);
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !error.message.startsWith(`No migration file found in ${migrationsDir}`)
-    ) {
-      throw error;
-    }
-  }
+  const filePath = await findMigrationFile(migrationsDir, head.schemaHash, toHash);
 
   if (!filePath) {
     return {};
@@ -1306,33 +1196,15 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   emit(options, { type: "schema-loaded", schemaFile: compiled.schemaFile });
   const resolvedMigration = await resolveProjectDeployMigration(options, migrationsDir, compiled);
 
-  let result: ProjectDeployCatalogueResult;
-  try {
-    result = await deployCatalogue({
-      appId: options.appId,
-      serverUrl: options.serverUrl,
-      adminSecret: options.adminSecret,
-      schema: compiled.wasmSchema,
-      permissions: compiled.permissions,
-      migration: resolvedMigration.migration,
-      noVerify: options.noVerify,
-    });
-  } catch (error) {
-    if (error instanceof MigrationHashMismatchError && resolvedMigration.filePath) {
-      throw new Error(migrationFileHashMismatchMessage(resolvedMigration.filePath, error));
-    }
-    throw error;
-  }
-
-  if (result.migration?.status === "published" && resolvedMigration.filePath) {
-    result = {
-      ...result,
-      migration: {
-        ...result.migration,
-        filePath: resolvedMigration.filePath,
-      },
-    };
-  }
+  let result = await deployCatalogue({
+    appId: options.appId,
+    serverUrl: options.serverUrl,
+    adminSecret: options.adminSecret,
+    schema: compiled.wasmSchema,
+    permissions: compiled.permissions,
+    migration: resolvedMigration.migration,
+    noVerify: options.noVerify,
+  });
 
   if (result.migration?.status === "missing") {
     const message = disconnectedSchemaMessage(

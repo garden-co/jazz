@@ -71,15 +71,15 @@ export interface PushPermissionsResult {
   head: StoredPermissionsHead | null;
 }
 
-export interface PushMigrationOptions extends CatalogueServerOptions {
-  fromHash: string;
-  toHash: string;
-  knownSchemaHashes?: readonly string[];
-  migration?: DefinedMigration;
-  fromSchema?: SchemaSourceInput;
-  toSchema?: SchemaSourceInput;
-}
-
+export type PushMigrationOptions = CatalogueServerOptions &
+  (
+    | {
+        migration: DefinedMigration;
+        fromHash?: undefined;
+        toHash?: undefined;
+      }
+    | { fromHash: string; toHash: string; migration?: undefined }
+  );
 export interface PushMigrationResult {
   fromHash: string;
   toHash: string;
@@ -134,36 +134,12 @@ export class MissingMigrationError extends Error {
   }
 }
 
-export class MigrationHashMismatchError extends Error {
-  readonly name = "MigrationHashMismatchError";
-
-  constructor(
-    readonly actualFromHash: string,
-    readonly actualToHash: string,
-    readonly expectedFromHash: string,
-    readonly expectedToHash: string,
-  ) {
-    super(
-      `Migration exports ${actualFromHash} -> ${actualToHash}, expected ${shortSchemaHash(expectedFromHash)} -> ${shortSchemaHash(expectedToHash)}.`,
-    );
-  }
-}
-
-interface ResolvedSchemaInput {
-  hash: string;
-  schema: WasmSchema;
-}
-
 function collectWarning(warnings: string[], message: string): void {
   warnings.push(message);
 }
 
 function resolveMigrationDefinitionWasmSchema(input: unknown): WasmSchema {
   return schemaToWasm(schemaDefinitionToAst(input as any));
-}
-
-function hashMatchesFullSchema(hash: string, fullHash: string): boolean {
-  return fullHash.startsWith(normalizeSchemaHashInput(hash, "schema hash"));
 }
 
 export function resolveKnownSchemaHash(
@@ -350,45 +326,13 @@ function serializeForwardLenses(forward: readonly Lens[]): PublishedTableLens[] 
   }));
 }
 
-function isDefinedMigration(value: unknown): value is DefinedMigration {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate.fromHash === "string" &&
-    typeof candidate.toHash === "string" &&
-    typeof candidate.from === "object" &&
-    candidate.from !== null &&
-    typeof candidate.to === "object" &&
-    candidate.to !== null &&
-    Array.isArray(candidate.forward)
-  );
-}
-
-async function resolveMigrationSchema(
-  serverUrl: string,
-  options: CatalogueServerOptions,
-  hash: string,
-  schemaInput: SchemaSourceInput | undefined,
-): Promise<ResolvedSchemaInput> {
-  if (schemaInput) {
-    return {
-      hash,
-      schema: resolveSchemaSource(schemaInput),
-    };
-  }
-
-  const storedSchema = await fetchStoredWasmSchema(serverUrl, {
+async function loadSchema(options: CatalogueServerOptions, hash: string): Promise<WasmSchema> {
+  const storedSchema = await fetchStoredWasmSchema(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
     schemaHash: hash,
   });
-  return {
-    hash,
-    schema: storedSchema.schema,
-  };
+  return storedSchema.schema;
 }
 
 /**
@@ -447,83 +391,35 @@ export async function pushPermissions(
 /**
  * Publishes the migration that connects two schemas.
  *
- * When a reviewed migration is not present, this publishes an empty migration
+ * When a migration is not present, this publishes an empty migration
  * only if the schema transition does not require row transformations.
  */
 export async function pushMigration(options: PushMigrationOptions): Promise<PushMigrationResult> {
-  const hashes =
-    options.knownSchemaHashes ??
-    (
-      await fetchSchemaHashes(options.serverUrl, {
-        appId: options.appId,
-        adminSecret: options.adminSecret,
-      })
-    ).hashes;
-  const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
-  const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
-
-  if (!options.migration) {
-    const fromSchema = await resolveMigrationSchema(
-      options.serverUrl,
-      options,
-      fromHash,
-      options.fromSchema,
-    );
-    const toSchema = await resolveMigrationSchema(
-      options.serverUrl,
-      options,
-      toHash,
-      options.toSchema,
-    );
-
-    if (schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
-      throw new MissingMigrationError(fromHash, toHash);
-    }
-
-    const published = await publishStoredMigration(options.serverUrl, {
-      appId: options.appId,
-      adminSecret: options.adminSecret,
-      fromHash,
-      toHash,
-      forward: [],
-    });
-
-    return {
-      fromHash,
-      toHash,
-      status: "published",
-      objectId: published.objectId,
-    };
-  }
-
-  const migration = options.migration;
-  if (!isDefinedMigration(migration)) {
-    throw new Error("Invalid migration. Pass a value returned by defineMigration(...).");
-  }
-
-  if (
-    !hashMatchesFullSchema(migration.fromHash, fromHash) ||
-    !hashMatchesFullSchema(migration.toHash, toHash)
-  ) {
-    throw new MigrationHashMismatchError(migration.fromHash, migration.toHash, fromHash, toHash);
-  }
-
-  schemaDefinitionToAst(migration.from as any);
-  schemaDefinitionToAst(migration.to as any);
-
-  if (migration.forward.length === 0) {
-    const fromSchema = resolveMigrationDefinitionWasmSchema(migration.from);
-    const toSchema = resolveMigrationDefinitionWasmSchema(migration.to);
-
-    if (schemaTransitionRequiresRowTransform(fromSchema, toSchema)) {
-      throw new Error("Migration has no steps. Fill in migrate before push.");
-    }
-  }
-
-  const forward = migration.forward.length === 0 ? [] : serializeForwardLenses(migration.forward);
-  const published = await publishStoredMigration(options.serverUrl, {
+  const serverOptions: CatalogueServerOptions = {
     appId: options.appId,
+    serverUrl: options.serverUrl,
     adminSecret: options.adminSecret,
+  };
+  const migration = options.migration;
+  const fromSchema = migration ? resolveMigrationDefinitionWasmSchema(migration.from) : undefined;
+  const toSchema = migration ? resolveMigrationDefinitionWasmSchema(migration.to) : undefined;
+  const fromHash = options.fromHash ?? (await computeSchemaHash(fromSchema!));
+  const toHash = options.toHash ?? (await computeSchemaHash(toSchema!));
+
+  const forward = serializeForwardLenses(migration?.forward ?? []);
+  if (
+    forward.length === 0 &&
+    schemaTransitionRequiresRowTransform(
+      fromSchema ?? (await loadSchema(serverOptions, fromHash)),
+      toSchema ?? (await loadSchema(serverOptions, toHash)),
+    )
+  ) {
+    throw new MissingMigrationError(fromHash, toHash);
+  }
+
+  const published = await publishStoredMigration(serverOptions.serverUrl, {
+    appId: serverOptions.appId,
+    adminSecret: serverOptions.adminSecret,
     fromHash,
     toHash,
     forward,
@@ -608,15 +504,22 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       };
     } else {
       try {
-        migration = await pushMigration({
-          appId: options.appId,
-          serverUrl: options.serverUrl,
-          adminSecret: options.adminSecret,
-          fromHash: previousHead.schemaHash,
-          toHash: schema.hash,
-          migration: options.migration,
-          toSchema: wasmSchema,
-        });
+        migration = await pushMigration(
+          options.migration
+            ? {
+                appId: options.appId,
+                serverUrl: options.serverUrl,
+                adminSecret: options.adminSecret,
+                migration: options.migration,
+              }
+            : {
+                appId: options.appId,
+                serverUrl: options.serverUrl,
+                adminSecret: options.adminSecret,
+                fromHash: previousHead.schemaHash,
+                toHash: schema.hash,
+              },
+        );
       } catch (error) {
         if (!(error instanceof MissingMigrationError)) {
           throw error;

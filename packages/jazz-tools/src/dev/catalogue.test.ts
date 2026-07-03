@@ -386,8 +386,20 @@ describe("dev catalogue push behavior", () => {
     const migrationsDir = join(root, "migrations");
     await mkdir(migrationsDir, { recursive: true });
 
-    const fromHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const toHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const fromSchema = {
+      users: s.table({
+        email: s.string(),
+      }),
+    };
+    const toSchema = {
+      users: s.table({
+        email_address: s.string(),
+      }),
+    };
+    const { computeSchemaHash } = await import("./catalogue.js");
+    const fromHash = await computeSchemaHash(s.defineApp(fromSchema).wasmSchema);
+    const toHash = await computeSchemaHash(s.defineApp(toSchema).wasmSchema);
+
     await writeFile(
       join(migrationsDir, `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`),
       `
