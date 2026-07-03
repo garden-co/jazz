@@ -577,6 +577,40 @@ fn branch_creation_persists_no_overlay_partition_until_first_write() {
 }
 
 #[test]
+fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reopen() {
+    let mut core = open_history_complete_reopen_refusing_node_with_schema(node(0x22), schema());
+    let branch_id = branch(0x22);
+    let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    core.create_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x22), 10).cells(title_cells("branch partition write")),
+    )
+    .unwrap();
+
+    let rows = core
+        .query_rows_on_branch(branch_id, &shape, &binding)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        rows,
+        BTreeMap::from([(row(0x22), title_cells("branch partition write"))])
+    );
+    assert!(
+        core.branches.branch_partitions.iter().any(
+            |(table, schema_version, existing)| table == "todos"
+                && *schema_version == core.current_write_schema().schema
+                && *existing == branch_id
+        ),
+        "first branch write must create a live overlay partition without reopening storage"
+    );
+}
+
+#[test]
 fn branch_writes_reject_unknown_and_closed_branches() {
     let (_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let unknown = branch(0x14);

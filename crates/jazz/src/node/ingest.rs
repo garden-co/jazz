@@ -1426,7 +1426,7 @@ where
         }
 
         for (stored, global_seq) in current_updates.values() {
-            self.write_global_current_update(&mut batch, stored, *global_seq);
+            self.write_global_current_update(&mut batch, stored, *global_seq)?;
         }
 
         #[cfg(test)]
@@ -1527,7 +1527,7 @@ where
         }
         if let Some(global_seq) = stored.global_seq {
             for version in &global_current_updates {
-                self.write_global_current_update(&mut batch, version, global_seq);
+                self.write_global_current_update(&mut batch, version, global_seq)?;
             }
         }
         #[cfg(test)]
@@ -1546,7 +1546,7 @@ where
             .is_some_and(|global_seq| advanced_global_seqs.contains(&global_seq))
         {
             for version in self.query_versions_for_tx(tx_id)? {
-                self.write_ahead_current_delete(&mut batch, &version);
+                self.write_ahead_current_delete(&mut batch, &version)?;
             }
         }
         for global_seq in advanced_global_seqs
@@ -1653,7 +1653,7 @@ where
             }
         }
         for version in versions {
-            self.table(version.table())?;
+            self.table_in_schema(version.table(), version.schema_version())?;
             let current = self.visible_global_content_tx_id_now_memoized(
                 version.table(),
                 version.row_uuid(),
@@ -2336,7 +2336,10 @@ where
                 owned_record_from_storage_values(&rejected_tx_table, rejected_tx_values)?;
             let mut rejected_versions = Vec::new();
             for version in &rejected {
-                let table_schema = self.table(version.table())?.clone();
+                let schema_version = self
+                    .schema_version_for_alias(version.schema_version_alias())
+                    .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+                let table_schema = self.table_in_schema(version.table(), schema_version)?;
                 let rejected_version_table = table_schema.rejected_versions_storage_table();
                 let rejected_version_values = rejected_version_values(&table_schema, version)?;
                 batch.insert(
@@ -2365,7 +2368,7 @@ where
             ));
         }
         for version in &rejected {
-            self.write_ahead_current_delete(batch, version);
+            self.write_ahead_current_delete(batch, version)?;
             batch.delete(
                 version_storage_table_name(&version.table, version.layer()),
                 history_primary_key(version),
@@ -3371,16 +3374,35 @@ where
         version: &VersionRow,
         global_seq: GlobalSeq,
     ) -> Result<(), Error> {
-        let table = self.table(version.table())?.clone();
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let base_for_current_names = if self
+            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
+            .is_ok()
+        {
+            self.catalogue.current_schema_version_id
+        } else {
+            schema_version
+        };
+        let table = self.table_in_schema(version.table(), schema_version)?;
         let storage_tables = table.global_current_storage_tables();
         let (current_table, current_schema, expected_values) = match version.layer() {
             VersionLayer::Content => (
-                global_current_table_name(version.table()),
+                global_current_table_name_for_schema(
+                    version.table(),
+                    schema_version,
+                    base_for_current_names,
+                ),
                 &storage_tables[0],
                 global_current_values(&table, version, Some(global_seq))?,
             ),
             VersionLayer::Deletion => (
-                register_global_current_table_name(version.table()),
+                register_global_current_table_name_for_schema(
+                    version.table(),
+                    schema_version,
+                    base_for_current_names,
+                ),
                 &storage_tables[1],
                 register_global_current_values(version, Some(global_seq)),
             ),
@@ -3466,16 +3488,31 @@ where
         batch: &mut DatabaseBatch,
         version: &VersionRow,
         global_seq: GlobalSeq,
-    ) {
+    ) -> Result<(), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let base_for_current_names = if self
+            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
+            .is_ok()
+        {
+            self.catalogue.current_schema_version_id
+        } else {
+            schema_version
+        };
         match version.layer() {
             VersionLayer::Content => {
-                let table = self.table(version.table()).expect("known table");
+                let table = self.table_in_schema(version.table(), schema_version)?;
                 batch.update_raw(
-                    global_current_table_name(version.table()),
+                    global_current_table_name_for_schema(
+                        version.table(),
+                        schema_version,
+                        base_for_current_names,
+                    ),
                     global_current_primary_key(version.row_uuid()),
                     owned_record_from_storage_values(
                         &table.global_current_storage_tables()[0],
-                        global_current_values(table, version, Some(global_seq))
+                        global_current_values(&table, version, Some(global_seq))
                             .expect("valid global current values"),
                     )
                     .expect("valid global current row")
@@ -3484,12 +3521,15 @@ where
                 );
             }
             VersionLayer::Deletion => batch.update_raw(
-                register_global_current_table_name(version.table()),
+                register_global_current_table_name_for_schema(
+                    version.table(),
+                    schema_version,
+                    base_for_current_names,
+                ),
                 global_current_primary_key(version.row_uuid()),
                 owned_record_from_storage_values(
                     &self
-                        .table(version.table())
-                        .expect("known table")
+                        .table_in_schema(version.table(), schema_version)?
                         .global_current_storage_tables()[1],
                     register_global_current_values(version, Some(global_seq)),
                 )
@@ -3502,22 +3542,38 @@ where
             "jazz_global_changes",
             global_change_values(version, global_seq),
         );
+        Ok(())
     }
 
     pub(super) fn write_ahead_current_insert(
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
-    ) {
+    ) -> Result<(), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let base_for_current_names = if self
+            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
+            .is_ok()
+        {
+            self.catalogue.current_schema_version_id
+        } else {
+            schema_version
+        };
         match version.layer() {
             VersionLayer::Content => {
-                let table = self.table(version.table()).expect("known table");
+                let table = self.table_in_schema(version.table(), schema_version)?;
                 batch.insert_raw(
-                    ahead_current_table_name(version.table()),
+                    ahead_current_table_name_for_schema(
+                        version.table(),
+                        schema_version,
+                        base_for_current_names,
+                    ),
                     history_primary_key(version),
                     owned_record_from_storage_values(
                         &table.ahead_current_storage_tables()[0],
-                        global_current_values(table, version, None)
+                        global_current_values(&table, version, None)
                             .expect("valid ahead current values"),
                     )
                     .expect("valid ahead current row")
@@ -3526,12 +3582,15 @@ where
                 );
             }
             VersionLayer::Deletion => batch.insert_raw(
-                register_ahead_current_table_name(version.table()),
+                register_ahead_current_table_name_for_schema(
+                    version.table(),
+                    schema_version,
+                    base_for_current_names,
+                ),
                 history_primary_key(version),
                 owned_record_from_storage_values(
                     &self
-                        .table(version.table())
-                        .expect("known table")
+                        .table_in_schema(version.table(), schema_version)?
                         .ahead_current_storage_tables()[1],
                     register_global_current_values(version, None),
                 )
@@ -3547,16 +3606,36 @@ where
             version.tx_time(),
             version.tx_node_alias(),
         );
+        Ok(())
     }
 
     pub(super) fn write_ahead_current_delete(
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
-    ) {
+    ) -> Result<(), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let base_for_current_names = if self
+            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
+            .is_ok()
+        {
+            self.catalogue.current_schema_version_id
+        } else {
+            schema_version
+        };
         let table = match version.layer() {
-            VersionLayer::Content => ahead_current_table_name(version.table()),
-            VersionLayer::Deletion => register_ahead_current_table_name(version.table()),
+            VersionLayer::Content => ahead_current_table_name_for_schema(
+                version.table(),
+                schema_version,
+                base_for_current_names,
+            ),
+            VersionLayer::Deletion => register_ahead_current_table_name_for_schema(
+                version.table(),
+                schema_version,
+                base_for_current_names,
+            ),
         };
         batch.delete(table, history_primary_key(version));
         self.remove_ahead_current_key(
@@ -3566,6 +3645,7 @@ where
             version.tx_time(),
             version.tx_node_alias(),
         );
+        Ok(())
     }
 
     fn prune_ahead_current_for_global_seq(
@@ -3592,7 +3672,7 @@ where
         }
         for tx_id in tx_ids {
             for version in self.query_versions_for_tx(tx_id)? {
-                self.write_ahead_current_delete(batch, &version);
+                self.write_ahead_current_delete(batch, &version)?;
             }
         }
         Ok(())
@@ -3799,7 +3879,7 @@ where
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_seq.is_none()
             {
-                self.write_ahead_current_insert(&mut batch, &stored);
+                self.write_ahead_current_insert(&mut batch, &stored)?;
             }
         }
         if !matches!(fate, Fate::Rejected(_)) {
@@ -3810,7 +3890,7 @@ where
         if update_current_indexes && matches!(fate, Fate::Accepted) {
             if let Some(global_seq) = global_seq {
                 for stored in pending_global_updates.values() {
-                    self.write_global_current_update(&mut batch, stored, global_seq);
+                    self.write_global_current_update(&mut batch, stored, global_seq)?;
                 }
             }
         }
@@ -3867,7 +3947,7 @@ where
                 let mut batch = self.database.open_batch();
                 if advanced_global_seqs.contains(&global_seq) {
                     for version in self.query_versions_for_tx(tx.tx_id)? {
-                        self.write_ahead_current_delete(&mut batch, &version);
+                        self.write_ahead_current_delete(&mut batch, &version)?;
                     }
                 }
                 for advanced in advanced_global_seqs

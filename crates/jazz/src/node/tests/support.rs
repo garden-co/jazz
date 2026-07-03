@@ -334,6 +334,124 @@ fn catalogue_evolved_schema() -> JazzSchema {
         ],
     )])
 }
+
+#[derive(Clone)]
+struct ReopenRefusingMemoryStorage {
+    inner: MemoryStorage,
+}
+
+impl ReopenRefusingMemoryStorage {
+    fn new(column_families: &[&str]) -> Self {
+        Self {
+            inner: MemoryStorage::new(column_families),
+        }
+    }
+}
+
+impl OrderedKvStorage for ReopenRefusingMemoryStorage {
+    fn get(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+    ) -> Result<Option<StorageValue>, groove::storage::Error> {
+        self.inner.get(cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+        value: &[u8],
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.set(cf, key, value)
+    }
+
+    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), groove::storage::Error> {
+        self.inner.delete(cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_prefix(cf, prefix, visit)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_prefix_reverse(cf, prefix, visit)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<groove::storage::KeyValue>, groove::storage::Error> {
+        self.inner.last_with_prefix(cf, prefix)
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<groove::storage::KeyValue>, groove::storage::Error> {
+        self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
+        self.inner.write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
+    }
+}
+
+impl ReopenableStorage for ReopenRefusingMemoryStorage {
+    fn reopen(self, _column_families: &[&str]) -> Result<Self, groove::storage::Error> {
+        Err(groove::storage::Error::InvalidStorageLayout(
+            "test storage must not reopen for logical table additions".to_owned(),
+        ))
+    }
+}
+
+fn open_reopen_refusing_node_with_schema(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> NodeState<ReopenRefusingMemoryStorage> {
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = ReopenRefusingMemoryStorage::new(&refs);
+    NodeState::new(node_uuid, schema, storage).unwrap()
+}
+
+fn open_history_complete_reopen_refusing_node_with_schema(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> NodeState<ReopenRefusingMemoryStorage> {
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = ReopenRefusingMemoryStorage::new(&refs);
+    NodeState::new_history_complete(node_uuid, schema, storage).unwrap()
+}
+
 fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();

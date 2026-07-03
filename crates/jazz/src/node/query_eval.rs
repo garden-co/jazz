@@ -751,18 +751,90 @@ where
                     }))
         {
             if !request.requirements.metadata.is_empty() {
-                return Err(source_resolution_error(
+                if self.node.table(&request.source.table).is_ok() {
+                    return Err(source_resolution_error(
+                        request,
+                        SourceGap::SchemaProjection,
+                    ));
+                }
+                self.node.query_engine_read_metrics.source_full_scans += 1;
+                resolved_current_source_graph(
+                    self.node,
+                    &table,
+                    graph_tier.expect("visible current source has a tier"),
+                    &request.requirements,
+                    &request.authorization,
+                    self.read_view.policy_schema,
+                    None,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+            } else {
+                let source = self.projected_visible_current_source_graph(
                     request,
-                    SourceGap::SchemaProjection,
-                ));
+                    &table,
+                    graph_tier.expect("visible current source has a tier"),
+                )?;
+                let graph = match &request.authorization {
+                    SourceAuthorizationRequest::System => source.graph,
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    } => {
+                        if plan.protected_source.table != table.name
+                            || plan.role != PolicyDecisionRole::Read
+                            || plan.protected_row_field != "row_uuid"
+                        {
+                            return Err(source_resolution_error(request, SourceGap::Coverage));
+                        }
+                        let policy_request = self
+                            .node
+                            .table_read_policy_authorization_request(
+                                self.read_view.policy_schema,
+                                &table.name,
+                                *permission_subject,
+                                ParamBindingMode::InlineAllReachableSeeds,
+                                graph_tier.expect("visible current source has a tier"),
+                                plan.binding_source_shape.clone(),
+                                plan.binding_user_params.clone(),
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                source.graph,
+                                &current_row_fields(&table),
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                            .graph
+                    }
+                };
+                (graph, source.descriptor, source.metadata, BTreeSet::new())
             }
-            let source = self.projected_visible_current_source_graph(
-                request,
-                &table,
-                graph_tier.expect("visible current source has a tier"),
-            )?;
+        } else if request.visibility == RowVisibility::IncludeDeleted
+            && (self.read_view.read_schema != self.node.catalogue.current_schema_version_id
+                || self
+                    .node
+                    .catalogue
+                    .partitions
+                    .iter()
+                    .any(|(logical, version)| {
+                        logical == &request.source.table
+                            && *version != self.node.catalogue.current_schema_version_id
+                    }))
+        {
+            let tier = graph_tier.expect("visible current source has a tier");
+            let rows = self
+                .node
+                .include_deleted_current_rows_for_schema(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    tier,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let base = inline_include_deleted_current_graph(&table, rows)
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let graph = match &request.authorization {
-                SourceAuthorizationRequest::System => source.graph,
+                SourceAuthorizationRequest::System => base.clone(),
                 SourceAuthorizationRequest::PolicyFiltered {
                     permission_subject,
                     plan,
@@ -775,27 +847,33 @@ where
                     }
                     let policy_request = self
                         .node
-                        .table_read_policy_authorization_request(
+                        .table_read_policy_authorization_request_for_include_deleted(
                             self.read_view.policy_schema,
                             &table.name,
                             *permission_subject,
-                            ParamBindingMode::InlineAllReachableSeeds,
-                            graph_tier.expect("visible current source has a tier"),
+                            tier,
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                    let mut output_fields = current_row_fields(&table);
+                    output_fields.push("__jazz_deleted".to_owned());
                     self.node
                         .policy_filtered_current_source_graph_via_query_engine(
                             policy_request,
-                            source.graph,
-                            &current_row_fields(&table),
+                            base.clone(),
+                            &output_fields,
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
                         .graph
                 }
             };
-            (graph, source.descriptor, source.metadata, BTreeSet::new())
+            (
+                graph,
+                include_deleted_current_row_descriptor(&table),
+                BTreeMap::new(),
+                BTreeSet::new(),
+            )
         } else if request.visibility == RowVisibility::IncludeDeleted {
             let tier = graph_tier.expect("visible current source has a tier");
             let base = include_deleted_current_graph(&table, tier);
@@ -4002,7 +4080,7 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let table = self.query_output_table(shape.query())?;
+        let table = self.query_output_table(shape.query(), shape.schema_version())?;
         let program = self.compile_branch_query_program(
             branch_id,
             shape,
@@ -4740,7 +4818,7 @@ where
             None => None,
         };
         let policy = self.query_program_policy_context(identity);
-        let table_schema = self.query_output_table(shape.query())?;
+        let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
         let deltas_result = match plan {
             None => self
                 .database
@@ -4930,7 +5008,7 @@ where
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let query = lowered_shape.query();
         let table = if query.aggregate.is_some() {
-            self.query_output_table(query)?
+            self.query_output_table(query, lowered_shape.schema_version())?
         } else {
             self.table_in_schema(&query.table, lowered_shape.schema_version())?
                 .clone()
@@ -5380,10 +5458,15 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<(ValidatedQuery, Binding), Error> {
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let shape = bind_query_params_with_mode(
             shape,
             binding,
-            &self.catalogue.schema,
+            &schema.schema,
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
@@ -5746,8 +5829,12 @@ where
         self.apply_query_order(query, rows)
     }
 
-    fn query_output_table(&self, query: &crate::query::Query) -> Result<TableSchema, Error> {
-        let source_table = self.table(&query.table)?.clone();
+    fn query_output_table(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+    ) -> Result<TableSchema, Error> {
+        let source_table = self.table_in_schema(&query.table, schema_version)?;
         if query.aggregate.is_some() {
             aggregate_result_table(query, &source_table)
         } else {
@@ -5951,10 +6038,15 @@ where
         ),
         Error,
     > {
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let shape = bind_query_params_with_mode(
             shape,
             binding,
-            &self.catalogue.schema,
+            &schema.schema,
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
@@ -7505,6 +7597,40 @@ pub(super) fn inline_current_graph(
         .iter()
         .map(|row| inline_current_record(table, &descriptor, row))
         .collect::<Result<Vec<_>, _>>()?;
+    Ok(GraphBuilder::inline_records(descriptor, records))
+}
+
+fn inline_include_deleted_current_graph(
+    table: &TableSchema,
+    rows: Vec<(CurrentRow, bool)>,
+) -> Result<GraphBuilder, Error> {
+    let descriptor = include_deleted_current_row_descriptor(table);
+    let mut records = Vec::with_capacity(rows.len());
+    for (row, deleted) in rows {
+        let mut values = Vec::with_capacity(table.columns.len() + 8);
+        values.push(Value::Uuid(row.row_uuid().0));
+        for column in &table.columns {
+            values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
+        }
+        if let Some(provenance) = row.provenance()? {
+            values.push(Value::Uuid(provenance.created_by.0));
+            values.push(Value::U64(provenance.created_at.0));
+            values.push(Value::Uuid(provenance.updated_by.0));
+            values.push(Value::U64(provenance.updated_at.0));
+        } else {
+            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::U64(0));
+            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::U64(0));
+        }
+        let (tx_time, tx_node_alias) = row
+            .projected_tx_alias()
+            .unwrap_or((TxTime(0), NodeAlias(0)));
+        values.push(Value::U64(tx_time.0));
+        values.push(Value::U64(tx_node_alias.0));
+        values.push(Value::Bool(deleted));
+        records.push(descriptor.create(&values)?);
+    }
     Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
