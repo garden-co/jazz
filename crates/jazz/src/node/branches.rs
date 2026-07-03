@@ -248,6 +248,7 @@ where
             predicate_read_set: None,
             user_metadata_json: commit.user_metadata_json.clone(),
             source_branch: None,
+            merge_strategy: None,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
@@ -844,6 +845,7 @@ where
             predicate_read_set: None,
             user_metadata_json: None,
             source_branch: Some(branch_id),
+            merge_strategy: None,
         };
         self.ingest_edge_authority_mergeable_commit_unit(tx, versions, made_at.physical_ms())?;
         Ok(tx_id)

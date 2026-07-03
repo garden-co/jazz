@@ -243,6 +243,7 @@ where
             predicate_read_set: Some(open_tx.predicate_reads),
             user_metadata_json: open_tx.user_metadata_json,
             source_branch: None,
+            merge_strategy: None,
         };
         self.ingest_transaction_and_versions(
             tx.clone(),

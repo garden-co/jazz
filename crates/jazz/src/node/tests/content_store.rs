@@ -424,7 +424,7 @@ fn large_value_edits_reject_empty_batches_and_non_large_value_columns() {
 fn commit_units_with_missing_large_value_content_are_parked_until_extents_arrive() {
     let schema = JazzSchema::new([TableSchema::new(
         "docs",
-        [crate::schema::ColumnSchema::text("body")],
+        [crate::schema::ColumnSchema::blob("body")],
     )]);
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x4d), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x4e), schema.clone());
@@ -495,6 +495,13 @@ fn commit_units_with_missing_large_value_content_are_parked_until_extents_arrive
 }
 
 fn large_value_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "docs",
+        [crate::schema::ColumnSchema::blob("body")],
+    )])
+}
+
+fn text_large_value_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "docs",
         [crate::schema::ColumnSchema::text("body")],
@@ -607,6 +614,81 @@ fn authority_merge_version_op_merges_concurrent_large_value_edits() {
 
     assert_eq!(left_first, Some(Value::Bytes(b"aLEFTRIGHTbc".to_vec())));
     assert_eq!(left_first, right_first);
+}
+
+#[test]
+fn authority_merge_version_merges_concurrent_text_edits_and_records_strategy() {
+    let left_first = merged_concurrent_text_body(true);
+    let right_first = merged_concurrent_text_body(false);
+
+    assert_eq!(left_first, Some(Value::Bytes(b"aLEFTRIGHTbc".to_vec())));
+    assert_eq!(left_first, right_first);
+}
+
+#[test]
+fn out_of_order_text_unit_resolves_after_parent_arrives() {
+    let schema = text_large_value_schema();
+    let row_uuid = row(0x76);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x76), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x78), schema.clone());
+
+    let base_unit = commit_large_value_edit_unit(
+        &mut writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+            .made_by(user(0xa1))
+            .insert(0, b"abc"),
+    );
+    let child_unit = commit_large_value_edit_unit(
+        &mut writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+            .made_by(user(0xa1))
+            .insert(1, b"X"),
+    );
+    let _ = core.apply_sync_message(child_unit).unwrap();
+    assert_eq!(core.sync_metrics().parked_orphans, 1);
+    assert!(core.current_rows("docs", DurabilityTier::Local).unwrap().is_empty());
+
+    let _ = core.apply_sync_message(base_unit).unwrap();
+    assert_eq!(
+        core.current_rows("docs", DurabilityTier::Local)
+            .unwrap()
+            .remove(0)
+            .cell(&schema.tables[0], "body"),
+        Some(Value::Bytes(b"aXbc".to_vec()))
+    );
+}
+
+#[test]
+fn text_edit_history_rehydrates_materialized_text_after_reopen() {
+    let schema = text_large_value_schema();
+    let row_uuid = row(0x79);
+    let (dir, mut opened) = open_node_with_schema(node(0x79), schema.clone());
+
+    opened
+        .commit_large_value_edit(
+            LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+                .made_by(user(0xa1))
+                .insert(0, b"hello"),
+        )
+        .unwrap();
+    opened
+        .commit_large_value_edit(
+            LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+                .made_by(user(0xa1))
+                .insert(5, b" after restart"),
+        )
+        .unwrap();
+    drop(opened);
+
+    let mut reopened = reopen_node_at(&dir, node(0x79), schema.clone());
+    assert_eq!(
+        reopened
+            .current_rows("docs", DurabilityTier::Local)
+            .unwrap()
+            .remove(0)
+            .cell(&schema.tables[0], "body"),
+        Some(Value::Bytes(b"hello after restart".to_vec()))
+    );
 }
 
 #[test]
@@ -764,6 +846,71 @@ fn merged_concurrent_large_value_body(left_first: bool) -> Option<Value> {
     )))
 }
 
+fn merged_concurrent_text_body(left_first: bool) -> Option<Value> {
+    let schema = text_large_value_schema();
+    let row_uuid = row(if left_first { 0x7a } else { 0x7b });
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(0x7c), schema.clone());
+    let (_left_dir, mut left_writer) = open_node_with_schema(node(0x7d), schema.clone());
+    let (_right_dir, mut right_writer) = open_node_with_schema(node(0x7e), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x7f), schema.clone());
+
+    let base_unit = commit_large_value_edit_unit(
+        &mut base_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+            .made_by(user(0xa1))
+            .insert(0, b"abc"),
+    );
+    apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
+
+    let left = commit_large_value_edit_unit(
+        &mut left_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+            .made_by(user(0xa1))
+            .insert(1, b"LEFT"),
+    );
+    let right = commit_large_value_edit_unit(
+        &mut right_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 21)
+            .made_by(user(0xa2))
+            .insert(1, b"RIGHT"),
+    );
+    if left_first {
+        apply_large_value_unit(&mut core, &left_writer, left);
+        apply_large_value_unit(&mut core, &right_writer, right);
+    } else {
+        apply_large_value_unit(&mut core, &right_writer, right);
+        apply_large_value_unit(&mut core, &left_writer, left);
+    }
+
+    let merge = core
+        .query_all_versions()
+        .unwrap()
+        .into_iter()
+        .find(|version| {
+            version.row_uuid() == row_uuid
+                && core.version_tx_id(version).unwrap().node == node(0x7f)
+                && version.parents().len() == 2
+        })
+        .expect("core should create a text merge version");
+    let merge_tx = core
+        .query_transaction(core.version_tx_id(&merge).unwrap())
+        .unwrap()
+        .expect("merge transaction should be recorded");
+    let strategy = merge_tx
+        .tx
+        .merge_strategy
+        .expect("text merge should record strategy");
+    assert_eq!(strategy.id, "builtin.text-rle-v1");
+    assert_eq!(strategy.version, 1);
+
+    Some(Value::Bytes(
+        core.materialize_large_value_column(&schema.tables[0], &merge, "body")
+            .unwrap(),
+    ))
+}
+
 fn commit_large_value_unit(
     node: &mut NodeState<RocksDbStorage>,
     commit: MergeableCommit,
@@ -807,7 +954,7 @@ fn large_value_extents(
             let Value::Bytes(payload) = version.cell_at(0)? else {
                 return None;
             };
-            Some(text_oplog::decode(&payload).unwrap())
+            text_oplog::decode(&payload).ok()
         })
         .flatten()
         .filter_map(|op| match op {
