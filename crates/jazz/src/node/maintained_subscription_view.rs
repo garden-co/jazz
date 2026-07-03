@@ -1,18 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use groove::ivm::{MultisinkDeltas, RecordDeltas};
-use groove::records::{BorrowedRecord, Value};
+use groove::records::{BorrowedRecord, RecordDescriptor, Value};
 
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value, nullable_value,
     tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
-    OutputTerminalSchema, ProgramFactKey, ProgramFactSchema, ProgramFactTerminal, QueryProgram,
-    ResultMembershipSchema, VersionWitnessSchema,
+    AggregateResultSchema, OutputTerminalSchema, ProgramFactKey, ProgramFactSchema,
+    ProgramFactTerminal, QueryProgram, ResultMembershipSchema, VersionWitnessSchema,
 };
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
-use crate::protocol::{RealRowMemberEntry, ResultMemberEntry};
+use crate::protocol::{
+    ProgramFactEntry, RealRowMemberEntry, ResultMemberEntry, ResultMemberPayloadEntry,
+};
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::TxId;
@@ -22,6 +24,7 @@ type TableSchemas = BTreeMap<String, TableSchema>;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MaintainedSubscriptionView {
     result_weights: BTreeMap<ResultMemberEntry, i64>,
+    result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -80,11 +83,19 @@ struct ReplacementKey {
 pub(crate) struct ResultTransitions {
     pub(crate) adds: Vec<ResultMemberEntry>,
     pub(crate) removes: Vec<ResultMemberEntry>,
+    pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
+    pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum DecodedMaintainedEvent {
     ResultCurrent(ResultMemberEntry),
+    AggregateResult {
+        member: ResultMemberEntry,
+        payload: ResultMemberPayloadEntry,
+        synthetic: super::query_engine::SyntheticResultMembershipSchema,
+        value_fields: Vec<String>,
+    },
     VersionContent(VersionRow),
     VersionDeletion(VersionRow),
     ReplacementContent(VersionRow),
@@ -99,6 +110,7 @@ pub(crate) struct MaintainedTerminalSchemas {
 #[derive(Clone, Debug)]
 enum MaintainedTerminalKind {
     ResultCurrent(ResultMembershipSchema),
+    AggregateResult(AggregateResultSchema),
     VersionContent(VersionWitnessSchema),
     VersionDeletion(VersionWitnessSchema),
     ReplacementContent(VersionWitnessSchema),
@@ -115,6 +127,12 @@ enum EventIdentity {
 #[derive(Clone, Debug)]
 enum NetEvent {
     Result(ResultMemberEntry),
+    AggregateResult(
+        ResultMemberEntry,
+        ResultMemberPayloadEntry,
+        super::query_engine::SyntheticResultMembershipSchema,
+        Vec<String>,
+    ),
     Version(VersionIdentity, VersionRow),
     Replacement(ReplacementKey, VersionIdentity, VersionRow),
 }
@@ -158,6 +176,12 @@ impl MaintainedSubscriptionView {
                 self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
+            transitions
+                .program_fact_adds
+                .extend(delta_transitions.program_fact_adds);
+            transitions
+                .program_fact_removes
+                .extend(delta_transitions.program_fact_removes);
         }
         Ok(transitions)
     }
@@ -171,6 +195,12 @@ impl MaintainedSubscriptionView {
         for (event, weight) in rows {
             let net_event = match event {
                 DecodedMaintainedEvent::ResultCurrent(entry) => NetEvent::Result(entry),
+                DecodedMaintainedEvent::AggregateResult {
+                    member,
+                    payload,
+                    synthetic,
+                    value_fields,
+                } => NetEvent::AggregateResult(member, payload, synthetic, value_fields),
                 DecodedMaintainedEvent::VersionContent(row)
                 | DecodedMaintainedEvent::VersionDeletion(row) => {
                     let identity = VersionIdentity::for_row(&row);
@@ -201,6 +231,16 @@ impl MaintainedSubscriptionView {
             match event {
                 NetEvent::Result(entry) => {
                     self.apply_result_delta(entry, weight, &mut transitions);
+                }
+                NetEvent::AggregateResult(member, payload, synthetic, value_fields) => {
+                    self.apply_aggregate_result_delta(
+                        member,
+                        payload,
+                        &synthetic,
+                        &value_fields,
+                        weight,
+                        &mut transitions,
+                    )?;
                 }
                 NetEvent::Version(identity, row) => {
                     self.versions
@@ -246,6 +286,18 @@ impl MaintainedSubscriptionView {
         }
     }
 
+    pub(crate) fn payload_facts_for_members(
+        &self,
+        members: &[ResultMemberEntry],
+    ) -> Vec<ProgramFactEntry> {
+        members
+            .iter()
+            .filter_map(|member| self.result_payloads.get(member))
+            .cloned()
+            .map(ProgramFactEntry::ResultPayload)
+            .collect()
+    }
+
     fn apply_result_delta(
         &mut self,
         entry: ResultMemberEntry,
@@ -266,6 +318,86 @@ impl MaintainedSubscriptionView {
             self.result_weights.insert(entry, new);
         }
     }
+
+    fn apply_aggregate_result_delta(
+        &mut self,
+        member: ResultMemberEntry,
+        payload: ResultMemberPayloadEntry,
+        synthetic: &super::query_engine::SyntheticResultMembershipSchema,
+        value_fields: &[String],
+        weight: i64,
+        transitions: &mut ResultTransitions,
+    ) -> Result<(), super::Error> {
+        let (old_member, old_payload) = self.aggregate_payload_for_stable_member(&member);
+        let materialized = materialize_aggregate_payload_delta(
+            old_payload.as_ref(),
+            payload,
+            synthetic,
+            value_fields,
+            weight,
+        )?;
+        if aggregate_payload_is_empty(&materialized, value_fields)? {
+            if let Some(old_member) = old_member {
+                transitions.removes.push(old_member.clone());
+                self.result_weights.remove(&old_member);
+                if let Some(existing) = self.result_payloads.remove(&old_member) {
+                    transitions
+                        .program_fact_removes
+                        .push(ProgramFactEntry::ResultPayload(existing));
+                }
+            }
+            return Ok(());
+        }
+        if let Some(old_member) = old_member
+            && old_member != materialized.member
+        {
+            transitions.removes.push(old_member.clone());
+            self.result_weights.remove(&old_member);
+            if let Some(existing) = self.result_payloads.remove(&old_member) {
+                transitions
+                    .program_fact_removes
+                    .push(ProgramFactEntry::ResultPayload(existing));
+            }
+        }
+        let old = self
+            .result_weights
+            .get(&materialized.member)
+            .copied()
+            .unwrap_or(0);
+        if old <= 0 {
+            transitions.adds.push(materialized.member.clone());
+        }
+        transitions
+            .program_fact_adds
+            .push(ProgramFactEntry::ResultPayload(materialized.clone()));
+        self.result_payloads
+            .insert(materialized.member.clone(), materialized.clone());
+        self.result_weights.insert(materialized.member, 1);
+        Ok(())
+    }
+
+    fn aggregate_payload_for_stable_member(
+        &self,
+        member: &ResultMemberEntry,
+    ) -> (Option<ResultMemberEntry>, Option<ResultMemberPayloadEntry>) {
+        let ResultMemberEntry::Synthetic { table, row, .. } = member else {
+            return (None, None);
+        };
+        self.result_payloads
+            .iter()
+            .find_map(|(candidate, payload)| match candidate {
+                ResultMemberEntry::Synthetic {
+                    table: candidate_table,
+                    row: candidate_row,
+                    ..
+                } if candidate_table == table && candidate_row == row => {
+                    Some((candidate.clone(), payload.clone()))
+                }
+                _ => None,
+            })
+            .map(|(member, payload)| (Some(member), Some(payload)))
+            .unwrap_or((None, None))
+    }
 }
 
 impl MaintainedTerminalSchemas {
@@ -281,6 +413,11 @@ impl MaintainedTerminalSchemas {
                     ProgramFactTerminal::Primary,
                     ProgramFactSchema::ResultMembership(schema),
                 ) => Some(MaintainedTerminalKind::ResultCurrent(schema.clone())),
+                (
+                    ProgramFactKey::ResultMembership,
+                    ProgramFactTerminal::Primary,
+                    ProgramFactSchema::AggregateResult(schema),
+                ) => Some(MaintainedTerminalKind::AggregateResult(schema.clone())),
                 (
                     ProgramFactKey::VersionWitnesses,
                     ProgramFactTerminal::VersionWitnessDeletion,
@@ -386,6 +523,45 @@ fn decode_typed_terminal_record(
                 .with_settle_position(settle_position)
                 .into(),
             ))
+        }
+        MaintainedTerminalKind::AggregateResult(schema) => {
+            let table = match record.get_idx(field_idx(record, &schema.synthetic.table_field)?)? {
+                Value::String(value) => value,
+                _ => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "aggregate result table field must be string",
+                    ));
+                }
+            };
+            let row_value = record.get_idx(field_idx(record, &schema.synthetic.row_field)?)?;
+            let row = postcard::to_allocvec(&row_value).map_err(|_| {
+                super::Error::InvalidStoredValue("aggregate result row encoding failed")
+            })?;
+            let revision_value =
+                record.get_idx(field_idx(record, &schema.synthetic.revision_field)?)?;
+            let revision = postcard::to_allocvec(&revision_value).map_err(|_| {
+                super::Error::InvalidStoredValue("aggregate result revision encoding failed")
+            })?;
+            let member = ResultMemberEntry::Synthetic {
+                table,
+                row,
+                revision,
+            };
+            let payload = ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: encode_record_descriptor(&record.descriptor())?,
+                record: record.raw().to_vec(),
+            };
+            Ok(DecodedMaintainedEvent::AggregateResult {
+                member,
+                payload,
+                synthetic: schema.synthetic.clone(),
+                value_fields: schema
+                    .value_fields
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect(),
+            })
         }
         MaintainedTerminalKind::VersionContent(schema) => {
             validate_witness_event_kind(record, "version_content")?;
@@ -706,12 +882,154 @@ impl NetEvent {
     fn identity(&self) -> EventIdentity {
         match self {
             Self::Result(entry) => EventIdentity::Result(entry.clone()),
+            Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
             Self::Version(identity, _) => EventIdentity::Version(identity.clone()),
             Self::Replacement(key, identity, _) => {
                 EventIdentity::Replacement(key.clone(), identity.clone())
             }
         }
     }
+}
+
+fn materialize_aggregate_payload_delta(
+    previous: Option<&ResultMemberPayloadEntry>,
+    delta: ResultMemberPayloadEntry,
+    synthetic: &super::query_engine::SyntheticResultMembershipSchema,
+    value_fields: &[String],
+    weight: i64,
+) -> Result<ResultMemberPayloadEntry, super::Error> {
+    let delta_descriptor = decode_payload_descriptor(&delta.descriptor)?;
+    let delta_record = BorrowedRecord::new(&delta.record, &delta_descriptor);
+    let mut values = if let Some(previous) = previous {
+        let previous_descriptor = decode_payload_descriptor(&previous.descriptor)?;
+        BorrowedRecord::new(&previous.record, &previous_descriptor)
+            .to_values()
+            .map_err(|_| super::Error::InvalidStoredValue("aggregate payload decode failed"))?
+    } else {
+        delta_record
+            .to_values()
+            .map_err(|_| super::Error::InvalidStoredValue("aggregate payload decode failed"))?
+    };
+    if previous.is_none() {
+        for field in value_fields {
+            let idx = field_idx(delta_record, field)?;
+            values[idx] = zero_aggregate_value(values[idx].clone());
+        }
+    }
+    for field in value_fields {
+        let idx = field_idx(delta_record, field)?;
+        let delta_value = delta_record.get_idx(idx)?;
+        values[idx] = apply_aggregate_value_delta(values[idx].clone(), delta_value, weight)?;
+    }
+    if let Some(first_value_field) = value_fields.first() {
+        let value_idx = field_idx(delta_record, first_value_field)?;
+        let revision_idx = field_idx(delta_record, &synthetic.revision_field)?;
+        values[revision_idx] = values[value_idx].clone();
+    }
+    let raw = delta_descriptor
+        .create(&values)
+        .map_err(|_| super::Error::InvalidStoredValue("aggregate payload encoding failed"))?;
+    let revision_value = values[field_idx(delta_record, &synthetic.revision_field)?].clone();
+    let revision = postcard::to_allocvec(&revision_value).map_err(|_| {
+        super::Error::InvalidStoredValue("aggregate result revision encoding failed")
+    })?;
+    let member = match delta.member {
+        ResultMemberEntry::Synthetic { table, row, .. } => ResultMemberEntry::Synthetic {
+            table,
+            row,
+            revision,
+        },
+        _ => delta.member,
+    };
+    Ok(ResultMemberPayloadEntry {
+        member,
+        descriptor: delta.descriptor,
+        record: raw,
+    })
+}
+
+fn decode_payload_descriptor(bytes: &[u8]) -> Result<RecordDescriptor, super::Error> {
+    let fields: Vec<(Option<String>, groove::records::ValueType)> = postcard::from_bytes(bytes)
+        .map_err(|_| super::Error::InvalidStoredValue("aggregate descriptor decoding failed"))?;
+    Ok(RecordDescriptor::new(fields.into_iter().map(
+        |(name, value_type)| (name.unwrap_or_default(), value_type),
+    )))
+}
+
+fn apply_aggregate_value_delta(
+    current: Value,
+    delta: Value,
+    weight: i64,
+) -> Result<Value, super::Error> {
+    macro_rules! signed_int {
+        ($value:expr, $variant:ident, $ty:ty) => {{
+            let next = ($value as i128)
+                .checked_add(
+                    (weight as i128)
+                        * (match delta {
+                            Value::$variant(value) => value as i128,
+                            _ => return Ok(delta),
+                        }),
+                )
+                .ok_or(super::Error::InvalidStoredValue("aggregate value overflow"))?;
+            Value::$variant(
+                <$ty>::try_from(next)
+                    .map_err(|_| super::Error::InvalidStoredValue("aggregate value overflow"))?,
+            )
+        }};
+    }
+    Ok(match current {
+        Value::U8(value) => signed_int!(value, U8, u8),
+        Value::U16(value) => signed_int!(value, U16, u16),
+        Value::U32(value) => signed_int!(value, U32, u32),
+        Value::U64(value) => signed_int!(value, U64, u64),
+        Value::F64(value) => match delta {
+            Value::F64(delta) => Value::F64(value + (weight as f64) * delta),
+            _ => delta,
+        },
+        _ => delta,
+    })
+}
+
+fn zero_aggregate_value(value: Value) -> Value {
+    match value {
+        Value::U8(_) => Value::U8(0),
+        Value::U16(_) => Value::U16(0),
+        Value::U32(_) => Value::U32(0),
+        Value::U64(_) => Value::U64(0),
+        Value::F64(_) => Value::F64(0.0),
+        other => other,
+    }
+}
+
+fn aggregate_payload_is_empty(
+    payload: &ResultMemberPayloadEntry,
+    value_fields: &[String],
+) -> Result<bool, super::Error> {
+    if value_fields.is_empty() {
+        return Ok(false);
+    }
+    let descriptor = decode_payload_descriptor(&payload.descriptor)?;
+    let record = BorrowedRecord::new(&payload.record, &descriptor);
+    for field in value_fields {
+        let value = record.get_idx(field_idx(record, field)?)?;
+        match value {
+            Value::U8(0) | Value::U16(0) | Value::U32(0) | Value::U64(0) => {}
+            Value::F64(0.0) => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+fn encode_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, super::Error> {
+    let fields = descriptor
+        .fields()
+        .iter()
+        .map(|field| (field.name.clone(), field.value_type.clone()))
+        .collect::<Vec<_>>();
+    postcard::to_allocvec(&fields)
+        .map_err(|_| super::Error::InvalidStoredValue("aggregate descriptor encoding failed"))
 }
 
 fn remove_tx_identity(

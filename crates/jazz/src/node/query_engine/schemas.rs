@@ -66,6 +66,8 @@ pub(crate) enum ProgramFactSchema {
     AuthorizedRows(AuthorizedRowsSchema),
     /// Root result-set membership rows.
     ResultMembership(ResultMembershipSchema),
+    /// Synthetic aggregate result-set membership rows.
+    AggregateResult(AggregateResultSchema),
     /// Relation edge rows.
     RelationEdges(RelationEdgeSchema),
     /// Per-path correlation/cardinality coverage rows.
