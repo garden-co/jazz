@@ -746,6 +746,7 @@ where
     /// Commit a local mergeable write and leave its fate pending.
     pub fn commit_mergeable(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
         commit.validate()?;
+        self.merge_commit_parent_times(std::slice::from_ref(&commit))?;
         let made_at = self.mint_tx_time(commit.now_ms);
         self.commit_mergeable_at(commit, made_at)
     }
@@ -765,6 +766,7 @@ where
                 ));
             }
         }
+        self.merge_commit_parent_times(&commits)?;
         let made_at = self.mint_tx_time(commits[0].now_ms);
         self.commit_mergeable_many_at(commits, made_at)
     }
@@ -772,8 +774,56 @@ where
     /// Commit explicit text/blob edit operations for one large-value column.
     pub fn commit_large_value_edit(&mut self, edit: LargeValueEditCommit) -> Result<TxId, Error> {
         edit.validate()?;
+        if let Some(parent) =
+            self.current_layer_parent_tx_id(&edit.table, edit.row_uuid, VersionLayer::Content)?
+        {
+            self.merge_tx_time(parent.time);
+        }
         let made_at = self.mint_tx_time(edit.now_ms);
         self.commit_large_value_edit_at(edit, made_at)
+    }
+
+    fn merge_commit_parent_times(&mut self, commits: &[MergeableCommit]) -> Result<(), Error> {
+        for commit in commits {
+            if commit.parents.is_empty() {
+                let table_schema = self
+                    .table_in_schema(&commit.table, self.catalogue.current_write_schema.schema)?;
+                if table_schema
+                    .columns
+                    .iter()
+                    .any(|column| column.large_value.is_some())
+                {
+                    let layer = VersionLayer::for_commit(commit);
+                    if let Some(parent) =
+                        self.current_layer_parent_tx_id(&commit.table, commit.row_uuid, layer)?
+                    {
+                        self.merge_tx_time(parent.time);
+                    }
+                }
+            } else {
+                for parent in &commit.parents {
+                    self.merge_tx_time(parent.time);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn current_layer_parent_tx_id(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<TxId>, Error> {
+        let table_schema =
+            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
+        match self.query_local_layer_winner(&table_schema.name, row_uuid, layer)? {
+            Some(previous) => self.version_tx_id(&previous).map(Some),
+            None => self
+                .query_global_layer_winner(&table_schema.name, row_uuid, layer)?
+                .map(|previous| self.version_tx_id(&previous))
+                .transpose(),
+        }
     }
 
     fn commit_mergeable_at(
