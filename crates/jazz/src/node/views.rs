@@ -518,10 +518,6 @@ where
             .iter()
             .filter_map(ResultMemberEntry::as_row)
             .collect::<Vec<_>>();
-        let row_result_removes = result_member_removes
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .collect::<Vec<_>>();
         if !cold_bulk_loaded {
             for bundle in version_bundles {
                 self.ingest_view_bundle(bundle)?;
@@ -531,7 +527,6 @@ where
             for tx_id in peer_complete_tx_payload_refs
                 .iter()
                 .chain(row_result_adds.iter().map(|(_, _, tx_id)| tx_id))
-                .chain(row_result_removes.iter().map(|(_, _, tx_id)| tx_id))
             {
                 if incoming_bundle_tx_ids.contains(tx_id) {
                     continue;
@@ -545,6 +540,10 @@ where
                 }
             }
         }
+        // Removals are self-sufficient: the removed version can be invisible
+        // under the receiver's policy, so fetching its body is allowed to
+        // return nothing. The row ref in the removal is enough to clear local
+        // believed membership and advance coverage.
         self.validate_result_member_adds_are_witnessed(
             &peer_complete_tx_payload_refs,
             &row_result_adds,
@@ -562,7 +561,19 @@ where
             .entry(binding_view_key)
             .or_default();
         for member in result_member_removes {
-            row_result_set.remove(&member);
+            if row_result_set.remove(&member) {
+                continue;
+            }
+            if let Some((removed_table, removed_row_uuid, _)) = member.as_row() {
+                row_result_set.retain(|existing| {
+                    !matches!(
+                        existing.as_row(),
+                        Some((existing_table, existing_row_uuid, _))
+                            if existing_table == removed_table
+                                && existing_row_uuid == removed_row_uuid
+                    )
+                });
+            }
         }
         row_result_set.extend(result_member_adds);
         let program_facts = self

@@ -2607,6 +2607,10 @@ where
             })
             .collect::<BTreeSet<_>>();
         let mut missing = BTreeSet::new();
+        // Only additions require repair. Removals are self-sufficient because
+        // the removed version may now be policy-invisible to this receiver, in
+        // which case fetching the body is both unnecessary and allowed to
+        // return no payload.
         for (table, row_uuid, tx_id) in result_member_adds
             .iter()
             .filter_map(ResultMemberEntry::as_row)
