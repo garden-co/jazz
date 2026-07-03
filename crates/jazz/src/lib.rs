@@ -102,6 +102,8 @@ pub mod db;
 pub use db::block_on;
 /// Wire-stable identifiers.
 pub mod ids;
+/// Shared text merge strategy machinery.
+pub mod merge_strategy;
 /// Storage-backed node implementation and local API.
 pub mod node;
 /// Independent semantic oracle used by tests and harnesses.
