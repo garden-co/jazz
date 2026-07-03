@@ -81,6 +81,24 @@ fn mergeable_commits_persist_transaction_and_history_rows() {
             .is_empty()
     );
 }
+
+#[test]
+fn authoring_stamps_explicit_child_after_parent_time() {
+    let (_temp_dir, mut core) = open_node();
+    let parent = TxId::new(TxTime::from(10_000), node(0x77));
+    let child = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x71), 1)
+                .parents(vec![parent])
+                .cells(title_cells("child")),
+        )
+        .unwrap();
+
+    assert!(
+        child.time > parent.time,
+        "author must stamp explicit child after parent: child={child:?}, parent={parent:?}"
+    );
+}
 #[test]
 fn deletion_register_hides_and_restore_reveals_current_content() {
     let (_temp_dir, mut node) = open_node();

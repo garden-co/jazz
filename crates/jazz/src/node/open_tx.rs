@@ -208,6 +208,9 @@ where
             .open_exclusive
             .remove(&tx_id)
             .ok_or(Error::MissingOpenTx(tx_id))?;
+        for parent in open_tx.writes.iter().filter_map(|write| write.parent) {
+            self.merge_tx_time(parent.time);
+        }
         let made_at = self.mint_tx_time(now_ms);
         let tx_id = TxId::new(made_at, self.node_uuid);
         let versions = open_tx
