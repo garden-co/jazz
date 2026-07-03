@@ -65,11 +65,20 @@ parent is the highest-sort-key parent.
 
 ## 12.4 Materialization
 
-Reads expose values, not op-log encodings. To materialize a value, the node
-replays the op-log from a local checkpoint when one is present, otherwise from
-origin, along the single primary-parent chain (`INV-LVAL-13`). App-facing reads
-of a large-value column return the **materialized value as `Value::Bytes`**,
-never the encoded op payload (`INV-LVAL-12`).
+Query and sync result rows carry **large-value handles**, not bodies. A handle
+names the large-value kind, materialized logical length, and the extent refs
+needed to hydrate the value. Result membership, settlement, and read-frontier
+coverage are independent of whether the handle's body extents are present
+locally; a row can be a settled result member while its large-value bytes are
+still cold.
+
+Hydration is pull-only at the access layer. To materialize a value-returning API
+result, the node fetches any missing authorized extents, folds op-log extents at
+the boundary, and returns the materialized value as `Value::Bytes`. Encoded ops
+and extent handles never escape a value-returning API as cell bytes
+(`INV-LVAL-12`). To materialize a value, the node replays the op-log from a
+local checkpoint when one is present, otherwise from origin, along the single
+primary-parent chain (`INV-LVAL-13`).
 
 ## 12.4.1 Authority merge versions
 
@@ -109,6 +118,11 @@ extents that are not present locally (`INV-LVAL-14`). Content fetch serving is
 authorized by row context and membership: the serving node refuses an extent
 whose `Extent.row` mismatches the request or that is not visible to the peer
 (`INV-LVAL-15`, ch. 7, ch. 8).
+
+Revocation is enforced at fetch time. If a peer received a row handle before
+hydrating its body and later loses read scope, subsequent content-extent fetches
+for that row are denied; Jazz does not promise post-delivery redaction of bytes
+already fetched or stored locally (ch. 7 §7.3).
 
 _Further invariants._ `INV-LVAL-7` — re-ingesting an extent with identical bytes
 is idempotent; conflicting bytes for the same extent are rejected. `INV-LVAL-8` —

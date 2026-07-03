@@ -95,6 +95,12 @@ records in the unit (`INV-TX-3`). If the unit references parents, schema
 versions, or content that the receiver does not yet know, the receiver parks the
 unit until those dependencies arrive (`INV-TX-5`).
 
+Receiving a bare unfated commit unit is not authority. On a non-authority node,
+`apply_sync_message` stages or parks that commit unit as pending remote fate and
+waits for a `FateUpdate`; it must not accept the unit, assign global sequence, or
+create merge versions from it (`INV-TX-23`). Only a structurally wired fate
+authority path may decide fate (ch. 3 §3.6, ch. 9).
+
 ## 8.3 Fates downstream
 
 Downstream fate messages tell peers how an already-submitted transaction has
