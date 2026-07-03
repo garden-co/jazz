@@ -9,6 +9,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
+#[cfg(feature = "sync-autopsy")]
+use std::sync::{
+    LazyLock, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::task::{Context, Poll, Waker};
 
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -61,6 +66,73 @@ pub enum TickUrgency {
 pub trait TickScheduler {
     /// Schedule a future [`Db::tick`] for pending peer-connection work.
     fn schedule_tick(&self, urgency: TickUrgency);
+}
+
+#[cfg(feature = "sync-autopsy")]
+/// Debug-build sync trace buffer used by integration-test timeout autopsies.
+pub mod sync_autopsy {
+    use super::*;
+
+    const MAX_EVENTS: usize = 512;
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    static EVENTS: LazyLock<Mutex<VecDeque<String>>> =
+        LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_EVENTS)));
+
+    /// Enable passive event capture for the current process.
+    pub fn enable() {
+        ENABLED.store(true, Ordering::Relaxed);
+    }
+
+    /// Clear buffered events.
+    pub fn clear() {
+        if let Ok(mut events) = EVENTS.lock() {
+            events.clear();
+        }
+    }
+
+    /// Return the current buffered event log.
+    pub fn dump() -> String {
+        let events = EVENTS.lock().ok();
+        let mut out = String::from("sync autopsy events:\n");
+        if let Some(events) = events {
+            for event in events.iter() {
+                out.push_str("  ");
+                out.push_str(event);
+                out.push('\n');
+            }
+        } else {
+            out.push_str("  <event buffer poisoned>\n");
+        }
+        out
+    }
+
+    /// Append one event to the ring buffer when capture is enabled.
+    pub fn record(event: impl Into<String>) {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(mut events) = EVENTS.lock() else {
+            return;
+        };
+        if events.len() == MAX_EVENTS {
+            events.pop_front();
+        }
+        events.push_back(event.into());
+    }
+}
+
+#[cfg(not(feature = "sync-autopsy"))]
+/// No-op sync trace buffer when sync autopsy capture is not compiled in.
+pub mod sync_autopsy {
+    /// Enable passive event capture for the current process.
+    pub fn enable() {}
+    /// Clear buffered events.
+    pub fn clear() {}
+    /// Return the current buffered event log.
+    pub fn dump() -> String {
+        String::new()
+    }
 }
 
 /// Poll a ready-immediate thread-affine database future to completion.
@@ -3236,6 +3308,11 @@ where
                                 values,
                                 known_state,
                             };
+                            #[cfg(feature = "sync-autopsy")]
+                            sync_autopsy::record(format!(
+                                "upstream send subscribe {}",
+                                summarize_subscription_key(subscribe.subscription)
+                            ));
                             self.node
                                 .borrow_mut()
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe.clone()))?;
@@ -3285,6 +3362,12 @@ where
                 let mut applied = false;
                 while let Some(received) = self.transport.try_recv_received() {
                     let write_state_tx_id = write_state_update_tx_id(&received.message);
+                    #[cfg(feature = "sync-autopsy")]
+                    sync_autopsy::record(format!(
+                        "upstream recv {} encoded_len={:?}",
+                        summarize_sync_message(&received.message),
+                        received.encoded_len
+                    ));
                     match received.message {
                         SyncMessage::RowVersionPayloads { versions } => {
                             let Some(repair) = pending_row_version_repairs.pop_front() else {
@@ -3319,7 +3402,18 @@ where
                                         None,
                                         received.encoded_len,
                                     )?;
+                                #[cfg(feature = "sync-autopsy")]
+                                sync_autopsy::record(format!(
+                                    "upstream applied view update {}",
+                                    summarize_subscription_key(subscription)
+                                ));
                             } else {
+                                #[cfg(feature = "sync-autopsy")]
+                                sync_autopsy::record(format!(
+                                    "upstream queued repair {} missing={}",
+                                    summarize_subscription_key(subscription),
+                                    missing.len()
+                                ));
                                 self.transport
                                     .send(SyncMessage::FetchRowVersions {
                                         requests: missing.clone(),
@@ -3366,6 +3460,12 @@ where
                 let mut scheduled_immediate = false;
                 while let Some(received) = self.transport.try_recv_received() {
                     applied_inbound = true;
+                    #[cfg(feature = "sync-autopsy")]
+                    sync_autopsy::record(format!(
+                        "subscriber recv {} encoded_len={:?}",
+                        summarize_sync_message(&received.message),
+                        received.encoded_len
+                    ));
                     match received.message {
                         SyncMessage::RegisterShape {
                             shape_id,
@@ -3463,17 +3563,38 @@ where
                                     }
                                     Err(error) => return Err(error.into()),
                                 };
+                                #[cfg(feature = "sync-autopsy")]
+                                sync_autopsy::record(format!(
+                                    "subscriber rehydrate first usage={} group={} update={}",
+                                    summarize_subscription_key(subscription),
+                                    summarize_subscription_key(group_subscription),
+                                    summarize_sync_message(&update)
+                                ));
                                 retarget_view_update(update, subscription)
                             } else {
                                 peer.declare_known_state(subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
-                                peer.rehydrate_query_for_subscription_from_maintained_subscription(
-                                    &mut node,
-                                    group_subscription,
-                                    subscription,
-                                    &shape,
-                                )?
+                                let update = peer
+                                    .rehydrate_query_for_subscription_from_maintained_subscription(
+                                        &mut node,
+                                        group_subscription,
+                                        subscription,
+                                        &shape,
+                                    )?;
+                                #[cfg(feature = "sync-autopsy")]
+                                sync_autopsy::record(format!(
+                                    "subscriber rehydrate duplicate usage={} group={} update={}",
+                                    summarize_subscription_key(subscription),
+                                    summarize_subscription_key(group_subscription),
+                                    summarize_sync_message(&update)
+                                ));
+                                update
                             };
+                            #[cfg(feature = "sync-autopsy")]
+                            sync_autopsy::record(format!(
+                                "subscriber send rehydrate {}",
+                                summarize_sync_message(&update)
+                            ));
                             self.node
                                 .borrow_mut()
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe))?;
@@ -3610,8 +3731,19 @@ where
                         )?
                     };
                     if !view_update_is_empty(&update) {
+                        #[cfg(feature = "sync-autopsy")]
+                        sync_autopsy::record(format!(
+                            "subscriber generated group delta group={} update={}",
+                            summarize_subscription_key(group_subscription),
+                            summarize_sync_message(&update)
+                        ));
                         for subscription in group.subscribers.iter().copied() {
                             let update = retarget_view_update(update.clone(), subscription);
+                            #[cfg(feature = "sync-autopsy")]
+                            sync_autopsy::record(format!(
+                                "subscriber send group delta {}",
+                                summarize_sync_message(&update)
+                            ));
                             send_with_content_extents(
                                 &self.node,
                                 peer,
@@ -3678,6 +3810,81 @@ fn transport_error(error: TransportError) -> Error {
     }
 }
 
+#[cfg(feature = "sync-autopsy")]
+fn summarize_subscription_key(subscription: SubscriptionKey) -> String {
+    format!(
+        "shape={} binding={} read_view={}",
+        subscription.shape_id.0, subscription.binding_id.0, subscription.read_view.id
+    )
+}
+
+#[cfg(feature = "sync-autopsy")]
+fn summarize_sync_message(message: &SyncMessage) -> String {
+    match message {
+        SyncMessage::RegisterShape { shape_id, opts, .. } => {
+            format!(
+                "RegisterShape shape={} read_view={}",
+                shape_id.0,
+                opts.read_view_key().id
+            )
+        }
+        SyncMessage::Subscribe(subscribe) => {
+            format!(
+                "Subscribe {} values={} known_state={}",
+                summarize_subscription_key(subscribe.subscription),
+                subscribe.values.len(),
+                subscribe.known_state.is_some()
+            )
+        }
+        SyncMessage::Unsubscribe { subscription } => {
+            format!("Unsubscribe {}", summarize_subscription_key(*subscription))
+        }
+        SyncMessage::SubscribeRejected {
+            subscription,
+            reason,
+        } => format!(
+            "SubscribeRejected {} reason={reason:?}",
+            summarize_subscription_key(*subscription)
+        ),
+        SyncMessage::ViewUpdate {
+            subscription,
+            settled_through,
+            reset_result_set,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        } => format!(
+            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
+            summarize_subscription_key(*subscription),
+            settled_through.0,
+            reset_result_set,
+            version_bundles.len(),
+            peer_payload_inventory.complete_tx_payloads.len(),
+            result_member_adds.len(),
+            result_member_removes.len(),
+            program_fact_adds.len(),
+            program_fact_removes.len()
+        ),
+        SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
+        SyncMessage::FateUpdate { tx_id, fate, .. } => {
+            format!("FateUpdate tx={tx_id:?} fate={fate:?}")
+        }
+        SyncMessage::FetchRowVersions { requests } => {
+            format!("FetchRowVersions requests={}", requests.len())
+        }
+        SyncMessage::RowVersionPayloads { versions } => {
+            format!("RowVersionPayloads versions={}", versions.len())
+        }
+        SyncMessage::ContentExtents { extents } => {
+            format!("ContentExtents extents={}", extents.len())
+        }
+        other => format!("{other:?}"),
+    }
+}
+
 fn send_with_content_extents<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     peer: &mut PeerState,
@@ -3700,8 +3907,18 @@ where
             let mut node = node.borrow_mut();
             peer.serve_content_extents(&mut node, row, extents)?
         };
+        #[cfg(feature = "sync-autopsy")]
+        sync_autopsy::record(format!(
+            "transport send {}",
+            summarize_sync_message(&response)
+        ));
         transport.send(response).map_err(transport_error)?;
     }
+    #[cfg(feature = "sync-autopsy")]
+    sync_autopsy::record(format!(
+        "transport send {}",
+        summarize_sync_message(&message)
+    ));
     transport.send(message).map_err(transport_error)
 }
 
@@ -3727,8 +3944,18 @@ where
             }
             SyncMessage::ContentExtents { extents: out }
         };
+        #[cfg(feature = "sync-autopsy")]
+        sync_autopsy::record(format!(
+            "transport send {}",
+            summarize_sync_message(&response)
+        ));
         transport.send(response).map_err(transport_error)?;
     }
+    #[cfg(feature = "sync-autopsy")]
+    sync_autopsy::record(format!(
+        "transport send {}",
+        summarize_sync_message(&message)
+    ));
     transport.send(message).map_err(transport_error)
 }
 

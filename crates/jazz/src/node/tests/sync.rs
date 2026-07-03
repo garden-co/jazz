@@ -518,7 +518,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
 }
 
 #[test]
-fn view_updates_reject_unknown_usage_site_bindings() {
+fn view_updates_drop_unknown_usage_site_bindings() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let canonical = reader.whole_table_subscription_key("todos").unwrap();
     let unknown_usage_site = SubscriptionKey {
@@ -527,26 +527,24 @@ fn view_updates_reject_unknown_usage_site_bindings() {
     };
 
     // Public APIs should never be able to create this packet; this is receiver
-    // hardening for malformed or late wire updates.
-    let error = reader
+    // hardening for malformed or late wire updates. Subscription teardown races
+    // in-flight traffic by design, so unknown per-subscription packets are
+    // benign drops, not protocol corruption.
+    reader
         .apply_sync_message(SyncMessage::ViewUpdate {
-            subscription: unknown_usage_site,
-            settled_through: GlobalSeq(0),
-            reset_result_set: false,
-            version_bundles: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        })
-        .unwrap_err();
+        subscription: unknown_usage_site,
+        settled_through: GlobalSeq(0),
+        reset_result_set: false,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    })
+    .unwrap();
 
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("subscription referenced unregistered shape")
-            | Error::InvalidStoredValue("subscription referenced unregistered binding")
-    ));
+    assert_eq!(reader.sync_metrics().dropped_detached_subscription_messages, 1);
     assert!(reader.query.settled_result_sets.is_empty());
     assert!(reader.query.settled_program_facts.is_empty());
 }
@@ -1152,6 +1150,119 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row_uuid, title_cells("repair me"))])
     );
+}
+
+#[test]
+fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
+    // Internal protocol coverage: public APIs only expose this as a background
+    // tick-driver stall. The protocol invariant is that unsubscribe is
+    // asynchronous, so per-subscription traffic can arrive after local detach.
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(10);
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let binding_view_key = BindingViewKey::from_canonical_subscription_key(subscription);
+
+    let (_tx_id, visible_unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("visible")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = visible_unit else {
+        panic!("expected commit unit");
+    };
+    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    reader
+        .apply_sync_message(core.view_update_for_current_rows("todos").unwrap())
+        .unwrap();
+    let before = reader
+        .subscription_current_rows("todos", DurabilityTier::Global)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(before, BTreeMap::from([(row_uuid, title_cells("visible"))]));
+
+    let usage_subscription = crate::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x88; 16])),
+        read_view: Default::default(),
+    };
+    reader
+        .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: usage_subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+    assert_eq!(
+        reader
+            .binding_view_key_for_subscription(usage_subscription)
+            .unwrap(),
+        binding_view_key
+    );
+    reader.apply_unsubscribe(usage_subscription);
+    let late = SyncMessage::ViewUpdate {
+        subscription: usage_subscription,
+        settled_through: GlobalSeq(2),
+        reset_result_set: false,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: vec![crate::protocol::ResultMemberEntry::row((
+            groove::Intern::from("todos".to_owned()),
+            row_uuid,
+            TxId::new(TxTime(777), node(44)),
+        ))],
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    reader.apply_sync_message(late).unwrap();
+
+    assert_eq!(reader.sync_metrics().dropped_detached_subscription_messages, 1);
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        before,
+        "late traffic must not mutate the shared canonical settled state"
+    );
+}
+
+#[test]
+fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
+    // Internal protocol coverage: the receiver cannot distinguish a never-seen
+    // subscription key from a key detached before an in-flight message arrived.
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = crate::protocol::SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([0x55; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x66; 16])),
+        read_view: Default::default(),
+    };
+    let late = SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(1),
+        reset_result_set: true,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+
+    reader.apply_sync_message(late).unwrap();
+
+    assert_eq!(reader.sync_metrics().dropped_detached_subscription_messages, 1);
+    assert!(reader.query.settled_result_sets.is_empty());
 }
 
 #[test]

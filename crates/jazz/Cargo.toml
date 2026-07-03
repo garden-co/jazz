@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["rocksdb"]
 rocksdb = ["groove/rocksdb"]
+sync-autopsy = []
 testing = []
 
 [dependencies]
