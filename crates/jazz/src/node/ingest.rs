@@ -7,13 +7,14 @@
 //! protocol sync loop.
 
 use super::*;
+use crate::merge_strategy::{MergeSide, MergeStrategyInput, materialize_strategy_output};
 use crate::protocol::{CatalogueAck, ContentExtent, LensOp, VersionBundle};
 use crate::protocol_limits::{
     commit_unit_limit_violation, validate_content_extents, validate_known_state_declaration,
     validate_shape_ast_size,
 };
 use crate::schema::LargeValueKind;
-use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE};
+use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE, no_text_merge_spec_hash};
 use crate::text_merge::{
     EventId as TextEventId, Run as PlainTextRun, TextEvent, TextEventGraph,
     TieBreak as TextTieBreak,
@@ -25,6 +26,11 @@ pub(super) struct CommitUnitParkMode {
     ingest_context: Option<CommitUnitIngestContext>,
     edge_authority_mergeable: bool,
     edge_accepted_mergeable: bool,
+}
+
+struct LargeValueMergeCell {
+    value: Value,
+    strategy: RecordedMergeStrategy,
 }
 
 impl<S> NodeState<S>
@@ -2403,7 +2409,8 @@ where
                     .ok_or(Error::MissingTransaction(*tx_id))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let cells = self.merge_cells_for_heads(&table_schema, &raw_heads, &row_versions_by_tx)?;
+        let (cells, recorded_strategy) =
+            self.merge_cells_for_heads(&table_schema, &raw_heads, &row_versions_by_tx)?;
         if cells.is_empty() {
             return Ok(());
         }
@@ -2420,21 +2427,11 @@ where
         if self.query_transaction(merge_tx_id)?.is_some() {
             return Ok(());
         }
-        let merge_large_value_kind = cells
-            .keys()
-            .find_map(|column| column_large_value_kind(&table_schema, column).ok());
         let mut merge_commit = MergeableCommit::new(table, row_uuid, made_at.physical_ms())
             .parents(parents)
             .cells(cells);
-        if let Some(kind) = merge_large_value_kind {
-            merge_commit = merge_commit.merge_strategy(RecordedMergeStrategy {
-                id: match kind {
-                    LargeValueKind::Text => "builtin.text-rle-v1",
-                    LargeValueKind::Blob => "builtin.large-value-oplog-v1",
-                }
-                .to_owned(),
-                version: 1,
-            });
+        if let Some(strategy) = recorded_strategy {
+            merge_commit = merge_commit.merge_strategy(strategy);
         }
         let merge_tx = self.commit_mergeable_at(merge_commit, made_at)?;
         let global_seq = self.clock.next_global_seq;
@@ -2454,20 +2451,24 @@ where
         table_schema: &TableSchema,
         heads: &[VersionRow],
         row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
-    ) -> Result<BTreeMap<String, Value>, Error> {
+    ) -> Result<(BTreeMap<String, Value>, Option<RecordedMergeStrategy>), Error> {
         let mut cells = BTreeMap::new();
+        let mut recorded_strategy = None;
         for column in &table_schema.columns {
             match table_schema.merge_strategy(&column.name) {
                 MergeStrategy::Lww => {
                     if column.large_value.is_some()
-                        && let Some(value) = self.merge_large_value_cell_for_heads(
+                        && let Some(merged) = self.merge_large_value_cell_for_heads(
                             table_schema,
                             &column.name,
                             heads,
                             row_versions_by_tx,
                         )?
                     {
-                        cells.insert(column.name.clone(), value);
+                        if recorded_strategy.is_none() {
+                            recorded_strategy = Some(merged.strategy);
+                        }
+                        cells.insert(column.name.clone(), merged.value);
                         continue;
                     }
                     let mut best: Option<(crate::time::TxTimeSortKey, Value)> = None;
@@ -2525,7 +2526,7 @@ where
                 }
             }
         }
-        Ok(cells)
+        Ok((cells, recorded_strategy))
     }
 
     fn merge_large_value_cell_for_heads(
@@ -2534,7 +2535,7 @@ where
         column: &str,
         heads: &[VersionRow],
         row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
-    ) -> Result<Option<Value>, Error> {
+    ) -> Result<Option<LargeValueMergeCell>, Error> {
         let column_heads = heads
             .iter()
             .filter(|version| version.cell(table_schema, column).transpose().is_some())
@@ -2605,7 +2606,14 @@ where
             column,
             ops,
         )?;
-        Ok(Some(Value::Bytes(text_oplog::encode(&ops))))
+        Ok(Some(LargeValueMergeCell {
+            value: Value::Bytes(text_oplog::encode(&ops)),
+            strategy: RecordedMergeStrategy {
+                id: "builtin.large-value-oplog-v1".to_owned(),
+                version: 1,
+                column_spec_hash: no_text_merge_spec_hash(),
+            },
+        }))
     }
 
     fn merge_text_value_cell_for_heads(
@@ -2614,7 +2622,7 @@ where
         column: &str,
         column_heads: Vec<TxId>,
         row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
-    ) -> Result<Option<Value>, Error> {
+    ) -> Result<Option<LargeValueMergeCell>, Error> {
         let keyed_column_heads = column_heads
             .into_iter()
             .map(|tx_id| {
@@ -2694,6 +2702,26 @@ where
         let merged = graph
             .merge_heads(root, &lca_value, &heads)
             .map_err(|_| Error::InvalidStoredValue("text merge graph walk failed"))?;
+        let mut recorded_strategy = RecordedMergeStrategy {
+            id: "builtin.text-rle-v1".to_owned(),
+            version: 1,
+            column_spec_hash: table_schema
+                .columns
+                .iter()
+                .find(|candidate| candidate.name == column)
+                .and_then(|column| column.text_merge_spec.as_ref())
+                .map_or_else(no_text_merge_spec_hash, |spec| spec.spec_hash()),
+        };
+        let merged = self.rung3_text_merge_if_triggered(
+            table_schema,
+            column,
+            &keyed_column_heads,
+            &lca_value,
+            lca,
+            row_versions_by_tx,
+            merged,
+            &mut recorded_strategy,
+        )?;
         let primary = self.large_value_primary_head(
             &keyed_column_heads
                 .iter()
@@ -2705,9 +2733,125 @@ where
             .ok_or(Error::MissingTransaction(primary))?;
         let primary_value =
             self.materialize_large_value_column(table_schema, primary_version, column)?;
-        Ok(Some(Value::Bytes(
-            materialized_text_op(primary_value.len(), &merged).encode(),
-        )))
+        Ok(Some(LargeValueMergeCell {
+            value: Value::Bytes(materialized_text_op(primary_value.len(), &merged).encode()),
+            strategy: recorded_strategy,
+        }))
+    }
+
+    fn rung3_text_merge_if_triggered(
+        &mut self,
+        table_schema: &TableSchema,
+        column: &str,
+        keyed_column_heads: &[(TxTimeSortKey, TxId)],
+        base: &[u8],
+        lca: Option<TxId>,
+        row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
+        rung2_merged: Vec<u8>,
+        recorded_strategy: &mut RecordedMergeStrategy,
+    ) -> Result<Vec<u8>, Error> {
+        let Some(column_schema) = table_schema
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+        else {
+            return Ok(rung2_merged);
+        };
+        let Some(spec) = column_schema.text_merge_spec.clone() else {
+            return Ok(rung2_merged);
+        };
+        if keyed_column_heads.len() != 2 {
+            return Ok(rung2_merged);
+        }
+        let Some(strategy) = self
+            .text_merge_strategies
+            .get(&(spec.strategy_id.clone(), spec.strategy_version))
+            .cloned()
+        else {
+            return Ok(rung2_merged);
+        };
+
+        let mut ordered_heads = keyed_column_heads
+            .iter()
+            .map(|(_, tx_id)| *tx_id)
+            .collect::<Vec<_>>();
+        ordered_heads.sort();
+        let left = self.merge_strategy_side(
+            table_schema,
+            column,
+            ordered_heads[0],
+            lca,
+            row_versions_by_tx,
+        )?;
+        let right = self.merge_strategy_side(
+            table_schema,
+            column,
+            ordered_heads[1],
+            lca,
+            row_versions_by_tx,
+        )?;
+        let input = MergeStrategyInput {
+            schema_version: self.catalogue.current_write_schema.schema,
+            table: table_schema.name.clone(),
+            column: column.to_owned(),
+            spec_hash: spec.spec_hash(),
+            spec,
+            base: base.to_vec(),
+            left,
+            right,
+        };
+        if !strategy.structural_proximity(&input) {
+            return Ok(rung2_merged);
+        }
+        let Ok(output) = strategy.merge(&input) else {
+            self.sync_metrics.rung3_text_merge_fallbacks = self
+                .sync_metrics
+                .rung3_text_merge_fallbacks
+                .saturating_add(1);
+            return Ok(rung2_merged);
+        };
+        if output.strategy_id != strategy.id() || output.strategy_version != strategy.version() {
+            self.sync_metrics.rung3_text_merge_fallbacks = self
+                .sync_metrics
+                .rung3_text_merge_fallbacks
+                .saturating_add(1);
+            return Ok(rung2_merged);
+        }
+        let Ok(materialized) = materialize_strategy_output(&input, &output) else {
+            self.sync_metrics.rung3_text_merge_fallbacks = self
+                .sync_metrics
+                .rung3_text_merge_fallbacks
+                .saturating_add(1);
+            return Ok(rung2_merged);
+        };
+        *recorded_strategy = RecordedMergeStrategy {
+            id: output.strategy_id,
+            version: output.strategy_version,
+            column_spec_hash: input.spec_hash,
+        };
+        Ok(materialized)
+    }
+
+    fn merge_strategy_side(
+        &mut self,
+        table_schema: &TableSchema,
+        column: &str,
+        head: TxId,
+        lca: Option<TxId>,
+        row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
+    ) -> Result<MergeSide, Error> {
+        let head_version = row_versions_by_tx
+            .get(&head)
+            .ok_or(Error::MissingTransaction(head))?;
+        Ok(MergeSide {
+            head,
+            materialized: self.materialize_large_value_column(
+                table_schema,
+                head_version,
+                column,
+            )?,
+            ops: self.plain_text_ops_since_lca(table_schema, column, head, lca)?,
+        })
     }
 
     fn large_value_lca(

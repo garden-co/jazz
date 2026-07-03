@@ -6,6 +6,7 @@
 //! are grounded in `jazz/README.md`.
 
 use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
+use crate::merge_strategy::ColumnSpecHash;
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
@@ -52,6 +53,8 @@ pub struct RecordedMergeStrategy {
     pub id: String,
     /// Strategy implementation version.
     pub version: u32,
+    /// Hash of the declared column merge spec in force.
+    pub column_spec_hash: ColumnSpecHash,
 }
 
 /// Deletion register event carried by a row version.

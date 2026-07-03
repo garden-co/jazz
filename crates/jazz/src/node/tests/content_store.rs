@@ -1,8 +1,10 @@
 use crate::ids::AuthorId;
 use crate::node::EdgeCacheClass;
 use crate::peer::PeerEvictionPins;
-use crate::schema::CONTENT_META_STORE;
-use crate::tx::TxId;
+use crate::schema::{CONTENT_META_STORE, TextMergeSpec};
+use crate::tx::{RecordedMergeStrategy, TxId};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
 fn content_store_appends_reads_isolates_and_survives_reopen() {
@@ -499,6 +501,21 @@ fn text_large_value_schema() -> JazzSchema {
     )])
 }
 
+fn preferred_text_large_value_schema() -> JazzSchema {
+    text_large_value_schema_with_strategy("test.prefer-longer")
+}
+
+fn text_large_value_schema_with_strategy(strategy_id: &str) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "docs",
+        [crate::schema::ColumnSchema::text("body").with_text_merge_spec(TextMergeSpec::new(
+            strategy_id,
+            1,
+            b"trigger".to_vec(),
+        ))],
+    )])
+}
+
 fn append_large_value_edits(
     node: &mut NodeState<RocksDbStorage>,
     row_uuid: RowUuid,
@@ -603,6 +620,181 @@ fn authority_merge_version_merges_concurrent_text_edits_and_records_strategy() {
 
     assert_eq!(left_first, Some(Value::Bytes(b"aLEFTRIGHTbc".to_vec())));
     assert_eq!(left_first, right_first);
+}
+
+#[test]
+fn authority_text_merge_dispatches_registered_rung3_strategy_and_records_spec_hash() {
+    let schema = preferred_text_large_value_schema();
+    let row_uuid = row(0x8a);
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(0x8b), schema.clone());
+    let (_left_dir, mut left_writer) = open_node_with_schema(node(0x8c), schema.clone());
+    let (_right_dir, mut right_writer) = open_node_with_schema(node(0x8d), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x8e), schema.clone());
+    let calls = Arc::new(AtomicUsize::new(0));
+    core.register_text_merge_strategy(Arc::new(
+        crate::merge_strategy::testing::PreferLongerStrategy::new(calls.clone()),
+    ));
+
+    let base_unit = commit_large_value_edit_unit(
+        &mut base_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+            .made_by(user(0xa1))
+            .insert(0, b"abc"),
+    );
+    apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
+
+    let left = commit_large_value_edit_unit(
+        &mut left_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+            .made_by(user(0xa1))
+            .insert(1, b"LEFT-LONG"),
+    );
+    let right = commit_large_value_edit_unit(
+        &mut right_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 21)
+            .made_by(user(0xa2))
+            .insert(1, b"R"),
+    );
+    apply_large_value_unit(&mut core, &left_writer, left);
+    apply_large_value_unit(&mut core, &right_writer, right);
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let merge = core
+        .query_all_versions()
+        .unwrap()
+        .into_iter()
+        .find(|version| {
+            version.row_uuid() == row_uuid
+                && core.version_tx_id(version).unwrap().node == node(0x8e)
+                && version.parents().len() == 2
+        })
+        .expect("core should create a strategy merge version");
+    assert_eq!(
+        core.materialize_large_value_column(&schema.tables[0], &merge, "body")
+            .unwrap(),
+        b"aLEFT-LONGbc".to_vec()
+    );
+    let merge_tx = core
+        .query_transaction(core.version_tx_id(&merge).unwrap())
+        .unwrap()
+        .expect("merge transaction should be recorded");
+    let strategy = merge_tx
+        .tx
+        .merge_strategy
+        .expect("text merge should record strategy");
+    let spec_hash = schema.tables[0].columns[0]
+        .text_merge_spec
+        .as_ref()
+        .unwrap()
+        .spec_hash();
+    assert_eq!(strategy.id, "test.prefer-longer");
+    assert_eq!(strategy.version, 1);
+    assert_eq!(strategy.column_spec_hash, spec_hash);
+}
+
+#[test]
+fn failing_rung3_text_strategy_falls_back_to_builtin_char_walk() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (materialized, strategy, fallbacks) = rung3_fallback_text_merge(
+        "test.failing",
+        Arc::new(crate::merge_strategy::testing::FailingStrategy::new(
+            calls.clone(),
+        )),
+        row(0x91),
+        node(0x95),
+    );
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fallbacks, 1);
+    assert_eq!(materialized, b"aLEFTRIGHTbc".to_vec());
+    assert_eq!(strategy.id, "builtin.text-rle-v1");
+    assert_eq!(strategy.version, 1);
+}
+
+#[test]
+fn mismatched_rung3_text_strategy_metadata_falls_back_to_builtin_char_walk() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (materialized, strategy, fallbacks) = rung3_fallback_text_merge(
+        "test.mismatched",
+        Arc::new(crate::merge_strategy::testing::MismatchedIdStrategy::new(
+            calls.clone(),
+        )),
+        row(0x92),
+        node(0x96),
+    );
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fallbacks, 1);
+    assert_eq!(materialized, b"aLEFTRIGHTbc".to_vec());
+    assert_eq!(strategy.id, "builtin.text-rle-v1");
+    assert_eq!(strategy.version, 1);
+}
+
+fn rung3_fallback_text_merge(
+    strategy_id: &str,
+    strategy_impl: Arc<dyn crate::merge_strategy::MergeStrategy>,
+    row_uuid: RowUuid,
+    core_node: NodeUuid,
+) -> (Vec<u8>, RecordedMergeStrategy, u64) {
+    let schema = text_large_value_schema_with_strategy(strategy_id);
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(0x93), schema.clone());
+    let (_left_dir, mut left_writer) = open_node_with_schema(node(0x94), schema.clone());
+    let (_right_dir, mut right_writer) = open_node_with_schema(node(0x97), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(core_node, schema.clone());
+    core.register_text_merge_strategy(strategy_impl);
+
+    let base_unit = commit_large_value_edit_unit(
+        &mut base_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+            .made_by(user(0xa1))
+            .insert(0, b"abc"),
+    );
+    apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
+
+    let left = commit_large_value_edit_unit(
+        &mut left_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+            .made_by(user(0xa1))
+            .insert(1, b"LEFT"),
+    );
+    let right = commit_large_value_edit_unit(
+        &mut right_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 21)
+            .made_by(user(0xa2))
+            .insert(1, b"RIGHT"),
+    );
+    apply_large_value_unit(&mut core, &left_writer, left);
+    apply_large_value_unit(&mut core, &right_writer, right);
+
+    let merge = core
+        .query_all_versions()
+        .unwrap()
+        .into_iter()
+        .find(|version| {
+            version.row_uuid() == row_uuid
+                && core.version_tx_id(version).unwrap().node == core_node
+                && version.parents().len() == 2
+        })
+        .expect("core should create a fallback merge version");
+    let materialized = core
+        .materialize_large_value_column(&schema.tables[0], &merge, "body")
+        .unwrap();
+    let merge_tx = core
+        .query_transaction(core.version_tx_id(&merge).unwrap())
+        .unwrap()
+        .expect("merge transaction should be recorded");
+    (
+        materialized,
+        merge_tx
+            .tx
+            .merge_strategy
+            .expect("fallback merge should record builtin strategy"),
+        core.sync_metrics().rung3_text_merge_fallbacks,
+    )
 }
 
 #[test]
@@ -867,6 +1059,10 @@ fn merged_concurrent_text_body(left_first: bool) -> Option<Value> {
         .expect("text merge should record strategy");
     assert_eq!(strategy.id, "builtin.text-rle-v1");
     assert_eq!(strategy.version, 1);
+    assert_eq!(
+        strategy.column_spec_hash,
+        crate::schema::no_text_merge_spec_hash()
+    );
 
     Some(Value::Bytes(
         core.materialize_large_value_column(&schema.tables[0], &merge, "body")
@@ -930,9 +1126,7 @@ fn large_value_extents(
         .filter_map(|version| {
             let table = source.table(version.table()).ok()?;
             let column = table.columns.first()?;
-            if column.large_value.is_none() {
-                return None;
-            }
+            column.large_value?;
             let Value::Bytes(payload) = version.cell_at(0)? else {
                 return None;
             };
