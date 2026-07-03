@@ -1429,9 +1429,17 @@ where
             self.write_global_current_update(&mut batch, stored, *global_seq);
         }
 
+        #[cfg(test)]
+        let current_update_versions = current_updates
+            .values()
+            .map(|(stored, global_seq)| (stored.clone(), *global_seq))
+            .collect::<Vec<_>>();
         self.database.commit_batch(batch)?;
         #[cfg(test)]
-        self.assert_merge_head_rows_match_history_for_test(&content_rows)?;
+        {
+            self.assert_merge_head_rows_match_history_for_test(&content_rows)?;
+            self.assert_global_current_updates_match_history_for_test(&current_update_versions)?;
+        }
         for bundle in bundles {
             self.invalidate_tx_version_tables_cache(bundle.tx.tx_id);
         }
@@ -1522,6 +1530,17 @@ where
                 self.write_global_current_update(&mut batch, version, global_seq);
             }
         }
+        #[cfg(test)]
+        let global_current_update_versions = stored
+            .global_seq
+            .map(|global_seq| {
+                global_current_updates
+                    .iter()
+                    .cloned()
+                    .map(|version| (version, global_seq))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if stored
             .global_seq
             .is_some_and(|global_seq| advanced_global_seqs.contains(&global_seq))
@@ -1550,6 +1569,9 @@ where
                 .map(|version| (version.table().to_owned(), version.row_uuid()))
                 .collect::<BTreeSet<_>>();
             self.assert_merge_head_rows_match_history_for_test(&rows)?;
+            self.assert_global_current_updates_match_history_for_test(
+                &global_current_update_versions,
+            )?;
         }
         if let Some(rejected_payload) = rejected_payload {
             let tx_id = rejected_payload.tx_id();
@@ -3275,6 +3297,170 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
+    fn recomputed_global_layer_winner_from_history_for_test(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<VersionRow>, Error> {
+        let mut winner = None::<(VersionRow, TxId, TxTime)>;
+        for version in self
+            .query_row_versions(table, row_uuid)?
+            .into_iter()
+            .filter(|version| version.layer() == layer)
+        {
+            let tx_id = self.version_tx_id(&version)?;
+            let Some(tx) = self.query_transaction(tx_id)? else {
+                continue;
+            };
+            if !matches!(tx.fate, Fate::Accepted) || tx.global_seq.is_none() {
+                continue;
+            }
+            let made_at = self.version_made_at(&version)?;
+            let previous = winner
+                .as_ref()
+                .map(|(version, tx_id, made_at)| (version, *tx_id, *made_at));
+            if version_wins_over_open_winner(&version, tx_id, made_at, previous) {
+                winner = Some((version, tx_id, made_at));
+            }
+        }
+        Ok(winner.map(|(version, _, _)| version))
+    }
+
+    #[cfg(test)]
+    fn assert_global_current_updates_match_history_for_test(
+        &mut self,
+        updates: &[(VersionRow, GlobalSeq)],
+    ) -> Result<(), Error> {
+        for (version, global_seq) in updates {
+            let Some(expected) = self.recomputed_global_layer_winner_from_history_for_test(
+                version.table(),
+                version.row_uuid(),
+                version.layer(),
+            )?
+            else {
+                panic!(
+                    "global-current update has no accepted history winner for {}/ {:?} {:?}",
+                    version.table(),
+                    version.row_uuid(),
+                    version.layer()
+                );
+            };
+            let expected_tx = self.version_tx_id(&expected)?;
+            let actual_tx = self.version_tx_id(version)?;
+            if expected_tx != actual_tx {
+                panic!(
+                    "global-current update diverged from history for {}/{:?} {:?}: expected winner {:?}, actual update {:?}",
+                    version.table(),
+                    version.row_uuid(),
+                    version.layer(),
+                    expected_tx,
+                    actual_tx
+                );
+            }
+            self.assert_global_current_row_matches_version_for_test(version, *global_seq)?;
+            self.assert_global_change_row_matches_version_for_test(version, *global_seq)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn assert_global_current_row_matches_version_for_test(
+        &mut self,
+        version: &VersionRow,
+        global_seq: GlobalSeq,
+    ) -> Result<(), Error> {
+        let table = self.table(version.table())?.clone();
+        let storage_tables = table.global_current_storage_tables();
+        let (current_table, current_schema, expected_values) = match version.layer() {
+            VersionLayer::Content => (
+                global_current_table_name(version.table()),
+                &storage_tables[0],
+                global_current_values(&table, version, Some(global_seq))?,
+            ),
+            VersionLayer::Deletion => (
+                register_global_current_table_name(version.table()),
+                &storage_tables[1],
+                register_global_current_values(version, Some(global_seq)),
+            ),
+        };
+        let rows = self
+            .database
+            .primary_key_scan_raw(&current_table, &[Value::Uuid(version.row_uuid().0)])?;
+        let actual = rows.first().map(|row| row.record().raw().to_vec());
+        let expected = owned_record_from_storage_values(current_schema, expected_values)?
+            .raw()
+            .to_vec();
+        if actual.as_deref() != Some(expected.as_slice()) {
+            panic!(
+                "global-current row diverged for {}/{:?} {:?}: expected {:?}, actual {:?}",
+                version.table(),
+                version.row_uuid(),
+                version.layer(),
+                expected,
+                actual
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn assert_global_change_row_matches_version_for_test(
+        &mut self,
+        version: &VersionRow,
+        global_seq: GlobalSeq,
+    ) -> Result<(), Error> {
+        let rows = self.database.primary_key_scan_raw(
+            "jazz_global_changes",
+            &[
+                Value::Bytes(version.table().as_bytes().to_vec()),
+                Value::Uuid(version.row_uuid().0),
+                Value::Bytes(version_layer_string(version.layer()).into_bytes()),
+                Value::U64(global_seq.0),
+            ],
+        )?;
+        let Some(row) = rows.first() else {
+            panic!(
+                "missing global-change row for {}/{:?} {:?} at {:?}",
+                version.table(),
+                version.row_uuid(),
+                version.layer(),
+                global_seq
+            );
+        };
+        let record = row.record();
+        let expected_deletion = version.deletion();
+        let actual_deletion =
+            nullable_value(record.get_idx(GlobalChangeRowRecord::FIELD__DELETION_IDX)?)?
+                .map(deletion_event_from_value)
+                .transpose()?;
+        let actual_tx = TxId::new(
+            TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?),
+            self.node_for_alias(NodeAlias(
+                record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?,
+            ))
+            .ok_or(Error::InvalidStoredValue(
+                "global-change tx node alias must exist",
+            ))?,
+        );
+        let expected_tx = self.version_tx_id(version)?;
+        if actual_tx != expected_tx || actual_deletion != expected_deletion {
+            panic!(
+                "global-change row diverged for {}/{:?} {:?} at {:?}: expected tx {:?} deletion {:?}, actual tx {:?} deletion {:?}",
+                version.table(),
+                version.row_uuid(),
+                version.layer(),
+                global_seq,
+                expected_tx,
+                expected_deletion,
+                actual_tx,
+                actual_deletion
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn write_global_current_update(
         &self,
         batch: &mut DatabaseBatch,
@@ -3628,6 +3814,21 @@ where
                 }
             }
         }
+        #[cfg(test)]
+        let pending_global_update_versions =
+            if update_current_indexes && matches!(fate, Fate::Accepted) {
+                global_seq
+                    .map(|global_seq| {
+                        pending_global_updates
+                            .values()
+                            .cloned()
+                            .map(|version| (version, global_seq))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
         for (parent, parent_alias) in &pending_edge_rows {
             let values = pending_edge_values(tx_node_alias, tx.tx_id, *parent_alias, *parent);
             if tx_already_known {
@@ -3644,6 +3845,9 @@ where
                 .map(|version| (version.table().to_owned(), version.row_uuid()))
                 .collect::<BTreeSet<_>>();
             self.assert_merge_head_rows_match_history_for_test(&rows)?;
+            self.assert_global_current_updates_match_history_for_test(
+                &pending_global_update_versions,
+            )?;
         }
         self.invalidate_tx_version_tables_cache(tx.tx_id);
         if matches!(fate, Fate::Accepted) {
