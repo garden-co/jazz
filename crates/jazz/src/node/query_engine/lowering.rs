@@ -1575,6 +1575,11 @@ fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) 
                 seen_slice = true;
             }
             LinearStep::Aggregate { .. } => {
+                if seen_order || seen_slice {
+                    gaps.push(UnsupportedReason::Operator(
+                        "aggregate over ordered/windowed input is not lowered yet".to_owned(),
+                    ));
+                }
                 seen_aggregate = true;
             }
         }
