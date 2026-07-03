@@ -2465,6 +2465,17 @@ where
             .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust)
     }
 
+    /// Accept an edge-terminated subscriber with session claims.
+    pub fn accept_edge_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node
+            .accept_edge_subscriber_with_claims(transport, identity, claims)
+    }
+
     /// Accept a reconnecting subscriber, resuming from a previous cursor.
     pub fn accept_subscriber_with_resume(
         &self,
@@ -2748,6 +2759,23 @@ where
         self.accept_subscriber_with_resume_and_trust(transport, identity, trust, None)
     }
 
+    /// Accept an edge-terminated subscriber with explicit auth claims.
+    pub fn accept_edge_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node.borrow_mut().set_session_claims(identity, claims);
+        self.accept_subscriber_with_peer(
+            transport,
+            identity,
+            CommitUnitTrust::Session,
+            None,
+            PeerState::edge_client(identity),
+        )
+    }
+
     /// Accept a reconnecting subscriber, resuming from a previous cursor.
     pub fn accept_subscriber_with_resume(
         &self,
@@ -2770,14 +2798,24 @@ where
         trust: CommitUnitTrust,
         cursor: Option<ResumeCursor>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
-        let peer = cursor
-            .map(|cursor| cursor.peer)
-            .unwrap_or_else(|| match trust {
-                CommitUnitTrust::TrustedBackend => {
-                    PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
-                }
-                CommitUnitTrust::Session => PeerState::for_author(identity),
-            });
+        let peer = match trust {
+            CommitUnitTrust::TrustedBackend => {
+                PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
+            }
+            CommitUnitTrust::Session => PeerState::for_author(identity),
+        };
+        self.accept_subscriber_with_peer(transport, identity, trust, cursor, peer)
+    }
+
+    fn accept_subscriber_with_peer(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        trust: CommitUnitTrust,
+        cursor: Option<ResumeCursor>,
+        peer: PeerState,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        let peer = cursor.map(|cursor| cursor.peer).unwrap_or(peer);
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             node: Rc::clone(&self.node),

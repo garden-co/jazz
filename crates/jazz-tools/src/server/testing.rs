@@ -13,6 +13,7 @@ use crate::AppContext;
 use crate::AppId;
 use crate::middleware::AuthConfig;
 use crate::public_schema::Schema;
+use jazz::node::EdgeCacheBudget;
 
 use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use tokio::sync::oneshot;
@@ -34,6 +35,7 @@ pub struct JazzServerBuilder {
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     upstream_url: Option<String>,
+    edge_cache_budget: Option<EdgeCacheBudget>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
 }
@@ -100,6 +102,11 @@ impl JazzServerBuilder {
 
     pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
         self.upstream_url = Some(upstream_url.into());
+        self
+    }
+
+    pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
+        self.edge_cache_budget = Some(budget);
         self
     }
 
@@ -256,6 +263,7 @@ impl JazzServer {
             admin_secret,
             backend_secret,
             upstream_url,
+            edge_cache_budget,
             jwks_url,
             auth_clock,
         } = builder;
@@ -292,6 +300,9 @@ impl JazzServer {
         let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         if let Some(upstream_url) = upstream_url {
             server_builder = server_builder.with_upstream_url(upstream_url);
+        }
+        if let Some(edge_cache_budget) = edge_cache_budget {
+            server_builder = server_builder.with_edge_cache_budget(edge_cache_budget);
         }
         let mut server_builder = apply_storage_mode(
             server_builder,

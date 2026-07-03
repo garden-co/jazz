@@ -665,6 +665,11 @@ where
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.inner.column_family_names()
     }
+
+    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+        let physical_cf = self.layout.map_cf(cf).physical_cf.to_owned();
+        self.inner.approximate_class_bytes(&physical_cf)
+    }
 }
 
 /// Storage that can be reconstructed with an expanded table/column-family set.
