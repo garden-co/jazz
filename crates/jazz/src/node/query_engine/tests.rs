@@ -362,14 +362,14 @@ fn production_output_request(
                 projection: PayloadProjection::ShapeDefault,
                 large_values: Vec::new(),
             }),
-            facts: has_relation_paths
-                .then(|| {
-                    BTreeSet::from([
-                        ProgramFactKey::RelationEdges,
-                        ProgramFactKey::PathCorrelationCoverage,
-                    ])
-                })
-                .unwrap_or_default(),
+            facts: if has_relation_paths {
+                BTreeSet::from([
+                    ProgramFactKey::RelationEdges,
+                    ProgramFactKey::PathCorrelationCoverage,
+                ])
+            } else {
+                BTreeSet::new()
+            },
         },
         ProductionOutputProfile::MaintainedView => RowSetOutputRequest {
             app_rows: None,
