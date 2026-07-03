@@ -3,8 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use jazz::db::WireTransportAdapter;
+use jazz::ids::AuthorId;
+use jazz::node::EdgeCacheBudget;
 use jazz::schema::JazzSchema;
-use jazz_server::StorageConfig;
+use jazz_server::{NodeRole, StorageConfig};
 use tracing::info;
 
 use crate::AppId;
@@ -15,6 +18,7 @@ use crate::middleware::auth::{
 use crate::public_schema::Schema;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use crate::server::CatalogueRocksDbStorage;
+use crate::server::core_websocket_transport::WebSocketTransport;
 use crate::server::routes;
 use crate::server::{
     CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology, StoredCatalogue,
@@ -70,6 +74,7 @@ pub struct ServerBuilder {
     storage_backend: StorageBackend,
     core_server_shell_schema: Option<JazzSchema>,
     upstream_url: Option<String>,
+    edge_cache_budget: Option<EdgeCacheBudget>,
     shutdown_timeout: Duration,
 }
 
@@ -87,6 +92,7 @@ impl ServerBuilder {
             },
             core_server_shell_schema: None,
             upstream_url: None,
+            edge_cache_budget: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         }
     }
@@ -103,6 +109,11 @@ impl ServerBuilder {
 
     pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
         self.upstream_url = Some(upstream_url.into());
+        self
+    }
+
+    pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
+        self.edge_cache_budget = Some(budget);
         self
     }
 
@@ -151,7 +162,9 @@ impl ServerBuilder {
         let core_server_shell = self.build_core_server_shell(
             latest_catalogue_schema,
             core_server_shell_storage_config.clone(),
+            topology,
         )?;
+        let edge_upstream_shell = core_server_shell.clone();
         let core_server_shell_storage_config = core_server_shell_storage_config.ok();
 
         let state = Arc::new(ServerState {
@@ -167,6 +180,21 @@ impl ServerBuilder {
             core_server_shell_storage_config,
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
+
+        if let (ServerTopology::Edge, Some(upstream_url), Some(shell), Some(admin_secret)) = (
+            topology,
+            self.upstream_url.clone(),
+            edge_upstream_shell,
+            state.auth_config.admin_secret.clone(),
+        ) {
+            spawn_edge_upstream_connector(
+                state.clone(),
+                shell,
+                upstream_url,
+                self.app_id,
+                admin_secret,
+            );
+        }
 
         let app = routes::create_router(state.clone());
         Ok(BuiltServer { state, app })
@@ -207,13 +235,20 @@ impl ServerBuilder {
         &self,
         latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
+        topology: ServerTopology,
     ) -> Result<Option<crate::server::core_server_shell::ServerShellHandle>, String> {
+        let role = match topology {
+            ServerTopology::Core => NodeRole::Core,
+            ServerTopology::Edge => NodeRole::Edge,
+        };
         if let Some(schema) = &self.core_server_shell_schema {
             let storage_config = storage_config?;
             return Ok(Some(
-                crate::server::core_server_shell::ServerShellHandle::start_with_storage(
+                crate::server::core_server_shell::ServerShellHandle::start_with_storage_config(
                     schema.clone(),
                     storage_config,
+                    role,
+                    self.edge_cache_budget,
                 )?,
             ));
         }
@@ -229,9 +264,11 @@ impl ServerBuilder {
         let schema = crate::server::public_schema_convert::convert_public_schema(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
-            crate::server::core_server_shell::ServerShellHandle::start_with_storage(
+            crate::server::core_server_shell::ServerShellHandle::start_with_storage_config(
                 schema,
                 storage_config,
+                role,
+                self.edge_cache_budget,
             )?,
         ))
     }
@@ -337,6 +374,53 @@ impl ServerBuilder {
 #[cfg(test)]
 fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
     schema.map(|_| "main".to_string()).into_iter().collect()
+}
+
+fn spawn_edge_upstream_connector(
+    state: Arc<ServerState>,
+    shell: crate::server::core_server_shell::ServerShellHandle,
+    upstream_url: String,
+    app_id: AppId,
+    admin_secret: String,
+) {
+    tokio::spawn(async move {
+        let retry_delay = Duration::from_millis(100);
+        loop {
+            if state.shutdown.is_shutting_down() {
+                return;
+            }
+            let wake_shell = shell.clone();
+            let wake = Arc::new(move || wake_shell.notify_activity());
+            let auth = crate::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some(admin_secret.clone()),
+                ..Default::default()
+            };
+            match WebSocketTransport::connect_with_wake(
+                &upstream_url,
+                app_id,
+                AuthorId::SYSTEM,
+                auth,
+                wake,
+            )
+            .await
+            {
+                Ok(transport) => {
+                    if shell
+                        .connect_upstream(Box::new(WireTransportAdapter::current(transport)))
+                        .await
+                        .is_ok()
+                    {
+                        shell.notify_activity();
+                        return;
+                    }
+                }
+                Err(error) => {
+                    info!("edge upstream connection pending: {}", error);
+                }
+            }
+            tokio::time::sleep(retry_delay).await;
+        }
+    });
 }
 
 async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {

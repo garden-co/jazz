@@ -212,6 +212,10 @@ required-features = ["test-utils"]
 name = "text_document_merge"
 required-features = ["test-utils"]
 
+[[test]]
+name = "edge_server_mode"
+required-features = ["test"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]

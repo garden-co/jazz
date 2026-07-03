@@ -2,7 +2,6 @@ use crate::ids::AuthorId;
 use crate::json_merge::{
     JsonMergeStrategy, STRATEGY_ID as JSON_STRATEGY_ID, STRATEGY_VERSION as JSON_STRATEGY_VERSION,
 };
-use crate::groove::storage::MemoryStorage;
 use crate::node::{EdgeCacheBudget, EdgeCacheClass};
 use crate::peer::PeerEvictionPins;
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
