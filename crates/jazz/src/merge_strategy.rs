@@ -1,4 +1,4 @@
-//! Shared rung-3 text merge strategy interface.
+//! Shared rung-3 text merge strategy interface and test harness.
 //!
 //! Strategies are deliberately outside schema lowering, storage encoding, and
 //! sync protocol details. The merge creation path gives them materialized text
@@ -70,7 +70,7 @@ pub struct MergeStrategyOutput {
     pub strategy_version: u32,
 }
 
-/// Shared deterministic strategy contract for text formats.
+/// Deterministic rung-3 strategy contract for declared text formats.
 ///
 /// Implementations must be deterministic: the same input, including the same
 /// side ordering/tie-breaks, must produce the same output. Strategy failures
@@ -85,7 +85,7 @@ pub trait MergeStrategy: Send + Sync {
     /// Strategy implementation version.
     fn version(&self) -> u32;
 
-    /// Conservative structural-proximity hook.
+    /// Conservative structural-proximity hook for deciding whether rung 3 runs.
     ///
     /// Returning `false` keeps the rung-2 char-walk result. Returning `true`
     /// allows the strategy to produce a replacement op.
@@ -93,7 +93,7 @@ pub trait MergeStrategy: Send + Sync {
         false
     }
 
-    /// Canonicalize a whole authored value before storage.
+    /// Canonicalize a whole authored value before op encoding and storage.
     ///
     /// Returning `Ok(None)` leaves bytes exactly as authored; this is also what
     /// happens when a node lacks a registered strategy for the declared spec.
@@ -125,9 +125,21 @@ pub fn materialize_strategy_output(
 /// Test support for strategy intention cases and toy implementations.
 pub mod testing {
     use super::*;
+    use crate::ids::NodeUuid;
     use crate::text_merge::diff;
+    use crate::time::TxTime;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Stable schema version used by strategy intention tests.
+    pub fn intention_schema_version() -> SchemaVersionId {
+        SchemaVersionId(uuid::Uuid::from_u128(1))
+    }
+
+    /// Stable TxId constructor used by strategy intention tests.
+    pub fn intention_tx(time: u64, node: u128) -> TxId {
+        TxId::new(TxTime(time), NodeUuid(uuid::Uuid::from_u128(node)))
+    }
 
     /// Expected result for a strategy intention test.
     pub enum Expected {
@@ -184,6 +196,30 @@ pub mod testing {
             Expected::Property(property) => assert!(property(&materialized)),
         }
         Ok(())
+    }
+
+    /// Run an exact string-output intention case with the standard test clock.
+    pub fn run_exact_intention_case<S: MergeStrategy>(
+        strategy: &S,
+        base: &str,
+        left: &str,
+        right: &str,
+        spec: TextMergeSpec,
+        expected: &str,
+    ) -> Result<(), TextMergeError> {
+        run_intention_case(
+            strategy,
+            IntentionCase {
+                base: base.as_bytes().to_vec(),
+                side_a: left.as_bytes().to_vec(),
+                side_b: right.as_bytes().to_vec(),
+                spec,
+                expected: Expected::Exact(expected.as_bytes().to_vec()),
+            },
+            intention_schema_version(),
+            intention_tx(1, 1),
+            intention_tx(2, 2),
+        )
     }
 
     /// Test-only strategy that chooses the longer side, with TxId tie-break.
@@ -376,15 +412,9 @@ pub mod testing {
                 spec,
                 expected: Expected::Exact(b"abc-long".to_vec()),
             },
-            SchemaVersionId(uuid::Uuid::from_u128(1)),
-            TxId::new(
-                crate::time::TxTime(1),
-                crate::ids::NodeUuid(uuid::Uuid::from_u128(1)),
-            ),
-            TxId::new(
-                crate::time::TxTime(2),
-                crate::ids::NodeUuid(uuid::Uuid::from_u128(2)),
-            ),
+            intention_schema_version(),
+            intention_tx(1, 1),
+            intention_tx(2, 2),
         )
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);

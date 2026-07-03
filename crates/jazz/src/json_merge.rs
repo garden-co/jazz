@@ -1,8 +1,10 @@
-//! JSON document rung-3 merge strategy.
+//! Built-in JSON document rung-3 merge strategy.
 //!
 //! The v1 strategy canonicalizes whole authored JSON values by sorting object
 //! keys and emitting compact JSON. Text-at-path merges use a string-local diff
-//! rather than projecting document-level ops into substring ranges.
+//! rather than projecting document-level ops into substring ranges. Op-stream
+//! edits on format-declared columns and N-head strategy inputs are staging
+//! limitations documented on [`crate::merge_strategy::MergeStrategy`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,10 +16,10 @@ use crate::merge_strategy::{
 };
 use crate::text_merge::{TextMergeError, TieBreak, diff, merge_concurrent_ops};
 
-/// Stable strategy id for the built-in JSON document strategy.
-pub const JSON_MERGE_STRATEGY_ID: &str = "builtin.json-document-v1";
-/// Current implementation version for [`JsonMergeStrategy`].
-pub const JSON_MERGE_STRATEGY_VERSION: u32 = 1;
+/// Stable id for the built-in JSON document strategy.
+pub const STRATEGY_ID: &str = "builtin.json-document-v1";
+/// Current JSON document strategy version.
+pub const STRATEGY_VERSION: u32 = 1;
 
 /// Built-in JSON document strategy.
 #[derive(Clone, Debug, Default)]
@@ -41,11 +43,11 @@ struct JsonMergeConfig {
 
 impl MergeStrategy for JsonMergeStrategy {
     fn id(&self) -> &str {
-        JSON_MERGE_STRATEGY_ID
+        STRATEGY_ID
     }
 
     fn version(&self) -> u32 {
-        JSON_MERGE_STRATEGY_VERSION
+        STRATEGY_VERSION
     }
 
     fn canonicalize(
@@ -399,11 +401,8 @@ fn write_canonical_json(value: &Value, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{NodeUuid, SchemaVersionId};
-    use crate::merge_strategy::testing::{Expected, IntentionCase, run_intention_case};
+    use crate::merge_strategy::testing::run_exact_intention_case;
     use crate::schema::TextMergeSpec;
-    use crate::time::TxTime;
-    use crate::tx::TxId;
 
     fn spec(paths: &[(&str, &str)]) -> TextMergeSpec {
         let paths = paths
@@ -411,29 +410,11 @@ mod tests {
             .map(|(path, kind)| ((*path).to_owned(), Value::String((*kind).to_owned())))
             .collect::<Map<_, _>>();
         let config = Value::Object(Map::from_iter([("paths".to_owned(), Value::Object(paths))]));
-        TextMergeSpec::new(
-            JSON_MERGE_STRATEGY_ID,
-            JSON_MERGE_STRATEGY_VERSION,
-            canonical_json_bytes(&config),
-        )
+        TextMergeSpec::new(STRATEGY_ID, STRATEGY_VERSION, canonical_json_bytes(&config))
     }
 
     fn run(base: &str, left: &str, right: &str, spec: TextMergeSpec, expected: &str) {
-        let strategy = JsonMergeStrategy;
-        run_intention_case(
-            &strategy,
-            IntentionCase {
-                base: base.as_bytes().to_vec(),
-                side_a: left.as_bytes().to_vec(),
-                side_b: right.as_bytes().to_vec(),
-                spec,
-                expected: Expected::Exact(expected.as_bytes().to_vec()),
-            },
-            SchemaVersionId(uuid::Uuid::from_u128(1)),
-            TxId::new(TxTime(1), NodeUuid(uuid::Uuid::from_u128(1))),
-            TxId::new(TxTime(2), NodeUuid(uuid::Uuid::from_u128(2))),
-        )
-        .unwrap();
+        run_exact_intention_case(&JsonMergeStrategy, base, left, right, spec, expected).unwrap();
     }
 
     #[test]
