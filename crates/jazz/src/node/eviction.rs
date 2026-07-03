@@ -1,4 +1,4 @@
-//! Edge cache eviction classification and manual cold-state eviction.
+//! Edge cache eviction classification and cold-state eviction.
 
 use std::collections::BTreeSet;
 
@@ -10,6 +10,9 @@ use crate::schema::{CONTENT_CHECKPOINTS_STORE, CONTENT_EXTENTS_STORE, CONTENT_ME
 use crate::tx::{DurabilityTier, Fate, TxId};
 
 use super::*;
+
+const EDGE_CACHE_LOW_WATER_NUMERATOR: u64 = 9;
+const EDGE_CACHE_LOW_WATER_DENOMINATOR: u64 = 10;
 
 /// Conservative edge-cache classification for cached state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +44,48 @@ pub struct EvictColdReport {
     pub deferred_edge_fate_txs_pinned: usize,
     /// Number of referenced scope subscriptions observed and preserved.
     pub referenced_scope_subscriptions_pinned: usize,
+}
+
+/// Optional edge-cache byte budget.
+///
+/// When absent, automatic edge eviction is disabled and the node behaves as it
+/// did before budgeted eviction existed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EdgeCacheBudget {
+    /// High-water byte budget. Eviction runs only when metered bytes exceed it.
+    pub max_bytes: u64,
+}
+
+impl EdgeCacheBudget {
+    /// Construct a byte budget that triggers eviction above `max_bytes`.
+    pub fn new(max_bytes: u64) -> Self {
+        Self { max_bytes }
+    }
+
+    fn low_water_bytes(self) -> u64 {
+        self.max_bytes
+            .saturating_mul(EDGE_CACHE_LOW_WATER_NUMERATOR)
+            / EDGE_CACHE_LOW_WATER_DENOMINATOR
+    }
+}
+
+/// Report from one budget-triggered edge-cache eviction pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EdgeCacheBudgetReport {
+    /// Metered bytes before eviction.
+    pub before_bytes: u64,
+    /// Metered bytes after eviction.
+    pub after_bytes: u64,
+    /// Hysteresis low-water target for the pass.
+    pub low_water_bytes: u64,
+    /// Entries removed or preserved during the pass.
+    pub evicted: EvictColdReport,
+}
+
+#[derive(Clone)]
+struct EvictableRowVersion {
+    tx_id: TxId,
+    version: VersionRow,
 }
 
 impl<S> NodeState<S>
@@ -78,6 +123,50 @@ where
     /// large-value metadata, fate-pending rows, peer-deferred edge fates,
     /// referenced permission scopes, and all parked families.
     pub fn evict_cold(&mut self, peer_pins: &PeerEvictionPins) -> Result<EvictColdReport, Error> {
+        self.evict_cold_inner(peer_pins, None)
+            .map(|report| report.evicted)
+    }
+
+    /// Enforce an optional byte budget for edge-cache state.
+    ///
+    /// Returns `Ok(None)` when the backend cannot meter all relevant storage
+    /// classes or when the cache is already at or below the high-water budget.
+    pub fn enforce_edge_cache_budget(
+        &mut self,
+        peer_pins: &PeerEvictionPins,
+        budget: EdgeCacheBudget,
+    ) -> Result<Option<EdgeCacheBudgetReport>, Error> {
+        let Some(before_bytes) = self.edge_cache_metered_bytes()? else {
+            return Ok(None);
+        };
+        if before_bytes <= budget.max_bytes {
+            return Ok(None);
+        }
+        let mut report = self.evict_cold_inner(peer_pins, Some(budget.low_water_bytes()))?;
+        report.before_bytes = before_bytes;
+        report.after_bytes = self
+            .edge_cache_metered_bytes()?
+            .unwrap_or(report.after_bytes);
+        Ok(Some(report))
+    }
+
+    /// Return metered edge-cache bytes, if every relevant class can be metered.
+    pub fn edge_cache_metered_bytes(&mut self) -> Result<Option<u64>, Error> {
+        let mut bytes = 0_u64;
+        for cf in self.edge_cache_metered_column_families()? {
+            let Some(next) = self.database.approximate_class_bytes(&cf)? else {
+                return Ok(None);
+            };
+            bytes = bytes.saturating_add(next);
+        }
+        Ok(Some(bytes))
+    }
+
+    fn evict_cold_inner(
+        &mut self,
+        peer_pins: &PeerEvictionPins,
+        low_water_bytes: Option<u64>,
+    ) -> Result<EdgeCacheBudgetReport, Error> {
         let mut report = EvictColdReport {
             parked_families_pinned: self.parking.parked_commit_units.len()
                 + self.parking.parked_catalogue_commit_units.len()
@@ -87,34 +176,29 @@ where
             ..EvictColdReport::default()
         };
 
+        let before_bytes = self.edge_cache_metered_bytes()?.unwrap_or(0);
         report.content_meta_entries_pinned = self.direct_store_entry_count(CONTENT_META_STORE)?;
-        report.content_extent_entries = self.delete_direct_store_entries(CONTENT_EXTENTS_STORE)?;
-        report.content_checkpoint_entries =
-            self.delete_direct_store_entries(CONTENT_CHECKPOINTS_STORE)?;
 
-        let mut seen_txs = BTreeSet::new();
-        let mut batch = self.database.open_batch();
+        let mut remaining_bytes = before_bytes;
+        if low_water_bytes.is_none_or(|low_water| remaining_bytes > low_water) {
+            report.content_extent_entries =
+                self.delete_direct_store_entries(CONTENT_EXTENTS_STORE)?;
+            report.content_checkpoint_entries =
+                self.delete_direct_store_entries(CONTENT_CHECKPOINTS_STORE)?;
+            remaining_bytes = self.edge_cache_metered_bytes()?.unwrap_or(remaining_bytes);
+        }
+
+        let mut seen_pinned_txs = BTreeSet::new();
+        let mut evictable = Vec::new();
         for table in self.catalogue.schema.tables.clone() {
             for version in self.query_table_versions(&table.name)? {
                 let tx_id = self.version_tx_id(&version)?;
                 match self.classify_row_version_for_eviction(tx_id, peer_pins)? {
                     EdgeCacheClass::Evictable => {
-                        report.row_versions_evictable += 1;
-                        let schema_version = self
-                            .schema_version_for_alias(version.schema_version_alias())
-                            .ok_or(Error::InvalidStoredValue("version schema alias must exist"))?;
-                        batch.delete(
-                            version_storage_table_name_for_schema(
-                                version.table(),
-                                version.layer(),
-                                schema_version,
-                                self.catalogue.current_schema_version_id,
-                            ),
-                            history_primary_key(&version),
-                        );
+                        evictable.push(EvictableRowVersion { tx_id, version })
                     }
                     EdgeCacheClass::Pinned => {
-                        if seen_txs.insert(tx_id) {
+                        if seen_pinned_txs.insert(tx_id) {
                             report.row_versions_pinned += 1;
                             if self
                                 .query_transaction(tx_id)?
@@ -127,7 +211,37 @@ where
                 }
             }
         }
-        self.database.commit_batch(batch)?;
+        evictable.sort_by_key(|candidate| candidate.tx_id);
+
+        let mut batch = self.database.open_batch();
+        let mut batch_deletes = 0_usize;
+        for candidate in evictable {
+            if low_water_bytes.is_some_and(|low_water| remaining_bytes <= low_water) {
+                break;
+            }
+            report.row_versions_evictable += 1;
+            let schema_version = self
+                .schema_version_for_alias(candidate.version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue("version schema alias must exist"))?;
+            batch.delete(
+                version_storage_table_name_for_schema(
+                    candidate.version.table(),
+                    candidate.version.layer(),
+                    schema_version,
+                    self.catalogue.current_schema_version_id,
+                ),
+                history_primary_key(&candidate.version),
+            );
+            batch_deletes += 1;
+            if low_water_bytes.is_some() {
+                self.database.commit_batch(batch)?;
+                remaining_bytes = self.edge_cache_metered_bytes()?.unwrap_or(remaining_bytes);
+                batch = self.database.open_batch();
+            }
+        }
+        if batch_deletes > 0 && low_water_bytes.is_none() {
+            self.database.commit_batch(batch)?;
+        }
         if report.row_versions_evictable > 0 {
             // INV-SYNC-27: once local row-version bodies are removed, no
             // persisted fast known-state cursor may survive. This coarse
@@ -136,7 +250,34 @@ where
             self.clear_all_known_state_facts()?;
         }
 
-        Ok(report)
+        let after_bytes = self.edge_cache_metered_bytes()?.unwrap_or(remaining_bytes);
+        Ok(EdgeCacheBudgetReport {
+            before_bytes,
+            after_bytes,
+            low_water_bytes: low_water_bytes.unwrap_or(0),
+            evicted: report,
+        })
+    }
+
+    fn edge_cache_metered_column_families(&mut self) -> Result<Vec<String>, Error> {
+        let mut families = BTreeSet::from([
+            CONTENT_EXTENTS_STORE.to_owned(),
+            CONTENT_CHECKPOINTS_STORE.to_owned(),
+        ]);
+        for table in self.catalogue.schema.tables.clone() {
+            for version in self.query_table_versions(&table.name)? {
+                let schema_version = self
+                    .schema_version_for_alias(version.schema_version_alias())
+                    .ok_or(Error::InvalidStoredValue("version schema alias must exist"))?;
+                families.insert(version_storage_table_name_for_schema(
+                    version.table(),
+                    version.layer(),
+                    schema_version,
+                    self.catalogue.current_schema_version_id,
+                ));
+            }
+        }
+        Ok(families.into_iter().collect())
     }
 
     fn direct_store_entry_count(&self, store: &str) -> Result<usize, Error> {

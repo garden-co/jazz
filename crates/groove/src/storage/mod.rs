@@ -185,6 +185,15 @@ pub trait OrderedKvStorage {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error>;
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error>;
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error>;
+    /// Return approximate live bytes for one storage class/column family when
+    /// the backend can expose them cheaply.
+    ///
+    /// Backends that cannot meter a family return `Ok(None)`, allowing higher
+    /// layers to leave byte-budget features disabled rather than relying on
+    /// invented accounting.
+    fn approximate_class_bytes(&self, _cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+        Ok(None)
+    }
     fn scan_range(
         &self,
         cf: &ColumnFamilyName,
@@ -1471,6 +1480,21 @@ mod tests {
         storage.set("records", b"a", b"one").unwrap();
 
         assert_eq!(storage.get("records", b"a").unwrap(), Some(b"one".to_vec()));
+    }
+
+    #[test]
+    fn rocksdb_approximate_class_bytes_reports_populated_family() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+
+        storage.set("records", b"a", b"one").unwrap();
+
+        assert!(
+            storage
+                .approximate_class_bytes("records")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

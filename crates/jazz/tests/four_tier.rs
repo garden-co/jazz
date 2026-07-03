@@ -240,6 +240,16 @@ fn rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
         .collect()
 }
 
+fn edge_rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
+    let schema = schema();
+    let table = &schema.tables[0];
+    node.current_rows("todos", DurabilityTier::Edge)
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.row_uuid(), row.cell(table, "title").expect("title")))
+        .collect()
+}
+
 fn subscription_rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
     let schema = schema();
     let table = &schema.tables[0];
@@ -863,6 +873,171 @@ fn edge_releases_scope_subscription_after_last_deferred_unit_resolves() {
     assert_eq!(updates.len(), 2);
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 0);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 0);
+}
+
+#[test]
+fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
+    let schema = read_write_policy_schema();
+    let client_author = AuthorId::from_bytes([7; 16]);
+
+    let (_client_dir, mut client) = open_node(node(1), schema.clone());
+    let (edge_dir, mut edge) = open_node(node(3), schema.clone());
+    let mut edge_to_client = PeerState::edge_client(client_author);
+
+    let row_uuid = row(26);
+    let (tx_id, unit) = commit(
+        &mut client,
+        row_uuid,
+        10,
+        "redelivered after edge restart",
+        client_author,
+        [],
+    );
+    let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
+        panic!("expected commit unit");
+    };
+
+    assert!(
+        edge_to_client
+            .ingest_edge_mergeable_commit_unit(
+                &mut edge,
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+            )
+            .unwrap()
+            .is_empty(),
+        "edge must defer until the permission scope settles"
+    );
+    assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
+    assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
+    assert_eq!(edge.transaction_state(tx_id).unwrap().0, Fate::Pending);
+    drop(edge);
+    drop(edge_to_client);
+
+    let mut edge = reopen_node(&edge_dir, node(3), schema.clone());
+    let edge_to_client = PeerState::edge_client(client_author);
+    assert_eq!(
+        edge_to_client.deferred_edge_fate_count(),
+        0,
+        "deferred edge-fate gates are in-memory and must not survive restart"
+    );
+    assert_eq!(
+        edge_to_client.edge_scope_subscription_count(),
+        0,
+        "permission-scope gate refs are in-memory and must not survive restart"
+    );
+    let scope_key = permission_scope_key(&schema, "todos", client_author);
+    assert!(
+        edge_to_client.subscription_result_sets(scope_key).is_none(),
+        "scope subscription result state must not survive through a fresh peer after restart"
+    );
+    assert_eq!(
+        edge.transaction_state(tx_id).unwrap().0,
+        Fate::Pending,
+        "the pending relay history survives restart, but not the in-memory gate"
+    );
+
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected redelivered commit unit");
+    };
+    let mut redelivered_edge_to_client = PeerState::edge_client(client_author);
+    assert!(
+        redelivered_edge_to_client
+            .ingest_edge_mergeable_commit_unit(
+                &mut edge,
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+            )
+            .unwrap()
+            .is_empty(),
+        "redelivered unit reopens the permission-scope gate after restart"
+    );
+    let [fate] = redelivered_edge_to_client
+        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: None,
+            durability: Some(DurabilityTier::Edge),
+        }
+    );
+    assert_eq!(
+        edge.transaction_state(tx_id).unwrap(),
+        (Fate::Accepted, None, DurabilityTier::Edge)
+    );
+    assert_eq!(
+        edge_rows(&mut edge),
+        vec![(
+            row_uuid,
+            Value::String("redelivered after edge restart".to_owned())
+        )]
+    );
+}
+
+#[test]
+fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([7; 16]);
+
+    let (_client_dir, mut client) = open_node(node(1), schema.clone());
+    let (edge_dir, mut edge) = open_node(node(3), schema.clone());
+    let mut edge_to_client = PeerState::edge_client(client_author);
+
+    let row_uuid = row(27);
+    let (tx_id, unit) = commit(
+        &mut client,
+        row_uuid,
+        10,
+        "accepted before edge restart",
+        client_author,
+        [],
+    );
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+
+    let [fate] = edge_to_client
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: None,
+            durability: Some(DurabilityTier::Edge),
+        }
+    );
+    assert_eq!(
+        edge.transaction_state(tx_id).unwrap(),
+        (Fate::Accepted, None, DurabilityTier::Edge)
+    );
+    drop(edge);
+    drop(edge_to_client);
+
+    let mut reopened = reopen_node(&edge_dir, node(3), schema);
+    assert_eq!(
+        reopened.transaction_state(tx_id).unwrap(),
+        (Fate::Accepted, None, DurabilityTier::Edge),
+        "edge-accepted fate must persist in edge storage across restart"
+    );
+    assert_eq!(
+        edge_rows(&mut reopened),
+        vec![(
+            row_uuid,
+            Value::String("accepted before edge restart".to_owned())
+        )],
+        "edge-accepted row must be readable after restart without client redelivery"
+    );
 }
 
 #[test]
