@@ -10,7 +10,7 @@ use super::policy::ViewEvaluationContext;
 use super::*;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
-    KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry, RowVersionRef,
+    KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry, RowVersionRef,
 };
 
 fn maintained_view_tx_versions_contain_winner(
@@ -43,6 +43,7 @@ fn content_row_members_for_bundle(
 ) -> Result<Vec<ResultRowEntry>, Error> {
     members
         .iter()
+        .filter(|member| member.as_row().is_some())
         .map(|member| {
             member.as_row().ok_or(Error::InvalidStoredValue(match member {
                 ResultMemberEntry::Row(_) => context,
@@ -71,6 +72,8 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) previous_result_set: BTreeSet<TxId>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
+    pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
+    pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
     pub(crate) identity: AuthorId,
     pub(crate) tier: DurabilityTier,
     pub(crate) maintained_facts: &'a MaintainedSubscriptionView,
@@ -230,6 +233,8 @@ where
             subscription,
             result_member_adds,
             result_member_removes,
+            program_fact_adds: transitions.program_fact_adds,
+            program_fact_removes: transitions.program_fact_removes,
             peer_complete_tx_payloads,
             known_state: None,
             complete_exclusive_payloads: false,
@@ -254,10 +259,23 @@ where
             previous_result_set: _previous_result_set,
             result_member_adds,
             result_member_removes,
+            mut program_fact_adds,
+            program_fact_removes,
             identity: _identity,
             tier: _tier,
             maintained_facts,
         } = inputs;
+        program_fact_adds.extend(maintained_facts.payload_facts_for_members(&result_member_adds));
+        let program_fact_adds = program_fact_adds
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let program_fact_removes = program_fact_removes
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let mut context = ViewEvaluationContext::default();
         let row_result_adds = content_row_members_for_bundle(
             &result_member_adds,
@@ -472,8 +490,8 @@ where
             },
             result_member_adds: result_member_adds.into_iter().collect(),
             result_member_removes: result_member_removes.into_iter().collect(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            program_fact_adds,
+            program_fact_removes,
         })
     }
 
