@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ColumnFamilyName, Error, Key, OrderedKvStorage, ReopenableStorage, ScanVisitor, Value,
-    WriteOperation,
+    WriteOperation, apply_storage_delta,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
@@ -159,7 +159,9 @@ impl OrderedKvStorage for MemoryStorage {
             let inner = self.inner.borrow();
             for operation in operations {
                 let cf = match operation {
-                    WriteOperation::Set { cf, .. } | WriteOperation::Delete { cf, .. } => *cf,
+                    WriteOperation::Set { cf, .. }
+                    | WriteOperation::Delete { cf, .. }
+                    | WriteOperation::Delta { cf, .. } => *cf,
                 };
                 if !inner.contains_key(cf) {
                     return Err(Error::ColumnFamilyNotFound(cf.to_owned()));
@@ -181,6 +183,13 @@ impl OrderedKvStorage for MemoryStorage {
                         .get_mut(*cf)
                         .expect("validated column family")
                         .remove(*key);
+                }
+                WriteOperation::Delta { cf, key, delta } => {
+                    let values = inner.get_mut(*cf).expect("validated column family");
+                    let encoded = delta.encode()?;
+                    let merged =
+                        apply_storage_delta(values.get(*key).map(Vec::as_slice), &encoded)?;
+                    values.insert((*key).to_vec(), merged);
                 }
             }
         }

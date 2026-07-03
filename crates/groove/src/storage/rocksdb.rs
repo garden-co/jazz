@@ -12,11 +12,14 @@ use std::path::{Path, PathBuf};
 
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
-    Direction, IteratorMode, Options, ReadOptions, UniversalCompactOptions, WriteBatch,
-    WriteBufferManager, WriteOptions,
+    Direction, IteratorMode, MergeOperands, Options, ReadOptions, UniversalCompactOptions,
+    WriteBatch, WriteBufferManager, WriteOptions,
 };
 
-use super::{ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation};
+use super::{
+    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation,
+    apply_storage_delta, compact_storage_delta_operand,
+};
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const ROCKSDB_WRITE_BUFFER_MANAGER_BYTES: usize = 256 * 1024 * 1024;
@@ -183,6 +186,11 @@ fn rocksdb_options_for_profile(
     options.set_target_file_size_base(profile.target_file_size());
     options.set_compression_type(profile.compression());
     options.set_bottommost_compression_type(profile.bottommost_compression());
+    options.set_merge_operator(
+        "groove_delta",
+        rocksdb_full_merge_delta,
+        rocksdb_partial_merge_delta,
+    );
     if matches!(profile, RocksDbClassProfile::AppendRange) {
         let mut universal = UniversalCompactOptions::default();
         universal.set_size_ratio(20);
@@ -410,6 +418,9 @@ impl OrderedKvStorage for RocksDbStorage {
                 WriteOperation::Delete { cf, key } => {
                     batch.delete_cf(self.cf_handle(cf)?, key);
                 }
+                WriteOperation::Delta { cf, key, delta } => {
+                    batch.merge_cf(self.cf_handle(cf)?, key, delta.encode()?);
+                }
             }
         }
 
@@ -419,6 +430,41 @@ impl OrderedKvStorage for RocksDbStorage {
     fn column_family_names(&self) -> Option<Vec<String>> {
         Some(self.column_families.iter().cloned().collect())
     }
+}
+
+fn rocksdb_full_merge_delta(
+    _key: &[u8],
+    old_value: Option<&[u8]>,
+    operands: &MergeOperands,
+) -> Option<Vec<u8>> {
+    apply_merge_operands(old_value, operands).ok()
+}
+
+fn rocksdb_partial_merge_delta(
+    _key: &[u8],
+    left_operand: Option<&[u8]>,
+    operands: &MergeOperands,
+) -> Option<Vec<u8>> {
+    let mut value = match left_operand {
+        Some(operand) => Some(apply_storage_delta(None, operand).ok()?),
+        None => None,
+    };
+    let template = left_operand.or_else(|| operands.iter().next())?;
+    for operand in operands {
+        value = Some(apply_storage_delta(value.as_deref(), operand).ok()?);
+    }
+    compact_storage_delta_operand(template, value?).ok()
+}
+
+fn apply_merge_operands(
+    initial: Option<&[u8]>,
+    operands: &MergeOperands,
+) -> Result<Vec<u8>, Error> {
+    let mut value = initial.map(<[u8]>::to_vec);
+    for operand in operands {
+        value = Some(apply_storage_delta(value.as_deref(), operand)?);
+    }
+    value.ok_or_else(|| Error::InvalidStorageDelta("merge operator received no value".to_owned()))
 }
 
 fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {

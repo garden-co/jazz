@@ -7,7 +7,8 @@ use std::rc::Rc;
 use opfs_btree::{BTreeOptions, OpfsBTree, OpfsFile};
 
 use super::{
-    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation, key_codec,
+    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation,
+    apply_storage_delta, key_codec,
 };
 
 #[derive(Clone)]
@@ -56,7 +57,9 @@ impl OpfsStorage {
         let column_families = self.column_families.borrow();
         for operation in operations {
             let cf = match operation {
-                WriteOperation::Set { cf, .. } | WriteOperation::Delete { cf, .. } => *cf,
+                WriteOperation::Set { cf, .. }
+                | WriteOperation::Delete { cf, .. }
+                | WriteOperation::Delta { cf, .. } => *cf,
             };
             if !column_families.contains(cf) {
                 return Err(Error::ColumnFamilyNotFound(cf.to_owned()));
@@ -119,9 +122,16 @@ impl OrderedKvStorage for OpfsStorage {
         for operation in operations {
             encoded_operations.push(match operation {
                 WriteOperation::Set { cf, key, value } => {
-                    (self.encoded_key(cf, key)?, Some(*value))
+                    (self.encoded_key(cf, key)?, Some((*value).to_vec()))
                 }
                 WriteOperation::Delete { cf, key } => (self.encoded_key(cf, key)?, None),
+                WriteOperation::Delta { cf, key, delta } => {
+                    let key = self.encoded_key(cf, key)?;
+                    let existing = self.tree.borrow_mut().get(&key)?;
+                    let encoded = delta.encode()?;
+                    let merged = apply_storage_delta(existing.as_deref(), &encoded)?;
+                    (key, Some(merged))
+                }
             });
         }
 
