@@ -33,6 +33,7 @@ fn branch_read_is_base_snapshot_plus_overlay_writes() {
     )
     .unwrap();
 
+    core.reset_query_engine_read_metrics();
     let actual = core
         .query_rows_on_branch(branch_id, &shape, &binding)
         .unwrap()
@@ -45,6 +46,12 @@ fn branch_read_is_base_snapshot_plus_overlay_writes() {
             (row(1), title_cells("overlay-one")),
             (row(3), title_cells("overlay-three")),
         ])
+    );
+    assert_eq!(
+        core.query_engine_read_metrics()
+            .source_global_seq_range_scans,
+        1,
+        "branch base hydration should use the bounded historical range path"
     );
 
     let main = core

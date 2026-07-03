@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use groove::ivm::{LiteralValue, RoutedMultisinkTerminal, StaticScanSpec};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
-use groove::records::{EnumSchema, RecordDescriptor, ValueType};
+use groove::records::{RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
@@ -1004,8 +1004,17 @@ where
         position: GlobalSeq,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         if self.uses_current_schema_partition(&request.source.table) {
-            return Ok(historical_current_graph(table, position));
+            self.node
+                .query_engine_read_metrics
+                .source_global_seq_range_scans += 1;
+            let rows = self
+                .node
+                .bounded_historical_current_rows(&request.source.table, position)
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+            return inline_current_graph(table, rows)
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut));
         }
+        self.node.query_engine_read_metrics.source_full_scans += 1;
         let rows = self
             .node
             .projected_historical_current_rows(
@@ -4807,52 +4816,97 @@ where
         table: &str,
         position: GlobalSeq,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let table_schema = self.table(table)?.clone();
-        let mut rows = Vec::new();
-        for row_uuid in self.global_row_ids_at(table, position)? {
-            if self
-                .global_layer_winner_at(table, row_uuid, VersionLayer::Deletion, position)?
-                .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
-            {
-                continue;
-            }
-            let Some(content) =
-                self.global_layer_winner_at(table, row_uuid, VersionLayer::Content, position)?
-            else {
-                continue;
-            };
-            rows.push(self.current_row_from_materialized_version(&table_schema, &content)?);
-        }
-        sort_current_rows(&mut rows);
-        Ok(rows)
+        self.query_engine_read_metrics.source_global_seq_range_scans += 1;
+        self.bounded_historical_current_rows(table, position)
     }
 
-    fn global_row_ids_at(
+    fn bounded_global_change_records_at(
         &mut self,
         table: &str,
         position: GlobalSeq,
-    ) -> Result<BTreeSet<RowUuid>, Error> {
-        let raws = if position.0 == u64::MAX {
-            self.database
-                .index_scan_raw("jazz_global_changes", "by_global_seq", &[])?
-        } else {
-            self.database.index_scan_range_raw(
+    ) -> Result<Vec<groove::db::EncodedKeyValue<'_>>, Error> {
+        if position.0 == u64::MAX {
+            Ok(self.database.index_scan_raw(
                 "jazz_global_changes",
-                "by_global_seq",
-                &[Value::U64(0)],
-                &[Value::U64(position.0 + 1)],
-            )?
-        };
-        let mut row_ids = BTreeSet::new();
-        for raw in raws {
+                "by_table_global_seq",
+                &[Value::Bytes(table.as_bytes().to_vec())],
+            )?)
+        } else {
+            Ok(self.database.index_scan_range_raw(
+                "jazz_global_changes",
+                "by_table_global_seq",
+                &[Value::Bytes(table.as_bytes().to_vec()), Value::U64(0)],
+                &[
+                    Value::Bytes(table.as_bytes().to_vec()),
+                    Value::U64(position.0 + 1),
+                ],
+            )?)
+        }
+    }
+
+    fn bounded_historical_current_rows(
+        &mut self,
+        table: &str,
+        position: GlobalSeq,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table_schema = self.table(table)?.clone();
+        let content_descriptor = table_schema.history_storage_table().record_schema();
+        let mut rows_by_uuid = BTreeMap::<
+            RowUuid,
+            (
+                Option<(TxTime, NodeAlias)>,
+                Option<(TxTime, NodeAlias, Option<DeletionEvent>)>,
+            ),
+        >::new();
+        for raw in self.bounded_global_change_records_at(table, position)? {
             let record = raw.record();
-            if record.get_bytes(GlobalChangeRowRecord::FIELD_TABLE_NAME_IDX)? == table.as_bytes() {
-                row_ids.insert(RowUuid(
-                    record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?,
-                ));
+            let row_uuid = RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?);
+            let layer = record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?;
+            let tx_time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
+            let tx_node = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let deletion = record
+                .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
+                .map(|value| deletion_event_from_value(Value::Enum(value)))
+                .transpose()?;
+            let entry = rows_by_uuid.entry(row_uuid).or_insert((None, None));
+            if layer == version_layer_string(VersionLayer::Content).as_bytes() {
+                if entry.0.is_none_or(|current| (tx_time, tx_node) > current) {
+                    entry.0 = Some((tx_time, tx_node));
+                }
+            }
+            if entry.1.is_none_or(|(current_time, current_node, _)| {
+                (tx_time, tx_node) > (current_time, current_node)
+            }) {
+                entry.1 = Some((tx_time, tx_node, deletion));
             }
         }
-        Ok(row_ids)
+        let mut rows = Vec::new();
+        for (row_uuid, (content, latest_event)) in rows_by_uuid {
+            let Some((_, _, latest_deletion)) = latest_event else {
+                continue;
+            };
+            if latest_deletion == Some(DeletionEvent::Deleted) {
+                continue;
+            }
+            let Some((tx_time, tx_node_alias)) = content else {
+                continue;
+            };
+            let version = self
+                .query_version_by_alias_with_descriptor(
+                    table,
+                    row_uuid,
+                    VersionLayer::Content,
+                    tx_time,
+                    tx_node_alias,
+                    &content_descriptor,
+                )?
+                .ok_or(Error::InvalidStoredValue(
+                    "historical content winner is missing",
+                ))?;
+            rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
+        }
+        sort_current_rows(&mut rows);
+        Ok(rows)
     }
 
     pub(crate) fn open_local_maintained_view_subscription(
@@ -7230,7 +7284,8 @@ fn inline_branch_current_record(
     Ok(descriptor.create(&values)?)
 }
 
-fn historical_current_graph(table: &TableSchema, position: GlobalSeq) -> GraphBuilder {
+#[cfg(test)]
+fn historical_current_graph_full_scan(table: &TableSchema, position: GlobalSeq) -> GraphBuilder {
     let cut_predicate = PredicateExpr::And(vec![
         PredicateExpr::eq("table_name", Value::Bytes(table.name.as_bytes().to_vec())),
         PredicateExpr::LtEq {
@@ -7249,7 +7304,8 @@ fn historical_current_graph(table: &TableSchema, position: GlobalSeq) -> GraphBu
         )
     };
     let nullable_deletion_type = ValueType::Nullable(Box::new(ValueType::Enum(
-        EnumSchema::new("jazz_deletion", ["deleted", "restored"]).expect("valid deletion enum"),
+        groove::records::EnumSchema::new("jazz_deletion", ["deleted", "restored"])
+            .expect("valid deletion enum"),
     )));
     let content_events = changes_for_layer("content").project_fields([
         ProjectField::named("row_uuid"),
@@ -7701,6 +7757,171 @@ mod tests {
         )
         .expect("accept row");
         tx_id
+    }
+
+    fn current_titles(
+        table: &TableSchema,
+        rows: impl IntoIterator<Item = CurrentRow>,
+    ) -> BTreeMap<RowUuid, Value> {
+        rows.into_iter()
+            .map(|row| {
+                (
+                    row.row_uuid(),
+                    row.cell(table, "title")
+                        .expect("test row should carry title"),
+                )
+            })
+            .collect()
+    }
+
+    fn historical_titles_via_full_scan(
+        node: &mut NodeState<RocksDbStorage>,
+        table: &TableSchema,
+        position: GlobalSeq,
+    ) -> BTreeMap<RowUuid, Value> {
+        let deltas = node
+            .database
+            .query_graph(historical_current_graph_full_scan(table, position))
+            .expect("full-scan historical graph");
+        let rows = node
+            .materialize_inline_current_query_rows(table, deltas)
+            .expect("materialize full-scan historical graph");
+        current_titles(table, rows)
+    }
+
+    #[test]
+    fn historical_cut_bounded_source_matches_full_scan_graph() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "docs",
+            [crate::schema::ColumnSchema::new(
+                "title",
+                ColumnType::String,
+            )],
+        )]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0x31; 16]), schema);
+        let table = node.table("docs").expect("docs table").clone();
+        let first = row(0x31);
+        let second = row(0x32);
+        commit_global_cells(
+            &mut node,
+            "docs",
+            first,
+            BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
+            1_000,
+            1,
+        );
+        commit_global_cells(
+            &mut node,
+            "docs",
+            second,
+            BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
+            1_001,
+            2,
+        );
+        let delete_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("docs", first, 1_002).deletion(DeletionEvent::Deleted),
+            )
+            .expect("commit delete");
+        node.apply_fate_update(
+            delete_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(3)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("accept delete");
+        // Keep an unrelated later write in the same table to ensure the full-scan
+        // control has more history available than the bounded cut should read.
+        commit_global_cells(
+            &mut node,
+            "docs",
+            row(0x33),
+            BTreeMap::from([("title".to_owned(), Value::String("later".to_owned()))]),
+            1_003,
+            4,
+        );
+
+        node.reset_query_engine_read_metrics();
+        let shape = Query::from("docs")
+            .validate(&node.catalogue.schema)
+            .expect("shape");
+        let binding = shape.bind(BTreeMap::new()).expect("binding");
+        let bounded = current_titles(
+            &table,
+            node.query_rows_at(&shape, &binding, GlobalSeq(2))
+                .expect("bounded historical query"),
+        );
+        let selected_metrics = node.query_engine_read_metrics().clone();
+        let full = historical_titles_via_full_scan(&mut node, &table, GlobalSeq(2));
+
+        assert_eq!(bounded, full);
+        assert_eq!(selected_metrics.source_global_seq_range_scans, 1);
+        assert_eq!(selected_metrics.source_full_scans, 0);
+    }
+
+    #[test]
+    fn historical_cut_reads_only_table_global_seq_range() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "docs",
+            [crate::schema::ColumnSchema::new(
+                "title",
+                ColumnType::String,
+            )],
+        )]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0x32; 16]), schema);
+        let table = node.table("docs").expect("docs table").clone();
+        let shape = Query::from("docs")
+            .validate(&node.catalogue.schema)
+            .expect("shape");
+        let binding = shape.bind(BTreeMap::new()).expect("binding");
+        commit_global_cells(
+            &mut node,
+            "docs",
+            row(0x41),
+            BTreeMap::from([("title".to_owned(), Value::String("at-cut".to_owned()))]),
+            1_000,
+            1,
+        );
+        for idx in 0_u8..40 {
+            commit_global_cells(
+                &mut node,
+                "docs",
+                row((0x50 + idx) as usize),
+                BTreeMap::from([("title".to_owned(), Value::String(format!("later-{idx}")))]),
+                1_010 + idx as u64,
+                2 + idx as u64,
+            );
+        }
+
+        node.reset_query_engine_read_metrics();
+        node.reset_storage_read_metrics();
+        let rows = current_titles(
+            &table,
+            node.query_rows_at(&shape, &binding, GlobalSeq(1))
+                .expect("bounded historical query"),
+        );
+        let read_metrics = node.take_storage_read_metrics();
+        let selected_metrics = node.query_engine_read_metrics().clone();
+
+        assert_eq!(
+            rows,
+            BTreeMap::from([(row(0x41), Value::String("at-cut".to_owned()))])
+        );
+        assert_eq!(selected_metrics.source_global_seq_range_scans, 1);
+        assert_eq!(
+            read_metrics.global_changes_indexes.ranges, 1,
+            "bounded cut should use one by_table_global_seq range"
+        );
+        assert!(
+            read_metrics.global_changes_indexes.reads <= 2,
+            "small cut should not read the later same-table history: {:?}",
+            read_metrics.global_changes_indexes
+        );
+        assert!(
+            read_metrics.global_changes_rows.reads <= 2,
+            "small cut should not fetch later same-table change rows: {:?}",
+            read_metrics.global_changes_rows
+        );
     }
 
     #[test]
