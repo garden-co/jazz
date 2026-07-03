@@ -3123,6 +3123,8 @@ pub struct QueryEngineReadMetrics {
     pub source_primary_key_scans: u64,
     /// Visible-current source resolutions that used a declared secondary index.
     pub source_index_probes: u64,
+    /// Historical/branch-base source resolutions that used a bounded global-sequence range.
+    pub source_global_seq_range_scans: u64,
     /// Visible-current source resolutions that fell back to a full source scan.
     pub source_full_scans: u64,
 }
