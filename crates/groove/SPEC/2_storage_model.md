@@ -204,6 +204,59 @@ key-column declaration order, so it orders by the first key column, then the
 second, and so on. Valid key types are the integer widths, `Bool`, `String`,
 `Bytes`, and `Uuid`; `F64`, arrays, and nullable values are not valid key parts.
 
+## 2.9 Windowed record encoding (target optimization guidance)
+
+`INV-STORAGE-8` makes a record's physical layout private to its encoder. This
+section lifts that principle from one record to a **sequence of records**: a
+record store MAY represent runs of consecutive records as **windows** — one
+physical key/value pair holding a bounded number of records in columnar form —
+without any layer above the record store knowing.
+
+**Motivation (measured, 2026-07-03).** A single serial text-edit transaction
+writes ~10 KV records: ~675 B of physical keys plus ~740 B of values, against
+~3 B of new information (the zstd-compressed op log of a 2 000-edit trace is
+2.9 B/edit — the compact-history thesis, measured). The bytes are dominated by
+re-stating per-record context — repeated key encodings, constant fields,
+near-monotone timestamps, parent refs to the preceding record. Windowing
+abolishes the repetition instead of compressing it.
+
+**The codec is schema-driven, never semantics-driven.** It lives inside the
+record-store implementation — above `OrderedKvStorage` (where keys are opaque)
+and below the record-store interface (where both the value
+`RecordDescriptor` and the declared `PrimaryKey` structure are known). A
+window of N consecutive records (in key order, formed at consolidation time —
+flush, compaction, checkpoint — never on the hot write path) becomes one
+physical pair: the storage key is the first record's key; the value holds all
+N records as **typed columns, key fields included** — record keys cease to be
+storage keys at all. Each column independently selects from a small generic
+menu per window: constant, delta-varint, dictionary, previous-row-field
+reference, verbatim — chosen by measured size, compressor-style. Domain
+patterns (same author, chain parents, monotone times) fall into these
+encodings because the schema types them and the key design clusters them;
+the codec imports no higher-layer semantics.
+
+**Windows are physical, not semantic.** There is no run-sealing judgment: a
+window closes when full (bounded to a CPU-cache-sized decode, on the order of
+a few hundred records / few KB). A window of mixed traffic degrades gracefully
+to dictionary/verbatim encodings — a "bad" window costs bytes, never
+correctness. Reads decode the covering window transiently (floor-seek on the
+window key, then in-window search over decoded key columns); the ordered
+contract of §2.1 is preserved through the accessor.
+
+**Write path.** Hot appends are deltas — via an optional storage capability
+("append a small delta to a growing value with delta-cost durability"), which
+RocksDB provides as a merge operator, the OPFS B+tree provides as a hot-leaf
+upsert plus WAL delta-append, and the memory backend trivially. Backends
+without the capability fall back to rewriting the open window value, bounded
+by the window size. Which record stores opt in is a per-class attribute
+alongside the class compaction profiles (append-forever classes first).
+
+_Target invariant._ `INV-STORAGE-26` (target) — windowed encoding is invisible
+above the record store: `decode ∘ encode` is the identity over record
+sequences, the storage conformance suite passes identically under windowed and
+plain representations, and no consumer above the record store can observe
+which representation is in use.
+
 ## Open questions
 
 - 🔶 **Portable backend contract.** Before exposing storage through WASM/NAPI or
