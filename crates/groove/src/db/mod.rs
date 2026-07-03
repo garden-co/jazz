@@ -26,7 +26,10 @@ use crate::schema::{
     ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKeyColumn, PrimaryKeyType, TableSchema,
 };
-use crate::storage::{OrderedKvStorage, OwnedWriteOperation, RecordStore, WriteOperation};
+use crate::storage::{
+    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StorageLayout,
+    WriteOperation,
+};
 use thiserror::Error;
 
 pub use crate::ivm::{
@@ -36,7 +39,7 @@ pub use crate::ivm::{
 
 /// Schema-aware database facade over storage and IVM subscriptions.
 pub struct Database<S> {
-    storage: S,
+    storage: LayoutStorage<S>,
     /// Owns query/index maintenance over the storage-backed base tables.
     ivm_runtime: IvmRuntime,
     last_commit_metrics: Option<CommitMetrics>,
@@ -81,9 +84,17 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn new(schema: DatabaseSchema, storage: S) -> Result<Self, Error> {
+        Self::new_with_storage_layout(schema, storage, StorageLayout::Identity)
+    }
+
+    pub fn new_with_storage_layout(
+        schema: DatabaseSchema,
+        storage: S,
+        storage_layout: StorageLayout,
+    ) -> Result<Self, Error> {
         let ivm_runtime = IvmRuntime::new(schema)?;
         Ok(Self {
-            storage,
+            storage: LayoutStorage::new(storage, storage_layout)?,
             ivm_runtime,
             last_commit_metrics: None,
             last_tick_metrics: None,
@@ -93,7 +104,7 @@ where
     }
 
     pub fn into_storage(self) -> S {
-        self.storage
+        self.storage.into_inner()
     }
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
@@ -1480,7 +1491,7 @@ where
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct DirectRecordStore<'a, S> {
-    storage: &'a S,
+    storage: &'a LayoutStorage<S>,
     name: String,
     key: RecordDescriptor,
     value: RecordDescriptor,

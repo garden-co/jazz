@@ -19,7 +19,7 @@ use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
-use groove::storage::{self, OrderedKvStorage, ReopenableStorage};
+use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use thiserror::Error;
 
 use self::query_engine::user_column_field;
@@ -76,6 +76,15 @@ use open_tx::*;
 use text_oplog::{Content as TextContent, Op as TextOp};
 
 pub use eviction::{EdgeCacheClass, EvictColdReport};
+
+fn jazz_physical_column_families(schema: &groove::schema::DatabaseSchema) -> Vec<String> {
+    StorageLayout::jazz_class_v1().physical_column_families(
+        schema
+            .column_families()
+            .into_iter()
+            .chain(std::iter::once("indices")),
+    )
+}
 
 #[cfg(test)]
 mod tests;
@@ -464,13 +473,11 @@ where
                 SchemaVersion::new(schema.clone()),
             );
         }
-        let refs = schema
-            .lower_to_groove_with_partitions(&schemas, &partitions, &branch_partitions)
-            .column_families()
-            .into_iter()
-            .chain(std::iter::once("indices"))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        let refs = jazz_physical_column_families(&schema.lower_to_groove_with_partitions(
+            &schemas,
+            &partitions,
+            &branch_partitions,
+        ));
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = storage.reopen(&refs)?;
         let database =
@@ -560,13 +567,26 @@ where
         storage: S,
     ) -> Result<Database<S>, Error> {
         debug_assert_lowered_layouts(schema);
-        Database::new(
+        let lowered = schema.lower_to_groove_with_partitions(
+            catalogue_schemas,
+            partitions,
+            branch_partitions,
+        );
+        let logical_cfs = lowered
+            .column_families()
+            .into_iter()
+            .chain(std::iter::once("indices"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let layout = StorageLayout::jazz_class_v1_for(logical_cfs.iter().map(String::as_str));
+        Database::new_with_storage_layout(
             schema.lower_to_groove_with_partitions(
                 catalogue_schemas,
                 partitions,
                 branch_partitions,
             ),
             storage,
+            layout,
         )
         .map_err(Error::from)
     }
@@ -594,19 +614,12 @@ where
         S: ReopenableStorage,
     {
         let old_database = self.database.take();
-        let refs = self
-            .catalogue
-            .schema
-            .lower_to_groove_with_partitions(
+        let refs =
+            jazz_physical_column_families(&self.catalogue.schema.lower_to_groove_with_partitions(
                 &self.catalogue.catalogue_schemas,
                 &self.catalogue.partitions,
                 &self.branches.branch_partitions,
-            )
-            .column_families()
-            .into_iter()
-            .chain(std::iter::once("indices"))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+            ));
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = old_database.into_storage().reopen(&refs)?;
         let database = Self::open_full_database(
