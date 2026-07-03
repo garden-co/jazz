@@ -32,5 +32,6 @@ include!("counter_merge.rs");
 include!("merge_heads.rs");
 include!("recovery.rs");
 include!("content_store.rs");
+include!("edge_authority.rs");
 include!("general.rs");
 include!("view_update_capture.rs");
