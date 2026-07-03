@@ -436,7 +436,7 @@ mod tests {
                 )],
             },
             SyncMessage::RowVersionPayloads {
-                versions: Vec::new(),
+                version_bundles: Vec::new(),
             },
         ];
 

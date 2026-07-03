@@ -146,8 +146,8 @@ pub enum SyncMessage {
     },
     /// Repair-lane response carrying canonical row-version payloads.
     RowVersionPayloads {
-        /// Versions visible to the requesting link identity.
-        versions: Vec<VersionRecord>,
+        /// Version bundles visible to the requesting link identity.
+        version_bundles: Vec<VersionBundle>,
     },
 }
 

@@ -1673,12 +1673,14 @@ fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> bool {
     usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len())
 }
 
-fn split_row_version_payloads(versions: Vec<VersionRecord>) -> Result<Vec<SyncMessage>, Error> {
+fn split_row_version_payloads(
+    version_bundles: Vec<VersionBundle>,
+) -> Result<Vec<SyncMessage>, Error> {
     let mut messages = Vec::new();
     let mut current = Vec::new();
-    for version in versions {
+    for bundle in version_bundles {
         let single_encoded = postcard::to_allocvec(&SyncMessage::RowVersionPayloads {
-            versions: vec![version.clone()],
+            version_bundles: vec![bundle.clone()],
         })
         .map_err(|_| Error::UnsupportedSyncMessage("failed to measure row-version payload"))?;
         if single_encoded.len() > MAX_SYNC_MESSAGE_BYTES {
@@ -1687,24 +1689,28 @@ fn split_row_version_payloads(versions: Vec<VersionRecord>) -> Result<Vec<SyncMe
             ));
         }
         if current.is_empty() {
-            current.push(version);
+            current.push(bundle);
             continue;
         }
         let mut candidate = current.clone();
-        candidate.push(version.clone());
+        candidate.push(bundle.clone());
         let encoded = postcard::to_allocvec(&SyncMessage::RowVersionPayloads {
-            versions: candidate,
+            version_bundles: candidate,
         })
         .map_err(|_| Error::UnsupportedSyncMessage("failed to measure row-version payload"))?;
         if encoded.len() > MAX_SYNC_MESSAGE_BYTES {
-            messages.push(SyncMessage::RowVersionPayloads { versions: current });
-            current = vec![version];
+            messages.push(SyncMessage::RowVersionPayloads {
+                version_bundles: current,
+            });
+            current = vec![bundle];
         } else {
-            current.push(version);
+            current.push(bundle);
         }
     }
     if !current.is_empty() {
-        messages.push(SyncMessage::RowVersionPayloads { versions: current });
+        messages.push(SyncMessage::RowVersionPayloads {
+            version_bundles: current,
+        });
     }
     Ok(messages)
 }
