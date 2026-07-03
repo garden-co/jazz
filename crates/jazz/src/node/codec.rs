@@ -993,15 +993,52 @@ pub(super) fn transaction_values(
 }
 
 pub(super) fn encode_merge_strategy_tag(strategy: &RecordedMergeStrategy) -> String {
-    format!("{}@{}", strategy.id, strategy.version)
+    format!(
+        "{}@{}#{}",
+        strategy.id,
+        strategy.version,
+        hex_encode(&strategy.column_spec_hash)
+    )
 }
 
 pub(super) fn decode_merge_strategy_tag(value: &str) -> Option<RecordedMergeStrategy> {
-    let (id, version) = value.rsplit_once('@')?;
+    let (head, hash) = value.rsplit_once('#')?;
+    let (id, version) = head.rsplit_once('@')?;
     Some(RecordedMergeStrategy {
         id: id.to_owned(),
         version: version.parse().ok()?,
+        column_spec_hash: hex_decode_32(hash)?,
     })
+}
+
+fn hex_encode(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (idx, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        out[idx] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
+    }
+    Some(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub(super) fn rejected_transaction_values(
