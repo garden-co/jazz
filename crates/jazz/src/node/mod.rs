@@ -27,6 +27,7 @@ use crate::ids::{
     AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias,
     SchemaVersionId,
 };
+use crate::merge_strategy::MergeStrategy as TextMergeStrategy;
 use crate::protocol::{
     BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ReadViewKey, ResultMemberEntry,
     ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
@@ -191,6 +192,8 @@ pub struct NodeState<S> {
     large_value_metrics: LargeValueMetrics,
     /// Immutable materialized large-value bytes keyed by exact version.
     large_value_materialization_cache: BTreeMap<LargeValueCacheKey, Vec<u8>>,
+    /// Runtime registry for rung-3 text merge strategies.
+    text_merge_strategies: BTreeMap<(String, u32), Arc<dyn TextMergeStrategy>>,
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
     /// Runtime counters for query-engine read authorization paths.
@@ -361,6 +364,12 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, true)
     }
 
+    /// Register a deterministic rung-3 text merge strategy for this process.
+    pub fn register_text_merge_strategy(&mut self, strategy: Arc<dyn TextMergeStrategy>) {
+        self.text_merge_strategies
+            .insert((strategy.id().to_owned(), strategy.version()), strategy);
+    }
+
     /// Open or create a node with a specific local checkpoint density.
     pub fn new_with_large_value_checkpoint_op_interval(
         node_uuid: NodeUuid,
@@ -391,10 +400,18 @@ where
             catalogue,
             database,
             history_complete,
+            text_merge_strategies,
             ..
         } = self;
         let storage = database.into_inner().into_storage();
-        Self::new_with_history_complete(node_uuid, catalogue.schema, storage, history_complete)
+        let mut reopened = Self::new_with_history_complete(
+            node_uuid,
+            catalogue.schema,
+            storage,
+            history_complete,
+        )?;
+        reopened.text_merge_strategies = text_merge_strategies;
+        Ok(reopened)
     }
 
     fn new_with_history_complete(
@@ -508,6 +525,7 @@ where
             large_value_checkpoint_op_interval: large_value_checkpoint_op_interval.max(1),
             large_value_metrics: LargeValueMetrics::default(),
             large_value_materialization_cache: BTreeMap::new(),
+            text_merge_strategies: BTreeMap::new(),
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
             session_claims: BTreeMap::new(),
@@ -3258,6 +3276,8 @@ pub struct SyncMetrics {
     pub parked_catalogue_shapes_resolved: u64,
     /// Per-subscription messages dropped because the subscription is no longer registered locally.
     pub dropped_detached_subscription_messages: u64,
+    /// Rung-3 text strategies that degraded to the builtin char-walk merge.
+    pub rung3_text_merge_fallbacks: u64,
 }
 
 /// Deterministic counters for query-engine read authorization.

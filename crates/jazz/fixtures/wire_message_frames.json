@@ -55,10 +55,10 @@
     {
       "name": "publish_schema_todos_body",
       "message_family": "PublishSchema",
-      "frame_hex": "010101004507105555555555555555555555555555555510c48df78b41435047b6bd55ee6a1e5ea10105746f646f7302057469746c65060004626f647907010000000000000000000000",
-      "frame_base64": "AQEBAEUHEFVVVVVVVVVVVVVVVVVVVVUQxI33i0FDUEe2vVXuah5eoQEFdG9kb3MCBXRpdGxlBgAEYm9keQcBAAAAAAAAAAAAAAA=",
-      "payload_hex": "07105555555555555555555555555555555510c48df78b41435047b6bd55ee6a1e5ea10105746f646f7302057469746c65060004626f647907010000000000000000000000",
-      "decoded_debug": "PublishSchema { author: AuthorId(55555555-5555-5555-5555-555555555555), schema: SchemaVersion { id: SchemaVersionId(c48df78b-4143-5047-b6bd-55ee6a1e5ea1), schema: JazzSchema { tables: [TableSchema { name: \"todos\", columns: [ColumnSchema { name: \"title\", column_type: String, large_value: None }, ColumnSchema { name: \"body\", column_type: Bytes, large_value: Some(Text) }], references: {}, read_policy: None, write_policies: WritePolicies { insert_check: None, update_using: None, update_check: None, delete_using: None }, indexed_columns: {}, merge_strategies: {} }], branch_read_policy: None, branch_write_policy: None } } }"
+      "frame_hex": "010101004707105555555555555555555555555555555510c48df78b41435047b6bd55ee6a1e5ea10105746f646f7302057469746c6506000004626f64790701000000000000000000000000",
+      "frame_base64": "AQEBAEcHEFVVVVVVVVVVVVVVVVVVVVUQxI33i0FDUEe2vVXuah5eoQEFdG9kb3MCBXRpdGxlBgAABGJvZHkHAQAAAAAAAAAAAAAAAA==",
+      "payload_hex": "07105555555555555555555555555555555510c48df78b41435047b6bd55ee6a1e5ea10105746f646f7302057469746c6506000004626f64790701000000000000000000000000",
+      "decoded_debug": "PublishSchema { author: AuthorId(55555555-5555-5555-5555-555555555555), schema: SchemaVersion { id: SchemaVersionId(c48df78b-4143-5047-b6bd-55ee6a1e5ea1), schema: JazzSchema { tables: [TableSchema { name: \"todos\", columns: [ColumnSchema { name: \"title\", column_type: String, large_value: None, text_merge_spec: None }, ColumnSchema { name: \"body\", column_type: Bytes, large_value: Some(Text), text_merge_spec: None }], references: {}, read_policy: None, write_policies: WritePolicies { insert_check: None, update_using: None, update_check: None, delete_using: None }, indexed_columns: {}, merge_strategies: {} }], branch_read_policy: None, branch_write_policy: None } } }"
     },
     {
       "name": "publish_lens_todos_body_identity",
