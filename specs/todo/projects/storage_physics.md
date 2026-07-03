@@ -52,11 +52,22 @@ under freeze pressure.
    emit write bytes per commit per destination; define budgets per class and
    gate them in the C-appendix discipline (INV-PERF style). "Lots of writes is
    OK" becomes a defended number.
-5. **Later direction (recorded, not scheduled): history-as-log.** History is
-   semantically a log; a segment store + sparse boundary-arrangement index
-   behind the OrderedKvStorage seam replaces the KV representation if budgets
-   demand it. The seam keeps the engine question permanently open; RocksDB
-   remains the default for overwrite classes.
+5. **Windowed record encoding (was: history-as-log; now spec'd, groove ch. 2
+   §2.9 + INV-STORAGE-26).** The history-as-log direction arrived as a
+   concrete design 2026-07-03: a schema-driven columnar window codec inside
+   the record store (record keys become typed columns; one physical KV per
+   window; per-column adaptive encodings; physical windows, never semantic).
+   Codec v1 (history class first) follows item 2, whose delta-append
+   capability is its substrate. Measured target: history at rest from
+   ~149 B/edit (batch=256) toward the ~2.9 B/edit zstd op-log floor, and
+   ~10 KV records per serial tx toward ~1 window share. Consequences already
+   spec'd: text-stack simplifications (jazz ch. 12 target section — single
+   op representation, eager chain shipping, window-seal checkpoints and
+   state hashes) and the wire posture (jazz ch. 8 — stream compression +
+   reserved columnar ViewUpdate variant). This de-scopes Plan 6's former
+   'client keystroke batching' item (no semantic batching; per-keystroke
+   transactions become cheap) and closes the eager-vs-repair bundling
+   question.
 
 ## Receipts / gates
 
