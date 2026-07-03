@@ -34,15 +34,17 @@ use thiserror::Error;
 
 pub use app_id::AppId;
 pub use public_schema::{
-    AuthMode, BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation,
-    OrderedRowDelta, PolicyExpr, Query, QueryBuilder, Row, RowDelta, RowDescriptor, Schema,
-    SchemaBuilder, SchemaHash, Session, TableName, TablePolicies, TableSchema, Value, WriteContext,
-    permissions, policy_expr,
+    AuthMode, BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueKind,
+    Operation, OrderedRowDelta, PolicyExpr, Query, QueryBuilder, Row, RowDelta, RowDescriptor,
+    Schema, SchemaBuilder, SchemaHash, Session, TableName, TablePolicies, TableSchema, Value,
+    WriteContext, permissions, policy_expr,
 };
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
+#[cfg(feature = "client")]
+pub use jazz::db::TextEdit;
 
 pub use object::ObjectId;
 #[cfg(feature = "client")]

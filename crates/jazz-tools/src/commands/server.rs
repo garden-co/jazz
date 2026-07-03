@@ -11,6 +11,7 @@ use tracing::info;
 const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
 
 /// Run the Jazz server.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     app_id_str: &str,
     port: u16,

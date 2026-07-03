@@ -12,7 +12,12 @@ use crate::protocol_limits::{
     commit_unit_limit_violation, validate_content_extents, validate_known_state_declaration,
     validate_shape_ast_size,
 };
+use crate::schema::LargeValueKind;
 use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE};
+use crate::text_merge::{
+    EventId as TextEventId, Run as PlainTextRun, TextEvent, TextEventGraph,
+    TieBreak as TextTieBreak,
+};
 use crate::time::TxTimeSortKey;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2213,7 +2218,13 @@ where
                 let Some(Value::Bytes(payload)) = version.optional_cell_at(idx) else {
                     continue;
                 };
-                refs.extend(content_refs_in_ops(text_oplog::decode(&payload)?));
+                match column.large_value {
+                    Some(LargeValueKind::Text) => {}
+                    Some(LargeValueKind::Blob) => {
+                        refs.extend(content_refs_in_ops(text_oplog::decode(&payload)?));
+                    }
+                    None => {}
+                }
             }
         }
         Ok(refs)
@@ -2392,12 +2403,19 @@ where
         if self.query_transaction(merge_tx_id)?.is_some() {
             return Ok(());
         }
-        let merge_tx = self.commit_mergeable_at(
-            MergeableCommit::new(table, row_uuid, made_at.physical_ms())
-                .parents(parents)
-                .cells(cells),
-            made_at,
-        )?;
+        let uses_text_strategy = cells.keys().any(|column| {
+            column_large_value_kind(&table_schema, column).ok() == Some(LargeValueKind::Text)
+        });
+        let mut merge_commit = MergeableCommit::new(table, row_uuid, made_at.physical_ms())
+            .parents(parents)
+            .cells(cells);
+        if uses_text_strategy {
+            merge_commit = merge_commit.merge_strategy(RecordedMergeStrategy {
+                id: "builtin.text-rle-v1".to_owned(),
+                version: 1,
+            });
+        }
+        let merge_tx = self.commit_mergeable_at(merge_commit, made_at)?;
         let global_seq = self.clock.next_global_seq;
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         self.apply_fate_update(
@@ -2504,6 +2522,14 @@ where
         if column_heads.len() < 2 {
             return Ok(None);
         }
+        if column_large_value_kind(table_schema, column)? == LargeValueKind::Text {
+            return self.merge_text_value_cell_for_heads(
+                table_schema,
+                column,
+                column_heads,
+                row_versions_by_tx,
+            );
+        }
         let keyed_column_heads = column_heads
             .into_iter()
             .map(|tx_id| {
@@ -2559,6 +2585,108 @@ where
             ops,
         )?;
         Ok(Some(Value::Bytes(text_oplog::encode(&ops))))
+    }
+
+    fn merge_text_value_cell_for_heads(
+        &mut self,
+        table_schema: &TableSchema,
+        column: &str,
+        column_heads: Vec<TxId>,
+        row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
+    ) -> Result<Option<Value>, Error> {
+        let keyed_column_heads = column_heads
+            .into_iter()
+            .map(|tx_id| {
+                let made_at = self
+                    .transaction_made_at(tx_id)?
+                    .ok_or(Error::MissingTransaction(tx_id))?;
+                Ok((made_at.sort_key(tx_id.node), tx_id))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let lca = self.large_value_lca(
+            &keyed_column_heads
+                .iter()
+                .map(|(_, tx_id)| *tx_id)
+                .collect::<Vec<_>>(),
+            row_versions_by_tx,
+        )?;
+        let lca_value = match lca {
+            Some(lca) => {
+                let lca_version = row_versions_by_tx
+                    .get(&lca)
+                    .ok_or(Error::MissingTransaction(lca))?;
+                self.materialize_large_value_column(table_schema, lca_version, column)?
+            }
+            None => Vec::new(),
+        };
+
+        let mut chains = Vec::new();
+        let mut tie_tx_ids = BTreeSet::new();
+        for (_, head) in &keyed_column_heads {
+            let chain = self.plain_text_ops_since_lca(table_schema, column, *head, lca)?;
+            for (tx_id, _) in &chain {
+                tie_tx_ids.insert(*tx_id);
+            }
+            chains.push((*head, chain));
+        }
+        let tie_breaks = tie_tx_ids
+            .into_iter()
+            .enumerate()
+            .map(|(idx, tx_id)| (tx_id, TextTieBreak((idx + 1) as u64)))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut graph = TextEventGraph::default();
+        let root = TextEventId(0);
+        graph
+            .insert(TextEvent {
+                id: root,
+                parents: Vec::new(),
+                op: crate::text_merge::TextOp::identity(),
+                tie_break: TextTieBreak(0),
+            })
+            .map_err(|_| Error::InvalidStoredValue("text merge graph insert failed"))?;
+
+        let mut ids = BTreeMap::new();
+        if let Some(lca) = lca {
+            ids.insert(lca, root);
+        }
+        let mut next_id = 1u64;
+        let mut heads = Vec::new();
+        for (_, chain) in chains {
+            let mut parent = root;
+            for (tx_id, op) in chain {
+                let id = *ids.entry(tx_id).or_insert_with(|| {
+                    let id = TextEventId(next_id);
+                    next_id += 1;
+                    id
+                });
+                let _ = graph.insert(TextEvent {
+                    id,
+                    parents: vec![parent],
+                    op,
+                    tie_break: tie_breaks[&tx_id],
+                });
+                parent = id;
+            }
+            heads.push(parent);
+        }
+        let merged = graph
+            .merge_heads(root, &lca_value, &heads)
+            .map_err(|_| Error::InvalidStoredValue("text merge graph walk failed"))?;
+        let primary = self.large_value_primary_head(
+            &keyed_column_heads
+                .iter()
+                .map(|(_, tx_id)| *tx_id)
+                .collect::<Vec<_>>(),
+        )?;
+        let primary_version = row_versions_by_tx
+            .get(&primary)
+            .ok_or(Error::MissingTransaction(primary))?;
+        let primary_value =
+            self.materialize_large_value_column(table_schema, primary_version, column)?;
+        Ok(Some(Value::Bytes(
+            materialized_text_op(primary_value.len(), &merged).encode(),
+        )))
     }
 
     fn large_value_lca(
@@ -2644,6 +2772,45 @@ where
                 continue;
             };
             ops.extend(self.resolve_text_op_refs(text_oplog::decode(&payload)?)?);
+        }
+        Ok(ops)
+    }
+
+    fn plain_text_ops_since_lca(
+        &mut self,
+        table_schema: &TableSchema,
+        column: &str,
+        head: TxId,
+        lca: Option<TxId>,
+    ) -> Result<Vec<(TxId, crate::text_merge::TextOp)>, Error> {
+        let mut chain = Vec::new();
+        let mut current = Some(head);
+        while let Some(tx_id) = current {
+            if Some(tx_id) == lca {
+                break;
+            }
+            let version = self
+                .query_versions_for_tx(tx_id)?
+                .into_iter()
+                .find(|version| {
+                    version.table() == table_schema.name && version.layer() == VersionLayer::Content
+                })
+                .ok_or(Error::MissingTransaction(tx_id))?;
+            current = match version.parents().as_slice() {
+                [] => None,
+                [parent] => Some(*parent),
+                parents => Some(self.large_value_primary_parent(parents)?),
+            };
+            chain.push((tx_id, version));
+        }
+        chain.reverse();
+
+        let mut ops = Vec::new();
+        for (tx_id, version) in chain {
+            let Some(Value::Bytes(payload)) = version.cell(table_schema, column)? else {
+                continue;
+            };
+            ops.push((tx_id, decode_plain_text_op(&payload)?));
         }
         Ok(ops)
     }
@@ -3434,6 +3601,13 @@ fn merge_large_value_head_ops(
         merged_origin = Some(accumulator_origin.max(origin));
     }
     merged
+}
+
+fn materialized_text_op(parent_len: usize, value: &[u8]) -> crate::text_merge::TextOp {
+    crate::text_merge::TextOp::new([
+        PlainTextRun::Delete(parent_len),
+        PlainTextRun::Insert(value.to_vec()),
+    ])
 }
 
 fn content_refs_in_ops(ops: Vec<TextOp>) -> Vec<content_store::Extent> {

@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module, clippy::wrong_self_convention)]
+
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
