@@ -11,14 +11,28 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompressionType, Direction,
-    IteratorMode, Options, ReadOptions, WriteBatch, WriteBufferManager, WriteOptions,
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
+    Direction, IteratorMode, Options, ReadOptions, UniversalCompactOptions, WriteBatch,
+    WriteBufferManager, WriteOptions,
 };
 
 use super::{ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation};
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const ROCKSDB_WRITE_BUFFER_MANAGER_BYTES: usize = 256 * 1024 * 1024;
+const ROCKSDB_DEFAULT_BLOCK_BYTES: usize = 16 * 1024;
+const ROCKSDB_LARGE_BLOCK_BYTES: usize = 64 * 1024;
+const ROCKSDB_APPEND_TARGET_FILE_BYTES: u64 = 128 * 1024 * 1024;
+const ROCKSDB_OVERWRITE_TARGET_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+const CLASS_HISTORY_CF: &str = "__groove_class_history";
+const CLASS_REGISTER_CF: &str = "__groove_class_register";
+const CLASS_GLOBAL_CURRENT_CF: &str = "__groove_class_global_current";
+const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
+const CLASS_CHANGES_CF: &str = "__groove_class_changes";
+const CLASS_INDICES_CF: &str = "__groove_class_indices";
+const CLASS_CONTENT_CF: &str = "__groove_class_content";
+const CLASS_META_CF: &str = "__groove_class_meta";
 
 /// RocksDB durability tier used for writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -88,7 +102,7 @@ impl RocksDbStorage {
             .map(|name| {
                 ColumnFamilyDescriptor::new(
                     name,
-                    rocksdb_options(&block_cache, &write_buffer_manager),
+                    rocksdb_options_for_cf(name, &block_cache, &write_buffer_manager),
                 )
             });
 
@@ -115,16 +129,106 @@ impl RocksDbStorage {
 }
 
 fn rocksdb_options(block_cache: &Cache, write_buffer_manager: &WriteBufferManager) -> Options {
+    rocksdb_options_for_profile(
+        RocksDbClassProfile::Default,
+        block_cache,
+        write_buffer_manager,
+    )
+}
+
+fn rocksdb_options_for_cf(
+    cf: &str,
+    block_cache: &Cache,
+    write_buffer_manager: &WriteBufferManager,
+) -> Options {
+    rocksdb_options_for_profile(rocksdb_class_profile(cf), block_cache, write_buffer_manager)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RocksDbClassProfile {
+    Default,
+    AppendRange,
+    OverwriteHot,
+    Content,
+    Meta,
+}
+
+fn rocksdb_class_profile(cf: &str) -> RocksDbClassProfile {
+    match cf {
+        CLASS_HISTORY_CF | CLASS_REGISTER_CF | CLASS_CHANGES_CF => RocksDbClassProfile::AppendRange,
+        CLASS_GLOBAL_CURRENT_CF | CLASS_AHEAD_CURRENT_CF | CLASS_INDICES_CF => {
+            RocksDbClassProfile::OverwriteHot
+        }
+        CLASS_CONTENT_CF => RocksDbClassProfile::Content,
+        CLASS_META_CF => RocksDbClassProfile::Meta,
+        _ => RocksDbClassProfile::Default,
+    }
+}
+
+fn rocksdb_options_for_profile(
+    profile: RocksDbClassProfile,
+    block_cache: &Cache,
+    write_buffer_manager: &WriteBufferManager,
+) -> Options {
     let mut block_options = BlockBasedOptions::default();
-    block_options.set_bloom_filter(10.0, false);
+    if profile.uses_blooms() {
+        block_options.set_bloom_filter(10.0, false);
+    }
+    block_options.set_block_size(profile.block_size());
     block_options.set_block_cache(block_cache);
 
     let mut options = Options::default();
     options.set_block_based_table_factory(&block_options);
     options.set_write_buffer_manager(write_buffer_manager);
-    options.set_compression_type(DBCompressionType::Lz4);
-    options.set_bottommost_compression_type(DBCompressionType::Zstd);
+    options.set_target_file_size_base(profile.target_file_size());
+    options.set_compression_type(profile.compression());
+    options.set_bottommost_compression_type(profile.bottommost_compression());
+    if matches!(profile, RocksDbClassProfile::AppendRange) {
+        let mut universal = UniversalCompactOptions::default();
+        universal.set_size_ratio(20);
+        universal.set_min_merge_width(4);
+        universal.set_max_size_amplification_percent(50);
+        universal.set_compression_size_percent(-1);
+        options.set_compaction_style(DBCompactionStyle::Universal);
+        options.set_universal_compaction_options(&universal);
+    }
     options
+}
+
+impl RocksDbClassProfile {
+    fn uses_blooms(self) -> bool {
+        match self {
+            // History/register/changes are consumed as prefix/range/latest scans.
+            // Current/index/content-meta classes still have real point probes.
+            Self::AppendRange => false,
+            Self::Default | Self::OverwriteHot | Self::Content | Self::Meta => true,
+        }
+    }
+
+    fn block_size(self) -> usize {
+        match self {
+            Self::AppendRange | Self::Content => ROCKSDB_LARGE_BLOCK_BYTES,
+            Self::Default | Self::OverwriteHot | Self::Meta => ROCKSDB_DEFAULT_BLOCK_BYTES,
+        }
+    }
+
+    fn target_file_size(self) -> u64 {
+        match self {
+            Self::AppendRange | Self::Content => ROCKSDB_APPEND_TARGET_FILE_BYTES,
+            Self::Default | Self::OverwriteHot | Self::Meta => ROCKSDB_OVERWRITE_TARGET_FILE_BYTES,
+        }
+    }
+
+    fn compression(self) -> DBCompressionType {
+        match self {
+            Self::AppendRange | Self::Content => DBCompressionType::Zstd,
+            Self::Default | Self::OverwriteHot | Self::Meta => DBCompressionType::Lz4,
+        }
+    }
+
+    fn bottommost_compression(self) -> DBCompressionType {
+        DBCompressionType::Zstd
+    }
 }
 
 impl super::ReopenableStorage for RocksDbStorage {
@@ -327,4 +431,51 @@ fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_CONTENT_CF, CLASS_GLOBAL_CURRENT_CF,
+        CLASS_HISTORY_CF, CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile,
+        rocksdb_class_profile,
+    };
+
+    #[test]
+    fn class_cfs_select_storage_physics_profiles() {
+        for cf in [CLASS_HISTORY_CF, CLASS_REGISTER_CF, CLASS_CHANGES_CF] {
+            let profile = rocksdb_class_profile(cf);
+            assert_eq!(profile, RocksDbClassProfile::AppendRange);
+            assert!(
+                !profile.uses_blooms(),
+                "{cf} should not build point-probe blooms"
+            );
+        }
+
+        for cf in [
+            CLASS_GLOBAL_CURRENT_CF,
+            CLASS_AHEAD_CURRENT_CF,
+            CLASS_INDICES_CF,
+        ] {
+            let profile = rocksdb_class_profile(cf);
+            assert_eq!(profile, RocksDbClassProfile::OverwriteHot);
+            assert!(profile.uses_blooms(), "{cf} should keep point-probe blooms");
+        }
+
+        let content = rocksdb_class_profile(CLASS_CONTENT_CF);
+        assert_eq!(content, RocksDbClassProfile::Content);
+        assert!(
+            content.uses_blooms(),
+            "content class includes content_meta/checkpoint point probes today"
+        );
+
+        assert_eq!(
+            rocksdb_class_profile(CLASS_META_CF),
+            RocksDbClassProfile::Meta
+        );
+        assert_eq!(
+            rocksdb_class_profile("ordinary"),
+            RocksDbClassProfile::Default
+        );
+    }
 }

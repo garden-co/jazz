@@ -17640,3 +17640,782 @@ Samples: 28518; elapsed: 42.685s; frequency_hz: 997
 - Logs: `target/benchmark-cf-receipts/20260703T170138Z/`
 - Commands: `cargo bench -p jazz-sim --bench s2_canvas`, `s5_durable_stream`, `s6_text_traces` at default size.
 - Report: `/Users/anselm/CF-RECEIPTS-2026-07-03.md`
+
+---
+
+## Run 2026-07-03T17:30:01Z - smoke
+
+- result: `pass`
+- git: `e6f4df4c8`
+- dirty: `true`
+- log_dir: `target/benchmark-smoke`
+- result_dir: `dev/benchmarks/results/20260703T172118Z`
+- prebuild_s: `486.162`
+- excerpt_lines: `18`
+
+### Summary
+
+| Scenario                       | Status | Wall Time | Previous |   Delta | JSONL Rows | Invocation                                                                                            |
+| ------------------------------ | ------ | --------: | -------: | ------: | ---------: | ----------------------------------------------------------------------------------------------------- |
+| jazz/cold_subscription         | `pass` |    0.817s |   0.838s | -0.021s |          5 | `JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --bench cold_subscription`               |
+| jazz/sync                      | `pass` |    0.665s |   0.710s | -0.045s |          2 | `GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --bench sync`                              |
+| jazz/validation                | `pass` |    0.657s |   0.654s | +0.003s |          2 | `GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --bench validation`            |
+| jazz/merge_back_cost           | `pass` |    0.688s |   0.705s | -0.017s |          5 | `JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost`                               |
+| jazz/large_value_checkpointing | `pass` |    3.489s |   3.390s | +0.099s |          3 | `JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing`        |
+| jazz-sim/micro                 | `pass` |   13.835s |  13.752s | +0.083s |         23 | `JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain` |
+| jazz-sim/s1_saas               | `pass` |    1.219s |   1.187s | +0.032s |          5 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s1_saas`                                                |
+| jazz-sim/s2_canvas             | `pass` |    3.699s |   3.654s | +0.045s |          3 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s2_canvas`                                              |
+| jazz-sim/s3_permissions        | `pass` |    1.265s |   1.208s | +0.057s |          9 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s3_permissions`                                         |
+| jazz-sim/s4_order_processing   | `pass` |    4.725s |   4.759s | -0.034s |          7 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s4_order_processing`                                    |
+| jazz-sim/s5_durable_stream     | `pass` |    0.719s |   0.724s | -0.005s |          6 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream`                                      |
+| jazz-sim/s6_text_traces        | `pass` |    0.853s |   0.902s | -0.049s |         28 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s6_text_traces`                                         |
+| jazz-sim/s7_migrations         | `pass` |    1.612s |   1.564s | +0.048s |          5 | `cargo bench -p jazz-sim --bench s7_migrations # source always runs smoke(); no env knob`             |
+| jazz-sim/s9_durable_execution  | `pass` |    0.963s |   0.943s | +0.020s |          5 | `JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution`                                   |
+
+### Details
+
+#### jazz/cold_subscription
+
+- status: `pass`
+- wall_time: `0.817s`
+- previous_wall_time: `0.838s`
+- delta: `-0.021s`
+- log: `target/benchmark-smoke/jazz_cold_subscription.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz_cold_subscription.jsonl`
+- invocation:
+
+```sh
+JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --bench cold_subscription
+```
+
+- excerpt:
+
+```jsonl
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":13,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":0,"core_last_commit_storage_write_history_indexes_count":0,"core_last_commit_storage_write... [truncated; see jsonl]
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":13,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":0,"core_last_commit_storage_write_history_indexes_count":0,"core_last_commit_storage_write... [truncated; see jsonl]
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":18,"core_last_commit_storage_write_bytes":850,"core_last_commit_storage_write_count":7,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":121,"core_last_commit_storage_write_history_indexes_count":1,"core_last_commit_storage_wr... [truncated; see jsonl]
+{"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":18,"core_last_commit_storage_write_bytes":850,"core_last_commit_storage_write_count":7,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_history_indexes_bytes":121,"core_last_commit_storage_write_history_indexes_count":1,"core_last_commit_storage_wr... [truncated; see jsonl]
+```
+
+#### jazz/sync
+
+- status: `pass`
+- wall_time: `0.665s`
+- previous_wall_time: `0.710s`
+- delta: `-0.045s`
+- log: `target/benchmark-smoke/jazz_sync.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz_sync.jsonl`
+- invocation:
+
+```sh
+GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --bench sync
+```
+
+- excerpt:
+
+```jsonl
+{"accept_count":20,"commits":20,"core_edge_complete_tx_payload_refs_out":0,"core_edge_version_bundles_out":21,"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":65,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"core_last_commit_storage_write_hist... [truncated; see jsonl]
+```
+
+#### jazz/validation
+
+- status: `pass`
+- wall_time: `0.657s`
+- previous_wall_time: `0.654s`
+- delta: `+0.003s`
+- log: `target/benchmark-smoke/jazz_validation.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz_validation.jsonl`
+- invocation:
+
+```sh
+GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --bench validation
+```
+
+- excerpt:
+
+```jsonl
+{"accept_count":18,"clients":5,"commits":25,"core_ingest_max_us":468,"core_ingest_p50_us":215,"core_ingest_p95_us":401,"core_ingest_p99_us":468,"core_large_value_checkpoint_hits":0,"core_large_value_checkpoint_writes":0,"core_large_value_last_replayed_ops":0,"core_large_value_last_replayed_versions":0,"core_large_value_materializations":0,"core_large_value_total_replayed_ops":0,"core_last_commit_ivm_tick_us":11,"core_last_commit_storage_write_bytes":35,"core_last_commit_storage_write_count":1,"core_last_commit_storage_write_global_changes_indexes_bytes":0,"core_last_commit_storage_write_global_changes_indexes_count":0,"core_last_commit_storage_write_global_changes_rows_bytes":0,"core_last_commit_storage_write_global_changes_rows_count":0,"core_last_commit_storage_write_global_current_indexes_bytes":0,"core_last_commit_storage_write_global_current_indexes_count":0,"core_last_commit_storage_write_global_current_rows_bytes":0,"core_last_commit_storage_write_global_current_rows_count":0,"c... [truncated; see jsonl]
+```
+
+#### jazz/merge_back_cost
+
+- status: `pass`
+- wall_time: `0.688s`
+- previous_wall_time: `0.705s`
+- delta: `-0.017s`
+- log: `target/benchmark-smoke/jazz_merge_back_cost.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz_merge_back_cost.jsonl`
+- invocation:
+
+```sh
+JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost
+```
+
+- excerpt:
+
+```jsonl
+{"git_dirty":true,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":21,"node_last_commit_storage_write_bytes":60,"node_last_commit_storage_write_count":1,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":0,"node_last_commit_storage_write... [truncated; see jsonl]
+{"git_dirty":true,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":22,"node_last_commit_storage_write_bytes":592,"node_last_commit_storage_write_count":4,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":204,"node_last_commit_storage_wr... [truncated; see jsonl]
+{"git_dirty":true,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":18,"node_last_commit_storage_write_bytes":60,"node_last_commit_storage_write_count":1,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":0,"node_last_commit_storage_write... [truncated; see jsonl]
+{"git_dirty":true,"knobs":{"JAZZ_MERGE_BACK_WRITES":"50"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":18,"node_last_commit_storage_write_bytes":60,"node_last_commit_storage_write_count":1,"node_last_commit_storage_write_global_changes_indexes_bytes":0,"node_last_commit_storage_write_global_changes_indexes_count":0,"node_last_commit_storage_write_global_changes_rows_bytes":0,"node_last_commit_storage_write_global_changes_rows_count":0,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":0,"node_last_commit_storage_write_global_current_rows_count":0,"node_last_commit_storage_write_history_indexes_bytes":0,"node_last_commit_storage_write... [truncated; see jsonl]
+```
+
+#### jazz/large_value_checkpointing
+
+- status: `pass`
+- wall_time: `3.489s`
+- previous_wall_time: `3.390s`
+- delta: `+0.099s`
+- log: `target/benchmark-smoke/jazz_large_value_checkpointing.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz_large_value_checkpointing.jsonl`
+- invocation:
+
+```sh
+JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing
+```
+
+- excerpt:
+
+```jsonl
+{"bytes":16878,"checkpoint_interval":"checkpointed","checkpoint_interval_ops":64,"depth":300,"git_dirty":true,"knobs":{"JAZZ_LV_DEPTH":"300","JAZZ_LV_INTERVALS":"64"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":23,"node_last_commit_storage_write_bytes":1169,"node_last_commit_storage_write_count":11,"node_last_commit_storage_write_global_changes_indexes_bytes":280,"node_last_commit_storage_write_global_changes_indexes_count":2,"node_last_commit_storage_write_global_changes_rows_bytes":100,"node_last_commit_storage_write_global_changes_rows_count":1,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":225,"node_last_commit_storage_write... [truncated; see jsonl]
+{"bytes":16878,"checkpoint_interval":"full","checkpoint_interval_ops":18446744073709551615,"depth":300,"git_dirty":true,"knobs":{"JAZZ_LV_DEPTH":"300","JAZZ_LV_INTERVALS":"64"},"node_large_value_checkpoint_hits":0,"node_large_value_checkpoint_writes":0,"node_large_value_last_replayed_ops":0,"node_large_value_last_replayed_versions":0,"node_large_value_materializations":0,"node_large_value_total_replayed_ops":0,"node_last_commit_ivm_tick_us":27,"node_last_commit_storage_write_bytes":1169,"node_last_commit_storage_write_count":11,"node_last_commit_storage_write_global_changes_indexes_bytes":280,"node_last_commit_storage_write_global_changes_indexes_count":2,"node_last_commit_storage_write_global_changes_rows_bytes":100,"node_last_commit_storage_write_global_changes_rows_count":1,"node_last_commit_storage_write_global_current_indexes_bytes":0,"node_last_commit_storage_write_global_current_indexes_count":0,"node_last_commit_storage_write_global_current_rows_bytes":225,"node_last_commit_sto... [truncated; see jsonl]
+```
+
+#### jazz-sim/micro
+
+- status: `pass`
+- wall_time: `13.835s`
+- previous_wall_time: `13.752s`
+- delta: `+0.083s`
+- log: `target/benchmark-smoke/jazz-sim_micro.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz-sim_micro.jsonl`
+- invocation:
+
+```sh
+JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain
+```
+
+- excerpt:
+
+```jsonl
+{"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"node_open_max_ns":14106623,"node_open_p50_ns":14106623,"node_open_p95_ns":14106623,"node_open_p99_ns":14106623,"primitive":"node_open","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"versions":1000}
+{"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"node_open_max_ns":77398015,"node_open_p50_ns":77398015,"node_open_p95_ns":77398015,"node_open_p99_ns":77398015,"primitive":"node_open","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"versions":10000}
+{"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"node_open_max_ns":759169023,"node_open_p50_ns":759169023,"node_open_p95_ns":759169023,"node_open_p99_ns":759169023,"primitive":"node_open","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"versions":100000}
+{"driver":"micro","git_dirty":true,"hlc_mint_max_ns":167,"hlc_mint_p50_ns":167,"hlc_mint_p95_ns":167,"hlc_mint_p99_ns":167,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"hlc_mint","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"driver":"micro","git_dirty":true,"hlc_receive_max_max_ns":42,"hlc_receive_max_p50_ns":42,"hlc_receive_max_p95_ns":42,"hlc_receive_max_p99_ns":42,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"hlc_receive_max","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"driver":"micro","git_dirty":true,"hlc_compare_max_ns":41,"hlc_compare_p50_ns":41,"hlc_compare_p95_ns":41,"hlc_compare_p99_ns":41,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"hlc_compare","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":707583,"domination_winner_probe_p50_ns":707583,"domination_winner_probe_p95_ns":707583,"domination_winner_probe_p99_ns":707583,"driver":"micro","git_dirty":true,"heads":1,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":227071,"domination_winner_probe_p50_ns":227071,"domination_winner_probe_p95_ns":227071,"domination_winner_probe_p99_ns":227071,"driver":"micro","git_dirty":true,"heads":2,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":236031,"domination_winner_probe_p50_ns":236031,"domination_winner_probe_p95_ns":236031,"domination_winner_probe_p99_ns":236031,"driver":"micro","git_dirty":true,"heads":8,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"domination_winner_probe_max_ns":275967,"domination_winner_probe_p50_ns":275967,"domination_winner_probe_p95_ns":275967,"domination_winner_probe_p99_ns":275967,"driver":"micro","git_dirty":true,"heads":64,"knobs":{"JAZZ_MICRO_ITERS":"1"},"notes":"public current_rows probe over heads constructed through normal ingest; exact private clock-condition helper is not exposed","primitive":"domination_winner_probe","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"deletion_register_resolution_max_ns":258303,"deletion_register_resolution_p50_ns":258303,"deletion_register_resolution_p95_ns":258303,"deletion_register_resolution_p99_ns":258303,"driver":"micro","events":32,"git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"deletion_register_resolution","profile":"micro","samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":91,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"version_ingest_rate","profile":"micro","samples":1,"scenario":"micro","seed":469919560303,"version_ingest_rate_max_ns":175231,"version_ingest_rate_p50_ns":175231,"version_ingest_rate_p95_ns":175231,"version_ingest_rate_p99_ns":175231,"versions":1,"versions_per_sec_p50":5706}
+{"bytes":94,"commit_unit_encode_max_ns":5375,"commit_unit_encode_p50_ns":5375,"commit_unit_encode_p95_ns":5375,"commit_unit_encode_p99_ns":5375,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_encode","profile":"micro","rows_per_unit":1,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":94,"commit_unit_decode_ingest_max_ns":172159,"commit_unit_decode_ingest_p50_ns":172159,"commit_unit_decode_ingest_p95_ns":172159,"commit_unit_decode_ingest_p99_ns":172159,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_decode_ingest","profile":"micro","rows_per_unit":1,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":940,"commit_unit_encode_max_ns":24639,"commit_unit_encode_p50_ns":24639,"commit_unit_encode_p95_ns":24639,"commit_unit_encode_p99_ns":24639,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_encode","profile":"micro","rows_per_unit":10,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":940,"commit_unit_decode_ingest_max_ns":666623,"commit_unit_decode_ingest_p50_ns":666623,"commit_unit_decode_ingest_p95_ns":666623,"commit_unit_decode_ingest_p99_ns":666623,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_decode_ingest","profile":"micro","rows_per_unit":10,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":9490,"commit_unit_encode_max_ns":202623,"commit_unit_encode_p50_ns":202623,"commit_unit_encode_p95_ns":202623,"commit_unit_encode_p99_ns":202623,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_encode","profile":"micro","rows_per_unit":100,"samples":1,"scenario":"micro","seed":469919560303}
+{"bytes":9490,"commit_unit_decode_ingest_max_ns":4648959,"commit_unit_decode_ingest_p50_ns":4648959,"commit_unit_decode_ingest_p95_ns":4648959,"commit_unit_decode_ingest_p99_ns":4648959,"driver":"micro","git_dirty":true,"knobs":{"JAZZ_MICRO_ITERS":"1"},"primitive":"commit_unit_decode_ingest","profile":"micro","rows_per_unit":100,"samples":1,"scenario":"micro","seed":469919560303}
+```
+
+#### jazz-sim/s1_saas
+
+- status: `pass`
+- wall_time: `1.219s`
+- previous_wall_time: `1.187s`
+- delta: `+0.032s`
+- log: `target/benchmark-smoke/jazz-sim_s1_saas.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz-sim_s1_saas.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s1_saas
+```
+
+- excerpt:
+
+```jsonl
+{"clients":2,"closure_rows":10,"cold_bytes":3728,"cold_bytes_floor":1808,"cold_complete_p50_us":2000,"cold_complete_p95_us":2000,"driver":"deterministic","fixture_hash":11224403247539415689,"fixture_rows":51,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"naive_refetch_ceiling_bytes":5520,"profile":"s1-smoke","result_set_rows":4,"scenario":"s1_saas","seed":1370116097,"transport_codec":"wire_frames","warm_local_p50_us":1241,"warm_local_p95_us":1781,"warm_settled_p50_us":357,"warm_settled_p95_us":429,"writes_applied":3}
+{"acceptance_p50_us":1000,"acceptance_p95_us":1000,"driver":"deterministic","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s1-smoke","scenario":"s1_saas","seed":1370116097}
+{"driver":"deterministic","git_dirty":true,"hydration_bytes":3728,"hydration_floor_bytes":1808,"hydration_rows":4,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s1-smoke","scenario":"s1_saas","scope":"saas_query_closure","seed":1370116097}
+{"catchup_bytes":5368,"catchup_bytes_floor":2552,"catchup_us":6000,"closure_rows":16,"driver":"deterministic","fixture_commits_applied":53,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"messages_delivered":130,"messages_dropped":4,"messages_sent":134,"phase":"reconnect","profile":"s1-smoke","result_set_rows":6,"scenario":"s1_saas_reconnect","seed":1370116097,"transport_codec":"wire_frames","transport_codec_decode_avg_us_per_message":2.4776119402985075,"transport_codec_decode_count":134,"transport_codec_decode_max_us":43,"transport_codec_decode_p50_us":1,"transport_codec_decode_p95_us":7,"transport_codec_decode_p99_us":43,"transport_codec_decode_total_us":332,"transport_codec_encode_avg_us_per_message":1.2164179104477613,"transport_codec_encode_count":134,"transport_codec_encode_max_us":16,"transport_codec_encode_p50_us":1,"transport_codec_encode_p95_us":4,"transport_codec_encode_p99_us":14,"transport_codec_encode_total_us":163,"transport_codec_encoded_bytes":53935,"transport_codec_encode... [truncated; see jsonl]
+```
+
+#### jazz-sim/s2_canvas
+
+- status: `pass`
+- wall_time: `3.699s`
+- previous_wall_time: `3.654s`
+- delta: `+0.045s`
+- log: `target/benchmark-smoke/jazz-sim_s2_canvas.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz-sim_s2_canvas.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s2_canvas
+```
+
+- excerpt:
+
+```jsonl
+{"coalesced_16ms":false,"driver":"deterministic","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"needs":"historical-implicit-include-source-coverage","phase":"historical_load","profile":"s2-smoke","scenario":"s2_canvas","seed":1375783678,"status":"gated"}
+{"coalesced_16ms":true,"driver":"deterministic","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"needs":"historical-implicit-include-source-coverage","phase":"historical_load","profile":"s2-smoke","scenario":"s2_canvas","seed":1375783678,"status":"gated"}
+```
+
+#### jazz-sim/s3_permissions
+
+- status: `pass`
+- wall_time: `1.265s`
+- previous_wall_time: `1.208s`
+- delta: `+0.057s`
+- log: `target/benchmark-smoke/jazz-sim_s3_permissions.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz-sim_s3_permissions.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s3_permissions
+```
+
+- excerpt:
+
+```jsonl
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"cold_bytes":2205,"cold_bytes_floor":1197,"cold_complete_us":4000,"cold_core_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":21,"reads":364},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":0,"reads":0},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":25,"reads":0},"total":{"ranges":59,"reads":373},"transactions_indexes":{"ranges":0,"reads":0},"transactions_rows":{"ranges":9,"reads":9}},"cold_view_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":21,"reads":364},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":0,"reads":0},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":25,"... [truncated; see jsonl]
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"cold_bytes":4920,"cold_bytes_floor":2680,"cold_complete_us":4000,"cold_core_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":27,"reads":339},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":0,"reads":0},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":31,"reads":0},"total":{"ranges":82,"reads":359},"transactions_indexes":{"ranges":0,"reads":0},"transactions_rows":{"ranges":20,"reads":20}},"cold_view_storage_reads":{"global_changes_indexes":{"ranges":0,"reads":0},"global_changes_rows":{"ranges":0,"reads":0},"global_current_indexes":{"ranges":0,"reads":0},"global_current_rows":{"ranges":21,"reads":364},"history_indexes":{"ranges":0,"reads":0},"history_rows":{"ranges":0,"reads":0},"other":{"ranges":4,"reads":0},"register_global_current_rows":{"ranges":25... [truncated; see jsonl]
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","edge_core_one_way_ms":1,"git_dirty":true,"grant_global_p50_us":4001,"grant_global_p95_us":4001,"grant_none_p50_us":4001,"grant_none_p95_us":4001,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"grant","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"teams_per_org":4}
+{"access_edges_per_resource":1,"apply_us":24,"client_edge_one_way_ms":1,"core_recompute_p50_us":1583,"core_recompute_p95_us":1583,"disappearance_p50_us":4001,"disappearance_p95_us":4001,"driver":"deterministic","edge_core_one_way_ms":1,"git_dirty":true,"hidden_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"revocation","profile":"s3-smoke","query_update_us":35559,"resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"send_recv_us":0,"teams_per_org":4,"update_rows":1}
+{"access_edges_per_resource":1,"apply_us":24,"client_edge_one_way_ms":1,"core_recompute_p50_us":1560,"core_recompute_p95_us":1560,"disappearance_p50_us":4001,"disappearance_p95_us":4001,"driver":"deterministic","edge_core_one_way_ms":1,"git_dirty":true,"hidden_rows":3,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"revocation","profile":"s3-smoke","query_update_us":34958,"resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"send_recv_us":0,"teams_per_org":4,"update_rows":3}
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","edge_core_one_way_ms":1,"forbidden_deliveries":0,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":4000,"orgs":1,"phase":"forbidden_writes","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"teams_per_org":4}
+{"acceptance_p50_us":2000,"acceptance_p95_us":2000,"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","durability_tier":"Edge","edge_core_one_way_ms":1,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"orgs":1,"phase":"edge_mergeable_acceptance","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","seed":1392508929,"teams_per_org":4}
+{"access_edges_per_resource":1,"client_edge_one_way_ms":1,"driver":"deterministic","edge_core_one_way_ms":1,"edge_scope_subscription_count_after_drain":0,"edge_scope_subscription_count_before_drain":1,"git_dirty":true,"hydration_bytes":1723,"hydration_floor_bytes":939,"hydration_rows":7,"knobs":{"JAZZ_SMOKE":"1"},"orgs":1,"phase":"edge_permission_scope_hydration","profile":"s3-smoke","resources_per_org":20,"scenario":"s3_permissions","scope":"narrow(policy_shape, writer_claim)","seed":1392508929,"teams_per_org":4,"whole_table_scope":"not hydrated; bench reports the narrow B2 scope only"}
+```
+
+#### jazz-sim/s4_order_processing
+
+- status: `pass`
+- wall_time: `4.725s`
+- previous_wall_time: `4.759s`
+- delta: `-0.034s`
+- log: `target/benchmark-smoke/jazz-sim_s4_order_processing.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz-sim_s4_order_processing.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s4_order_processing
+```
+
+- excerpt:
+
+```jsonl
+{"abort_retry_rate":0.0,"attempts":5,"clients":1,"committed":5,"customers":20,"customers_per_district":2,"delivered_order_lines":0,"delivered_orders":0,"districts_per_warehouse":10,"driver":"synchronous","git_dirty":true,"items":5,"jazz_settle_tx_per_sec":101.75217240888092,"jazz_sqlite_ratio":null,"jazz_wall_tx_per_sec":101.75217240888092,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"measurement_excludes":"per-accepted-commit peer current_rows_update fan-out","measurement_includes":"engine commit/accept path","phase":"throughput_settlement","profile":"s4-smoke","propagation_p50_us":0,"propagation_p95_us":0,"ratio_omitted_reason":"minimum sample is 200 committed transactions","rejects":0,"retries":0,"same_schedule_replay":"matched","scenario":"s4_order_processing","seed":1409286145,"settle_p50_us":9407,"settle_p95_us":11391,"settlement_tx_per_sec":101.75217240888092,"sqlite_elapsed_us":68,"sqlite_tx_per_sec":73529.41176470589,"stock_rows":5,"throughput_line":"settlement throughp... [truncated; see jsonl]
+{"acceptance_p50_us":1230,"acceptance_p95_us":2277,"clients":1,"driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s4-smoke","scenario":"s4_order_processing","seed":1409286145}
+{"driver":"synchronous","git_dirty":true,"hydration_bytes":20391,"hydration_floor_bytes":20391,"hydration_rows":77,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s4-smoke","scenario":"s4_order_processing","scope":"order_processing_table_surface","seed":1409286145}
+{"abort_retry_rate":0.0,"attempts":5,"clients":1,"committed":5,"customers":20,"customers_per_district":2,"delivered_order_lines":0,"delivered_orders":0,"districts_per_warehouse":10,"driver":"synchronous","git_dirty":true,"items":5,"jazz_settle_tx_per_sec":101.83921624539177,"jazz_sqlite_ratio":null,"jazz_wall_tx_per_sec":24.070980507319987,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"measurement_excludes":null,"measurement_includes":"engine commit/accept path plus per-accepted-commit peer current_rows_update fan-out","phase":"throughput_propagation_inclusive","profile":"s4-smoke","propagation_inclusive_tx_per_sec":24.070980507319987,"propagation_p50_us":31743,"propagation_p95_us":32031,"ratio_omitted_reason":"minimum sample is 200 committed transactions","rejects":0,"retries":0,"same_schedule_replay":"matched","scenario":"s4_order_processing","seed":1409286145,"settle_p50_us":9575,"settle_p95_us":11247,"sqlite_elapsed_us":68,"sqlite_tx_per_sec":73529.41176470589,"stock_rows":5,... [truncated; see jsonl]
+{"acceptance_p50_us":1270,"acceptance_p95_us":2439,"clients":1,"driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s4-smoke","scenario":"s4_order_processing","seed":1409286145}
+{"driver":"synchronous","git_dirty":true,"hydration_bytes":22991,"hydration_floor_bytes":22991,"hydration_rows":86,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s4-smoke","scenario":"s4_order_processing","scope":"order_processing_table_surface","seed":1409286145}
+```
+
+#### jazz-sim/s5_durable_stream
+
+- status: `pass`
+- wall_time: `0.719s`
+- previous_wall_time: `0.724s`
+- delta: `-0.005s`
+- log: `target/benchmark-smoke/jazz-sim_s5_durable_stream.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz-sim_s5_durable_stream.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream
+```
+
+- excerpt:
+
+```jsonl
+{"append_p50_us":877,"append_tail_p50_us":863,"append_tail_p99_us":990,"batch_tokens":2,"commits":2,"core_cpu_us_per_append":884.5,"correctness":"prefix_monotone_and_resumer_exact","driver":"synchronous","durability_regime":"wal_no_sync_equivalent; log floor fsyncs once at end","git_dirty":true,"history_metadata_bytes_per_token":46210.0,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"log_floor_bytes_per_token":10.5,"log_floor_nosync_elapsed_us":10249,"peak_rss_bytes":19775488,"profile":"s5-smoke","resume_bytes":696,"resume_bytes_by_gap":[232,232,232],"resume_elapsed_us_by_gap":[3074,2727,2612],"resume_gap_tokens":[3,2,1],"resume_p50_us":2727,"resumers":1,"run_seconds":1,"scenario":"s5_durable_stream","seed":1426063361,"sqlite_db_bytes_per_token":3072.0,"sqlite_elapsed_us":49,"storage_amplification":11552.5,"storage_bytes_per_token_note":"most meaningful at full-rate/full-duration knobs","streams":1,"sustained_appends_per_sec":58.87201224537854,"synced_bytes_per_token_per_tailer":1... [truncated; see jsonl]
+{"append_p50_us":2334,"append_p95_us":2334,"append_p99_us":2334,"batch_tokens":2,"changed_p50_us":0,"changed_p95_us":0,"commits":2,"correctness":"db_watch_tailers_prefix_monotone_and_final_exact","current_p50_us":1,"current_p95_us":1,"drain_p50_us":1400,"drain_p99_us":1400,"driver":"db_surface","git_dirty":true,"history_metadata_bytes_per_token":91303.5,"knobs":{"JAZZ_SMOKE":"1"},"peak_rss_bytes":20905984,"phase":"db_surface_live","profile":"s5-smoke","rows":1,"run_seconds":1,"scenario":"s5_durable_stream","seed":1426063361,"streams":1,"sustained_appends_per_sec":402.0908725371934,"tailers":1,"tokens_per_second":4,"update_p50_us":923,"update_p99_us":923,"wait_p50_us":0,"wait_p99_us":0}
+{"acceptance_p50_us":130,"acceptance_p95_us":191,"driver":"db_surface","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s5-smoke","scenario":"s5_durable_stream","seed":1426063361}
+{"driver":"db_surface","git_dirty":true,"hydration_bytes":423,"hydration_floor_bytes":423,"hydration_rows":2,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s5-smoke","scenario":"s5_durable_stream","scope":"durable_stream_table_surface","seed":1426063361}
+{"driver":"db_surface","full_rehydrate_bytes":60,"git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"process_local_resume","profile":"s5-smoke","resume_bytes":7529,"resume_ratio":125.48333333333333,"resume_status":"resumed_larger_or_equal","rows":16,"scenario":"s5_durable_stream","seed":1426063361}
+```
+
+#### jazz-sim/s6_text_traces
+
+- status: `pass`
+- wall_time: `0.853s`
+- previous_wall_time: `0.902s`
+- delta: `-0.049s`
+- log: `target/benchmark-smoke/jazz-sim_s6_text_traces.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz-sim_s6_text_traces.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s6_text_traces
+```
+
+- excerpt:
+
+```jsonl
+{"batch_edits":1,"commits":8,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"history_metadata_bytes_per_edit":24538.0,"ingest_edits_per_sec":684.5798391237378,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":541,"local_echo_p95_us":1166,"peak_memory_proxy_bytes":8,"peak_rss_bytes":14680064,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":1,"commits":8,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"history_metadata_bytes_per_edit":45173.625,"ingest_edits_per_sec":1099.5052226498076,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":213,"local_echo_p95_us":286,"peak_memory_proxy_bytes":8,"peak_rss_bytes":18726912,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"acceptance_p50_us":17,"acceptance_p95_us":275,"batch_edits":1,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":1,"driver":"synchronous","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"hydration_bytes":215,"hydration_floor_bytes":215,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":4,"commits":2,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"history_metadata_bytes_per_edit":22303.75,"ingest_edits_per_sec":5878.030859662013,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":276,"local_echo_p95_us":287,"peak_memory_proxy_bytes":8,"peak_rss_bytes":18939904,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":4,"commits":2,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"history_metadata_bytes_per_edit":44043.5,"ingest_edits_per_sec":3552.3978685612788,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":166,"local_echo_p95_us":186,"peak_memory_proxy_bytes":8,"peak_rss_bytes":19120128,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"acceptance_p50_us":17,"acceptance_p95_us":140,"batch_edits":4,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":4,"driver":"synchronous","expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"hydration_bytes":215,"hydration_floor_bytes":215,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"driver":"synchronous","edit_rate_nominal_per_sec":10,"edits":4,"expected_trace_sha256":"aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"observer_p95_us":1315,"phase":"live_observation","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"synced_bytes":1388,"trace":"automerge-paper","trace_commit":"da212e984c777d31ee7d888f82637288aa4c61d3","trace_fixture_path":"synthetic-smoke/automerge-paper","trace_profile":"synthetic_smoke_automerge-paper","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js"}
+{"batch_edits":1,"commits":8,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"history_metadata_bytes_per_edit":24538.0,"ingest_edits_per_sec":1383.1258644536654,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":283,"local_echo_p95_us":347,"peak_memory_proxy_bytes":8,"peak_rss_bytes":19283968,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":1,"commits":8,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"history_metadata_bytes_per_edit":45173.625,"ingest_edits_per_sec":1224.552273075157,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":206,"local_echo_p95_us":279,"peak_memory_proxy_bytes":8,"peak_rss_bytes":19365888,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"acceptance_p50_us":16,"acceptance_p95_us":134,"batch_edits":1,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"batch_edits":1,"driver":"synchronous","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"hydration_bytes":215,"hydration_floor_bytes":215,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"batch_edits":4,"commits":2,"correctness":"final_and_prefix_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"history_metadata_bytes_per_edit":22303.75,"ingest_edits_per_sec":6191.950464396285,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":245,"local_echo_p95_us":267,"peak_memory_proxy_bytes":8,"peak_rss_bytes":19365888,"phase":"trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz","zstd19_final_doc_bytes":17,"zstd19_json_op_log_bytes":71,"zstd_final_doc_bytes":17,"zstd_json_op_log_bytes":78}
+{"api_surface":"db","batch_edits":4,"commits":2,"correctness":"final_replay_matched","driver":"synchronous","edits":8,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"history_metadata_bytes_per_edit":44043.5,"ingest_edits_per_sec":3626.473254759746,"knobs":{"JAZZ_SMOKE":"1"},"local_echo_p50_us":174,"local_echo_p95_us":200,"peak_memory_proxy_bytes":8,"peak_rss_bytes":19382272,"phase":"db_surface_trace_replay","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"acceptance_p50_us":17,"acceptance_p95_us":143,"batch_edits":4,"driver":"synchronous","durability_tier":"Edge","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"batch_edits":4,"driver":"synchronous","expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"hydration_bytes":215,"hydration_floor_bytes":215,"hydration_rows":1,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s6-smoke","scenario":"s6_text_traces","scope":"text_doc_table_surface","seed":1442840577,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+{"driver":"synchronous","edit_rate_nominal_per_sec":10,"edits":4,"expected_trace_sha256":"43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"observer_p95_us":1330,"phase":"live_observation","profile":"s6-smoke","scenario":"s6_text_traces","seed":1442840577,"synced_bytes":1388,"trace":"seph-blog1","trace_commit":"762fa6c51605c88a05ebe5c4b9d4540caca30b97","trace_fixture_path":"synthetic-smoke/seph-blog1","trace_profile":"synthetic_smoke_seph-blog1","trace_sha256":"synthetic","trace_url":"https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz"}
+```
+
+#### jazz-sim/s7_migrations
+
+- status: `pass`
+- wall_time: `1.612s`
+- previous_wall_time: `1.564s`
+- delta: `+0.048s`
+- log: `target/benchmark-smoke/jazz-sim_s7_migrations.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz-sim_s7_migrations.jsonl`
+- invocation:
+
+```sh
+cargo bench -p jazz-sim --bench s7_migrations # source always runs smoke(); no env knob
+```
+
+- excerpt:
+
+```jsonl
+{"acceptance_p50_us":249,"acceptance_p95_us":249,"driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{},"phase":"edge_mergeable_acceptance","profile":"s7-local","scenario":"s7_migrations","seed":1459617793}
+{"driver":"synchronous","git_dirty":true,"hydration_bytes":0,"hydration_floor_bytes":0,"hydration_rows":3,"knobs":{},"phase":"edge_permission_scope_hydration","profile":"s7-local","scenario":"s7_migrations","scope":"migration_schema_catalog","seed":1459617793}
+{"driver":"synchronous","git_dirty":true,"iterations":64,"knobs":{},"native_p50_us":796,"native_p95_us":854,"one_hop_p50_us":692,"one_hop_p95_us":753,"phase":"lens_read_latency","profile":"s7-local","rows":128,"scenario":"s7_migrations","seed":1459617793,"three_hop_p50_us":718,"three_hop_p95_us":784}
+{"driver":"synchronous","git_dirty":true,"knobs":{},"native_p50_us":1076,"native_p95_us":1403,"one_hop_p50_us":1672,"one_hop_p95_us":1981,"phase":"lens_write_translation","profile":"s7-local","rows":128,"scenario":"s7_migrations","seed":1459617793,"three_hop_p50_us":2285,"three_hop_p95_us":2595}
+```
+
+#### jazz-sim/s9_durable_execution
+
+- status: `pass`
+- wall_time: `0.963s`
+- previous_wall_time: `0.943s`
+- delta: `+0.020s`
+- log: `target/benchmark-smoke/jazz-sim_s9_durable_execution.log`
+- jsonl: `dev/benchmarks/results/20260703T172118Z/jazz-sim_s9_durable_execution.jsonl`
+- invocation:
+
+```sh
+JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution
+```
+
+- excerpt:
+
+```jsonl
+{"aggregate_elapsed_us":153304,"aggregate_transitions_per_sec":78.2758440745186,"aggregate_with_assertions_elapsed_us":190074,"aggregate_with_assertions_transitions_per_sec":63.13330597556741,"assertion_elapsed_us":36760,"attempts":15,"cold_resume_elapsed_us":24483,"cold_resume_transitions_per_sec":490.1360127435363,"committed_transitions":12,"correctness":"gap_free_monotone_no_double_advance_resume_exact","dashboard_p95_us":1543,"double_advance_rejects":3,"double_advances":0,"driver":"synchronous","fixture_current_state_bytes":198437,"git_dirty":true,"injected_races":3,"instances":8,"knobs":{"JAZZ_SMOKE":"1"},"link_rtt_floor_us":2000,"log_floor_bytes_per_step":7.0,"log_floor_elapsed_us":9459,"max_concurrent_instances_within_slo":8,"phase":"smoke","profile":"s9-smoke","rejects":3,"resume_bytes":8156,"resume_p95_us":24495,"same_schedule_replay":"matched","scenario":"s9_durable_execution","seed":1493172225,"settle_transitions_per_sec":215.47080370609783,"sqlite_elapsed_us":267,"sqlite_tx... [truncated; see jsonl]
+{"correctness":"matched","driver":"deterministic","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"smoke_timing","profile":"s9-smoke","scenario":"s9_durable_execution","seed":1493172225,"smoke_elapsed_us":401089}
+{"acceptance_p50_us":4523,"acceptance_p95_us":5279,"api_surface":"db","driver":"synchronous","durability_tier":"Edge","git_dirty":true,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_mergeable_acceptance","profile":"s9-smoke","scenario":"s9_durable_execution","seed":1493172225}
+{"driver":"synchronous","git_dirty":true,"hydration_bytes":9420,"hydration_floor_bytes":9420,"hydration_rows":8,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s9-smoke","scenario":"s9_durable_execution","scope":"workflow_table_surface","seed":1493172225}
+```
+
+---
+
+## Profile Run 2026-07-03T17:42:04Z - profile-default-cf-item1
+
+- result: `pass`
+- git: `e6f4df4c8`
+- dirty: `true`
+- profile_dir: `dev/benchmarks/profiles/20260703T173005Z`
+- result_dir: `dev/benchmarks/results/20260703T173005Z`
+- command: `JAZZ_PROFILE_SIZE=default dev/benchmarks/profile.sh`
+
+### Profile Runs
+
+| Scenario            | Status | Wall Time | JSONL                                                               |
+| ------------------- | ------ | --------: | ------------------------------------------------------------------- |
+| s1_saas             | `pass` |  134.907s | `dev/benchmarks/results/20260703T173005Z/s1_saas.jsonl`             |
+| s3_permissions      | `pass` |  142.528s | `dev/benchmarks/results/20260703T173005Z/s3_permissions.jsonl`      |
+| s4_order_processing | `pass` |  166.496s | `dev/benchmarks/results/20260703T173005Z/s4_order_processing.jsonl` |
+
+### Top-10 Self-Time Tables
+
+#### s1_saas\_\_deterministic_execute
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         1148 | 55.43% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          116 |  5.60% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    3 |           61 |  2.95% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|    4 |           58 |  2.80% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    5 |           47 |  2.27% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    6 |           46 |  2.22% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    7 |           45 |  2.17% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    8 |           30 |  1.45% | `<groove::ivm::graph::GraphNode as core::clone::Clone>::clone`                                                   |
+|    9 |           26 |  1.26% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|   10 |           26 |  1.26% | `internment::container::Arena::with`                                                                             |
+
+Samples: 2071; elapsed: 2.565s; frequency_hz: 997
+
+#### s1_saas\_\_high_fan_out_hydration
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         9080 | 29.42% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |         3890 | 12.60% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    3 |         2412 |  7.82% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    4 |         2311 |  7.49% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    5 |         1074 |  3.48% | `groove::ivm::runtime::join::join_keys`                                                                          |
+|    6 |          895 |  2.90% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    7 |          891 |  2.89% | `groove::records::RecordDescriptor::field_span`                                                                  |
+|    8 |          868 |  2.81% | `groove::ivm::runtime::join::append_join_deltas`                                                                 |
+|    9 |          681 |  2.21% | `jazz::node::maintained_subscription_view::MaintainedSubscriptionView::apply_decoded_deltas`                     |
+|   10 |          648 |  2.10% | `<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::try_fold`                      |
+
+Samples: 30862; elapsed: 49.380s; frequency_hz: 997
+
+#### s1_saas\_\_reconnect
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |        23562 | 52.32% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |         2329 |  5.17% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    3 |         2139 |  4.75% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    4 |         1963 |  4.36% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    5 |         1331 |  2.96% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |         1128 |  2.50% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|    7 |         1086 |  2.41% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    8 |         1020 |  2.26% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    9 |          885 |  1.97% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|   10 |          543 |  1.21% | `internment::container::Arena::with`                                                                             |
+
+Samples: 45035; elapsed: 65.013s; frequency_hz: 997
+
+#### s1_saas\_\_subscriber_sweep
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |          586 | 16.21% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          331 |  9.16% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |          292 |  8.08% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    4 |          276 |  7.64% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          247 |  6.83% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    6 |          175 |  4.84% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |          134 |  3.71% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    8 |          124 |  3.43% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    9 |          115 |  3.18% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|   10 |          108 |  2.99% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+
+Samples: 3614; elapsed: 5.893s; frequency_hz: 997
+
+#### s1_saas\_\_threaded_execute
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         2337 | 58.11% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          332 |  8.25% | `std::sync::mpmc::waker::SyncWaker::notify`                                                                      |
+|    3 |          117 |  2.91% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    4 |          102 |  2.54% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    5 |           66 |  1.64% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    6 |           61 |  1.52% | `<groove::ivm::graph::GraphNode as core::clone::Clone>::clone`                                                   |
+|    7 |           58 |  1.44% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    8 |           57 |  1.42% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|    9 |           54 |  1.34% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|   10 |           51 |  1.27% | `groove::ivm::runtime::TickEvaluator<S>::update_node`                                                            |
+
+Samples: 4022; elapsed: 9.367s; frequency_hz: 997
+
+#### s3_permissions\_\_block_tree
+
+| Rank | Self Samples | Self % | Function                                                                                                                                                                                                                                            |
+| ---: | -----------: | -----: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    1 |         5455 | 57.74% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)`                                                                                                                                    |
+|    2 |          670 |  7.09% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                                                                                                                                                       |
+|    3 |          407 |  4.31% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                                                                                                                                                                  |
+|    4 |          140 |  1.48% | `alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing` |
+|    5 |          136 |  1.44% | `groove::db::Database<S>::commit_batch`                                                                                                                                                                                                             |
+|    6 |          135 |  1.43% | `groove::records::RecordDescriptor::project_record_raw`                                                                                                                                                                                             |
+|    7 |          120 |  1.27% | `core::hash::BuildHasher::hash_one`                                                                                                                                                                                                                 |
+|    8 |          113 |  1.20% | `<alloc::collections::btree::map::BTreeMap<K,V,A> as core::clone::Clone>::clone::clone_subtree`                                                                                                                                                     |
+|    9 |          100 |  1.06% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                                                                                                                                                     |
+|   10 |           99 |  1.05% | `<alloc::string::String as core::clone::Clone>::clone`                                                                                                                                                                                              |
+
+Samples: 9448; elapsed: 11.599s; frequency_hz: 997
+
+#### s3_permissions\_\_block_tree_headline
+
+| Rank | Self Samples | Self % | Function                                                                           |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------- |
+|    1 |         3260 | 24.50% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                      |
+|    2 |         1593 | 11.97% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter` |
+|    3 |          502 |  3.77% | `groove::records::RecordDescriptor::project_record_raw`                            |
+|    4 |          346 |  2.60% | `groove::ivm::runtime::join::append_join_deltas`                                   |
+|    5 |          304 |  2.28% | `core::hash::BuildHasher::hash_one`                                                |
+|    6 |          283 |  2.13% | `internment::container::Arena::with`                                               |
+|    7 |          250 |  1.88% | `groove::ivm::runtime::consolidate_deltas`                                         |
+|    8 |          242 |  1.82% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                              |
+|    9 |          241 |  1.81% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                    |
+|   10 |          231 |  1.74% | `groove::ivm::runtime::join::join_keys`                                            |
+
+Samples: 13305; elapsed: 19.748s; frequency_hz: 997
+
+#### s3_permissions\_\_db_surface
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         2335 | 63.94% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          125 |  3.42% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    3 |           79 |  2.16% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    4 |           73 |  2.00% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    5 |           61 |  1.67% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    6 |           39 |  1.07% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|    7 |           39 |  1.07% | `internment::container::Arena::with`                                                                             |
+|    8 |           38 |  1.04% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    9 |           37 |  1.01% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|   10 |           36 |  0.99% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+
+Samples: 3652; elapsed: 4.747s; frequency_hz: 997
+
+#### s3_permissions\_\_deterministic_run
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |        27200 | 65.35% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |         1649 |  3.96% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    3 |         1209 |  2.90% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    4 |          973 |  2.34% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    5 |          881 |  2.12% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    6 |          696 |  1.67% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    7 |          676 |  1.62% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    8 |          629 |  1.51% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    9 |          462 |  1.11% | `groove::ivm::runtime::join::join_keys`                                                                          |
+|   10 |          453 |  1.09% | `groove::records::RecordDescriptor::field_span`                                                                  |
+
+Samples: 41625; elapsed: 51.592s; frequency_hz: 997
+
+#### s3_permissions\_\_threaded_run
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |        26741 | 65.14% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |         1453 |  3.54% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    3 |         1113 |  2.71% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    4 |          898 |  2.19% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    5 |          862 |  2.10% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    6 |          756 |  1.84% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    7 |          719 |  1.75% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    8 |          719 |  1.75% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    9 |          461 |  1.12% | `groove::ivm::runtime::join::join_keys`                                                                          |
+|   10 |          449 |  1.09% | `groove::records::RecordDescriptor::field_span`                                                                  |
+
+Samples: 41052; elapsed: 51.541s; frequency_hz: 997
+
+#### s4_order_processing\_\_contention_high
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         7896 | 57.91% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          749 |  5.49% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |          673 |  4.94% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    4 |          633 |  4.64% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          488 |  3.58% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |          336 |  2.46% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |          270 |  1.98% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    8 |          261 |  1.91% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    9 |          164 |  1.20% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|   10 |          148 |  1.09% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+
+Samples: 13634; elapsed: 19.676s; frequency_hz: 997
+
+#### s4_order_processing\_\_contention_hot_items
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         1994 | 62.70% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          125 |  3.93% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    3 |          124 |  3.90% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    4 |          121 |  3.81% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    5 |           97 |  3.05% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |           87 |  2.74% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |           41 |  1.29% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    8 |           39 |  1.23% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    9 |           29 |  0.91% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|   10 |           25 |  0.79% | `internment::container::Arena::with`                                                                             |
+
+Samples: 3180; elapsed: 4.211s; frequency_hz: 997
+
+#### s4_order_processing\_\_contention_low
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         2174 | 64.41% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          135 |  4.00% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |          117 |  3.47% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    4 |          112 |  3.32% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |           95 |  2.81% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |           72 |  2.13% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |           56 |  1.66% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    8 |           43 |  1.27% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|    9 |           39 |  1.16% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|   10 |           35 |  1.04% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+
+Samples: 3375; elapsed: 4.648s; frequency_hz: 997
+
+#### s4_order_processing\_\_contention_medium
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         4205 | 63.93% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          256 |  3.89% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |          253 |  3.85% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    4 |          229 |  3.48% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    5 |          166 |  2.52% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |          132 |  2.01% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |          124 |  1.89% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    8 |           80 |  1.22% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+|    9 |           79 |  1.20% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+|   10 |           75 |  1.14% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+
+Samples: 6578; elapsed: 9.190s; frequency_hz: 997
+
+#### s4_order_processing\_\_scale_out_1w
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         1359 | 81.57% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |           36 |  2.16% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |           29 |  1.74% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    4 |           19 |  1.14% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    5 |           17 |  1.02% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |           16 |  0.96% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    7 |           10 |  0.60% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+|    8 |           10 |  0.60% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    9 |            9 |  0.54% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|   10 |            9 |  0.54% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+
+Samples: 1666; elapsed: 2.339s; frequency_hz: 997
+
+#### s4_order_processing\_\_scale_out_2w
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         1915 | 58.67% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          193 |  5.91% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |          153 |  4.69% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    4 |          152 |  4.66% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          125 |  3.83% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |           76 |  2.33% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |           48 |  1.47% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    8 |           37 |  1.13% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    9 |           36 |  1.10% | `groove::ivm::runtime::TickEvaluator<S>::update_node`                                                            |
+|   10 |           28 |  0.86% | `<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter`                               |
+
+Samples: 3264; elapsed: 4.444s; frequency_hz: 997
+
+#### s4_order_processing\_\_scale_out_4w
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         4544 | 71.42% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          212 |  3.33% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    3 |          175 |  2.75% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    4 |          146 |  2.29% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          118 |  1.85% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    6 |           98 |  1.54% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    7 |           85 |  1.34% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    8 |           54 |  0.85% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    9 |           49 |  0.77% | `groove::ivm::runtime::join::apply_join_delta_to_index`                                                          |
+|   10 |           48 |  0.75% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                        |
+
+Samples: 6362; elapsed: 8.985s; frequency_hz: 997
+
+#### s4_order_processing\_\_scale_out_8w
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         9150 | 58.59% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |          739 |  4.73% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |          631 |  4.04% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    4 |          538 |  3.45% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          417 |  2.67% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |          331 |  2.12% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    7 |          308 |  1.97% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                        |
+|    8 |          251 |  1.61% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    9 |          215 |  1.38% | `groove::ivm::runtime::join::apply_join_delta_to_index`                                                          |
+|   10 |          214 |  1.37% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+
+Samples: 15616; elapsed: 21.876s; frequency_hz: 997
+
+#### s4_order_processing\_\_slo
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |         2202 | 68.75% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |           85 |  2.65% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |           74 |  2.31% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                        |
+|    4 |           71 |  2.22% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |           70 |  2.19% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    6 |           59 |  1.84% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |           56 |  1.75% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    8 |           48 |  1.50% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    9 |           36 |  1.12% | `groove::ivm::runtime::join::apply_join_delta_to_index`                                                          |
+|   10 |           28 |  0.87% | `<alloc::vec::Vec<T,A> as core::clone::Clone>::clone`                                                            |
+
+Samples: 3203; elapsed: 4.232s; frequency_hz: 997
+
+#### s4_order_processing\_\_sqlite_reference
+
+| Rank | Self Samples | Self % | Function                 |
+| ---: | -----------: | -----: | ------------------------ |
+|    1 |            1 | 25.00% | `_sqlite3LockAndPrepare` |
+|    2 |            1 | 25.00% | `_sqlite3RunParser`      |
+|    3 |            1 | 25.00% | `_tokenExpr`             |
+|    4 |            1 | 25.00% | `_yy_reduce`             |
+
+Samples: 4; elapsed: 0.010s; frequency_hz: 997
+
+#### s4_order_processing\_\_throughput_propagation_inclusive
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |        16633 | 54.63% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |         1522 |  5.00% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |         1294 |  4.25% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    4 |         1277 |  4.19% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          895 |  2.94% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |          793 |  2.60% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |          512 |  1.68% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    8 |          487 |  1.60% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|    9 |          459 |  1.51% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                        |
+|   10 |          363 |  1.19% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+
+Samples: 30446; elapsed: 41.506s; frequency_hz: 997
+
+#### s4_order_processing\_\_throughput_settlement
+
+| Rank | Self Samples | Self % | Function                                                                                                         |
+| ---: | -----------: | -----: | ---------------------------------------------------------------------------------------------------------------- |
+|    1 |        16931 | 56.07% | `rocksdb::PosixWritableFile::Append(rocksdb::Slice const&, rocksdb::IOOptions const&, rocksdb::IODebugContext*)` |
+|    2 |         1440 |  4.77% | `hashbrown::raw::RawTable<T,A>::reserve_rehash`                                                                  |
+|    3 |         1183 |  3.92% | `core::hash::BuildHasher::hash_one`                                                                              |
+|    4 |         1139 |  3.77% | `hashbrown::map::HashMap<K,V,S,A>::insert`                                                                       |
+|    5 |          874 |  2.89% | `groove::ivm::graph::IvmGraph::node`                                                                             |
+|    6 |          775 |  2.57% | `<alloc::string::String as core::clone::Clone>::clone`                                                           |
+|    7 |          487 |  1.61% | `alloc::raw_vec::RawVecInner<A>::finish_grow`                                                                    |
+|    8 |          478 |  1.58% | `alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry`                                        |
+|    9 |          409 |  1.35% | `groove::ivm::runtime::TickEvaluator<S>::depends_on_context`                                                     |
+|   10 |          407 |  1.35% | `groove::records::RecordDescriptor::project_record_raw`                                                          |
+
+Samples: 30196; elapsed: 41.083s; frequency_hz: 997
+
+## CF item 1 medium JSONL receipt run: 20260703T174213Z
+
+- Pre-item-0 JSONL run: `20260703T075746Z`
+- Item-0 JSONL run: `20260703T170138Z`
+- Item-1 JSONL run: `20260703T174213Z`
+- Result artifacts: `dev/benchmarks/results/20260703T174213Z/`
+- Logs: `target/benchmark-cf-item1/20260703T174213Z/`
+- Commands: `cargo bench -p jazz-sim --bench s2_canvas`, `s5_durable_stream`, `s6_text_traces` at default size.
+- Report: `/Users/anselm/CF-RECEIPTS-2026-07-03.md`
