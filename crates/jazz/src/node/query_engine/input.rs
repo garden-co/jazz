@@ -604,6 +604,8 @@ pub(crate) enum AggregateFunction {
     Count,
     /// Sum values.
     Sum,
+    /// Average values.
+    Avg,
     /// Minimum value.
     Min,
     /// Maximum value.

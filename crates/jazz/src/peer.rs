@@ -16,14 +16,15 @@ use crate::node::content_store::Extent;
 use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionView,
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
-    MaintainedTerminalSchemas,
+    MaintainedTerminalSchemas, ResultTransitions,
 };
 use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
 #[cfg(any(test, debug_assertions))]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
-    ContentExtent, KnownStateDeclaration, LargeValueOwnerRef, ReadViewSpec, RegisterShapeOptions,
-    ResultMemberEntry, RowVersionRef, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    ContentExtent, KnownStateDeclaration, LargeValueOwnerRef, ProgramFactEntry, ReadViewSpec,
+    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SubscriptionKey, SyncMessage,
+    VersionBundle, VersionRecord,
 };
 use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, validate_fetch_row_versions};
 use crate::query::{Binding, ValidatedQuery};
@@ -123,6 +124,7 @@ type RowKey = (groove::Intern<String>, RowUuid);
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum MemberIndexKey {
     Row(RowKey),
+    Synthetic { table: String, row: Vec<u8> },
     Member(ResultMemberEntry),
 }
 
@@ -457,14 +459,50 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let (result_member_adds, result_member_removes) = self
-            .drain_maintained_subscription_view_changes(
-                node,
-                shape,
-                subscription,
-                result_table_filter,
-            )?;
-        if result_member_adds.is_empty() && result_member_removes.is_empty() {
+        let transitions = self.drain_maintained_subscription_view_changes(
+            node,
+            shape,
+            subscription,
+            result_table_filter,
+        )?;
+        let ResultTransitions {
+            adds: result_member_adds,
+            removes: mut result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        } = transitions;
+        let previous_member_result_set = self
+            .subscriptions
+            .get(&subscription)
+            .map(PeerSubscriptionState::member_result_set)
+            .unwrap_or_default();
+        for added in &result_member_adds {
+            let ResultMemberEntry::Synthetic { table, row, .. } = added else {
+                continue;
+            };
+            result_member_removes.extend(previous_member_result_set.iter().filter_map(
+                |previous| match previous {
+                    ResultMemberEntry::Synthetic {
+                        table: previous_table,
+                        row: previous_row,
+                        ..
+                    } if previous_table == table && previous_row == row && previous != added => {
+                        Some(previous.clone())
+                    }
+                    _ => None,
+                },
+            ));
+        }
+        result_member_removes = result_member_removes
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if result_member_adds.is_empty()
+            && result_member_removes.is_empty()
+            && program_fact_adds.is_empty()
+            && program_fact_removes.is_empty()
+        {
             return Ok(SyncMessage::ViewUpdate {
                 subscription,
                 settled_through: node.applied_global_watermark(),
@@ -477,11 +515,6 @@ impl PeerState {
                 program_fact_removes: Vec::new(),
             });
         }
-        let previous_member_result_set = self
-            .subscriptions
-            .get(&subscription)
-            .map(PeerSubscriptionState::member_result_set)
-            .unwrap_or_default();
         let previous_result_tx_ids = previous_member_result_set
             .iter()
             .filter_map(ResultMemberEntry::as_row)
@@ -518,6 +551,8 @@ impl PeerState {
                     previous_result_set: previous_result_tx_ids,
                     result_member_adds,
                     result_member_removes,
+                    program_fact_adds,
+                    program_fact_removes,
                     identity: self.identity(),
                     tier,
                     maintained_facts: maintained,
@@ -537,7 +572,7 @@ impl PeerState {
         _shape: &ValidatedQuery,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
-    ) -> Result<(Vec<ResultMemberEntry>, Vec<ResultMemberEntry>), Error>
+    ) -> Result<ResultTransitions, Error>
     where
         S: OrderedKvStorage,
     {
@@ -554,13 +589,15 @@ impl PeerState {
             .map(|maintained| maintained.tables.clone())
             .unwrap_or_default();
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
+        let mut program_fact_adds = Vec::new();
+        let mut program_fact_removes = Vec::new();
         {
             let Some(maintained_subscription_view) = self
                 .subscriptions
                 .get_mut(&subscription)
                 .and_then(|state| state.maintained_subscription_view.as_mut())
             else {
-                return Ok((Vec::new(), Vec::new()));
+                return Ok(ResultTransitions::default());
             };
             loop {
                 match maintained_subscription_view.subscription.try_recv() {
@@ -574,6 +611,16 @@ impl PeerState {
                                 &maintained_subscription_view.tables,
                                 &node.node_aliases,
                             )?;
+                        program_fact_adds.extend(filter_program_facts_for_result_table(
+                            transitions.program_fact_adds,
+                            result_table_filter,
+                            &output_tables,
+                        ));
+                        program_fact_removes.extend(filter_program_facts_for_result_table(
+                            transitions.program_fact_removes,
+                            result_table_filter,
+                            &output_tables,
+                        ));
                         for member in transitions.adds {
                             let before = previous_member_result_set.contains(&member);
                             states
@@ -603,7 +650,9 @@ impl PeerState {
             if result_table_filter.is_some_and(|table| table_name != table) {
                 continue;
             }
-            if !output_tables.contains_key(table_name) {
+            if !output_tables.contains_key(table_name)
+                && !matches!(member, ResultMemberEntry::Synthetic { .. })
+            {
                 continue;
             }
             match (before, after) {
@@ -612,7 +661,12 @@ impl PeerState {
                 _ => {}
             }
         }
-        Ok((result_member_adds, result_member_removes))
+        Ok(ResultTransitions {
+            adds: result_member_adds,
+            removes: result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        })
     }
 
     fn rehydrate_query_maintained_subscription_view<S>(
@@ -650,7 +704,8 @@ impl PeerState {
                     return false;
                 };
                 result_table_filter.is_none_or(|table| table_name == table)
-                    && output_tables.contains_key(table_name)
+                    && (output_tables.contains_key(table_name)
+                        || matches!(member, ResultMemberEntry::Synthetic { .. }))
             })
             .collect::<Vec<_>>();
         let current_member_result_set = result_member_adds.iter().cloned().collect::<BTreeSet<_>>();
@@ -672,6 +727,8 @@ impl PeerState {
                 previous_result_set: BTreeSet::new(),
                 result_member_adds,
                 result_member_removes,
+                program_fact_adds: transitions.program_fact_adds,
+                program_fact_removes: transitions.program_fact_removes,
                 identity: self.identity(),
                 tier,
                 maintained_facts: &maintained,
@@ -808,13 +865,23 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         self.clear_stale_groove_runtime_handles(node, maintained_subscription);
-        let (source_adds, source_removes) = self.drain_maintained_subscription_view_changes(
+        let source_transitions = self.drain_maintained_subscription_view_changes(
             node,
             shape,
             maintained_subscription,
             None,
         )?;
-        if !source_adds.is_empty() || !source_removes.is_empty() {
+        let ResultTransitions {
+            adds: source_adds,
+            removes: source_removes,
+            program_fact_adds: source_program_fact_adds,
+            program_fact_removes: source_program_fact_removes,
+        } = source_transitions;
+        if !source_adds.is_empty()
+            || !source_removes.is_empty()
+            || !source_program_fact_adds.is_empty()
+            || !source_program_fact_removes.is_empty()
+        {
             self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate {
                 subscription: maintained_subscription,
                 settled_through: node.applied_global_watermark(),
@@ -823,8 +890,8 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: source_adds,
                 result_member_removes: source_removes,
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
+                program_fact_adds: source_program_fact_adds,
+                program_fact_removes: source_program_fact_removes,
             });
         }
         let result_member_adds = self
@@ -867,6 +934,8 @@ impl PeerState {
                     previous_result_set: BTreeSet::new(),
                     result_member_adds,
                     result_member_removes: Vec::new(),
+                    program_fact_adds: Vec::new(),
+                    program_fact_removes: Vec::new(),
                     identity: self.identity(),
                     tier,
                     maintained_facts: maintained,
@@ -1474,13 +1543,41 @@ fn member_row_key(member: &ResultMemberEntry) -> Option<RowKey> {
 }
 
 fn member_index_key(member: &ResultMemberEntry) -> MemberIndexKey {
-    member_row_key(member)
-        .map(MemberIndexKey::Row)
-        .unwrap_or_else(|| MemberIndexKey::Member(member.clone()))
+    if let Some(row) = member_row_key(member) {
+        return MemberIndexKey::Row(row);
+    }
+    match member {
+        ResultMemberEntry::Synthetic { table, row, .. } => MemberIndexKey::Synthetic {
+            table: table.clone(),
+            row: row.clone(),
+        },
+        _ => MemberIndexKey::Member(member.clone()),
+    }
 }
 
 fn member_content_tx(member: &ResultMemberEntry) -> Option<TxId> {
     member.as_row().map(|(_, _, tx_id)| tx_id)
+}
+
+fn filter_program_facts_for_result_table(
+    facts: Vec<ProgramFactEntry>,
+    result_table_filter: Option<&str>,
+    output_tables: &BTreeMap<String, TableSchema>,
+) -> Vec<ProgramFactEntry> {
+    facts
+        .into_iter()
+        .filter(|fact| match fact {
+            ProgramFactEntry::ResultPayload(payload) => {
+                let Some(table_name) = payload.member.table_name() else {
+                    return false;
+                };
+                result_table_filter.is_none_or(|table| table_name == table)
+                    && (output_tables.contains_key(table_name)
+                        || matches!(payload.member, ResultMemberEntry::Synthetic { .. }))
+            }
+            _ => true,
+        })
+        .collect()
 }
 
 fn apply_contribution_add<'a>(
@@ -1499,6 +1596,18 @@ fn apply_contribution_add<'a>(
                 if member_content_tx(member)
                     .zip(member_content_tx(&slot.member))
                     .is_some_and(|(new_tx, old_tx)| new_tx > old_tx) =>
+            {
+                let old_member = slot.member.clone();
+                result_member_removes.push(old_member.clone());
+                result_member_adds.push(member.clone());
+                state.result_member_set.remove(&old_member);
+                state.result_member_set.insert(member.clone());
+                slot.member = member.clone();
+                slot.refcount += 1;
+            }
+            Some(slot)
+                if slot.member != *member
+                    && matches!(member, ResultMemberEntry::Synthetic { .. }) =>
             {
                 let old_member = slot.member.clone();
                 result_member_removes.push(old_member.clone());
@@ -1674,13 +1783,15 @@ mod tests {
 
     use crate::ids::{NodeUuid, RowUuid};
     use crate::node::MergeableCommit;
-    use crate::protocol::{SyncMessage, VersionRecord};
-    use crate::query::{OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not, param};
+    use crate::protocol::{ProgramFactEntry, SyncMessage, VersionRecord};
+    use crate::query::{
+        Aggregate, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not, param,
+    };
     use crate::schema::{JazzSchema, Policy, TableSchema};
     use crate::time::GlobalSeq;
     use crate::tx::DeletionEvent;
     use crate::tx::{DurabilityTier, Fate, TxKind};
-    use groove::records::Value;
+    use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
     use groove::schema::{ColumnSchema, ColumnType};
     use groove::storage::RocksDbStorage;
 
@@ -1775,6 +1886,38 @@ mod tests {
         BTreeMap::from([
             ("doc".to_owned(), Value::Uuid(doc.0)),
             ("userID".to_owned(), Value::Uuid(user.0)),
+        ])
+    }
+
+    fn aggregate_access_policy_schema() -> JazzSchema {
+        JazzSchema::new([
+            TableSchema::new(
+                "docs",
+                [
+                    ColumnSchema::new("title", ColumnType::String),
+                    ColumnSchema::new("score", ColumnType::U64),
+                ],
+            )
+            .with_read_policy(Policy::shape(Query::from("docs").join_via(
+                "docAccess",
+                "doc",
+                [eq(col("userID"), claim("sub"))],
+            ))),
+            TableSchema::new(
+                "docAccess",
+                [
+                    ColumnSchema::new("doc", ColumnType::Uuid),
+                    ColumnSchema::new("userID", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("doc", "docs"),
+        ])
+    }
+
+    fn scored_doc_cells(title: impl Into<String>, score: u64) -> BTreeMap<String, Value> {
+        BTreeMap::from([
+            ("title".to_owned(), Value::String(title.into())),
+            ("score".to_owned(), Value::U64(score)),
         ])
     }
 
@@ -2073,6 +2216,25 @@ mod tests {
             ),
             other => panic!("expected unsupported maintained subscription error, got {other:?}"),
         }
+    }
+
+    fn aggregate_payload_count(fact: &ProgramFactEntry) -> Value {
+        let ProgramFactEntry::ResultPayload(payload) = fact else {
+            panic!("expected result payload fact");
+        };
+        let fields: Vec<(Option<String>, ValueType)> =
+            postcard::from_bytes(&payload.descriptor).unwrap();
+        let descriptor = RecordDescriptor::new(
+            fields
+                .into_iter()
+                .map(|(name, value_type)| (name.unwrap(), value_type)),
+        );
+        let record = BorrowedRecord::new(&payload.record, &descriptor);
+        record.get("count").unwrap().clone()
+    }
+
+    fn aggregate_cells(row: &crate::node::CurrentRow) -> BTreeMap<String, Value> {
+        row.test_cells_by_descriptor()
     }
 
     fn view_update_added_rows(update: SyncMessage) -> BTreeSet<RowUuid> {
@@ -3003,7 +3165,7 @@ mod tests {
     }
 
     #[test]
-    fn maintained_subscription_view_unsupported_aggregate_rehydrate_errors_loudly() {
+    fn maintained_subscription_view_aggregate_rehydrate_ships_payload_fact() {
         let (_dir, mut core) = open_node_with_uuid(node(0x90));
         let first_tx = core
             .commit_mergeable(
@@ -3022,15 +3184,154 @@ mod tests {
         let aggregate_subscription = subscription_key(&aggregate_shape, &aggregate_binding);
         let mut peer = PeerState::new();
 
-        assert_unsupported_maintained_subscription_error(peer.rehydrate_query(
-            &mut core,
-            &aggregate_shape,
-            &aggregate_binding,
-        ));
+        let update = peer
+            .rehydrate_query(&mut core, &aggregate_shape, &aggregate_binding)
+            .unwrap();
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        } = update
+        else {
+            panic!("expected view update");
+        };
 
+        assert!(reset_result_set);
+        assert_eq!(result_member_adds.len(), 1);
+        assert!(result_member_removes.is_empty());
+        assert_eq!(program_fact_adds.len(), 1);
+        assert!(program_fact_removes.is_empty());
+        assert_eq!(
+            aggregate_payload_count(&program_fact_adds[0]),
+            Value::U64(2)
+        );
         let metrics = peer.maintained_subscription_view_metrics();
         assert_eq!(metrics.unsupported_skips_out, 0);
-        assert!(maintained_subscription_id(&peer, aggregate_subscription).is_none());
+        assert!(maintained_subscription_id(&peer, aggregate_subscription).is_some());
+    }
+
+    #[test]
+    fn maintained_subscription_view_aggregate_updates_incrementally() {
+        let (_dir, mut core) = open_node_with_uuid(node(0x90));
+        for (idx, title) in [(0x10, "alpha"), (0x11, "beta")] {
+            let tx = core
+                .commit_mergeable(
+                    MergeableCommit::new("todos", row(idx), 1_000 + idx as u64)
+                        .cells(title_cells(title)),
+                )
+                .unwrap();
+            accept_global(&mut core, tx, idx as u64);
+        }
+        let shape = Query::from("todos").count().validate(&schema()).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = subscription_key(&shape, &binding);
+        let mut peer = PeerState::new();
+
+        let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            program_fact_adds, ..
+        } = initial
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(
+            aggregate_payload_count(&program_fact_adds[0]),
+            Value::U64(2)
+        );
+
+        let tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(0x12), 2_000).cells(title_cells("gamma")),
+            )
+            .unwrap();
+        accept_global(&mut core, tx, 100);
+        let update = peer
+            .query_update_for_subscription(&mut core, subscription, &shape, &binding)
+            .unwrap();
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        } = update
+        else {
+            panic!("expected view update");
+        };
+
+        assert!(!reset_result_set);
+        assert_eq!(result_member_adds.len(), 1);
+        assert_eq!(result_member_removes.len(), 1);
+        assert_eq!(program_fact_adds.len(), 1);
+        assert_eq!(program_fact_removes.len(), 1);
+        assert_eq!(
+            aggregate_payload_count(&program_fact_adds[0]),
+            Value::U64(3)
+        );
+    }
+
+    #[test]
+    fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
+        let admin = AuthorId::from_bytes([0xa1; 16]);
+        let member = AuthorId::from_bytes([0xb2; 16]);
+        let spy = AuthorId::from_bytes([0xc3; 16]);
+        let (_dir, mut core) = open_node_with_schema(node(0x90), aggregate_access_policy_schema());
+        let docs = [
+            (row(0x10), "alpha", 10, vec![admin, member]),
+            (row(0x11), "beta", 20, vec![admin]),
+            (row(0x12), "gamma", 30, vec![member]),
+        ];
+        let mut seq = 1;
+        for (doc, title, score, readers) in docs {
+            let tx = core
+                .commit_mergeable(
+                    MergeableCommit::new("docs", doc, 1_000 + seq)
+                        .cells(scored_doc_cells(title, score)),
+                )
+                .unwrap();
+            accept_global(&mut core, tx, seq);
+            seq += 1;
+            for reader in readers {
+                let tx = core
+                    .commit_mergeable(
+                        MergeableCommit::new("docAccess", row(seq as u8), 2_000 + seq)
+                            .cells(access_cells(doc, reader)),
+                    )
+                    .unwrap();
+                accept_global(&mut core, tx, seq);
+                seq += 1;
+            }
+        }
+        let shape = Query::from("docs")
+            .aggregate([Aggregate::count(), Aggregate::sum("score")])
+            .validate(&aggregate_access_policy_schema())
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+
+        for (identity, expected_count, expected_sum) in
+            [(admin, 2, 30), (member, 2, 40), (spy, 0, 0)]
+        {
+            let rows = core
+                .query_rows_with_prepared_plan_for_identity(
+                    &shape,
+                    &binding,
+                    DurabilityTier::Global,
+                    None,
+                    identity,
+                )
+                .unwrap();
+            if expected_count == 0 {
+                assert!(rows.is_empty());
+                continue;
+            }
+            let cells = aggregate_cells(&rows[0]);
+            assert_eq!(cells["count"], Value::U64(expected_count));
+            assert_eq!(cells["sum_score"], Value::U64(expected_sum));
+        }
     }
 
     #[test]
