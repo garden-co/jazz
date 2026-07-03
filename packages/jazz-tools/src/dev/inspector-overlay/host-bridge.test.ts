@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { installInspectorHost } from "./host-bridge.js";
-import { INSPECTOR_HOST_GLOBAL } from "../../dev-tools/inspector-host-types.js";
+import { INSPECTOR_HOST_GLOBAL } from "./inspector-host-types.js";
 
 function makeFakeDb(overrides: Record<string, unknown> = {}) {
   let changeCb: () => void = () => {};

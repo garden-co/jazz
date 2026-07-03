@@ -1,5 +1,5 @@
-import type { WasmSchema } from "../drivers/types.js";
-import type { ActiveQuerySubscriptionTrace } from "../runtime/db.js";
+import type { WasmSchema } from "../../drivers/types.js";
+import type { ActiveQuerySubscriptionTrace } from "../../runtime/db.js";
 
 /** Active subscription as sent to the overlay — the trace minus the JS stack. */
 export type InspectorSubscription = Omit<ActiveQuerySubscriptionTrace, "stack">;
