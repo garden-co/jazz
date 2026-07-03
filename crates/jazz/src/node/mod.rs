@@ -82,6 +82,12 @@ mod tests;
 
 /// Default client-clock skew tolerance in milliseconds.
 pub const SKEW_TOLERANCE_MS: u64 = 30_000;
+/// Default local checkpoint cadence for large text/blob materialization.
+///
+/// Checkpoints are derived content-store state, never wire state. Every 1024
+/// replayed large-value ops, the node stores a materialized snapshot so later
+/// reads fold from the nearest checkpoint plus the suffix instead of the full
+/// history chain.
 pub(crate) const LARGE_VALUE_CHECKPOINT_OP_INTERVAL: usize = 1024;
 const LARGE_VALUE_MATERIALIZATION_CACHE_MAX_ENTRIES: usize = 128;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;

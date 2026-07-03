@@ -16,8 +16,7 @@ use crate::protocol_limits::{
 use crate::schema::LargeValueKind;
 use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE, no_text_merge_spec_hash};
 use crate::text_merge::{
-    EventId as TextEventId, Run as PlainTextRun, TextEvent, TextEventGraph,
-    TieBreak as TextTieBreak,
+    EventId as TextEventId, TextEvent, TextEventGraph, TieBreak as TextTieBreak,
 };
 use crate::time::TxTimeSortKey;
 
@@ -2447,6 +2446,7 @@ where
             Some(DurabilityTier::Global),
         )?;
         debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
+        self.checkpoint_large_values_for_tx(merge_tx)?;
         Ok(())
     }
 
@@ -2737,8 +2737,28 @@ where
             .ok_or(Error::MissingTransaction(primary))?;
         let primary_value =
             self.materialize_large_value_column(table_schema, primary_version, column)?;
+        let mut merge_ops = vec![TextOp::Delete {
+            pos: 0,
+            len: primary_value.len(),
+        }];
+        if merged.len() <= crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES {
+            merge_ops.push(TextOp::Insert {
+                pos: 0,
+                content: TextContent::Inline(merged),
+            });
+        } else {
+            merge_ops.extend(self.extent_back_text_ops(
+                AuthorId(self.node_uuid.0),
+                primary_version.row_uuid(),
+                column,
+                vec![TextOp::Insert {
+                    pos: 0,
+                    content: TextContent::Inline(merged),
+                }],
+            )?);
+        }
         Ok(Some(LargeValueMergeCell {
-            value: Value::Bytes(materialized_text_op(primary_value.len(), &merged).encode()),
+            value: Value::Bytes(encode_extent_text_ops(&merge_ops)),
             strategy: recorded_strategy,
         }))
     }
@@ -3770,13 +3790,6 @@ fn merge_large_value_head_ops(
         merged_origin = Some(accumulator_origin.max(origin));
     }
     merged
-}
-
-fn materialized_text_op(parent_len: usize, value: &[u8]) -> crate::text_merge::TextOp {
-    crate::text_merge::TextOp::new([
-        PlainTextRun::Delete(parent_len),
-        PlainTextRun::Insert(value.to_vec()),
-    ])
 }
 
 fn content_refs_in_ops(ops: Vec<TextOp>) -> Vec<content_store::Extent> {
