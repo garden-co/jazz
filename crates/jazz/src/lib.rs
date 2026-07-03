@@ -102,6 +102,8 @@ pub mod db;
 pub use db::block_on;
 /// Wire-stable identifiers.
 pub mod ids;
+/// Built-in JSON document merge strategy.
+pub mod json_merge;
 /// Built-in simple block-granular markdown text merge strategy.
 pub mod markdown_strategy;
 /// Shared text merge strategy machinery.

@@ -71,6 +71,8 @@ pub enum TextMergeError {
     TrailingEncoding,
     /// Encoded op integer does not fit this platform.
     IntegerTooLarge,
+    /// Strategy-specific input or configuration was invalid.
+    StrategyInputInvalid,
 }
 
 /// In-memory edit event graph used by the pure merge walk.
