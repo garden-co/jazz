@@ -518,6 +518,7 @@ where
             .iter()
             .filter_map(ResultMemberEntry::as_row)
             .collect::<Vec<_>>();
+        let version_bundles_is_empty = version_bundles.is_empty();
         if !cold_bulk_loaded {
             for bundle in version_bundles {
                 self.ingest_view_bundle(bundle)?;
@@ -548,7 +549,24 @@ where
             &peer_complete_tx_payload_refs,
             &row_result_adds,
         )?;
-        if reset_result_set {
+        let empty_reset = reset_result_set
+            && version_bundles_is_empty
+            && peer_complete_tx_payload_refs.is_empty()
+            && result_member_adds.is_empty()
+            && result_member_removes.is_empty()
+            && program_fact_adds.is_empty()
+            && program_fact_removes.is_empty();
+        // A reset only replaces shared canonical state when it carries the
+        // snapshot that will replace it. Empty resets from short-lived duplicate
+        // usage subscriptions are coverage stamps; letting them clear non-empty
+        // shared state makes later one-shot reads less settled than before.
+        let preserve_existing_shared_state = empty_reset
+            && self
+                .query
+                .settled_result_sets
+                .get(&binding_view_key)
+                .is_some_and(|members| !members.is_empty());
+        if reset_result_set && !preserve_existing_shared_state {
             self.query.settled_result_sets.remove(&binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
             self.query
