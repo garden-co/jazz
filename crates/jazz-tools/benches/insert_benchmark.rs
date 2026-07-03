@@ -187,12 +187,16 @@ fn seed_data(db: &BenchDb, scale: usize) -> BenchmarkData {
     }
 
     for index in 0..scale {
-        let folder = if index % 2 == 0 {
+        let folder = if index.is_multiple_of(2) {
             owned_folders[(index / 2) % owned_folders.len()]
         } else {
             team_folders[(index / 2) % team_folders.len()]
         };
-        let author = if index % 2 == 0 { AUTHOR } else { OTHER_AUTHOR };
+        let author = if index.is_multiple_of(2) {
+            AUTHOR
+        } else {
+            OTHER_AUTHOR
+        };
         let write = db
             .insert(
                 "documents",
