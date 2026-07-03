@@ -48,10 +48,16 @@ under freeze pressure.
 3. **Value separation** for big payload bytes: history record bodies and
    content extents via RocksDB BlobDB (or Plan-6-owned extent store) —
    compaction shuffles pointers, not payloads. Coordinate with Plan 6.
-4. **Per-class write-amp budget as a measured gate.** Bench counters already
-   emit write bytes per commit per destination; define budgets per class and
-   gate them in the C-appendix discipline (INV-PERF style). "Lots of writes is
-   OK" becomes a defended number.
+4. **Per-class write-amp budget as a measured gate.** Scheduled (Anselm,
+   2026-07-03): kicks off with THE PERF CENSUS immediately after windowed-
+   encoding step 3 (write-path windows — when the measured #1 hotspot, WAL
+   Append at 44-58% of foreground CPU, should first move). One campaign
+   closing four instrumentation gaps: commit-path stage timers, per-class
+   write-byte counters (flagged missing twice), per-thread attribution
+   (landed 2026-07-03), and off-CPU/wait-state attribution for the 23-36%
+   of wall invisible to sampling. Budgets and their gates fall out as the
+   by-product. Until then, receipts are per-item deltas — no clean headline
+   set exists and that is a known, accepted state.
 5. **Windowed record encoding (was: history-as-log; now spec'd, groove ch. 2
    §2.9 + INV-STORAGE-26).** The history-as-log direction arrived as a
    concrete design 2026-07-03: a schema-driven columnar window codec inside
