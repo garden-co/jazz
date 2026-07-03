@@ -1616,13 +1616,6 @@ impl BrokerCore {
         let Some(active_reset) = self.reset_state.clone() else {
             return;
         };
-        if self
-            .reset_state
-            .as_ref()
-            .is_none_or(|reset| reset.request_id != active_reset.request_id)
-        {
-            return;
-        }
         let candidates = self.eligible_leader_candidates(now_ms);
         let Some(candidate) = select_leader_candidate(candidates.iter()) else {
             self.finish_storage_reset(
@@ -2233,7 +2226,9 @@ impl BrokerCore {
         self.leader_failure_retry_timer_running = true;
         commands.push(BrokerCommand::SetTimer {
             timer: TimerKey::LeaderFailureRetry,
-            delay_ms: retry_at.saturating_sub(now_ms) as u64,
+            // Clamp like the JS Math.max(0, ...): a negative i64 would cast
+            // to an astronomically large u64 delay.
+            delay_ms: retry_at.saturating_sub(now_ms).max(0) as u64,
         });
     }
 

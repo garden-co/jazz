@@ -425,8 +425,8 @@ export class BrowserBrokerClient {
     const message = event.data as BrowserBrokerControlMessage;
     if (!message || typeof message !== "object") return;
     // Strip any transferred MessagePort before the message crosses into wasm;
-    // the port is paired back on the matching Invoke* command. Events are
-    // processed strictly one at a time, so a single slot suffices.
+    // the port is paired back on the matching Invoke* command. dispatch
+    // saves/restores the slot, so re-entrant dispatches cannot clobber it.
     const { port: transferredPort, ...portlessMessage } = message as BrowserBrokerControlMessage & {
       port?: MessagePort;
     };
@@ -449,11 +449,26 @@ export class BrowserBrokerClient {
       this.queuedEvents.push({ event, heldPort });
       return;
     }
+    let commands: TabClientCommand[];
+    try {
+      commands = this.core.handle(event);
+    } catch (error) {
+      // Mirrors the broker worker shell: a message the core cannot parse
+      // (e.g. a known type whose fields drifted in a newer broker version)
+      // must be dropped like the JS switch ignored it, not thrown into the
+      // port's message listener.
+      console.warn("[jazz-broker] dropping event the tab broker core could not process", error);
+      return;
+    }
+    // Save/restore rather than reset: a synchronous callback inside
+    // executeCommands can re-enter dispatch (e.g. reportLeaderFailed), and a
+    // plain reset would null the outer batch's port.
+    const previousHeldPort = this.heldPort;
     this.heldPort = heldPort;
     try {
-      this.executeCommands(this.core.handle(event));
+      this.executeCommands(commands);
     } finally {
-      this.heldPort = null;
+      this.heldPort = previousHeldPort;
     }
   }
 
