@@ -1,7 +1,6 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
-import { computeSchemaHash } from "../../src/schema-hash.js";
 import type { Query, Table } from "../../src/typed-app.js";
 
 interface ProjectRecord {
