@@ -134,6 +134,7 @@ use super::op_types::*;
 pub enum GraphBuilder {
     Table {
         table: String,
+        scan: Option<StaticScanSpec>,
     },
     InlineRecords {
         output: RecordDescriptor,
@@ -142,6 +143,7 @@ pub enum GraphBuilder {
     Index {
         table: String,
         index: String,
+        scan: Option<StaticScanSpec>,
     },
     FrontierSource {
         binding: FrontierName,
@@ -245,6 +247,14 @@ impl GraphBuilder {
     pub fn table(table: impl Into<String>) -> Self {
         Self::Table {
             table: table.into(),
+            scan: None,
+        }
+    }
+
+    pub fn table_scan(table: impl Into<String>, scan: StaticScanSpec) -> Self {
+        Self::Table {
+            table: table.into(),
+            scan: Some(scan),
         }
     }
 
@@ -273,6 +283,19 @@ impl GraphBuilder {
         Self::Index {
             table: table.into(),
             index: index.into(),
+            scan: None,
+        }
+    }
+
+    pub fn index_scan(
+        table: impl Into<String>,
+        index: impl Into<String>,
+        scan: StaticScanSpec,
+    ) -> Self {
+        Self::Index {
+            table: table.into(),
+            index: index.into(),
+            scan: Some(scan),
         }
     }
 
@@ -689,6 +712,7 @@ impl NodeDescriptor {
 
         match &self.operator {
             OpType::TableSource(_)
+            | OpType::IndexSource(_)
             | OpType::InlineRecords(_)
             | OpType::FrontierSource(_)
             | OpType::BindingSource(_) => expect_arity(&self.inputs, 0),
@@ -906,6 +930,7 @@ pub enum GraphValidationError {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum OpType {
     TableSource(TableSourceOp),
+    IndexSource(IndexSourceOp),
     InlineRecords(InlineRecordsOp),
     FrontierSource(FrontierSourceOp),
     BindingSource(BindingSourceOp),
@@ -998,6 +1023,7 @@ mod tests {
         let descriptor = NodeDescriptor::new(
             OpType::TableSource(TableSourceOp {
                 table: "albums".to_owned(),
+                scan: None,
             }),
             [],
             output(),
@@ -1017,6 +1043,7 @@ mod tests {
         let descriptor = NodeDescriptor::new(
             OpType::TableSource(TableSourceOp {
                 table: "albums".to_owned(),
+                scan: None,
             }),
             [],
             output(),
@@ -1024,6 +1051,7 @@ mod tests {
         let colliding_descriptor = NodeDescriptor::new(
             OpType::TableSource(TableSourceOp {
                 table: "artists".to_owned(),
+                scan: None,
             }),
             [],
             output(),
@@ -1043,6 +1071,7 @@ mod tests {
             NodeDescriptor::new(
                 OpType::TableSource(TableSourceOp {
                     table: "albums".to_owned(),
+                    scan: None,
                 }),
                 [],
                 output(),
@@ -1070,6 +1099,7 @@ mod tests {
             NodeDescriptor::new(
                 OpType::TableSource(TableSourceOp {
                     table: "albums".to_owned(),
+                    scan: None,
                 }),
                 [],
                 output(),
