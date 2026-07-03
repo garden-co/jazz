@@ -1861,7 +1861,7 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
 }
 
 #[test]
-fn production_output_profiles_lower_for_linear_shapes_and_gate_correlated_maintained_view() {
+fn production_output_profiles_lower_for_linear_and_correlated_shapes() {
     // Internal lowering test: this pins production-shaped output requests at
     // the normalizer/lowering boundary, including app_rows: None fact profiles
     // that public API tests cannot isolate.
@@ -1887,20 +1887,9 @@ fn production_output_profiles_lower_for_linear_shapes_and_gate_correlated_mainta
         let result = lower_query_program(correlated_request, &mut FakeSourceResolver::default());
         match profile {
             ProductionOutputProfile::AuthorizedRows => {
-                let err = result.expect_err("correlated authorized rows should capability-gap");
-                assert!(matches!(
-                    err.gaps.as_slice(),
-                    [UnsupportedReason::Operator(message)]
-                        if message == "policy shapes with array subqueries are not lowered yet"
-                ));
-            }
-            ProductionOutputProfile::MaintainedView => {
-                let err = result.expect_err("correlated maintained view should capability-gap");
-                assert!(matches!(
-                    err.gaps.as_slice(),
-                    [UnsupportedReason::Operator(message)]
-                        if message == "maintained subscription views over array subqueries are not lowered yet"
-                ));
+                result.unwrap_or_else(|err| {
+                    panic!("correlated authorized rows profile should lower: {err:?}")
+                });
             }
             ProductionOutputProfile::RelationSnapshot => {
                 let program = result.expect("correlated relation snapshot should lower");
@@ -1923,6 +1912,11 @@ fn production_output_profiles_lower_for_linear_shapes_and_gate_correlated_mainta
                         })
                     )
                 }));
+            }
+            ProductionOutputProfile::MaintainedView => {
+                result.unwrap_or_else(|err| {
+                    panic!("correlated maintained view profile should lower: {err:?}")
+                });
             }
             _ => {
                 result.unwrap_or_else(|err| {

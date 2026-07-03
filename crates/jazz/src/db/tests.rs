@@ -13,8 +13,8 @@ use crate::protocol::{
 };
 use crate::protocol_limits::{MAX_CONTENT_EXTENT_BYTES, MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES};
 use crate::query::{
-    ArraySubquery, Include, JoinMode, all_of, any_of, claim, col, contains, eq, gt, in_list,
-    is_null, lit, lte, ne, not,
+    ArraySubquery, Include, JoinMode, OrderDirection, all_of, any_of, claim, col, contains, eq, gt,
+    in_list, is_null, lit, lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema};
 
@@ -49,6 +49,110 @@ fn delta_rows(event: SubscriptionEvent) -> (Vec<CurrentRow>, Vec<CurrentRow>, Ve
         } => (added, updated, removed),
         other => panic!("expected subscription delta event, got {other:?}"),
     }
+}
+
+fn snapshot_edges(event: &SubscriptionEvent) -> BTreeSet<RelationEdge> {
+    match event {
+        SubscriptionEvent::Opened { current, .. }
+        | SubscriptionEvent::Reset { current, .. }
+        | SubscriptionEvent::Delta { current, .. } => current.edges.iter().cloned().collect(),
+        other => panic!("expected subscription snapshot-bearing event, got {other:?}"),
+    }
+}
+
+fn snapshot_from_event(event: SubscriptionEvent) -> RelationSnapshot {
+    match event {
+        SubscriptionEvent::Opened { current, .. }
+        | SubscriptionEvent::Reset { current, .. }
+        | SubscriptionEvent::Delta { current, .. } => current,
+        other => panic!("expected subscription snapshot-bearing event, got {other:?}"),
+    }
+}
+
+fn schema_table<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
+    schema
+        .tables
+        .iter()
+        .find(|candidate| candidate.name == table)
+        .expect("test schema table should exist")
+}
+
+fn related_text_values(
+    snapshot: &RelationSnapshot,
+    schema: &JazzSchema,
+    source_table: &str,
+    source_row: RowUuid,
+    relation: &str,
+    target_table: &str,
+    column: &str,
+) -> Vec<String> {
+    let table = schema_table(schema, target_table);
+    snapshot
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.source_table == source_table
+                && edge.source_row == source_row
+                && edge.relation == relation
+                && edge.target_table == target_table
+        })
+        .map(|edge| {
+            snapshot
+                .rows
+                .iter()
+                .find(|row| row.table() == target_table && row.row_uuid() == edge.target_row)
+                .unwrap_or_else(|| panic!("missing target row for edge {edge:?}"))
+        })
+        .map(|row| match row.cell(table, column) {
+            Some(Value::String(value)) => value,
+            other => panic!("expected text cell {target_table}.{column}, got {other:?}"),
+        })
+        .collect()
+}
+
+fn sorted_related_text_values(
+    snapshot: &RelationSnapshot,
+    schema: &JazzSchema,
+    source_table: &str,
+    source_row: RowUuid,
+    relation: &str,
+    target_table: &str,
+    column: &str,
+) -> Vec<String> {
+    let mut values = related_text_values(
+        snapshot,
+        schema,
+        source_table,
+        source_row,
+        relation,
+        target_table,
+        column,
+    );
+    values.sort();
+    values
+}
+
+fn ordered_limited_related_text_values(
+    snapshot: &RelationSnapshot,
+    schema: &JazzSchema,
+    source_table: &str,
+    source_row: RowUuid,
+    relation: &str,
+    target_table: &str,
+    column: &str,
+    limit: usize,
+) -> Vec<String> {
+    let mut values = sorted_related_text_values(
+        snapshot,
+        schema,
+        source_table,
+        source_row,
+        relation,
+        target_table,
+        column,
+    );
+    values.truncate(limit);
+    values
 }
 
 fn event_settled(event: &SubscriptionEvent) -> bool {
@@ -96,17 +200,6 @@ fn assert_unsupported_subscription_include_deleted(error: Error) {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(
         error.message.contains("include_deleted"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
-fn assert_unsupported_subscription_array_subquery(error: Error) {
-    assert_eq!(error.code, ErrorCode::Query);
-    assert!(
-        error.message.contains("array subqueries")
-            && (error.message.contains("unified relation/path lowering")
-                || error.message.contains("relation-edge terminal deltas")),
         "unexpected error message: {}",
         error.message
     );
@@ -358,6 +451,24 @@ fn relation_schema() -> JazzSchema {
             ],
         )
         .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
+}
+
+fn policy_relation_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "comments",
+            [
+                ColumnSchema::new("body", ColumnType::String),
+                ColumnSchema::new("todo_id", ColumnType::Uuid),
+                ColumnSchema::new("owner", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::owner_only("comments", "owner"))
         .with_write_policy(Policy::public()),
     ])
 }
@@ -947,22 +1058,552 @@ fn include_deleted_fails_closed_on_live_subscription_apis() {
 }
 
 #[test]
-fn array_subquery_fails_closed_on_live_subscription_api() {
+fn array_subquery_live_subscription_tracks_child_edges() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
-    let query = Query::from("users").array_subquery(
-        ArraySubquery::new("todos", "todos", "owner_id", "id")
-            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+    )
+    .unwrap();
+
+    let query = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ));
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+
+    let opened = block_on(subscription.next_event()).unwrap();
+    assert_eq!(
+        snapshot_edges(&opened),
+        BTreeSet::new(),
+        "initial parent has no children"
     );
+
+    db.insert_with_id(
+        "todos",
+        row(0x11),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("first".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot_edges(&block_on(subscription.next_event()).unwrap()),
+        BTreeSet::from([RelationEdge {
+            source_table: "users".to_owned(),
+            source_row: row(0xa1),
+            relation: "todosViaOwner".to_owned(),
+            target_table: "todos".to_owned(),
+            target_row: row(0x11),
+        }])
+    );
+
+    db.update(
+        "todos",
+        row(0x11),
+        BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xb1).0))]),
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot_edges(&block_on(subscription.next_event()).unwrap()),
+        BTreeSet::new(),
+        "child leaves the correlated array when its owner changes"
+    );
+
+    db.update(
+        "todos",
+        row(0x11),
+        BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xa1).0))]),
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot_edges(&block_on(subscription.next_event()).unwrap()),
+        BTreeSet::from([RelationEdge {
+            source_table: "users".to_owned(),
+            source_row: row(0xa1),
+            relation: "todosViaOwner".to_owned(),
+            target_table: "todos".to_owned(),
+            target_row: row(0x11),
+        }]),
+        "re-populated group is emitted as full current relation state"
+    );
+}
+
+#[test]
+fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
+    let schema = relation_schema();
+    let db = open_db(0xc2, AuthorId::from_bytes([0xc2; 16]), &schema);
+    db.insert_with_id(
+        "todos",
+        row(0x21),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    let query = Query::from("todos")
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+
+    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        sorted_related_text_values(
+            &opened,
+            &schema,
+            "todos",
+            row(0x21),
+            "comments",
+            "comments",
+            "body"
+        ),
+        Vec::<String>::new()
+    );
+
+    db.insert_with_id(
+        "comments",
+        row(0xc1),
+        BTreeMap::from([
+            ("body".to_owned(), Value::String("first".to_owned())),
+            ("todo_id".to_owned(), Value::Uuid(row(0x21).0)),
+        ]),
+    )
+    .unwrap();
+    let after_insert = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        sorted_related_text_values(
+            &after_insert,
+            &schema,
+            "todos",
+            row(0x21),
+            "comments",
+            "comments",
+            "body"
+        ),
+        vec!["first".to_owned()]
+    );
+
+    db.update(
+        "comments",
+        row(0xc1),
+        BTreeMap::from([("body".to_owned(), Value::String("edited".to_owned()))]),
+    )
+    .unwrap();
+    let after_update = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        sorted_related_text_values(
+            &after_update,
+            &schema,
+            "todos",
+            row(0x21),
+            "comments",
+            "comments",
+            "body"
+        ),
+        vec!["edited".to_owned()]
+    );
+
+    db.delete("comments", row(0xc1)).unwrap();
+    let after_child_delete = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        sorted_related_text_values(
+            &after_child_delete,
+            &schema,
+            "todos",
+            row(0x21),
+            "comments",
+            "comments",
+            "body"
+        ),
+        Vec::<String>::new()
+    );
+
+    db.insert_with_id(
+        "comments",
+        row(0xc2),
+        BTreeMap::from([
+            ("body".to_owned(), Value::String("second".to_owned())),
+            ("todo_id".to_owned(), Value::Uuid(row(0x21).0)),
+        ]),
+    )
+    .unwrap();
+    let after_repopulate = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        sorted_related_text_values(
+            &after_repopulate,
+            &schema,
+            "todos",
+            row(0x21),
+            "comments",
+            "comments",
+            "body"
+        ),
+        vec!["second".to_owned()]
+    );
+
+    db.delete("todos", row(0x21)).unwrap();
+    let after_parent_delete = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(after_parent_delete.root_count, 0);
+    assert!(
+        after_parent_delete.edges.is_empty(),
+        "parent removal must cascade assembled child entries away"
+    );
+}
+
+#[test]
+fn array_subquery_subscription_updates_child_order_limit_boundary() {
+    let schema = relation_schema();
+    let db = open_db(0xc3, AuthorId::from_bytes([0xc3; 16]), &schema);
+    db.insert_with_id(
+        "todos",
+        row(0x31),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    let query = Query::from("todos")
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+
+    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        ordered_limited_related_text_values(
+            &opened,
+            &schema,
+            "todos",
+            row(0x31),
+            "comments",
+            "comments",
+            "body",
+            1
+        ),
+        Vec::<String>::new()
+    );
+
+    db.insert_with_id(
+        "comments",
+        row(0xd1),
+        BTreeMap::from([
+            ("body".to_owned(), Value::String("b".to_owned())),
+            ("todo_id".to_owned(), Value::Uuid(row(0x31).0)),
+        ]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let after_first_insert = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        ordered_limited_related_text_values(
+            &after_first_insert,
+            &schema,
+            "todos",
+            row(0x31),
+            "comments",
+            "comments",
+            "body",
+            1
+        ),
+        vec!["b".to_owned()]
+    );
+
+    db.insert_with_id(
+        "comments",
+        row(0xd2),
+        BTreeMap::from([
+            ("body".to_owned(), Value::String("c".to_owned())),
+            ("todo_id".to_owned(), Value::Uuid(row(0x31).0)),
+        ]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    if let Some(outside_boundary_event) = subscription.try_next_event() {
+        let outside_boundary = snapshot_from_event(outside_boundary_event);
+        assert_eq!(
+            ordered_limited_related_text_values(
+                &outside_boundary,
+                &schema,
+                "todos",
+                row(0x31),
+                "comments",
+                "comments",
+                "body",
+                1
+            ),
+            vec!["b".to_owned()]
+        );
+    }
+
+    db.insert_with_id(
+        "comments",
+        row(0xd3),
+        BTreeMap::from([
+            ("body".to_owned(), Value::String("a".to_owned())),
+            ("todo_id".to_owned(), Value::Uuid(row(0x31).0)),
+        ]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let after_boundary_insert = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        ordered_limited_related_text_values(
+            &after_boundary_insert,
+            &schema,
+            "todos",
+            row(0x31),
+            "comments",
+            "comments",
+            "body",
+            1
+        ),
+        vec!["a".to_owned()]
+    );
+
+    db.update(
+        "comments",
+        row(0xd3),
+        BTreeMap::from([("body".to_owned(), Value::String("z".to_owned()))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let after_boundary_update = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        ordered_limited_related_text_values(
+            &after_boundary_update,
+            &schema,
+            "todos",
+            row(0x31),
+            "comments",
+            "comments",
+            "body",
+            1
+        ),
+        vec!["b".to_owned()]
+    );
+}
+
+#[test]
+fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
+    let schema = policy_relation_schema();
+    let member = AuthorId::from_bytes([0xa1; 16]);
+    let other = AuthorId::from_bytes([0xb1; 16]);
+    let spy = AuthorId::from_bytes([0xc1; 16]);
+    let db = open_db(0xc4, AuthorId::SYSTEM, &schema);
+    db.insert_with_id(
+        "todos",
+        row(0x41),
+        BTreeMap::from([("title".to_owned(), Value::String("parent".to_owned()))]),
+    )
+    .unwrap();
+    for (id, body, owner) in [
+        (0xe1, "member-visible", member),
+        (0xe2, "other-visible", other),
+    ] {
+        db.insert_with_id(
+            "comments",
+            row(id),
+            BTreeMap::from([
+                ("body".to_owned(), Value::String(body.to_owned())),
+                ("todo_id".to_owned(), Value::Uuid(row(0x41).0)),
+                ("owner".to_owned(), Value::Uuid(owner.0)),
+            ]),
+        )
+        .unwrap();
+    }
+    let query = Query::from("todos")
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
     let prepared_query = prepared(&db, &query);
 
-    assert_unsupported_subscription_array_subquery(expect_error(block_on(
-        db.subscribe(&prepared_query, global_subscribe_opts()),
-    )));
+    let admin = block_on(db.all_relation_snapshot_for_identity(
+        &prepared_query,
+        ReadOpts::default(),
+        AuthorId::SYSTEM,
+    ))
+    .unwrap();
     assert_eq!(
-        prepared_read(&db, &query).len(),
-        0,
-        "one-shot reads remain available for already-supported array subquery snapshots"
+        sorted_related_text_values(
+            &admin,
+            &schema,
+            "todos",
+            row(0x41),
+            "comments",
+            "comments",
+            "body"
+        ),
+        vec!["member-visible".to_owned(), "other-visible".to_owned()]
+    );
+
+    let member_snapshot = block_on(db.all_relation_snapshot_for_identity(
+        &prepared_query,
+        ReadOpts::default(),
+        member,
+    ))
+    .unwrap();
+    assert_eq!(
+        sorted_related_text_values(
+            &member_snapshot,
+            &schema,
+            "todos",
+            row(0x41),
+            "comments",
+            "comments",
+            "body"
+        ),
+        vec!["member-visible".to_owned()]
+    );
+
+    let spy_snapshot =
+        block_on(db.all_relation_snapshot_for_identity(&prepared_query, ReadOpts::default(), spy))
+            .unwrap();
+    assert_eq!(
+        sorted_related_text_values(
+            &spy_snapshot,
+            &schema,
+            "todos",
+            row(0x41),
+            "comments",
+            "comments",
+            "body"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
+    let schema = relation_schema();
+    let db = open_db(0xc5, AuthorId::from_bytes([0xc5; 16]), &schema);
+    db.insert_with_id(
+        "todos",
+        row(0x51),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    for (id, body) in [(0xf1, "first"), (0xf2, "second")] {
+        db.insert_with_id(
+            "comments",
+            row(id),
+            BTreeMap::from([
+                ("body".to_owned(), Value::String(body.to_owned())),
+                ("todo_id".to_owned(), Value::Uuid(row(0x51).0)),
+            ]),
+        )
+        .unwrap();
+    }
+    let query = Query::from("todos").array_subquery(
+        ArraySubquery::new("comments", "comments", "todo_id", "id")
+            .order_by("body", OrderDirection::Asc),
+    );
+    let prepared_query = prepared(&db, &query);
+    let one_shot =
+        block_on(db.all_relation_snapshot(&prepared_query, ReadOpts::default())).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let maintained = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+
+    assert_eq!(
+        sorted_related_text_values(
+            &maintained,
+            &schema,
+            "todos",
+            row(0x51),
+            "comments",
+            "comments",
+            "body"
+        ),
+        sorted_related_text_values(
+            &one_shot,
+            &schema,
+            "todos",
+            row(0x51),
+            "comments",
+            "comments",
+            "body"
+        )
+    );
+}
+
+#[test]
+fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
+    let schema = relation_schema();
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorId::from_bytes([0xc6; 16]);
+    let client = open_db(0xc6, client_author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("users").array_subquery(ArraySubquery::new(
+        "todosViaOwner",
+        "todos",
+        "owner_id",
+        "id",
+    ));
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert!(opened.rows.is_empty());
+
+    server
+        .insert_with_id(
+            "users",
+            row(0xa6),
+            BTreeMap::from([("name".to_owned(), Value::String("remote user".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "todos",
+            row(0x66),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("remote child".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa6).0)),
+            ]),
+        )
+        .unwrap();
+
+    let mut delivered = None;
+    for _ in 0..20 {
+        client.tick().unwrap();
+        server.server.tick().unwrap();
+        client.tick().unwrap();
+        if let Some(event) = subscription.try_next_event() {
+            let snapshot = snapshot_from_event(event);
+            if sorted_related_text_values(
+                &snapshot,
+                &schema,
+                "users",
+                row(0xa6),
+                "todosViaOwner",
+                "todos",
+                "title",
+            ) == vec!["remote child".to_owned()]
+            {
+                delivered = Some(snapshot);
+                break;
+            }
+        }
+    }
+    assert!(
+        delivered.is_some(),
+        "remote maintained array subscription must hydrate the child row referenced by relation-edge facts"
     );
 }
 
@@ -3056,14 +3697,13 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
 }
 
 #[test]
-fn subscriber_connection_rejects_array_subquery_register_shape_before_serving_subscription() {
+fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subscription() {
     let schema = relation_schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
 
-    // Internal sync-loop coverage: public Db APIs reject array-subquery
-    // subscriptions/attachments before wire messages, so this sends protocol
-    // messages directly to exercise the serving fence.
+    // Internal sync-loop coverage: array-subquery subscriptions are served as
+    // flat relation-edge facts, so direct wire registration should be accepted.
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("users")
@@ -3079,7 +3719,11 @@ fn subscriber_connection_rejects_array_subquery_register_shape_before_serving_su
         })
         .unwrap();
 
-    assert_unsupported_subscription_array_subquery(subscriber.borrow_mut().tick().unwrap_err());
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        client_transport.try_recv().is_none(),
+        "registering a supported array-subquery shape should not emit a rejection"
+    );
 }
 
 #[test]
@@ -4192,7 +4836,7 @@ fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
 }
 
 #[test]
-fn global_subscription_rejects_array_subquery_before_upstream_coverage() {
+fn global_subscription_registers_array_subquery_upstream_coverage() {
     let schema = relation_schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
@@ -4203,21 +4847,21 @@ fn global_subscription_rejects_array_subquery_before_upstream_coverage() {
         ArraySubquery::new("todos", "todos", "owner_id", "id")
             .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
     );
-    assert_unsupported_subscription_array_subquery(expect_error(prepared_subscribe(
-        &client,
-        &query,
-        global_subscribe_opts(),
-    )));
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
 
     client.tick().unwrap();
-    assert!(
-        upstream_transport.try_recv().is_none(),
-        "array-subquery subscription failure must not register root or child coverage upstream"
-    );
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::RegisterShape { .. })
+    ));
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::Subscribe(_))
+    ));
 }
 
 #[test]
-fn array_subquery_attachment_rejects_before_upstream_coverage() {
+fn array_subquery_attachment_registers_upstream_coverage() {
     let schema = relation_schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
@@ -4229,22 +4873,20 @@ fn array_subquery_attachment_rejects_before_upstream_coverage() {
             .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
     );
     let prepared = prepared(&client, &query);
-    assert_unsupported_subscription_array_subquery(expect_error(
-        client.attach_query_with_opts(&prepared, global_subscribe_opts()),
-    ));
-    assert_unsupported_subscription_array_subquery(expect_error(
-        client.attach_query_with_opts_for_identity(
-            &prepared,
-            global_subscribe_opts(),
-            client.identity.author,
-        ),
-    ));
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
 
     client.tick().unwrap();
-    assert!(
-        upstream_transport.try_recv().is_none(),
-        "array-subquery attachment failure must not register coverage upstream"
-    );
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::RegisterShape { .. })
+    ));
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::Subscribe(_))
+    ));
+    client.detach_query(attachment);
 }
 
 #[test]
