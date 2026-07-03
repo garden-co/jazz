@@ -1,8 +1,10 @@
-//! Simple block-granular markdown merge strategy.
+//! Built-in block-granular markdown rung-3 merge strategy.
 //!
 //! This v1 strategy recognizes only coarse markdown blocks: headings,
 //! paragraphs, list items, and fenced code blocks. It deliberately does not
-//! reconcile inline formatting spans.
+//! reconcile inline formatting spans. Op-stream edits on format-declared
+//! columns and N-head strategy inputs are staging limitations documented on
+//! [`crate::merge_strategy::MergeStrategy`].
 
 use crate::merge_strategy::{MergeStrategy, MergeStrategyInput, MergeStrategyOutput};
 use crate::text_merge::{EventId, TextEvent, TextEventGraph, TextMergeError, TieBreak, diff};
@@ -393,34 +395,16 @@ fn ranges_overlap(left: &[ChangeRange], right: &[ChangeRange]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{NodeUuid, SchemaVersionId};
-    use crate::merge_strategy::testing::{Expected, IntentionCase, run_intention_case};
+    use crate::merge_strategy::testing::run_exact_intention_case;
     use crate::schema::TextMergeSpec;
-    use crate::time::TxTime;
-
-    fn tx(time: u64, node: u128) -> TxId {
-        TxId::new(TxTime(time), NodeUuid(uuid::Uuid::from_u128(node)))
-    }
 
     fn spec() -> TextMergeSpec {
         TextMergeSpec::new(STRATEGY_ID, STRATEGY_VERSION, Vec::new())
     }
 
     fn case(base: &str, left: &str, right: &str, expected: &str) {
-        run_intention_case(
-            &SimpleMarkdownStrategy,
-            IntentionCase {
-                base: base.as_bytes().to_vec(),
-                side_a: left.as_bytes().to_vec(),
-                side_b: right.as_bytes().to_vec(),
-                spec: spec(),
-                expected: Expected::Exact(expected.as_bytes().to_vec()),
-            },
-            SchemaVersionId(uuid::Uuid::from_u128(1)),
-            tx(1, 1),
-            tx(2, 2),
-        )
-        .unwrap();
+        run_exact_intention_case(&SimpleMarkdownStrategy, base, left, right, spec(), expected)
+            .unwrap();
     }
 
     #[test]
