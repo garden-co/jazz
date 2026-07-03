@@ -1,5 +1,5 @@
 use crate::ids::AuthorId;
-use crate::json_merge::{JSON_MERGE_STRATEGY_ID, JSON_MERGE_STRATEGY_VERSION, JsonMergeStrategy};
+use crate::json_merge::{JsonMergeStrategy, STRATEGY_ID as JSON_STRATEGY_ID, STRATEGY_VERSION as JSON_STRATEGY_VERSION};
 use crate::node::EdgeCacheClass;
 use crate::peer::PeerEvictionPins;
 use crate::schema::{CONTENT_META_STORE, TextMergeSpec};
@@ -521,8 +521,8 @@ fn json_document_schema(config: &[u8]) -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "docs",
         [crate::schema::ColumnSchema::text("body").with_text_merge_spec(TextMergeSpec::new(
-            JSON_MERGE_STRATEGY_ID,
-            JSON_MERGE_STRATEGY_VERSION,
+            JSON_STRATEGY_ID,
+            JSON_STRATEGY_VERSION,
             config.to_vec(),
         ))],
     )])
@@ -967,8 +967,8 @@ fn registered_json_strategy_merges_and_records_json_strategy_metadata() {
         .tx
         .merge_strategy
         .expect("json merge should record strategy");
-    assert_eq!(strategy.id, JSON_MERGE_STRATEGY_ID);
-    assert_eq!(strategy.version, JSON_MERGE_STRATEGY_VERSION);
+    assert_eq!(strategy.id, JSON_STRATEGY_ID);
+    assert_eq!(strategy.version, JSON_STRATEGY_VERSION);
     assert_eq!(
         strategy.column_spec_hash,
         schema.tables[0].columns[0]
