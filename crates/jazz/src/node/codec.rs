@@ -211,12 +211,13 @@ groove::define_record! {
         9 => user_metadata: Option<String>,
         10 => source_branch: Option<BranchId>,
         11 => permission_subject: Option<AuthorId>,
-        12 => fate: FateTag,
-        13 => global_seq: Option<GlobalSeq>,
-        14 => rejection_reason: Option<RejectionReasonTag>,
-        15 => cascade_root: Option<Value>,
-        16 => reason_detail: Option<String>,
-        17 => durability: DurabilityTier,
+        12 => merge_strategy: Option<String>,
+        13 => fate: FateTag,
+        14 => global_seq: Option<GlobalSeq>,
+        15 => rejection_reason: Option<RejectionReasonTag>,
+        16 => cascade_root: Option<Value>,
+        17 => reason_detail: Option<String>,
+        18 => durability: DurabilityTier,
     }
 }
 
@@ -973,6 +974,11 @@ pub(super) fn transaction_values(
         ),
         Value::Nullable(tx.source_branch.map(|id| Box::new(Value::Uuid(id.0)))),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
+        Value::Nullable(
+            tx.merge_strategy
+                .as_ref()
+                .map(|strategy| Box::new(Value::String(encode_merge_strategy_tag(strategy)))),
+        ),
         Value::String(fate_string(&fate)),
         Value::Nullable(global_seq.map(|seq| Box::new(Value::U64(seq.0)))),
         Value::Nullable(rejection_reason_tag(&fate).map(|reason| Box::new(Value::String(reason)))),
@@ -984,6 +990,18 @@ pub(super) fn transaction_values(
         ),
         Value::String(durability_string(durability).to_owned()),
     ]
+}
+
+pub(super) fn encode_merge_strategy_tag(strategy: &RecordedMergeStrategy) -> String {
+    format!("{}@{}", strategy.id, strategy.version)
+}
+
+pub(super) fn decode_merge_strategy_tag(value: &str) -> Option<RecordedMergeStrategy> {
+    let (id, version) = value.rsplit_once('@')?;
+    Some(RecordedMergeStrategy {
+        id: id.to_owned(),
+        version: version.parse().ok()?,
+    })
 }
 
 pub(super) fn rejected_transaction_values(

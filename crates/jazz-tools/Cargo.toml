@@ -204,6 +204,10 @@ required-features = ["test"]
 name = "transactions"
 required-features = ["test-utils"]
 
+[[test]]
+name = "text_document_merge"
+required-features = ["test-utils"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]

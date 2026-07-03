@@ -7,6 +7,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+const TAG_RETAIN: u8 = 0;
+const TAG_INSERT: u8 = 1;
+const TAG_DELETE: u8 = 2;
+const U64_LEN: usize = 8;
+
 /// Deterministic event identifier used by the pure merge walker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct EventId(pub u64);
@@ -58,6 +63,14 @@ pub enum TextMergeError {
     /// The graph event has multiple parents; Step 1 walker expects raw edit
     /// paths between the chosen ancestor and heads.
     MergeEventOnRawPath(EventId),
+    /// Encoded op bytes ended before the declared value was complete.
+    TruncatedEncoding,
+    /// Encoded op bytes carried an unknown run tag.
+    UnknownRunTag,
+    /// Encoded op bytes had trailing data.
+    TrailingEncoding,
+    /// Encoded op integer does not fit this platform.
+    IntegerTooLarge,
 }
 
 /// In-memory edit event graph used by the pure merge walk.
@@ -151,6 +164,30 @@ impl TextOp {
         Ok(diff(base, &composed))
     }
 
+    /// Encode this operation into deterministic storage/wire bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_usize(&mut bytes, self.runs.len());
+        for run in &self.runs {
+            match run {
+                Run::Retain(len) => {
+                    bytes.push(TAG_RETAIN);
+                    write_usize(&mut bytes, *len);
+                }
+                Run::Insert(insert) => {
+                    bytes.push(TAG_INSERT);
+                    write_usize(&mut bytes, insert.len());
+                    bytes.extend_from_slice(insert);
+                }
+                Run::Delete(len) => {
+                    bytes.push(TAG_DELETE);
+                    write_usize(&mut bytes, *len);
+                }
+            }
+        }
+        bytes
+    }
+
     fn push(&mut self, run: Run) {
         match run {
             Run::Retain(0) | Run::Delete(0) => {}
@@ -169,6 +206,28 @@ impl TextOp {
             },
         }
     }
+}
+
+/// Decode bytes produced by [`TextOp::encode`].
+pub fn decode(bytes: &[u8]) -> Result<TextOp, TextMergeError> {
+    let mut cursor = Cursor { bytes, pos: 0 };
+    let run_count = cursor.read_usize()?;
+    let mut runs = Vec::with_capacity(run_count);
+    for _ in 0..run_count {
+        match cursor.read_u8()? {
+            TAG_RETAIN => runs.push(Run::Retain(cursor.read_usize()?)),
+            TAG_INSERT => {
+                let len = cursor.read_usize()?;
+                runs.push(Run::Insert(cursor.read_bytes(len)?.to_vec()));
+            }
+            TAG_DELETE => runs.push(Run::Delete(cursor.read_usize()?)),
+            _ => return Err(TextMergeError::UnknownRunTag),
+        }
+    }
+    if cursor.remaining() != 0 {
+        return Err(TextMergeError::TrailingEncoding);
+    }
+    Ok(TextOp::new(runs))
 }
 
 /// Return a canonical middle-replacement op from `old` to `new`.
@@ -370,6 +429,57 @@ fn append_inserts_at(pos: usize, edits: &[EditRun], index: &mut usize, out: &mut
     }
 }
 
+fn write_usize(bytes: &mut Vec<u8>, value: usize) {
+    bytes.extend_from_slice(
+        &u64::try_from(value)
+            .expect("text op field exceeds u64")
+            .to_be_bytes(),
+    );
+}
+
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.pos
+    }
+
+    fn read_u8(&mut self) -> Result<u8, TextMergeError> {
+        let byte = *self
+            .bytes
+            .get(self.pos)
+            .ok_or(TextMergeError::TruncatedEncoding)?;
+        self.pos += 1;
+        Ok(byte)
+    }
+
+    fn read_usize(&mut self) -> Result<usize, TextMergeError> {
+        let bytes = self.read_bytes(U64_LEN)?;
+        let value = u64::from_be_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| TextMergeError::TruncatedEncoding)?,
+        );
+        usize::try_from(value).map_err(|_| TextMergeError::IntegerTooLarge)
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], TextMergeError> {
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or(TextMergeError::TruncatedEncoding)?;
+        let bytes = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or(TextMergeError::TruncatedEncoding)?;
+        self.pos = end;
+        Ok(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +500,18 @@ mod tests {
             op.runs(),
             &[Run::Retain(3), Run::Insert(b"abc".to_vec()), Run::Delete(3)]
         );
+    }
+
+    #[test]
+    fn encode_decode_round_trips_retained_runs() {
+        let op = TextOp::new([
+            Run::Retain(3),
+            Run::Insert(b"hello".to_vec()),
+            Run::Delete(2),
+        ]);
+
+        assert_eq!(decode(&op.encode()).unwrap(), op);
+        assert!(decode(&[0, 1]).is_err());
     }
 
     #[test]

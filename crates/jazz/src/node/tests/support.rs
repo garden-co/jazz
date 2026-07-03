@@ -960,6 +960,7 @@ fn ingest_relay_version(
             predicate_read_set: None,
             user_metadata_json: None,
             source_branch: None,
+            merge_strategy: None,
         },
         vec![version_record(
             row_uuid,

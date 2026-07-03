@@ -41,6 +41,17 @@ pub struct Transaction {
     pub user_metadata_json: Option<String>,
     /// Branch provenance for system-created branch squash transactions.
     pub source_branch: Option<BranchId>,
+    /// Strategy runtime that produced this transaction when it is a recorded merge.
+    pub merge_strategy: Option<RecordedMergeStrategy>,
+}
+
+/// Runtime strategy tag recorded on system-created merge transactions.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RecordedMergeStrategy {
+    /// Stable strategy id.
+    pub id: String,
+    /// Strategy implementation version.
+    pub version: u32,
 }
 
 /// Deletion register event carried by a row version.

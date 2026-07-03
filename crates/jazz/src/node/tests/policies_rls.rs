@@ -4707,7 +4707,7 @@ fn content_extent_visibility_requires_referencing_readable_version_row() {
     let schema = JazzSchema::new([TableSchema::new(
         "docs",
         [
-            crate::schema::ColumnSchema::text("body"),
+            crate::schema::ColumnSchema::blob("body"),
             crate::schema::ColumnSchema::new("owner", ColumnType::Uuid),
         ],
     )
@@ -4737,7 +4737,7 @@ fn content_extent_visibility_requires_referencing_readable_version_row() {
     let table = core.table("docs").unwrap().clone();
     let version = core.query_versions_for_tx(tx).unwrap().remove(0);
     let Value::Bytes(payload) = version.cell(&table, "body").unwrap().unwrap() else {
-        panic!("body must be stored as text oplog bytes");
+        panic!("body must be stored as blob oplog bytes");
     };
     let extent = text_oplog::decode(&payload)
         .unwrap()
