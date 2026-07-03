@@ -34,13 +34,15 @@ use crate::protocol::{
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
-    JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy, TableSchema, registered_column_transform,
+    JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind, MergeStrategy, TableSchema,
+    registered_column_transform,
 };
+use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::{
     AbsentRead, DeletionEvent, DurabilityTier, Fate, HistoryEntry, PredicateRead,
-    RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot, Transaction,
-    TransactionRecord, TxId, TxKind,
+    RecordedMergeStrategy, RejectedTransaction, RejectedVersion, RejectionReason, RowRead,
+    Snapshot, Transaction, TransactionRecord, TxId, TxKind,
 };
 
 mod branches;
@@ -778,6 +780,7 @@ where
             predicate_read_set: None,
             user_metadata_json,
             source_branch: None,
+            merge_strategy: commits[0].merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
@@ -838,18 +841,23 @@ where
             } else {
                 None
             };
+            let explicit_parent_count = commit.parents.len();
             let parents = if commit.parents.is_empty() {
                 implicit_parent.into_iter().collect()
             } else {
                 commit.parents
             };
-            let cells = self.encode_large_value_cells(
-                &table_schema,
-                commit.row_uuid,
-                commit.made_by,
-                commit.cells,
-                previous_current.as_ref(),
-            )?;
+            let cells = if explicit_parent_count > 1 && commit.merge_strategy.is_some() {
+                commit.cells
+            } else {
+                self.encode_large_value_cells(
+                    &table_schema,
+                    commit.row_uuid,
+                    commit.made_by,
+                    commit.cells,
+                    previous_current.as_ref(),
+                )?
+            };
             let stored = VersionRow::from_parts_with_schema_version(
                 &table_schema,
                 VersionRowParts {
@@ -949,6 +957,7 @@ where
             predicate_read_set: None,
             user_metadata_json: edit.user_metadata_json.clone(),
             source_branch: None,
+            merge_strategy: None,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let previous_current = match self.query_local_layer_winner(
@@ -976,10 +985,22 @@ where
         let made_by = edit.made_by;
         let updated_at = TxTime(edit.now_ms);
         let column_name = edit.column.clone();
-        let inline_ops = edit.into_text_ops();
-        validate_text_edit_ranges(parent_len, &inline_ops)?;
-        let ops = self.extent_back_text_ops(made_by, row_uuid, &column_name, inline_ops)?;
-        let cells = BTreeMap::from([(column_name, Value::Bytes(text_oplog::encode(&ops)))]);
+        let inline_ops = edit.ops;
+        validate_large_value_edit_ranges(parent_len, &inline_ops)?;
+        let cell_payload = match column.large_value {
+            Some(LargeValueKind::Text) => encode_plain_text_edit(parent_len, &inline_ops)?,
+            Some(LargeValueKind::Blob) => {
+                let text_ops = large_value_edit_ops_to_legacy_text_ops(inline_ops);
+                let ops = self.extent_back_text_ops(made_by, row_uuid, &column_name, text_ops)?;
+                text_oplog::encode(&ops)
+            }
+            None => {
+                return Err(Error::InvalidMergeableCommit(
+                    "large-value edit column must be text or blob",
+                ));
+            }
+        };
+        let cells = BTreeMap::from([(column_name, Value::Bytes(cell_payload))]);
         let parents = previous_current
             .as_ref()
             .map(|previous| self.version_tx_id(previous))
@@ -1273,11 +1294,20 @@ where
                 Some(parent) => self.materialize_large_value_column(table, parent, &column.name)?,
                 None => Vec::new(),
             };
-            let ops = text_oplog::diff(&parent_value, &new_value)
-                .into_iter()
-                .collect::<Vec<_>>();
-            let ops = self.extent_back_text_ops(writer, row_uuid, &column.name, ops)?;
-            cells.insert(column.name.clone(), Value::Bytes(text_oplog::encode(&ops)));
+            match column.large_value {
+                Some(LargeValueKind::Text) => {
+                    let ops = crate::text_merge::diff(&parent_value, &new_value);
+                    cells.insert(column.name.clone(), Value::Bytes(ops.encode()));
+                }
+                Some(LargeValueKind::Blob) => {
+                    let ops = text_oplog::diff(&parent_value, &new_value)
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    let ops = self.extent_back_text_ops(writer, row_uuid, &column.name, ops)?;
+                    cells.insert(column.name.clone(), Value::Bytes(text_oplog::encode(&ops)));
+                }
+                None => {}
+            }
         }
         Ok(cells)
     }
@@ -1366,15 +1396,25 @@ where
             let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
                 continue;
             };
-            let stored_ops = text_oplog::decode(&payload)?;
-            replayed_ops =
-                replayed_ops
-                    .checked_add(stored_ops.len())
-                    .ok_or(Error::InvalidStoredValue(
-                        "large value replay op count overflow",
-                    ))?;
-            let ops = self.resolve_text_op_refs(stored_ops)?;
-            value = text_oplog::replay(&value, &ops);
+            match column_large_value_kind(table, column)? {
+                LargeValueKind::Text => {
+                    let op = decode_plain_text_op(&payload)?;
+                    replayed_ops = replayed_ops.checked_add(op.runs().len()).ok_or(
+                        Error::InvalidStoredValue("large value replay op count overflow"),
+                    )?;
+                    value = op
+                        .apply(&value)
+                        .map_err(|_| Error::InvalidStoredValue("invalid text op payload"))?;
+                }
+                LargeValueKind::Blob => {
+                    let stored_ops = text_oplog::decode(&payload)?;
+                    replayed_ops = replayed_ops.checked_add(stored_ops.len()).ok_or(
+                        Error::InvalidStoredValue("large value replay op count overflow"),
+                    )?;
+                    let ops = self.resolve_text_op_refs(stored_ops)?;
+                    value = text_oplog::replay(&value, &ops);
+                }
+            }
         }
         self.large_value_metrics.last_replayed_ops = replayed_ops;
         self.large_value_metrics.total_replayed_ops = self
@@ -1504,7 +1544,10 @@ where
                 return Ok(replayed_ops);
             }
             if let Some(Value::Bytes(payload)) = version.cell(table, column)? {
-                let op_count = text_oplog::decode(&payload)?.len();
+                let op_count = match column_large_value_kind(table, column)? {
+                    LargeValueKind::Text => decode_plain_text_op(&payload)?.runs().len(),
+                    LargeValueKind::Blob => text_oplog::decode(&payload)?.len(),
+                };
                 replayed_ops =
                     replayed_ops
                         .checked_add(op_count)
@@ -1561,17 +1604,30 @@ where
             let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
                 continue;
             };
-            for op in text_oplog::decode(&payload)? {
-                match op {
-                    TextOp::Insert { content, .. } => {
-                        value_len = value_len
-                            .checked_add(text_content_len(&content)?)
-                            .ok_or(Error::InvalidStoredValue("large value length overflow"))?;
-                    }
-                    TextOp::Delete { len, .. } => {
-                        value_len = value_len
-                            .checked_sub(len)
-                            .ok_or(Error::InvalidStoredValue("large value length underflow"))?;
+            match column_large_value_kind(table, column)? {
+                LargeValueKind::Text => {
+                    let op = decode_plain_text_op(&payload)?;
+                    let value = vec![0; value_len];
+                    value_len = op
+                        .apply(&value)
+                        .map_err(|_| Error::InvalidStoredValue("invalid text op payload"))?
+                        .len();
+                }
+                LargeValueKind::Blob => {
+                    for op in text_oplog::decode(&payload)? {
+                        match op {
+                            TextOp::Insert { content, .. } => {
+                                value_len =
+                                    value_len.checked_add(text_content_len(&content)?).ok_or(
+                                        Error::InvalidStoredValue("large value length overflow"),
+                                    )?;
+                            }
+                            TextOp::Delete { len, .. } => {
+                                value_len = value_len.checked_sub(len).ok_or(
+                                    Error::InvalidStoredValue("large value length underflow"),
+                                )?;
+                            }
+                        }
                     }
                 }
             }
@@ -3171,19 +3227,6 @@ impl LargeValueEditCommit {
         }
         Ok(())
     }
-
-    fn into_text_ops(self) -> Vec<TextOp> {
-        self.ops
-            .into_iter()
-            .map(|op| match op {
-                LargeValueEditOp::Insert(pos, bytes) => TextOp::Insert {
-                    pos,
-                    content: TextContent::Inline(bytes),
-                },
-                LargeValueEditOp::Delete(pos, len) => TextOp::Delete { pos, len },
-            })
-            .collect()
-    }
 }
 
 /// Builder for a local mergeable commit.
@@ -3207,6 +3250,8 @@ pub struct MergeableCommit {
     pub parents: Vec<TxId>,
     /// Optional application metadata.
     pub user_metadata_json: Option<String>,
+    /// Recorded merge strategy for system-created merge versions.
+    pub merge_strategy: Option<RecordedMergeStrategy>,
 }
 
 impl MergeableCommit {
@@ -3222,6 +3267,7 @@ impl MergeableCommit {
             deletion: None,
             parents: Vec::new(),
             user_metadata_json: None,
+            merge_strategy: None,
         }
     }
 
@@ -3271,6 +3317,11 @@ impl MergeableCommit {
     /// Attach application metadata.
     pub fn user_metadata(mut self, json: String) -> Self {
         self.user_metadata_json = Some(json);
+        self
+    }
+
+    pub(crate) fn merge_strategy(mut self, strategy: RecordedMergeStrategy) -> Self {
+        self.merge_strategy = Some(strategy);
         self
     }
 
@@ -3385,6 +3436,124 @@ fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> 
             "mergeable commits must carry content cells or a deletion-register event",
         )),
     }
+}
+
+fn validate_large_value_edit_ranges(
+    parent_len: usize,
+    ops: &[LargeValueEditOp],
+) -> Result<(), Error> {
+    let text_ops = large_value_edit_ops_to_legacy_text_ops(ops.to_vec());
+    validate_text_edit_ranges(parent_len, &text_ops)
+}
+
+fn large_value_edit_ops_to_legacy_text_ops(ops: Vec<LargeValueEditOp>) -> Vec<TextOp> {
+    ops.into_iter()
+        .map(|op| match op {
+            LargeValueEditOp::Insert(pos, bytes) => TextOp::Insert {
+                pos,
+                content: TextContent::Inline(bytes),
+            },
+            LargeValueEditOp::Delete(pos, len) => TextOp::Delete { pos, len },
+        })
+        .collect()
+}
+
+fn encode_plain_text_edit(parent_len: usize, ops: &[LargeValueEditOp]) -> Result<Vec<u8>, Error> {
+    let mut tokens = (0..parent_len)
+        .map(PlainTextToken::Parent)
+        .collect::<Vec<_>>();
+    for op in ops {
+        match op {
+            LargeValueEditOp::Insert(pos, bytes) => {
+                if *pos > tokens.len() {
+                    return Err(Error::InvalidMergeableCommit(
+                        "large-value insert position is out of bounds",
+                    ));
+                }
+                tokens.splice(
+                    *pos..*pos,
+                    bytes.iter().copied().map(PlainTextToken::Inserted),
+                );
+            }
+            LargeValueEditOp::Delete(pos, len) => {
+                let end = pos.checked_add(*len).ok_or(Error::InvalidMergeableCommit(
+                    "large-value delete range overflows",
+                ))?;
+                if end > tokens.len() {
+                    return Err(Error::InvalidMergeableCommit(
+                        "large-value delete range is out of bounds",
+                    ));
+                }
+                tokens.drain(*pos..end);
+            }
+        }
+    }
+
+    let mut runs = Vec::new();
+    let mut parent_cursor = 0usize;
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        match tokens[idx] {
+            PlainTextToken::Parent(parent_idx) => {
+                if parent_idx > parent_cursor {
+                    runs.push(PlainTextRun::Delete(parent_idx - parent_cursor));
+                    parent_cursor = parent_idx;
+                }
+                let mut len = 0usize;
+                while idx < tokens.len() {
+                    match tokens[idx] {
+                        PlainTextToken::Parent(next_parent)
+                            if next_parent == parent_cursor + len =>
+                        {
+                            len += 1;
+                            idx += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                runs.push(PlainTextRun::Retain(len));
+                parent_cursor += len;
+            }
+            PlainTextToken::Inserted(_) => {
+                let mut bytes = Vec::new();
+                while idx < tokens.len() {
+                    match tokens[idx] {
+                        PlainTextToken::Inserted(byte) => {
+                            bytes.push(byte);
+                            idx += 1;
+                        }
+                        PlainTextToken::Parent(_) => break,
+                    }
+                }
+                runs.push(PlainTextRun::Insert(bytes));
+            }
+        }
+    }
+    if parent_cursor < parent_len {
+        runs.push(PlainTextRun::Delete(parent_len - parent_cursor));
+    }
+
+    Ok(PlainTextOp::new(runs).encode())
+}
+
+#[derive(Clone, Copy)]
+enum PlainTextToken {
+    Parent(usize),
+    Inserted(u8),
+}
+
+fn decode_plain_text_op(payload: &[u8]) -> Result<PlainTextOp, Error> {
+    crate::text_merge::decode(payload)
+        .map_err(|_| Error::InvalidStoredValue("text op payload failed to decode"))
+}
+
+fn column_large_value_kind(table: &TableSchema, column: &str) -> Result<LargeValueKind, Error> {
+    table
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == column)
+        .and_then(|column| column.large_value)
+        .ok_or(Error::InvalidStoredValue("large value column kind missing"))
 }
 
 fn validate_text_edit_ranges(parent_len: usize, ops: &[TextOp]) -> Result<(), Error> {

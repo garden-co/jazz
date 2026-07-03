@@ -382,6 +382,9 @@ where
                 source_branch: record
                     .get_nullable_uuid(TransactionRowRecord::FIELD_SOURCE_BRANCH_IDX)?
                     .map(BranchId),
+                merge_strategy: record
+                    .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
+                    .and_then(decode_merge_strategy_tag),
             };
             let fate = fate_from_encoded_fields(record)?;
             return Ok(Some(StoredTransaction {
