@@ -22,7 +22,7 @@ use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType,
 };
-use crate::storage::{MemoryStorage, RocksDbStorage};
+use crate::storage::{MemoryStorage, RocksDbStorage, StorageLayout};
 
 fn albums_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
@@ -1038,120 +1038,129 @@ fn commit_metrics_split_storage_and_tick_work() {
 
 #[test]
 fn commit_metrics_split_storage_writes_by_jazz_destination() {
-    let schema = DatabaseSchema::new([
-        TableSchema::new(
+    fn run(layout: StorageLayout) -> StorageWriteMetrics {
+        let schema = DatabaseSchema::new([
+            TableSchema::new(
+                "jazz_docs_history",
+                [
+                    ColumnSchema::new("row_uuid", ColumnType::Uuid),
+                    ColumnSchema::new("tx_time", ColumnType::U64),
+                    ColumnSchema::new("tx_node_id", ColumnType::U64),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                ],
+            )
+            .with_primary_key(PrimaryKey::composite([
+                PrimaryKeyColumn::uuid("row_uuid"),
+                PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
+                PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
+            ]))
+            .with_index(IndexSchema::new(
+                "by_tx",
+                ["tx_time", "tx_node_id", "row_uuid"],
+            )),
+            TableSchema::new(
+                "jazz_docs_global_current",
+                [
+                    ColumnSchema::new("row_uuid", ColumnType::Uuid),
+                    ColumnSchema::new("tx_time", ColumnType::U64),
+                    ColumnSchema::new("tx_node_id", ColumnType::U64),
+                    ColumnSchema::new("user_parent", ColumnType::Uuid),
+                ],
+            )
+            .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")]))
+            .with_index(IndexSchema::new("by_user_parent", ["user_parent"])),
+            TableSchema::new(
+                "jazz_docs_register_global_current",
+                [
+                    ColumnSchema::new("row_uuid", ColumnType::Uuid),
+                    ColumnSchema::new("tx_time", ColumnType::U64),
+                ],
+            )
+            .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")])),
+            TableSchema::new(
+                "jazz_global_changes",
+                [
+                    ColumnSchema::new("table_name", ColumnType::Bytes),
+                    ColumnSchema::new("row_uuid", ColumnType::Uuid),
+                    ColumnSchema::new("layer", ColumnType::Bytes),
+                    ColumnSchema::new("global_seq", ColumnType::U64),
+                ],
+            )
+            .with_primary_key(PrimaryKey::composite([
+                PrimaryKeyColumn::bytes("table_name"),
+                PrimaryKeyColumn::uuid("row_uuid"),
+                PrimaryKeyColumn::bytes("layer"),
+                PrimaryKeyColumn::integer("global_seq", IntegerKeyType::U64),
+            ]))
+            .with_index(IndexSchema::new(
+                "by_global_seq",
+                ["global_seq", "table_name", "row_uuid", "layer"],
+            )),
+            TableSchema::new(
+                "jazz_transactions",
+                [
+                    ColumnSchema::new("time", ColumnType::U64),
+                    ColumnSchema::new("node_id", ColumnType::U64),
+                    ColumnSchema::new("global_seq", ColumnType::U64),
+                ],
+            )
+            .with_primary_key(PrimaryKey::composite([
+                PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
+                PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+            ]))
+            .with_index(IndexSchema::new("by_global_seq", ["global_seq"])),
+        ]);
+        let column_families = layout.physical_column_families(schema.column_families());
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let storage = MemoryStorage::new(&refs);
+        let mut database = Database::new_with_storage_layout(schema, storage, layout).unwrap();
+        let row_uuid = uuid(1);
+
+        let mut batch = database.open_batch();
+        batch.insert(
             "jazz_docs_history",
-            [
-                ColumnSchema::new("row_uuid", ColumnType::Uuid),
-                ColumnSchema::new("tx_time", ColumnType::U64),
-                ColumnSchema::new("tx_node_id", ColumnType::U64),
-                ColumnSchema::new("parent", ColumnType::Uuid),
+            vec![
+                Value::Uuid(row_uuid),
+                Value::U64(1),
+                Value::U64(2),
+                Value::Uuid(uuid(3)),
             ],
-        )
-        .with_primary_key(PrimaryKey::composite([
-            PrimaryKeyColumn::uuid("row_uuid"),
-            PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-            PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
-        ]))
-        .with_index(IndexSchema::new(
-            "by_tx",
-            ["tx_time", "tx_node_id", "row_uuid"],
-        )),
-        TableSchema::new(
+        );
+        batch.insert(
             "jazz_docs_global_current",
-            [
-                ColumnSchema::new("row_uuid", ColumnType::Uuid),
-                ColumnSchema::new("tx_time", ColumnType::U64),
-                ColumnSchema::new("tx_node_id", ColumnType::U64),
-                ColumnSchema::new("user_parent", ColumnType::Uuid),
+            vec![
+                Value::Uuid(row_uuid),
+                Value::U64(1),
+                Value::U64(2),
+                Value::Uuid(uuid(3)),
             ],
-        )
-        .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")]))
-        .with_index(IndexSchema::new("by_user_parent", ["user_parent"])),
-        TableSchema::new(
+        );
+        batch.insert(
             "jazz_docs_register_global_current",
-            [
-                ColumnSchema::new("row_uuid", ColumnType::Uuid),
-                ColumnSchema::new("tx_time", ColumnType::U64),
-            ],
-        )
-        .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")])),
-        TableSchema::new(
+            vec![Value::Uuid(row_uuid), Value::U64(1)],
+        );
+        batch.insert(
             "jazz_global_changes",
-            [
-                ColumnSchema::new("table_name", ColumnType::Bytes),
-                ColumnSchema::new("row_uuid", ColumnType::Uuid),
-                ColumnSchema::new("layer", ColumnType::Bytes),
-                ColumnSchema::new("global_seq", ColumnType::U64),
+            vec![
+                Value::Bytes(b"docs".to_vec()),
+                Value::Uuid(row_uuid),
+                Value::Bytes(b"content".to_vec()),
+                Value::U64(1),
             ],
-        )
-        .with_primary_key(PrimaryKey::composite([
-            PrimaryKeyColumn::bytes("table_name"),
-            PrimaryKeyColumn::uuid("row_uuid"),
-            PrimaryKeyColumn::bytes("layer"),
-            PrimaryKeyColumn::integer("global_seq", IntegerKeyType::U64),
-        ]))
-        .with_index(IndexSchema::new(
-            "by_global_seq",
-            ["global_seq", "table_name", "row_uuid", "layer"],
-        )),
-        TableSchema::new(
+        );
+        batch.insert(
             "jazz_transactions",
-            [
-                ColumnSchema::new("time", ColumnType::U64),
-                ColumnSchema::new("node_id", ColumnType::U64),
-                ColumnSchema::new("global_seq", ColumnType::U64),
-            ],
-        )
-        .with_primary_key(PrimaryKey::composite([
-            PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
-            PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
-        ]))
-        .with_index(IndexSchema::new("by_global_seq", ["global_seq"])),
-    ]);
-    let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema, storage).unwrap();
-    let row_uuid = uuid(1);
+            vec![Value::U64(1), Value::U64(2), Value::U64(1)],
+        );
+        database.commit_batch(batch).unwrap();
 
-    let mut batch = database.open_batch();
-    batch.insert(
-        "jazz_docs_history",
-        vec![
-            Value::Uuid(row_uuid),
-            Value::U64(1),
-            Value::U64(2),
-            Value::Uuid(uuid(3)),
-        ],
-    );
-    batch.insert(
-        "jazz_docs_global_current",
-        vec![
-            Value::Uuid(row_uuid),
-            Value::U64(1),
-            Value::U64(2),
-            Value::Uuid(uuid(3)),
-        ],
-    );
-    batch.insert(
-        "jazz_docs_register_global_current",
-        vec![Value::Uuid(row_uuid), Value::U64(1)],
-    );
-    batch.insert(
-        "jazz_global_changes",
-        vec![
-            Value::Bytes(b"docs".to_vec()),
-            Value::Uuid(row_uuid),
-            Value::Bytes(b"content".to_vec()),
-            Value::U64(1),
-        ],
-    );
-    batch.insert(
-        "jazz_transactions",
-        vec![Value::U64(1), Value::U64(2), Value::U64(1)],
-    );
-    database.commit_batch(batch).unwrap();
+        database.last_commit_metrics().unwrap().storage_writes
+    }
 
-    let writes = database.last_commit_metrics().unwrap().storage_writes;
+    let writes = run(StorageLayout::Identity);
     assert_eq!(writes.total.count, 9);
     assert_eq!(writes.history_rows.count, 1);
     assert_eq!(writes.history_indexes.count, 1);
@@ -1163,6 +1172,9 @@ fn commit_metrics_split_storage_writes_by_jazz_destination() {
     assert_eq!(writes.transactions_rows.count, 1);
     assert_eq!(writes.transactions_indexes.count, 1);
     assert_eq!(writes.other.count, 0);
+
+    let class_writes = run(StorageLayout::jazz_class_v1());
+    assert_eq!(class_writes, writes);
 }
 
 #[test]
