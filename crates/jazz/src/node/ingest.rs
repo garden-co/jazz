@@ -12,7 +12,7 @@ use crate::protocol_limits::{
     commit_unit_limit_violation, validate_content_extents, validate_known_state_declaration,
     validate_shape_ast_size,
 };
-use crate::schema::ColumnSchema;
+use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE};
 use crate::time::TxTimeSortKey;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1298,6 +1298,8 @@ where
         batch.reserve(bundles.len() + version_count.saturating_mul(2));
         let mut current_updates =
             BTreeMap::<(String, RowUuid, VersionLayer), (VersionRow, GlobalSeq)>::new();
+        #[cfg(test)]
+        let mut content_rows = BTreeSet::<(String, RowUuid)>::new();
         let mut applied_global_seqs = Vec::with_capacity(bundles.len());
 
         for bundle in bundles {
@@ -1391,6 +1393,11 @@ where
                     history_primary_key(&stored),
                     stored.record.raw().to_vec(),
                 );
+                self.update_merge_heads_for_content_version(&mut batch, &stored)?;
+                #[cfg(test)]
+                if stored.layer() == VersionLayer::Content {
+                    content_rows.insert((stored.table().to_owned(), stored.row_uuid()));
+                }
 
                 let key = (stored.table().to_owned(), stored.row_uuid(), stored.layer());
                 let existing_winner = current_updates.get(&key).map(|(previous, _)| {
@@ -1412,6 +1419,8 @@ where
         }
 
         self.database.commit_batch(batch)?;
+        #[cfg(test)]
+        self.assert_merge_head_rows_match_history_for_test(&content_rows)?;
         for bundle in bundles {
             self.invalidate_tx_version_tables_cache(bundle.tx.tx_id);
         }
@@ -1453,6 +1462,11 @@ where
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
+        let content_versions = self
+            .query_versions_for_tx(tx_id)?
+            .into_iter()
+            .filter(|version| version.layer() == VersionLayer::Content)
+            .collect::<Vec<_>>();
         if matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
             global_current_updates = self.global_current_updates(tx_id)?;
         }
@@ -1487,6 +1501,11 @@ where
                 stored.durability,
             ),
         );
+        if !matches!(stored.fate, Fate::Rejected(_)) {
+            for version in &content_versions {
+                self.update_merge_heads_for_content_version(&mut batch, version)?;
+            }
+        }
         if let Some(global_seq) = stored.global_seq {
             for version in &global_current_updates {
                 self.write_global_current_update(&mut batch, version, global_seq);
@@ -1513,6 +1532,14 @@ where
             None
         };
         self.database.commit_batch(batch)?;
+        #[cfg(test)]
+        {
+            let rows = content_versions
+                .iter()
+                .map(|version| (version.table().to_owned(), version.row_uuid()))
+                .collect::<BTreeSet<_>>();
+            self.assert_merge_head_rows_match_history_for_test(&rows)?;
+        }
         if let Some(rejected_payload) = rejected_payload {
             let tx_id = rejected_payload.tx_id();
             self.rejections
@@ -2225,6 +2252,11 @@ where
             .iter()
             .map(|version| (version.table, version.row_uuid(), version.layer()))
             .collect::<BTreeSet<_>>();
+        let affected_content_rows = rejected
+            .iter()
+            .filter(|version| version.layer() == VersionLayer::Content)
+            .map(|version| (version.table().to_owned(), version.row_uuid()))
+            .collect::<BTreeSet<_>>();
         let mut rejected_payload = None;
         if tx_id.node == self.node_uuid
             && let Fate::Rejected(reason) = &tx.fate
@@ -2280,6 +2312,9 @@ where
                 history_primary_key(version),
             );
         }
+        for (table, row_uuid) in affected_content_rows {
+            self.rewrite_merge_heads_excluding_tx(batch, &table, row_uuid, tx_id)?;
+        }
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
         Ok(rejected_payload)
@@ -2307,8 +2342,8 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
-        let heads = self.content_heads(table, row_uuid)?;
-        if heads.len() < 2 {
+        let head_tx_ids = self.merge_head_tx_ids(table, row_uuid)?;
+        if head_tx_ids.len() < 2 {
             return Ok(());
         }
         let table_schema = self.table(table)?.clone();
@@ -2317,10 +2352,7 @@ where
         for version in row_versions {
             row_versions_by_tx.insert(self.version_tx_id(&version)?, version);
         }
-        let head_tx_ids = heads
-            .iter()
-            .map(|version| self.version_tx_id(version))
-            .collect::<Result<Vec<_>, Error>>()?;
+        let head_tx_ids = head_tx_ids.into_iter().collect::<Vec<_>>();
         let raw_head_tx_ids = raw_merge_head_tx_ids(&row_versions_by_tx, &head_tx_ids)?;
         let mut parents = raw_head_tx_ids.clone();
         parents.sort();
@@ -2347,7 +2379,7 @@ where
         if cells.is_empty() {
             return Ok(());
         }
-        let made_at = heads
+        let made_at = raw_heads
             .iter()
             .map(|version| self.version_made_at(version))
             .collect::<Result<Vec<_>, Error>>()?
@@ -2646,6 +2678,247 @@ where
             ))
     }
 
+    fn encode_merge_heads(heads: &BTreeSet<TxId>) -> Result<Vec<u8>, Error> {
+        postcard::to_allocvec(&heads.iter().copied().collect::<Vec<_>>())
+            .map_err(|_| Error::InvalidStoredValue("merge head set failed to encode"))
+    }
+
+    fn decode_merge_heads(bytes: &[u8]) -> Result<BTreeSet<TxId>, Error> {
+        let heads: Vec<TxId> = postcard::from_bytes(bytes)
+            .map_err(|_| Error::InvalidStoredValue("merge head set failed to decode"))?;
+        Ok(heads.into_iter().collect())
+    }
+
+    fn read_merge_heads(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeSet<TxId>>, Error> {
+        let rows = self.database.primary_key_scan_raw(
+            MERGE_HEADS_TABLE,
+            &[
+                Value::Bytes(table.as_bytes().to_vec()),
+                Value::Uuid(row_uuid.0),
+            ],
+        )?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let heads = row.record().get_bytes(2)?;
+        Self::decode_merge_heads(heads).map(Some)
+    }
+
+    fn require_merge_heads(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<BTreeSet<TxId>, Error> {
+        self.read_merge_heads(table, row_uuid)?
+            .ok_or(Error::InvalidStoredValue(
+                "merge head set missing for existing global current row",
+            ))
+    }
+
+    fn write_merge_heads(
+        batch: &mut DatabaseBatch,
+        table: &str,
+        row_uuid: RowUuid,
+        heads: &BTreeSet<TxId>,
+    ) -> Result<(), Error> {
+        batch.update(
+            MERGE_HEADS_TABLE,
+            vec![
+                Value::Bytes(table.as_bytes().to_vec()),
+                Value::Uuid(row_uuid.0),
+                Value::Bytes(Self::encode_merge_heads(heads)?),
+            ],
+        );
+        Ok(())
+    }
+
+    pub(super) fn update_merge_heads_for_content_version(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        version: &VersionRow,
+    ) -> Result<(), Error> {
+        if version.layer() != VersionLayer::Content {
+            return Ok(());
+        }
+        let new_tx = self.version_tx_id(version)?;
+        let mut heads = match self.read_merge_heads(version.table(), version.row_uuid())? {
+            Some(existing) => existing,
+            None => {
+                if let Some(previous) = self.query_local_layer_winner(
+                    version.table(),
+                    version.row_uuid(),
+                    VersionLayer::Content,
+                )? {
+                    let previous_tx = self.version_tx_id(&previous)?;
+                    if previous_tx != new_tx {
+                        return Err(Error::InvalidStoredValue(
+                            "merge head set missing for existing content row",
+                        ));
+                    }
+                }
+                BTreeSet::new()
+            }
+        };
+        for parent in version.parents() {
+            heads.remove(&parent);
+        }
+        let dominated_by_existing_head = heads
+            .iter()
+            .copied()
+            .map(|head| {
+                self.content_version_reaches_tx(version.table(), version.row_uuid(), head, new_tx)
+            })
+            .collect::<Result<Vec<_>, Error>>()?
+            .into_iter()
+            .any(|reaches| reaches);
+        if !dominated_by_existing_head {
+            heads.insert(new_tx);
+        }
+        Self::write_merge_heads(batch, version.table(), version.row_uuid(), &heads)
+    }
+
+    fn content_version_reaches_tx(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        start: TxId,
+        target: TxId,
+    ) -> Result<bool, Error> {
+        let mut stack = vec![start];
+        let mut seen = BTreeSet::new();
+        while let Some(tx_id) = stack.pop() {
+            if tx_id == target {
+                return Ok(true);
+            }
+            if !seen.insert(tx_id) {
+                continue;
+            }
+            for version in self.query_versions_for_tx(tx_id)? {
+                if version.table() == table
+                    && version.row_uuid() == row_uuid
+                    && version.layer() == VersionLayer::Content
+                {
+                    stack.extend(version.parents());
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn rewrite_merge_heads_excluding_tx(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        table: &str,
+        row_uuid: RowUuid,
+        excluded_tx: TxId,
+    ) -> Result<(), Error> {
+        let versions = self.query_row_versions(table, row_uuid)?;
+        let candidate_indices = versions
+            .iter()
+            .enumerate()
+            .filter(|(_, version)| {
+                version.layer() == VersionLayer::Content
+                    && self.version_tx_id(version).ok() != Some(excluded_tx)
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        let head_indices = content_head_indices(&versions, &candidate_indices, &self.node_aliases);
+        let mut heads = BTreeSet::new();
+        for idx in head_indices {
+            heads.insert(self.version_tx_id(&versions[idx])?);
+        }
+        Self::write_merge_heads(batch, table, row_uuid, &heads)
+    }
+
+    fn merge_head_tx_ids(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<BTreeSet<TxId>, Error> {
+        self.require_merge_heads(table, row_uuid)
+    }
+
+    #[cfg(test)]
+    fn recomputed_merge_heads_from_history_for_test(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<BTreeSet<TxId>, Error> {
+        let versions = self.query_row_versions(table, row_uuid)?;
+        let candidate_indices = versions
+            .iter()
+            .enumerate()
+            .filter(|(_, version)| version.layer() == VersionLayer::Content)
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        let head_indices = content_head_indices(&versions, &candidate_indices, &self.node_aliases);
+        let mut heads = BTreeSet::new();
+        for idx in head_indices {
+            heads.insert(self.version_tx_id(&versions[idx])?);
+        }
+        Ok(heads)
+    }
+
+    #[cfg(test)]
+    pub(super) fn rebuild_merge_heads_from_history_for_test(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<(), Error> {
+        let heads = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
+        let mut batch = self.database.open_batch();
+        Self::write_merge_heads(&mut batch, table, row_uuid, &heads)?;
+        self.database.commit_batch(batch)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_merge_heads_match_history_for_test(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<(), Error> {
+        let expected = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
+        let actual = self.require_merge_heads(table, row_uuid)?;
+        if actual != expected {
+            let versions = self
+                .query_row_versions(table, row_uuid)?
+                .into_iter()
+                .map(|version| {
+                    let tx_id = self.version_tx_id(&version)?;
+                    let fate = self
+                        .query_transaction(tx_id)?
+                        .map(|tx| tx.fate)
+                        .unwrap_or(Fate::Pending);
+                    Ok(format!(
+                        "{tx_id:?} layer={:?} parents={:?} fate={fate:?}",
+                        version.layer(),
+                        version.parents()
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            panic!(
+                "stored merge heads diverged from history for {table}/{row_uuid:?}: expected {expected:?}, actual {actual:?}, versions={versions:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn assert_merge_head_rows_match_history_for_test(
+        &mut self,
+        rows: &BTreeSet<(String, RowUuid)>,
+    ) -> Result<(), Error> {
+        for (table, row_uuid) in rows {
+            self.assert_merge_heads_match_history_for_test(table, *row_uuid)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn write_global_current_update(
         &self,
         batch: &mut DatabaseBatch,
@@ -2849,6 +3122,7 @@ where
         };
         let mut pending_global_updates =
             BTreeMap::<(String, RowUuid, VersionLayer), VersionRow>::new();
+        let mut content_versions = Vec::new();
         for version in versions {
             let author_schema = version.schema_version();
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
@@ -2918,37 +3192,42 @@ where
                 "clock condition violated: local winner after insert must be the previous winner or inserted version"
             );
             let _ = (new_is_current, previous_current);
-            if update_current_indexes && matches!(fate, Fate::Accepted) && global_seq.is_some() {
-                let previous_global_current = self.query_global_layer_winner(
-                    &table_schema.name,
-                    stored.row_uuid(),
-                    stored.layer(),
-                )?;
-                let previous_global_winner =
-                    if let Some(previous) = previous_global_current.as_ref() {
-                        Some((
-                            previous,
-                            self.version_tx_id(previous)?,
-                            self.version_made_at(previous)?,
-                        ))
-                    } else {
-                        None
-                    };
-                let new_is_global_current = version_wins_over_open_winner(
-                    &stored,
-                    tx.tx_id,
-                    tx.tx_id.time,
-                    previous_global_winner,
-                );
-                debug_assert!(
-                    new_is_global_current || previous_global_current.is_some(),
-                    "clock condition violated: global winner after insert must be the previous winner or inserted version"
-                );
-                if new_is_global_current {
-                    pending_global_updates.insert(
-                        (stored.table().to_owned(), stored.row_uuid(), stored.layer()),
-                        stored.clone(),
+            if !matches!(fate, Fate::Rejected(_)) && stored.layer() == VersionLayer::Content {
+                content_versions.push(stored.clone());
+            }
+            if update_current_indexes && matches!(fate, Fate::Accepted) {
+                if global_seq.is_some() {
+                    let previous_global_current = self.query_global_layer_winner(
+                        &table_schema.name,
+                        stored.row_uuid(),
+                        stored.layer(),
+                    )?;
+                    let previous_global_winner =
+                        if let Some(previous) = previous_global_current.as_ref() {
+                            Some((
+                                previous,
+                                self.version_tx_id(previous)?,
+                                self.version_made_at(previous)?,
+                            ))
+                        } else {
+                            None
+                        };
+                    let new_is_global_current = version_wins_over_open_winner(
+                        &stored,
+                        tx.tx_id,
+                        tx.tx_id.time,
+                        previous_global_winner,
                     );
+                    debug_assert!(
+                        new_is_global_current || previous_global_current.is_some(),
+                        "clock condition violated: global winner after insert must be the previous winner or inserted version"
+                    );
+                    if new_is_global_current {
+                        pending_global_updates.insert(
+                            (stored.table().to_owned(), stored.row_uuid(), stored.layer()),
+                            stored.clone(),
+                        );
+                    }
                 }
             }
             let history_table = version_storage_table_name_for_schema(
@@ -2981,12 +3260,16 @@ where
                 self.write_ahead_current_insert(&mut batch, &stored);
             }
         }
-        if update_current_indexes
-            && let Some(global_seq) = global_seq
-            && matches!(fate, Fate::Accepted)
-        {
-            for stored in pending_global_updates.values() {
-                self.write_global_current_update(&mut batch, stored, global_seq);
+        if !matches!(fate, Fate::Rejected(_)) {
+            for stored in &content_versions {
+                self.update_merge_heads_for_content_version(&mut batch, stored)?;
+            }
+        }
+        if update_current_indexes && matches!(fate, Fate::Accepted) {
+            if let Some(global_seq) = global_seq {
+                for stored in pending_global_updates.values() {
+                    self.write_global_current_update(&mut batch, stored, global_seq);
+                }
             }
         }
         for (parent, parent_alias) in &pending_edge_rows {
@@ -2998,6 +3281,14 @@ where
             }
         }
         self.database.commit_batch(batch)?;
+        #[cfg(test)]
+        {
+            let rows = content_versions
+                .iter()
+                .map(|version| (version.table().to_owned(), version.row_uuid()))
+                .collect::<BTreeSet<_>>();
+            self.assert_merge_head_rows_match_history_for_test(&rows)?;
+        }
         self.invalidate_tx_version_tables_cache(tx.tx_id);
         if matches!(fate, Fate::Accepted) {
             self.rejections.child_txs_by_parent.remove(&tx.tx_id);
