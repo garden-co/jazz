@@ -29,6 +29,7 @@ include!("exclusive_transactions.rs");
 include!("policies_rls.rs");
 include!("sync.rs");
 include!("counter_merge.rs");
+include!("merge_heads.rs");
 include!("recovery.rs");
 include!("content_store.rs");
 include!("general.rs");

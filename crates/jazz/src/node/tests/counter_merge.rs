@@ -206,6 +206,8 @@ fn counter_merge_of_divergent_merges_sums_raw_frontier_once() {
     ingest_counter_version(&mut core, &schema, row, m12, vec![h1, h2], 3, "cached-m12");
     ingest_counter_version(&mut core, &schema, row, m23, vec![h2, h3], 5, "cached-m23");
 
+    core.rebuild_merge_heads_from_history_for_test("counters", row)
+        .unwrap();
     core.create_merge_version_if_needed("counters", row).unwrap();
 
     let merge = merge_with_parent_set(&mut core, row, &[h1, h2, h3]);
@@ -232,6 +234,8 @@ fn lww_merge_of_divergent_merges_uses_raw_argmax() {
     ingest_todos_version(&mut core, &schema, table, row, m12, vec![h1, h2], "stale-m12");
     ingest_todos_version(&mut core, &schema, table, row, m23, vec![h2, h3], "stale-m23");
 
+    core.rebuild_merge_heads_from_history_for_test("todos", row)
+        .unwrap();
     core.create_merge_version_if_needed("todos", row).unwrap();
 
     let merge = merge_with_parent_set(&mut core, row, &[h1, h2, h3]);
@@ -260,6 +264,8 @@ fn raw_merge_heads_drop_transitive_ancestors_after_late_child() {
         vec![],
         "right-parent",
     );
+    core.rebuild_merge_heads_from_history_for_test("todos", row)
+        .unwrap();
     core.create_merge_version_if_needed("todos", row).unwrap();
     merge_with_parent_set(&mut core, row, &[left, right_parent]);
 
@@ -281,6 +287,8 @@ fn raw_merge_heads_drop_transitive_ancestors_after_late_child() {
         vec![right_mid],
         "right-child",
     );
+    core.rebuild_merge_heads_from_history_for_test("todos", row)
+        .unwrap();
     core.create_merge_version_if_needed("todos", row).unwrap();
 
     merge_with_parent_set(&mut core, row, &[left, right_child]);
@@ -310,6 +318,8 @@ fn duplicate_merges_over_same_frontier_refold_to_identical_cells() {
     ingest_todos_version(&mut core, &schema, table, row, m12a, vec![h1, h2], "h2");
     ingest_todos_version(&mut core, &schema, table, row, m12b, vec![h1, h2], "h2");
 
+    core.rebuild_merge_heads_from_history_for_test("todos", row)
+        .unwrap();
     core.create_merge_version_if_needed("todos", row).unwrap();
 
     let first = core

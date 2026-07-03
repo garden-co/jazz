@@ -30,6 +30,9 @@ pub const CONTENT_META_STORE: &str = "jazz_content_meta";
 pub const CONTENT_CHECKPOINTS_STORE: &str = "jazz_content_checkpoints";
 /// Direct groove record store used for persisted fast known-state facts.
 pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
+/// Node-local derived content-head table used to avoid row-history scans on
+/// ordinary accepted writes. It is storage metadata, never wire or app data.
+pub const MERGE_HEADS_TABLE: &str = "jazz_merge_heads";
 
 /// Complete logical Jazz schema.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -216,6 +219,7 @@ impl JazzSchema {
             transactions_table(),
             rejected_transactions_table(),
             pending_edges_table(),
+            merge_heads_table(),
         ];
         tables.extend(
             self.tables
@@ -1022,6 +1026,21 @@ fn global_changes_table() -> GrooveTableSchema {
         "by_table_global_seq",
         ["table_name", "global_seq", "row_uuid", "layer"],
     ))
+}
+
+fn merge_heads_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        MERGE_HEADS_TABLE,
+        [
+            column("table_name", GrooveColumnType::Bytes),
+            column("row_uuid", GrooveColumnType::Uuid),
+            column("heads", GrooveColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::bytes("table_name"),
+        PrimaryKeyColumn::uuid("row_uuid"),
+    ]))
 }
 
 fn pending_edges_table() -> GrooveTableSchema {
