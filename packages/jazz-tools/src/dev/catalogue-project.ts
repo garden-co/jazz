@@ -831,8 +831,8 @@ function isDefinedMigration(value: unknown): value is DefinedMigration {
 
   const candidate = value as Record<string, unknown>;
   return (
-    typeof candidate.fromHash === "string" &&
-    typeof candidate.toHash === "string" &&
+    (candidate.fromHash === undefined || typeof candidate.fromHash === "string") &&
+    (candidate.toHash === undefined || typeof candidate.toHash === "string") &&
     typeof candidate.from === "object" &&
     candidate.from !== null &&
     typeof candidate.to === "object" &&
