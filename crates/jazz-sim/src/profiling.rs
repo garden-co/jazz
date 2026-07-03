@@ -30,6 +30,7 @@ pub fn maybe_profile_phase<T>(scenario: &str, phase: &str, work: impl FnOnce() -
     );
     let svg_path = out_dir.join(format!("{stem}.svg"));
     let top_path = out_dir.join(format!("{stem}.top.txt"));
+    let thread_path = out_dir.join(format!("{stem}.threads.txt"));
 
     let guard = pprof::ProfilerGuardBuilder::default()
         .frequency(profile_frequency())
@@ -46,10 +47,12 @@ pub fn maybe_profile_phase<T>(scenario: &str, phase: &str, work: impl FnOnce() -
             let file = File::create(&svg_path).expect("create flamegraph SVG");
             report.flamegraph(file).expect("write flamegraph SVG");
             write_top_table(&report, &top_path, elapsed);
+            write_thread_tables(&report, &thread_path, elapsed);
             eprintln!(
-                "wrote profile scenario={scenario} phase={phase} svg={} top={}",
+                "wrote profile scenario={scenario} phase={phase} svg={} top={} threads={}",
                 svg_path.display(),
-                top_path.display()
+                top_path.display(),
+                thread_path.display()
             );
         }
         Err(error) => {
@@ -137,4 +140,178 @@ fn write_top_table(report: &pprof::Report, path: &PathBuf, elapsed: std::time::D
         profile_frequency()
     )
     .expect("write profile table");
+}
+
+#[cfg(feature = "profiling")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ThreadClass {
+    Foreground,
+    RocksDbBackground,
+    Other,
+}
+
+#[cfg(feature = "profiling")]
+fn write_thread_tables(report: &pprof::Report, path: &PathBuf, elapsed: std::time::Duration) {
+    let mut class_self_samples = BTreeMap::<ThreadClass, BTreeMap<String, isize>>::new();
+    let mut class_samples = BTreeMap::<ThreadClass, isize>::new();
+    let mut thread_samples = BTreeMap::<(ThreadClass, String), isize>::new();
+    let mut total_samples = 0_isize;
+
+    for (frames, count) in &report.data {
+        total_samples += *count;
+        let class = classify_thread_sample(frames);
+        *class_samples.entry(class).or_default() += *count;
+        *thread_samples
+            .entry((class, frames.thread_name_or_id()))
+            .or_default() += *count;
+        if let Some(symbols) = frames.frames.first()
+            && let Some(symbol) = symbols.first()
+        {
+            *class_self_samples
+                .entry(class)
+                .or_default()
+                .entry(symbol.name())
+                .or_default() += *count;
+        }
+    }
+
+    let mut file = File::create(path).expect("create profile thread table");
+    writeln!(
+        file,
+        "Samples: {total_samples}; elapsed: {:.3}s; frequency_hz: {}",
+        elapsed.as_secs_f64(),
+        profile_frequency()
+    )
+    .expect("write profile thread table");
+
+    writeln!(file, "\n## Thread Classes\n").expect("write profile thread table");
+    writeln!(file, "| Class | Samples | Sample % |").expect("write profile thread table");
+    writeln!(file, "| --- | ---: | ---: |").expect("write profile thread table");
+    for class in [
+        ThreadClass::Foreground,
+        ThreadClass::RocksDbBackground,
+        ThreadClass::Other,
+    ] {
+        let samples = class_samples.get(&class).copied().unwrap_or_default();
+        writeln!(
+            file,
+            "| {} | {} | {:.2}% |",
+            thread_class_name(class),
+            samples,
+            sample_pct(samples, total_samples)
+        )
+        .expect("write profile thread table");
+    }
+
+    writeln!(file, "\n## Threads\n").expect("write profile thread table");
+    writeln!(file, "| Class | Thread | Samples | Sample % |").expect("write profile thread table");
+    writeln!(file, "| --- | --- | ---: | ---: |").expect("write profile thread table");
+    let mut thread_rows: Vec<_> = thread_samples.into_iter().collect();
+    thread_rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    for ((class, thread), samples) in thread_rows {
+        writeln!(
+            file,
+            "| {} | `{}` | {} | {:.2}% |",
+            thread_class_name(class),
+            thread.replace('`', "'"),
+            samples,
+            sample_pct(samples, total_samples)
+        )
+        .expect("write profile thread table");
+    }
+
+    for class in [
+        ThreadClass::Foreground,
+        ThreadClass::RocksDbBackground,
+        ThreadClass::Other,
+    ] {
+        let class_total = class_samples.get(&class).copied().unwrap_or_default();
+        writeln!(file, "\n## {} Top Self-Time\n", thread_class_name(class))
+            .expect("write profile thread table");
+        writeln!(
+            file,
+            "| Rank | Self Samples | Class % | Total % | Function |"
+        )
+        .expect("write profile thread table");
+        writeln!(file, "| ---: | ---: | ---: | ---: | --- |").expect("write profile thread table");
+        let mut rows: Vec<_> = class_self_samples
+            .remove(&class)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        for (idx, (name, samples)) in rows.into_iter().take(15).enumerate() {
+            writeln!(
+                file,
+                "| {} | {} | {:.2}% | {:.2}% | `{}` |",
+                idx + 1,
+                samples,
+                sample_pct(samples, class_total),
+                sample_pct(samples, total_samples),
+                name.replace('`', "'")
+            )
+            .expect("write profile thread table");
+        }
+    }
+}
+
+#[cfg(feature = "profiling")]
+fn classify_thread_sample(frames: &pprof::Frames) -> ThreadClass {
+    let thread = frames.thread_name_or_id().to_ascii_lowercase();
+    if thread.contains("rocksdb")
+        || thread.contains("rocks")
+        || thread.contains("flush")
+        || thread.contains("compact")
+    {
+        return ThreadClass::RocksDbBackground;
+    }
+
+    let mut saw_foreground_symbol = false;
+    for frame in &frames.frames {
+        for symbol in frame {
+            let name = symbol.name();
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("background")
+                || lower.contains("bgthread")
+                || lower.contains("threadpoolimpl")
+                || lower.contains("flushjob")
+                || lower.contains("compactionjob")
+            {
+                return ThreadClass::RocksDbBackground;
+            }
+            if lower.contains("jazz_sim")
+                || lower.contains("jazz::")
+                || lower.contains("groove::")
+                || lower.contains("s1_saas")
+                || lower.contains("s3_permissions")
+                || lower.contains("s4_order_processing")
+            {
+                saw_foreground_symbol = true;
+            }
+        }
+    }
+
+    if saw_foreground_symbol {
+        ThreadClass::Foreground
+    } else {
+        ThreadClass::Other
+    }
+}
+
+#[cfg(feature = "profiling")]
+fn thread_class_name(class: ThreadClass) -> &'static str {
+    match class {
+        ThreadClass::Foreground => "foreground",
+        ThreadClass::RocksDbBackground => "rocksdb_background",
+        ThreadClass::Other => "other",
+    }
+}
+
+#[cfg(feature = "profiling")]
+fn sample_pct(samples: isize, total: isize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        samples as f64 * 100.0 / total as f64
+    }
 }
