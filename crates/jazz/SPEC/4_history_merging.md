@@ -92,6 +92,38 @@ merge-strategy output is deterministic and grouping-insensitive over the
 head/parent set, with no wall-clock or node-local state in merged values (partial
 coverage).
 
+## 4.3.1 Merge strategies and text merge
+
+A merge strategy is a deterministic function from a column's raw concurrent
+heads, their parent context, and the column's declared strategy metadata to one
+merged column value. The merge-time contract is non-wedging: a strategy failure
+must not block fate assignment. If a registered strategy cannot run, Jazz
+degrades to the built-in rung-2 behavior and records the built-in fallback id on
+the merge version. Write-time canonicalization is different: it is validation,
+and invalid authored values are rejected loudly before acceptance.
+
+Recorded merge versions carry the strategy id, strategy version, and the
+column-spec hash used for that merge. This keeps historical merge meaning
+immutable: changing a strategy affects only future merge versions, not time
+travel, replay, or existing checkpoints. Unregistered strategies are not
+interpreted during ordinary write ingestion; their authored bytes are stored as
+authored until a structurally wired authority with a registered strategy creates
+a merge version.
+
+The text strategy substrate stores plaintext retained-run operations as authored
+in the row-version payload. The only lossless compression inside that substrate
+is run-length encoding of retained runs; it must not rewrite the semantic edit
+stream. The distinguished merge site walks the event graph and orders concurrent
+same-position events by `TxId` tie-break. For rich text, the escalation ladder is:
+built-in scalar/LWW fallback, built-in plaintext retained-run merge, registered
+format-aware strategy, then future app/plugin strategies. Merge-time failure at
+any rung degrades to rung 2 with the fallback id recorded.
+
+Current staging limitations are explicit. More-than-two-head rich-text
+format-aware merges are not yet fully covered outside the built-in plaintext
+path, and op-edits against format-declared columns are rejected until the
+format-aware strategy surface owns those edits end to end.
+
 **Merging merges.** Distinct upstream nodes may each mint merge versions for the
 same row. If those nodes observed different frontiers, one merge may include a
 concurrent head the other has not yet seen. Such divergent merges reconcile by
@@ -145,7 +177,7 @@ currentness or domination.
 
 ## Open questions
 
-- 🔶 **Merge-strategy extensibility.** The deterministic, grouping-insensitive
-  merge contract (`INV-HIST-15`) is currently enforced only for the built-in
-  strategies (`Lww`, `Counter`), not an external strategy-plugin surface. Decide
-  whether the general contract is normative now or describes the built-ins only.
+- 🔶 **External strategy surface.** The deterministic, non-wedging
+  `MergeStrategy` contract is normative. The external plugin/registry surface
+  that lets applications ship new strategies is still staged; built-ins and
+  registered test strategies exercise only the first engine paths.

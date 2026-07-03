@@ -27,7 +27,11 @@ groove's record/IVM machinery. Op-log _metadata_ lowers normally (it rides
 commit units as ordinary cells), but the content bytes live in the raw
 `jazz_content` store below the table/IVM layer, reached through groove's raw
 column-family handle (ch. 12). The boundary is precise: anything queryable lowers
-to groove; anything only ever ranged-read lives in the content store.
+to groove; anything only ever ranged-read lives in the content store. Query and
+sync row results carry large-value handles, not bodies. Value-returning APIs
+materialize those handles by pulling authorized content extents and folding
+op-log extents at the access boundary; encoded ops and content handles do not
+escape as application cell bytes.
 
 ## 14.2 Schema → groove
 
@@ -188,7 +192,7 @@ the custom encoded record bytes. Relation/path lowering emits non-lossy path
 facts rather than hiding edge kind, versions, depth, branch alternative, order,
 role, or hole state in opaque revisions.
 
-## 14.6 Access-path selection (target)
+## 14.6 Access-path selection
 
 The source resolver selects access paths by deterministic rule, never by cost
 model or statistics:
@@ -200,11 +204,14 @@ model or statistics:
 4. otherwise → full scan, loudly counted (full-scan counters are part of the
    operational surface, ch. 17).
 
-v1 consumers, in order: one-shot filtered reads; position-bounded historical
-and branch-cut reads (this is what makes branch `at()` and historical
-reachable _bounded_ rather than gated); dry-run policy probes; recursion seed
-hydration. Prepared-shape steady-state probing is the later overlay-probe
-phase (groove ch. 4 §4.6).
+v1 consumers are implemented and tested: one-shot filtered reads;
+position-bounded historical and branch-cut reads (this is what makes branch
+`at()` and historical reachable bounded rather than gated); dry-run policy
+probes; and recursion seed hydration (`INV-LOWER-22`–`INV-LOWER-24`). The
+source resolver still fails loudly when a requested source cannot be represented
+by a sound static path; the fallback is a counted full scan, not a different
+semantic evaluator. Prepared-shape steady-state probing is the later
+overlay-probe phase (groove ch. 4 §4.6).
 
 ## Open questions
 
