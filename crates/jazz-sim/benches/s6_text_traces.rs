@@ -273,6 +273,9 @@ struct DbSurfaceReplaySummary {
     peak_doc_bytes: usize,
     peak_rss_bytes: u64,
     history_bytes: u64,
+    consolidated_windows: usize,
+    consolidated_window_records: usize,
+    history_window_consolidation_us: u128,
     edge_acceptance: Histogram<u64>,
     edge_hydration_bytes: u64,
     edge_hydration_rows: usize,
@@ -575,6 +578,9 @@ fn run_db_surface_replay(trace: &Trace, batch: usize) -> DbSurfaceReplaySummary 
     let mut doc = String::new();
     let mut echo = Histogram::new(3).unwrap();
     let mut edge_acceptance = Histogram::new(3).unwrap();
+    let mut consolidated_windows = 0_usize;
+    let mut consolidated_window_records = 0_usize;
+    let mut history_window_consolidation_us = 0_u128;
     let mut peak_doc_bytes = 0;
     let init = db
         .insert_with_id(DOCS, doc_row(), cells([("text", Value::Bytes(Vec::new()))]))
@@ -588,6 +594,9 @@ fn run_db_surface_replay(trace: &Trace, batch: usize) -> DbSurfaceReplaySummary 
         &mut edge_peer,
         &mut core,
         &mut edge_acceptance,
+        &mut consolidated_windows,
+        &mut consolidated_window_records,
+        &mut history_window_consolidation_us,
     );
     let start = Instant::now();
     let mut commits = 0;
@@ -637,6 +646,9 @@ fn run_db_surface_replay(trace: &Trace, batch: usize) -> DbSurfaceReplaySummary 
             &mut edge_peer,
             &mut core,
             &mut edge_acceptance,
+            &mut consolidated_windows,
+            &mut consolidated_window_records,
+            &mut history_window_consolidation_us,
         );
         echo.record(before.elapsed().as_micros() as u64).unwrap();
         assert_eq!(read_db_doc(&db, &schema), doc);
@@ -666,6 +678,9 @@ fn run_db_surface_replay(trace: &Trace, batch: usize) -> DbSurfaceReplaySummary 
         peak_doc_bytes,
         peak_rss_bytes: mem::peak_rss_bytes(),
         history_bytes: storage_bytes(dir.path()) + storage_bytes(core_dir.path()),
+        consolidated_windows,
+        consolidated_window_records,
+        history_window_consolidation_us,
         edge_acceptance,
         edge_hydration_bytes,
         edge_hydration_rows,
@@ -680,25 +695,77 @@ fn drain_db_route(
     edge_peer: &mut PeerState,
     core: &mut NodeState<RocksDbStorage>,
     edge_acceptance: &mut Histogram<u64>,
+    consolidated_windows: &mut usize,
+    consolidated_window_records: &mut usize,
+    history_window_consolidation_us: &mut u128,
 ) {
-    db.tick().unwrap();
+    record_db_tick(
+        db,
+        consolidated_windows,
+        consolidated_window_records,
+        history_window_consolidation_us,
+    );
     while let Some(unit) = outbound.borrow_mut().pop_front() {
         let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
             continue;
         };
         let start = Instant::now();
-        edge_peer
+        let edge_updates = edge_peer
             .ingest_edge_mergeable_commit_unit(edge, tx, versions, u64::MAX)
             .unwrap();
         edge_acceptance
             .record(start.elapsed().as_micros() as u64)
             .unwrap();
+        for update in edge_updates {
+            inbound.borrow_mut().push_back(update);
+            record_db_tick(
+                db,
+                consolidated_windows,
+                consolidated_window_records,
+                history_window_consolidation_us,
+            );
+        }
+        for update in edge_peer.drain_deferred_edge_fates(edge, u64::MAX).unwrap() {
+            inbound.borrow_mut().push_back(update);
+            record_db_tick(
+                db,
+                consolidated_windows,
+                consolidated_window_records,
+                history_window_consolidation_us,
+            );
+        }
         for update in core.apply_sync_message(unit).unwrap() {
             edge.apply_sync_message(update.clone()).unwrap();
             inbound.borrow_mut().push_back(update);
-            db.tick().unwrap();
+            record_db_tick(
+                db,
+                consolidated_windows,
+                consolidated_window_records,
+                history_window_consolidation_us,
+            );
+        }
+        for update in edge_peer.drain_deferred_edge_fates(edge, u64::MAX).unwrap() {
+            inbound.borrow_mut().push_back(update);
+            record_db_tick(
+                db,
+                consolidated_windows,
+                consolidated_window_records,
+                history_window_consolidation_us,
+            );
         }
     }
+}
+
+fn record_db_tick(
+    db: &Db<RocksDbStorage>,
+    consolidated_windows: &mut usize,
+    consolidated_window_records: &mut usize,
+    history_window_consolidation_us: &mut u128,
+) {
+    let stats = db.tick_stats().unwrap();
+    *consolidated_windows += stats.consolidated_windows;
+    *consolidated_window_records += stats.consolidated_window_records;
+    *history_window_consolidation_us += stats.history_window_consolidation_us;
 }
 
 fn run_live_observation(config: &Config, trace: &Trace) -> LiveSummary {
@@ -1093,6 +1160,25 @@ fn emit_db_surface_replay(
     fields.insert(
         "history_metadata_bytes_per_edit".to_owned(),
         json!(summary.history_bytes as f64 / summary.edits.max(1) as f64),
+    );
+    fields.insert(
+        "consolidated_windows".to_owned(),
+        json!(summary.consolidated_windows),
+    );
+    fields.insert(
+        "consolidated_window_records".to_owned(),
+        json!(summary.consolidated_window_records),
+    );
+    fields.insert(
+        "history_window_consolidation_us".to_owned(),
+        json!(summary.history_window_consolidation_us),
+    );
+    fields.insert(
+        "history_window_consolidation_us_per_tick_window".to_owned(),
+        json!(
+            summary.history_window_consolidation_us as f64
+                / summary.consolidated_windows.max(1) as f64
+        ),
     );
     fields.insert("correctness".to_owned(), json!("final_replay_matched"));
     emit_json_line("s6_text_traces", &JsonValue::Object(fields).to_string());

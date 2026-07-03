@@ -22,9 +22,14 @@ mod opfs;
 pub mod rocksdb_storage;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 
-use crate::records::{Record, RecordDescriptor};
+use crate::records::{OwnedRecord, Record, RecordDescriptor, Value as RecordValue, ValueType};
+use crate::window_codec::{
+    WindowRecord, WindowSchema, decode_window, encode_window, lookup_window,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -38,10 +43,69 @@ pub type ColumnFamilyName = str;
 pub type Key = [u8];
 pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
+const DECODED_WINDOW_CACHE_CAPACITY: usize = 32;
 /// Callback form used by scans so storage implementations do not have to
 /// materialize large ranges before the caller can process them.
 pub type ScanVisitor<'visitor> =
     dyn for<'a, 'b> FnMut(&'a [u8], &'b [u8]) -> Result<(), Error> + 'visitor;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DecodedWindowCacheKey {
+    column_family: String,
+    window_key: Vec<u8>,
+    value_fingerprint: u64,
+    value_len: usize,
+}
+
+#[derive(Default)]
+struct DecodedWindowCache {
+    values: HashMap<DecodedWindowCacheKey, Vec<KeyValue>>,
+    lru: VecDeque<DecodedWindowCacheKey>,
+}
+
+static DECODED_WINDOW_CACHE: OnceLock<Mutex<DecodedWindowCache>> = OnceLock::new();
+
+impl DecodedWindowCache {
+    // Window records are immutable in v1: consolidation writes each window once,
+    // tail records stay plain, and no later maintenance rewrites window values.
+    // Therefore decoded entries need no invalidation beyond LRU eviction. The
+    // value fingerprint is included only to keep separate test/store instances
+    // with the same logical CF and window key from colliding.
+    fn get(&mut self, key: &DecodedWindowCacheKey) -> Option<Vec<KeyValue>> {
+        let value = self.values.get(key)?.clone();
+        self.touch(key);
+        Some(value)
+    }
+
+    fn insert(&mut self, key: DecodedWindowCacheKey, value: Vec<KeyValue>) {
+        if self.values.contains_key(&key) {
+            self.values.insert(key.clone(), value);
+            self.touch(&key);
+            return;
+        }
+        self.values.insert(key.clone(), value);
+        self.lru.push_back(key);
+        while self.values.len() > DECODED_WINDOW_CACHE_CAPACITY {
+            if let Some(oldest) = self.lru.pop_front() {
+                self.values.remove(&oldest);
+            }
+        }
+    }
+
+    fn touch(&mut self, key: &DecodedWindowCacheKey) {
+        if let Some(index) = self.lru.iter().position(|candidate| candidate == key)
+            && let Some(existing) = self.lru.remove(index)
+        {
+            self.lru.push_back(existing);
+        }
+    }
+}
+
+fn fingerprint_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Typed storage delta appended through backends that can durably merge without
 /// first reading the existing value.
@@ -381,7 +445,7 @@ struct PhysicalCf<'a> {
     logical_prefix: Option<&'a str>,
 }
 
-fn is_jazz_history_table(name: &str) -> bool {
+pub(crate) fn is_windowed_history_table(name: &str) -> bool {
     name.starts_with("jazz_") && name.ends_with("_history")
 }
 
@@ -411,7 +475,7 @@ fn is_jazz_content_store(name: &str) -> bool {
 }
 
 fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
-    if is_jazz_history_table(logical_cf) {
+    if is_windowed_history_table(logical_cf) {
         Some(CLASS_HISTORY_CF)
     } else if is_jazz_register_table(logical_cf) {
         Some(CLASS_REGISTER_CF)
@@ -557,6 +621,22 @@ where
         self.inner.delete(&physical_cf, &physical_key)
     }
 
+    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+        let mapping = self.layout.map_cf(cf);
+        if mapping.logical_prefix.is_none() {
+            return self.inner.approximate_class_bytes(mapping.physical_cf);
+        }
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, b"");
+        let mut bytes = 0_u64;
+        self.inner
+            .scan_prefix(&physical_cf, &physical_prefix, &mut |key, value| {
+                let logical_key = self.strip_key(key, strip_len)?;
+                bytes = bytes.saturating_add(logical_key.len().saturating_add(value.len()) as u64);
+                Ok(())
+            })?;
+        Ok(Some(bytes))
+    }
+
     fn scan_range(
         &self,
         cf: &ColumnFamilyName,
@@ -677,8 +757,16 @@ pub struct RecordStore<'a, S> {
     storage: &'a S,
     /// One table or durable index column family.
     column_family: &'a str,
+    key_descriptor: Option<RecordDescriptor>,
     /// Interprets stored bytes without copying until a caller asks for values.
     descriptor: &'a RecordDescriptor,
+    windowed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowConsolidation {
+    pub windows: usize,
+    pub records: usize,
 }
 
 impl<'a, S> RecordStore<'a, S>
@@ -689,7 +777,24 @@ where
         Self {
             storage,
             column_family,
+            key_descriptor: None,
             descriptor,
+            windowed: false,
+        }
+    }
+
+    pub fn new_windowed(
+        storage: &'a S,
+        column_family: &'a str,
+        key_descriptor: RecordDescriptor,
+        descriptor: &'a RecordDescriptor,
+    ) -> Self {
+        Self {
+            storage,
+            column_family,
+            key_descriptor: Some(key_descriptor),
+            descriptor,
+            windowed: true,
         }
     }
 
@@ -702,7 +807,10 @@ where
     }
 
     pub fn get_raw(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
-        self.storage.get(self.column_family, key)
+        if !self.windowed {
+            return self.storage.get(self.column_family, key);
+        }
+        self.get_raw_run_aware(key)
     }
 
     pub fn get(&self, key: &Key) -> Result<Option<Record<'_>>, Error> {
@@ -711,11 +819,23 @@ where
     }
 
     pub fn range(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
-        self.storage.range(self.column_family, start, end)
+        if !self.windowed {
+            return self.storage.range(self.column_family, start, end);
+        }
+        self.run_aware_records(
+            |key| key >= start && key < end,
+            |visit| self.storage.scan_prefix(self.column_family, b"", visit),
+        )
     }
 
     pub fn prefix(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
-        self.storage.prefix(self.column_family, prefix)
+        if !self.windowed {
+            return self.storage.prefix(self.column_family, prefix);
+        }
+        self.run_aware_records(
+            |key| key.starts_with(prefix),
+            |visit| self.storage.scan_prefix(self.column_family, b"", visit),
+        )
     }
 
     pub fn scan_range(
@@ -724,12 +844,25 @@ where
         end: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        self.storage
-            .scan_range(self.column_family, start, end, visit)
+        if !self.windowed {
+            return self
+                .storage
+                .scan_range(self.column_family, start, end, visit);
+        }
+        for (key, value) in self.range(start, end)? {
+            visit(&key, &value)?;
+        }
+        Ok(())
     }
 
     pub fn scan_prefix(&self, prefix: &Key, visit: &mut ScanVisitor<'_>) -> Result<(), Error> {
-        self.storage.scan_prefix(self.column_family, prefix, visit)
+        if !self.windowed {
+            return self.storage.scan_prefix(self.column_family, prefix, visit);
+        }
+        for (key, value) in self.prefix(prefix)? {
+            visit(&key, &value)?;
+        }
+        Ok(())
     }
 
     pub fn scan_prefix_reverse(
@@ -737,12 +870,22 @@ where
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        self.storage
-            .scan_prefix_reverse(self.column_family, prefix, visit)
+        if !self.windowed {
+            return self
+                .storage
+                .scan_prefix_reverse(self.column_family, prefix, visit);
+        }
+        for (key, value) in self.prefix(prefix)?.into_iter().rev() {
+            visit(&key, &value)?;
+        }
+        Ok(())
     }
 
     pub fn last_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
-        self.storage.last_with_prefix(self.column_family, prefix)
+        if !self.windowed {
+            return self.storage.last_with_prefix(self.column_family, prefix);
+        }
+        self.last_logical_with_prefix(prefix)
     }
 
     pub fn last_with_prefix_before_or_at(
@@ -750,8 +893,15 @@ where
         prefix: &Key,
         upper: &Key,
     ) -> Result<Option<KeyValue>, Error> {
-        self.storage
-            .last_with_prefix_before_or_at(self.column_family, prefix, upper)
+        if !self.windowed {
+            return self
+                .storage
+                .last_with_prefix_before_or_at(self.column_family, prefix, upper);
+        }
+        Ok(self
+            .prefix(prefix)?
+            .into_iter()
+            .rfind(|(key, _)| key.as_slice() <= upper))
     }
 
     pub fn set<'op>(&'op self, key: &'op Key, record: &'op [u8]) -> WriteOperation<'op> {
@@ -769,6 +919,593 @@ where
     pub fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         self.storage.write_many(operations)
     }
+
+    pub fn consolidate_windows(&self, max_records: usize) -> Result<WindowConsolidation, Error> {
+        self.consolidate_windows_bounded(max_records, usize::MAX)
+    }
+
+    pub fn consolidate_windows_bounded(
+        &self,
+        max_records: usize,
+        max_windows: usize,
+    ) -> Result<WindowConsolidation, Error> {
+        self.consolidate_windows_bounded_inner(max_records, max_windows, true)
+    }
+
+    pub fn consolidate_full_windows_bounded(
+        &self,
+        max_records: usize,
+        max_windows: usize,
+    ) -> Result<WindowConsolidation, Error> {
+        self.consolidate_windows_bounded_inner(max_records, max_windows, false)
+    }
+
+    fn consolidate_windows_bounded_inner(
+        &self,
+        max_records: usize,
+        max_windows: usize,
+        consolidate_tail: bool,
+    ) -> Result<WindowConsolidation, Error> {
+        let use_cursor = !consolidate_tail;
+        if !self.windowed || max_records == 0 || max_windows == 0 {
+            return Ok(WindowConsolidation::default());
+        }
+        let raw = if use_cursor {
+            self.storage.range(
+                self.column_family,
+                &self.window_consolidation_cursor()?,
+                WINDOW_MARKER_KEY,
+            )?
+        } else {
+            self.storage.prefix(self.column_family, b"")?
+        };
+        let mut owned_operations = Vec::new();
+        let mut plain_run = Vec::<KeyValue>::new();
+        let mut consolidated = WindowConsolidation::default();
+        let mut cursor = None;
+        for (key, value) in raw {
+            if key == WINDOW_MARKER_KEY || key == WINDOW_CURSOR_KEY {
+                continue;
+            }
+            if decode_window_value(&value)?.is_some() {
+                append_window_operations(
+                    self,
+                    &mut owned_operations,
+                    &mut plain_run,
+                    max_records,
+                    max_windows,
+                    &mut consolidated,
+                )?;
+                if consolidated.windows >= max_windows {
+                    break;
+                }
+                cursor = Some(key);
+                continue;
+            }
+            plain_run.push((key, value));
+            if plain_run.len() >= max_records {
+                let next_cursor = plain_run.last().map(|(key, _)| key.clone());
+                append_window_operations(
+                    self,
+                    &mut owned_operations,
+                    &mut plain_run,
+                    max_records,
+                    max_windows,
+                    &mut consolidated,
+                )?;
+                if consolidated.windows >= max_windows {
+                    break;
+                }
+                cursor = next_cursor;
+            }
+        }
+        if consolidate_tail && consolidated.windows < max_windows {
+            let next_cursor = plain_run.last().map(|(key, _)| key.clone());
+            append_window_operations(
+                self,
+                &mut owned_operations,
+                &mut plain_run,
+                max_records,
+                max_windows,
+                &mut consolidated,
+            )?;
+            cursor = next_cursor;
+        }
+        if owned_operations.is_empty() {
+            return Ok(WindowConsolidation::default());
+        }
+        if consolidated.records > 0 && !self.window_marker_present()? {
+            owned_operations.push(OwnedWriteOperation::Set {
+                cf: self.column_family.to_owned(),
+                key: WINDOW_MARKER_KEY.to_vec(),
+                value: Vec::new(),
+            });
+        }
+        if use_cursor
+            && consolidated.records > 0
+            && let Some(cursor) = cursor
+        {
+            owned_operations.push(OwnedWriteOperation::Set {
+                cf: self.column_family.to_owned(),
+                key: WINDOW_CURSOR_KEY.to_vec(),
+                value: cursor,
+            });
+        }
+        let operations = owned_operations
+            .iter()
+            .map(OwnedWriteOperation::as_write_operation)
+            .collect::<Vec<_>>();
+        self.storage.write_many(&operations)?;
+        Ok(consolidated)
+    }
+
+    fn get_raw_run_aware(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+        if is_window_meta_key(key) {
+            return Ok(None);
+        }
+        if let Some(value) = self.storage.get(self.column_family, key)? {
+            if let Some(window) = decode_window_value(&value)? {
+                return self.lookup_window_record(window.codec, key);
+            }
+            return Ok(Some(value));
+        }
+        if !self.window_marker_present()? {
+            return Ok(None);
+        }
+        if let Some(prefix) = self.first_key_field_prefix(key)?
+            && let Some((latest_key, _)) = self.last_logical_with_prefix(&prefix)?
+            && latest_key.as_slice() < key
+        {
+            return Ok(None);
+        }
+        let mut found = None;
+        self.storage
+            .scan_prefix_reverse(self.column_family, b"", &mut |raw_key, raw_value| {
+                if is_window_meta_key(raw_key) {
+                    return Ok(());
+                }
+                if found.is_some() || raw_key > key {
+                    return Ok(());
+                }
+                let Some(window) = decode_window_value(raw_value)? else {
+                    return Ok(());
+                };
+                if key <= window.max_key {
+                    found = self.lookup_window_record(window.codec, key)?;
+                }
+                Ok(())
+            })?;
+        Ok(found)
+    }
+
+    fn last_logical_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
+        let Some((raw_key, raw_value)) =
+            self.storage.last_with_prefix(self.column_family, prefix)?
+        else {
+            return Ok(None);
+        };
+        if is_window_meta_key(&raw_key) {
+            return Ok(self.prefix(prefix)?.pop());
+        }
+        let Some(window) = decode_window_value(&raw_value)? else {
+            return Ok(Some((raw_key, raw_value)));
+        };
+        self.last_window_record_before_or_at(window.codec, prefix, None)
+    }
+
+    fn last_window_record_before_or_at(
+        &self,
+        window: &[u8],
+        prefix: &Key,
+        upper: Option<&Key>,
+    ) -> Result<Option<KeyValue>, Error> {
+        Ok(self
+            .decode_window_records(window)?
+            .into_iter()
+            .rev()
+            .find(|(key, _)| {
+                key.starts_with(prefix) && upper.is_none_or(|upper| key.as_slice() <= upper)
+            }))
+    }
+
+    fn first_key_field_prefix(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+        let Some(key_descriptor) = &self.key_descriptor else {
+            return Ok(None);
+        };
+        if key_descriptor.fields().is_empty() {
+            return Ok(None);
+        }
+        let values = decode_key_record(key, key_descriptor)?;
+        let Some(first_value) = values.into_iter().next() else {
+            return Ok(None);
+        };
+        encode_key_record(vec![first_value]).map(Some)
+    }
+
+    fn run_aware_records(
+        &self,
+        include: impl Fn(&[u8]) -> bool,
+        scan_raw: impl FnOnce(&mut ScanVisitor<'_>) -> Result<(), Error>,
+    ) -> Result<Vec<KeyValue>, Error> {
+        let mut records = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        scan_raw(&mut |raw_key, raw_value| {
+            if is_window_meta_key(raw_key) {
+                return Ok(());
+            }
+            if let Some(window) = decode_window_value(raw_value)? {
+                for (key, value) in self.decode_window_records_cached(raw_key, window.codec)? {
+                    if include(&key) {
+                        records.insert(key, value);
+                    }
+                }
+            } else if include(raw_key) {
+                records.insert(raw_key.to_vec(), raw_value.to_vec());
+            }
+            Ok(())
+        })?;
+        Ok(records.into_iter().collect())
+    }
+
+    fn window_marker_present(&self) -> Result<bool, Error> {
+        Ok(self
+            .storage
+            .get(self.column_family, WINDOW_MARKER_KEY)?
+            .is_some())
+    }
+
+    fn window_consolidation_cursor(&self) -> Result<Vec<u8>, Error> {
+        Ok(self
+            .storage
+            .get(self.column_family, WINDOW_CURSOR_KEY)?
+            .unwrap_or_default())
+    }
+
+    fn lookup_window_record(&self, window: &[u8], key: &Key) -> Result<Option<Vec<u8>>, Error> {
+        let key_record = self.key_record_from_bytes(key)?;
+        let schema = self.window_schema()?;
+        Ok(lookup_window(&schema, window, &key_record)?.map(|record| record.value.into_raw()))
+    }
+
+    fn decode_window_records(&self, window: &[u8]) -> Result<Vec<KeyValue>, Error> {
+        let schema = self.window_schema()?;
+        decode_window(&schema, window)?
+            .into_iter()
+            .map(|record| {
+                let key = encode_key_record(record.key.borrowed().to_values()?)?;
+                Ok((key, record.value.into_raw()))
+            })
+            .collect()
+    }
+
+    fn decode_window_records_cached(
+        &self,
+        window_key: &[u8],
+        window: &[u8],
+    ) -> Result<Vec<KeyValue>, Error> {
+        let key = DecodedWindowCacheKey {
+            column_family: self.column_family.to_owned(),
+            window_key: window_key.to_vec(),
+            value_fingerprint: fingerprint_bytes(window),
+            value_len: window.len(),
+        };
+        let cache = DECODED_WINDOW_CACHE.get_or_init(|| Mutex::new(DecodedWindowCache::default()));
+        if let Some(cached) = cache
+            .lock()
+            .expect("decoded window cache poisoned")
+            .get(&key)
+        {
+            return Ok(cached);
+        }
+        let records = self.decode_window_records(window)?;
+        cache
+            .lock()
+            .expect("decoded window cache poisoned")
+            .insert(key, records.clone());
+        Ok(records)
+    }
+
+    fn encode_window_records(&self, records: &[KeyValue]) -> Result<Vec<u8>, Error> {
+        let schema = self.window_schema()?;
+        let records = records
+            .iter()
+            .map(|(key, value)| {
+                Ok(WindowRecord::new(
+                    self.key_record_from_bytes(key)?,
+                    OwnedRecord::new(value.clone(), *self.descriptor),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(encode_window(&schema, &records)?)
+    }
+
+    fn window_schema(&self) -> Result<WindowSchema, Error> {
+        let key = self
+            .key_descriptor
+            .ok_or_else(|| Error::InvalidWindowRecord("missing key descriptor".to_owned()))?;
+        Ok(WindowSchema::new(key, *self.descriptor))
+    }
+
+    fn key_record_from_bytes(&self, key: &Key) -> Result<OwnedRecord, Error> {
+        let descriptor = self
+            .key_descriptor
+            .ok_or_else(|| Error::InvalidWindowRecord("missing key descriptor".to_owned()))?;
+        let values = decode_key_record(key, &descriptor)?;
+        Ok(OwnedRecord::new(descriptor.create(&values)?, descriptor))
+    }
+}
+
+const WINDOW_VALUE_MAGIC: &[u8] = b"GWIN2\0";
+const WINDOW_MARKER_KEY: &[u8] = b"\xffGWIN2-META";
+const WINDOW_CURSOR_KEY: &[u8] = b"\xffGWIN2-CURSOR";
+
+fn is_window_meta_key(key: &[u8]) -> bool {
+    key == WINDOW_MARKER_KEY || key == WINDOW_CURSOR_KEY
+}
+
+struct DecodedWindowValue<'a> {
+    max_key: &'a [u8],
+    codec: &'a [u8],
+}
+
+fn encode_window_value(max_key: &[u8], codec_bytes: &[u8]) -> Vec<u8> {
+    let max_key_len = u32::try_from(max_key.len()).expect("window key length fits in u32");
+    let mut value = Vec::with_capacity(
+        WINDOW_VALUE_MAGIC.len() + std::mem::size_of::<u32>() + max_key.len() + codec_bytes.len(),
+    );
+    value.extend_from_slice(WINDOW_VALUE_MAGIC);
+    value.extend(max_key_len.to_be_bytes());
+    value.extend_from_slice(max_key);
+    value.extend_from_slice(codec_bytes);
+    value
+}
+
+fn decode_window_value(value: &[u8]) -> Result<Option<DecodedWindowValue<'_>>, Error> {
+    if !value.starts_with(WINDOW_VALUE_MAGIC) {
+        return Ok(None);
+    }
+    let mut remaining = &value[WINDOW_VALUE_MAGIC.len()..];
+    let max_key_len = u32::from_be_bytes(
+        take_key_bytes(&mut remaining, std::mem::size_of::<u32>())?
+            .try_into()
+            .expect("slice has u32 length"),
+    ) as usize;
+    if remaining.len() < max_key_len {
+        return Err(Error::InvalidWindowRecord(
+            "window value has truncated max key".to_owned(),
+        ));
+    }
+    let (max_key, codec) = remaining.split_at(max_key_len);
+    Ok(Some(DecodedWindowValue { max_key, codec }))
+}
+
+fn append_window_operations<S>(
+    store: &RecordStore<'_, S>,
+    operations: &mut Vec<OwnedWriteOperation>,
+    plain_run: &mut Vec<KeyValue>,
+    max_records: usize,
+    max_windows: usize,
+    consolidated: &mut WindowConsolidation,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage,
+{
+    if plain_run.len() <= 1 {
+        plain_run.clear();
+        return Ok(());
+    }
+    for chunk in plain_run.chunks(max_records) {
+        if consolidated.windows >= max_windows {
+            break;
+        }
+        if chunk.len() <= 1 {
+            continue;
+        }
+        for (key, _) in chunk {
+            operations.push(OwnedWriteOperation::Delete {
+                cf: store.column_family.to_owned(),
+                key: key.clone(),
+            });
+        }
+        let window = store.encode_window_records(chunk)?;
+        operations.push(OwnedWriteOperation::Set {
+            cf: store.column_family.to_owned(),
+            key: chunk[0].0.clone(),
+            value: encode_window_value(&chunk[chunk.len() - 1].0, &window),
+        });
+        consolidated.windows += 1;
+        consolidated.records += chunk.len();
+    }
+    plain_run.clear();
+    Ok(())
+}
+
+fn decode_key_record(key: &[u8], descriptor: &RecordDescriptor) -> Result<Vec<RecordValue>, Error> {
+    let mut remaining = key;
+    let mut values = Vec::with_capacity(descriptor.fields().len());
+    for field in descriptor.fields() {
+        values.push(decode_key_part(&mut remaining, &field.value_type)?);
+    }
+    if !remaining.is_empty() {
+        return Err(Error::InvalidStorageKey(
+            "encoded key has trailing bytes".to_owned(),
+        ));
+    }
+    Ok(values)
+}
+
+fn encode_key_record(values: Vec<RecordValue>) -> Result<Vec<u8>, Error> {
+    let mut key = Vec::new();
+    for value in values {
+        encode_key_part(&mut key, &value)?;
+    }
+    Ok(key)
+}
+
+fn encode_key_part(key: &mut Vec<u8>, value: &RecordValue) -> Result<(), Error> {
+    match value {
+        RecordValue::U8(value) => {
+            key.push(0);
+            key.push(*value);
+        }
+        RecordValue::U16(value) => {
+            key.push(1);
+            key.extend(value.to_be_bytes());
+        }
+        RecordValue::U32(value) => {
+            key.push(2);
+            key.extend(value.to_be_bytes());
+        }
+        RecordValue::U64(value) => {
+            key.push(3);
+            key.extend(value.to_be_bytes());
+        }
+        RecordValue::Bool(value) => {
+            key.push(5);
+            key.push(u8::from(*value));
+        }
+        RecordValue::String(value) => {
+            key.push(6);
+            encode_ordered_bytes(key, value.as_bytes());
+        }
+        RecordValue::Enum(value) => {
+            key.push(0);
+            key.push(*value);
+        }
+        RecordValue::Bytes(value) => {
+            key.push(7);
+            encode_ordered_bytes(key, value);
+        }
+        RecordValue::Uuid(value) => {
+            key.push(10);
+            key.extend_from_slice(value.as_bytes());
+        }
+        RecordValue::F64(_)
+        | RecordValue::Tuple(_)
+        | RecordValue::Array(_)
+        | RecordValue::Nullable(_) => {
+            return Err(Error::InvalidStorageKey(
+                "unsupported window key value type".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn decode_key_part(bytes: &mut &[u8], value_type: &ValueType) -> Result<RecordValue, Error> {
+    match value_type {
+        ValueType::U8 => {
+            expect_key_tag(bytes, 0)?;
+            Ok(RecordValue::U8(take_key_bytes(bytes, 1)?[0]))
+        }
+        ValueType::U16 => {
+            expect_key_tag(bytes, 1)?;
+            Ok(RecordValue::U16(u16::from_be_bytes(
+                take_key_bytes(bytes, 2)?
+                    .try_into()
+                    .expect("slice has u16 length"),
+            )))
+        }
+        ValueType::U32 => {
+            expect_key_tag(bytes, 2)?;
+            Ok(RecordValue::U32(u32::from_be_bytes(
+                take_key_bytes(bytes, 4)?
+                    .try_into()
+                    .expect("slice has u32 length"),
+            )))
+        }
+        ValueType::U64 => {
+            expect_key_tag(bytes, 3)?;
+            Ok(RecordValue::U64(u64::from_be_bytes(
+                take_key_bytes(bytes, 8)?
+                    .try_into()
+                    .expect("slice has u64 length"),
+            )))
+        }
+        ValueType::Bool => {
+            expect_key_tag(bytes, 5)?;
+            match take_key_bytes(bytes, 1)?[0] {
+                0 => Ok(RecordValue::Bool(false)),
+                1 => Ok(RecordValue::Bool(true)),
+                _ => Err(Error::InvalidStorageKey(
+                    "invalid bool key payload".to_owned(),
+                )),
+            }
+        }
+        ValueType::String => {
+            expect_key_tag(bytes, 6)?;
+            Ok(RecordValue::String(
+                String::from_utf8(decode_ordered_bytes(bytes)?)
+                    .map_err(|_| Error::InvalidStorageKey("invalid string key".to_owned()))?,
+            ))
+        }
+        ValueType::Bytes => {
+            expect_key_tag(bytes, 7)?;
+            Ok(RecordValue::Bytes(decode_ordered_bytes(bytes)?))
+        }
+        ValueType::Uuid => {
+            expect_key_tag(bytes, 10)?;
+            Ok(RecordValue::Uuid(uuid::Uuid::from_bytes(
+                take_key_bytes(bytes, 16)?
+                    .try_into()
+                    .expect("slice has uuid length"),
+            )))
+        }
+        ValueType::Enum(_) => {
+            expect_key_tag(bytes, 0)?;
+            Ok(RecordValue::Enum(take_key_bytes(bytes, 1)?[0]))
+        }
+        ValueType::F64 | ValueType::Tuple(_) | ValueType::Array(_) | ValueType::Nullable(_) => Err(
+            Error::InvalidStorageKey("unsupported window key type".to_owned()),
+        ),
+    }
+}
+
+fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
+    for byte in value {
+        if *byte == 0 {
+            key.extend([0, 0xff]);
+        } else {
+            key.push(*byte);
+        }
+    }
+    key.extend([0, 0]);
+}
+
+fn decode_ordered_bytes(bytes: &mut &[u8]) -> Result<Vec<u8>, Error> {
+    let mut value = Vec::new();
+    loop {
+        let byte = take_key_bytes(bytes, 1)?[0];
+        if byte != 0 {
+            value.push(byte);
+            continue;
+        }
+        let escaped = take_key_bytes(bytes, 1)?[0];
+        match escaped {
+            0 => return Ok(value),
+            0xff => value.push(0),
+            _ => return Err(Error::InvalidStorageKey("invalid escaped key".to_owned())),
+        }
+    }
+}
+
+fn expect_key_tag(bytes: &mut &[u8], expected: u8) -> Result<(), Error> {
+    let actual = take_key_bytes(bytes, 1)?[0];
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(Error::InvalidStorageKey(format!(
+            "expected key tag {expected}, got {actual}"
+        )))
+    }
+}
+
+fn take_key_bytes<'a>(bytes: &mut &'a [u8], count: usize) -> Result<&'a [u8], Error> {
+    if bytes.len() < count {
+        return Err(Error::InvalidStorageKey("truncated key".to_owned()));
+    }
+    let (head, tail) = bytes.split_at(count);
+    *bytes = tail;
+    Ok(head)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1140,6 +1877,12 @@ pub enum Error {
     InvalidStorageKey(String),
     #[error("invalid storage delta: {0}")]
     InvalidStorageDelta(String),
+    #[error("invalid window record: {0}")]
+    InvalidWindowRecord(String),
+    #[error("window codec error: {0}")]
+    WindowCodec(#[from] crate::window_codec::WindowCodecError),
+    #[error("record error: {0}")]
+    Record(#[from] crate::records::Error),
     #[cfg(feature = "rocksdb")]
     #[error(transparent)]
     RocksDb(#[from] ::rocksdb::Error),
@@ -1309,6 +2052,67 @@ mod tests {
             Ok(())
         })?;
         Ok(values)
+    }
+
+    fn window_key_descriptor() -> RecordDescriptor {
+        RecordDescriptor::new([
+            ("row", ValueType::Bytes),
+            ("time", ValueType::U64),
+            ("node", ValueType::U64),
+        ])
+    }
+
+    fn window_value_descriptor() -> RecordDescriptor {
+        RecordDescriptor::new([("title", ValueType::String), ("payload", ValueType::Bytes)])
+    }
+
+    fn window_key(row: u8, time: u64, node: u64) -> Vec<u8> {
+        encode_key_record(vec![
+            Value::Bytes(vec![row; 2]),
+            Value::U64(time),
+            Value::U64(node),
+        ])
+        .unwrap()
+    }
+
+    fn window_value(descriptor: RecordDescriptor, title: &str, payload: &[u8]) -> Vec<u8> {
+        descriptor
+            .create(&[
+                Value::String(title.to_owned()),
+                Value::Bytes(payload.to_vec()),
+            ])
+            .unwrap()
+    }
+
+    fn seed_window_records<S: OrderedKvStorage>(
+        storage: &S,
+        value_descriptor: RecordDescriptor,
+        count: u64,
+    ) -> Vec<KeyValue> {
+        (0..count)
+            .map(|idx| {
+                let key = window_key(1, 100 + idx, 7);
+                let value = window_value(
+                    value_descriptor,
+                    &format!("title-{idx}"),
+                    &[idx as u8, (idx + 1) as u8],
+                );
+                storage.set("jazz_docs_history", &key, &value).unwrap();
+                (key, value)
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn window_store<'a, S: OrderedKvStorage>(
+        storage: &'a S,
+        value_descriptor: &'a RecordDescriptor,
+    ) -> RecordStore<'a, S> {
+        RecordStore::new_windowed(
+            storage,
+            "jazz_docs_history",
+            window_key_descriptor(),
+            value_descriptor,
+        )
     }
 
     #[test]
@@ -2101,6 +2905,158 @@ mod tests {
 
         let stored = store.get(key).unwrap().unwrap();
         assert_eq!(stored.get_idx(0).unwrap(), Value::U64(42));
+    }
+
+    #[test]
+    fn windowed_record_store_reads_match_plain_after_arbitrary_consolidation() {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        let expected = seed_window_records(&storage, descriptor, 9);
+        let store = window_store(&storage, &descriptor);
+
+        assert_eq!(store.prefix(&[]).unwrap(), expected);
+        assert_eq!(
+            store.consolidate_windows(3).unwrap(),
+            WindowConsolidation {
+                windows: 3,
+                records: 9
+            }
+        );
+
+        let mixed_key = window_key(1, 200, 7);
+        let mixed_value = window_value(descriptor, "late-plain", b"late");
+        storage
+            .set("jazz_docs_history", &mixed_key, &mixed_value)
+            .unwrap();
+        let interleaved_key = window_key(1, 103, 8);
+        let interleaved_value = window_value(descriptor, "interleaved-plain", b"interleaved");
+        storage
+            .set("jazz_docs_history", &interleaved_key, &interleaved_value)
+            .unwrap();
+        let mut expected = expected;
+        expected.push((mixed_key.clone(), mixed_value.clone()));
+        expected.push((interleaved_key.clone(), interleaved_value.clone()));
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(
+            store.get_raw(&expected[5].0).unwrap(),
+            Some(expected[5].1.clone())
+        );
+        assert_eq!(
+            store
+                .range(&window_key(1, 102, 7), &window_key(1, 107, 7))
+                .unwrap(),
+            expected[2..8].to_vec()
+        );
+        assert_eq!(store.prefix(&window_key(1, 10, 7)[..1]).unwrap(), expected);
+
+        let mut reversed = Vec::new();
+        store
+            .scan_prefix_reverse(&window_key(1, 10, 7)[..1], &mut |key, value| {
+                reversed.push((key.to_vec(), value.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+        let mut expected_reversed = expected.clone();
+        expected_reversed.reverse();
+        assert_eq!(reversed, expected_reversed);
+
+        assert_eq!(
+            store.last_with_prefix(&window_key(1, 10, 7)[..1]).unwrap(),
+            expected_reversed.first().cloned()
+        );
+        assert_eq!(
+            store
+                .last_with_prefix_before_or_at(&window_key(1, 10, 7)[..1], &window_key(1, 105, 7))
+                .unwrap(),
+            Some(expected[6].clone())
+        );
+    }
+
+    #[test]
+    fn windowed_record_store_get_skips_later_window_that_sorts_before_target() {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        let store = window_store(&storage, &descriptor);
+
+        let first_run = [
+            (1, 11, "row-1-initial"),
+            (2, 12, "row-2-initial"),
+            (3, 13, "row-3-initial"),
+            (4, 14, "row-4-initial"),
+        ];
+        let expected_target = first_run[2];
+        for (row, time, title) in first_run {
+            storage
+                .set(
+                    "jazz_docs_history",
+                    &window_key(row, time, 7),
+                    &window_value(descriptor, title, title.as_bytes()),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.consolidate_windows(10).unwrap(),
+            WindowConsolidation {
+                windows: 1,
+                records: 4
+            }
+        );
+
+        for (row, time, title) in [(1, 100, "row-1-later"), (2, 101, "row-2-later")] {
+            storage
+                .set(
+                    "jazz_docs_history",
+                    &window_key(row, time, 7),
+                    &window_value(descriptor, title, title.as_bytes()),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.consolidate_windows(10).unwrap(),
+            WindowConsolidation {
+                windows: 1,
+                records: 2
+            }
+        );
+
+        let target_key = window_key(expected_target.0, expected_target.1, 7);
+        assert_eq!(
+            store.get_raw(&target_key).unwrap(),
+            Some(window_value(
+                descriptor,
+                expected_target.2,
+                expected_target.2.as_bytes()
+            ))
+        );
+    }
+
+    #[test]
+    fn windowed_record_store_survives_reopen_mid_consolidated_history() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let descriptor = window_value_descriptor();
+        let expected = {
+            let storage = RocksDbStorage::open(temp_dir.path(), &["jazz_docs_history"]).unwrap();
+            let expected = seed_window_records(&storage, descriptor, 12);
+            let store = window_store(&storage, &descriptor);
+            assert_eq!(
+                store.consolidate_windows(5).unwrap(),
+                WindowConsolidation {
+                    windows: 3,
+                    records: 12
+                }
+            );
+            assert_eq!(store.prefix(&[]).unwrap(), expected);
+            expected
+        };
+
+        let storage = RocksDbStorage::open(temp_dir.path(), &["jazz_docs_history"]).unwrap();
+        let store = window_store(&storage, &descriptor);
+        assert_eq!(store.prefix(&[]).unwrap(), expected);
+        assert_eq!(
+            store.get_raw(&expected[8].0).unwrap(),
+            Some(expected[8].1.clone())
+        );
     }
 
     #[test]

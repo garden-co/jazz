@@ -19,7 +19,9 @@ use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
-use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
+use groove::storage::{
+    self, OrderedKvStorage, ReopenableStorage, StorageLayout, WindowConsolidation,
+};
 use thiserror::Error;
 
 use self::query_engine::user_column_field;
@@ -2362,6 +2364,22 @@ where
 
     pub(crate) fn flush_query_runtime(&mut self) -> Result<(), Error> {
         self.database.flush().map_err(Error::Groove)
+    }
+
+    pub(crate) fn post_tick_consolidate_history_windows(
+        &mut self,
+        max_windows: usize,
+    ) -> Result<WindowConsolidation, Error> {
+        let report = self.database.consolidate_history_windows(
+            groove::window_codec::TARGET_RECORDS_PER_WINDOW,
+            max_windows,
+        )?;
+        if report.windows > 0 {
+            self.query.tx_version_tables_cache.clear();
+            self.query.tx_version_tables_cache_order.clear();
+            self.query.tx_version_tables_cache_order_set.clear();
+        }
+        Ok(report)
     }
 
     pub(crate) fn groove_runtime_token(&self) -> u64 {
