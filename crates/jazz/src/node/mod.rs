@@ -2775,8 +2775,8 @@ where
         &mut self,
         requests: &[RowVersionRef],
         identity: AuthorId,
-    ) -> Result<Vec<VersionRecord>, Error> {
-        let mut out = Vec::new();
+    ) -> Result<Vec<VersionBundle>, Error> {
+        let mut by_tx = BTreeMap::<TxId, Vec<VersionRow>>::new();
         for request in requests {
             if !self.dry_run_read_current_allows(&request.table, request.row_uuid, identity)? {
                 continue;
@@ -2788,10 +2788,17 @@ where
                     && version.tx_time() == request.tx_time
                     && self.node_for_alias(version.tx_node_alias()) == Some(request.tx_node_id)
                 {
-                    out.push(self.version_record_from_row(&version)?);
+                    by_tx.entry(tx_id).or_default().push(version);
                     break;
                 }
             }
+        }
+        let mut out = Vec::new();
+        for (tx_id, versions) in by_tx {
+            let stored = self
+                .query_transaction(tx_id)?
+                .ok_or(Error::MissingTransaction(tx_id))?;
+            out.push(self.version_bundle_for_maintained_view_versions_with_tx(&stored, &versions)?);
         }
         Ok(out)
     }
@@ -2800,47 +2807,30 @@ where
     pub(crate) fn apply_row_version_payloads_for_requests(
         &mut self,
         requests: &[RowVersionRef],
-        versions: Vec<VersionRecord>,
+        version_bundles: Vec<VersionBundle>,
     ) -> Result<(), Error> {
-        let mut by_request = versions
-            .into_iter()
-            .map(|version| {
-                let candidates = requests
-                    .iter()
-                    .filter(|request| {
-                        request.table.as_str() == version.table()
-                            && request.row_uuid == version.row_uuid()
-                    })
-                    .collect::<Vec<_>>();
-                let key = match candidates.as_slice() {
-                    [request] => *request,
-                    many => many
-                        .iter()
-                        .copied()
-                        .find(|request| request.tx_time == version.updated_at())
-                        .ok_or(Error::MalformedViewUpdate(
-                            "row-version repair payload did not match an outstanding request",
-                        ))?,
-                };
-                Ok((key.clone(), version))
-            })
-            .collect::<Result<BTreeMap<_, _>, Error>>()?;
-        let mut grouped = BTreeMap::<TxId, Vec<VersionRecord>>::new();
-        for request in requests {
-            if let Some(version) = by_request.remove(request) {
-                grouped.entry(request.tx_id()).or_default().push(version);
+        let request_set = requests.iter().cloned().collect::<BTreeSet<_>>();
+        for bundle in version_bundles {
+            let versions = bundle
+                .versions
+                .into_iter()
+                .filter(|version| {
+                    request_set.contains(&RowVersionRef::new(
+                        version.table().to_owned(),
+                        version.row_uuid(),
+                        bundle.tx.tx_id,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if versions.is_empty() {
+                continue;
             }
-        }
-        for (tx_id, versions) in grouped {
-            let stored = self
-                .query_transaction(tx_id)?
-                .ok_or(Error::MissingTransaction(tx_id))?;
             self.ingest_known_transaction(
-                stored.tx,
+                bundle.tx,
                 versions,
-                stored.fate,
-                stored.global_seq,
-                stored.durability,
+                bundle.fate,
+                bundle.global_seq,
+                bundle.durability,
             )?;
         }
         Ok(())
@@ -2872,6 +2862,16 @@ where
             })
             .collect::<BTreeSet<_>>();
         let mut missing = BTreeSet::new();
+        let mut visited_text_ancestors = BTreeSet::new();
+        for bundle in version_bundles {
+            for version in &bundle.versions {
+                self.collect_missing_text_ancestor_refs(
+                    version,
+                    &mut missing,
+                    &mut visited_text_ancestors,
+                )?;
+            }
+        }
         // Only additions require repair. Removals are self-sufficient because
         // the removed version may now be policy-invisible to this receiver, in
         // which case fetching the body is both unnecessary and allowed to
@@ -2895,9 +2895,67 @@ where
                 });
             if !has_body {
                 missing.insert(version_ref);
+            } else if let Some(version) = self.local_version_record_for_ref(&version_ref)? {
+                self.collect_missing_text_ancestor_refs(
+                    &version,
+                    &mut missing,
+                    &mut visited_text_ancestors,
+                )?;
             }
         }
         Ok(missing.into_iter().collect())
+    }
+
+    fn collect_missing_text_ancestor_refs(
+        &mut self,
+        version: &VersionRecord,
+        missing: &mut BTreeSet<RowVersionRef>,
+        visited: &mut BTreeSet<RowVersionRef>,
+    ) -> Result<(), Error> {
+        if !self.version_record_has_text_cell(version)? {
+            return Ok(());
+        }
+        for parent in version.parents() {
+            let parent_ref =
+                RowVersionRef::new(version.table().to_owned(), version.row_uuid(), parent);
+            if !visited.insert(parent_ref.clone()) {
+                continue;
+            }
+            if self.query_transaction(parent)?.is_none() {
+                missing.insert(parent_ref);
+                continue;
+            }
+            let Some(parent_version) = self.local_version_record_for_ref(&parent_ref)? else {
+                missing.insert(parent_ref);
+                continue;
+            };
+            self.collect_missing_text_ancestor_refs(&parent_version, missing, visited)?;
+        }
+        Ok(())
+    }
+
+    fn local_version_record_for_ref(
+        &mut self,
+        version_ref: &RowVersionRef,
+    ) -> Result<Option<VersionRecord>, Error> {
+        for version in self.query_versions_for_tx(version_ref.tx_id())? {
+            if version.table() == version_ref.table.as_str()
+                && version.row_uuid() == version_ref.row_uuid
+                && version.tx_time() == version_ref.tx_time
+                && self.node_for_alias(version.tx_node_alias()) == Some(version_ref.tx_node_id)
+            {
+                return self.version_record_from_row(&version).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    fn version_record_has_text_cell(&self, version: &VersionRecord) -> Result<bool, Error> {
+        let table = self.table_in_schema(version.table(), version.schema_version())?;
+        Ok(table.columns.iter().enumerate().any(|(position, column)| {
+            column.large_value == Some(LargeValueKind::Text)
+                && version.optional_cell_at(position).is_some()
+        }))
     }
 
     fn mint_tx_time(&mut self, now_ms: u64) -> TxTime {
