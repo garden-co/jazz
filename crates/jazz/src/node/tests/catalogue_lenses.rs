@@ -368,6 +368,97 @@ fn current_write_pointer_flip_reopens_with_new_partition_tables() {
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
     assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 }
+
+#[test]
+fn current_write_pointer_flip_rebuilds_live_database_without_storage_reopen() {
+    let base = schema();
+    let evolved = JazzSchema::new([
+        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
+        TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
+    ]);
+    let evolved_payload = SchemaVersion::new(evolved.clone());
+    let mut core = open_reopen_refusing_node_with_schema(node(0x3e), base);
+
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(evolved_payload.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_payload.id,
+        },
+    })
+    .unwrap();
+    assert!(core.table_in_schema("notes", evolved_payload.id).is_ok());
+
+    let note = row(0x3e);
+    assert!(
+        core.dry_run_mergeable_write_allows(
+            MergeableCommit::new("notes", note, 10).cells(BTreeMap::from([(
+                "body".to_owned(),
+                v("live add-table write"),
+            )]))
+        )
+        .unwrap()
+    );
+    let tx_id = core.commit_mergeable(
+        MergeableCommit::new("notes", note, 10).cells(BTreeMap::from([(
+            "body".to_owned(),
+            v("live add-table write"),
+        )])),
+    )
+    .unwrap();
+    assert_eq!(
+        core.current_rows_for_schema("notes", evolved_payload.id, DurabilityTier::Local)
+            .unwrap()
+            .len(),
+        1
+    );
+    core.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(core.clock.next_global_seq),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    let shape = Query::from("notes").validate(&evolved).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = core
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        rows,
+        BTreeMap::from([(note, BTreeMap::from([("body".to_owned(), v("live add-table write"))]))])
+    );
+
+    let mut peer = PeerState::new();
+    let (served_shape, served_binding) = core.whole_table_shape_binding("notes").unwrap();
+    core.prepare_query_binding_for_link(
+        &served_shape,
+        &served_binding,
+        DurabilityTier::Global,
+        peer.identity(),
+    )
+    .unwrap();
+    let SyncMessage::ViewUpdate {
+        result_member_adds,
+        version_bundles,
+        ..
+    } = peer.current_rows_update(&mut core, "notes").unwrap()
+    else {
+        panic!("current-row subscription should produce a view update");
+    };
+    assert_eq!(result_member_adds.len(), 1);
+    assert_eq!(version_bundles.len(), 1);
+}
+
 #[test]
 fn partitioned_reads_project_natural_lenses_after_schema_agnostic_winner() {
     let base = schema();

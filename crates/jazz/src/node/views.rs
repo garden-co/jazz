@@ -792,7 +792,19 @@ where
         &self,
         table: &str,
     ) -> Result<(ValidatedQuery, Binding), Error> {
-        let shape = crate::query::Query::from(table).validate(&self.catalogue.schema)?;
+        let schema = if self.table(table).is_ok() {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&self.catalogue.current_write_schema.schema)
+                .ok_or(Error::InvalidStoredValue(
+                    "current write schema payload missing",
+                ))?
+                .schema
+        };
+        let shape = crate::query::Query::from(table).validate(schema)?;
         let binding = shape.bind(BTreeMap::new())?;
         Ok((shape, binding))
     }
