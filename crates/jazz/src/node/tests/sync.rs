@@ -1050,11 +1050,12 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
             },
         )
         .unwrap();
-    let [SyncMessage::RowVersionPayloads { versions }] = messages.as_slice() else {
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
         panic!("expected one row-version payload response");
     };
-    assert_eq!(versions.len(), 1);
-    assert_eq!(versions[0].row_uuid(), alice_row);
+    assert_eq!(version_bundles.len(), 1);
+    assert_eq!(version_bundles[0].versions.len(), 1);
+    assert_eq!(version_bundles[0].versions[0].row_uuid(), alice_row);
 
     let mut too_many = Vec::new();
     for _ in 0..=crate::protocol_limits::MAX_FETCH_ROW_VERSIONS {
@@ -1131,12 +1132,12 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
             },
         )
         .unwrap();
-    let [SyncMessage::RowVersionPayloads { versions }] = messages.as_slice()
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice()
     else {
         panic!("expected row-version payloads");
     };
     reader
-        .apply_row_version_payloads_for_requests(&missing, versions.clone())
+        .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
         .unwrap();
     assert!(reader
         .missing_known_state_row_version_refs(&update)
@@ -1580,12 +1581,12 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
             },
         )
         .unwrap();
-    let [SyncMessage::RowVersionPayloads { versions }] = messages.as_slice()
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice()
     else {
         panic!("expected row-version payloads");
     };
     reader
-        .apply_row_version_payloads_for_requests(&missing, versions.clone())
+        .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
         .unwrap();
     reader.apply_sync_message(update).unwrap();
     assert_eq!(
