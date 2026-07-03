@@ -418,6 +418,7 @@ mod tests {
                     predicate_read_set: None,
                     user_metadata_json: None,
                     source_branch: None,
+                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },

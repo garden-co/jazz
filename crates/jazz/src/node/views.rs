@@ -768,6 +768,7 @@ where
             base_snapshot,
             user_metadata_json,
             source_branch,
+            merge_strategy,
             ..
         } = stored_tx.tx.clone();
         let tx_payload = Transaction {
@@ -782,6 +783,7 @@ where
             predicate_read_set: None,
             user_metadata_json,
             source_branch,
+            merge_strategy,
         };
         Ok(VersionBundle {
             tx: tx_payload,

@@ -235,12 +235,12 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
 }
 
 #[test]
-fn text_column_round_trips_opaque_bytes() {
+fn blob_column_round_trips_opaque_bytes() {
     let (_temp_dir, mut node) = open_node_with_schema(
         node(0x44),
         JazzSchema::new([TableSchema::new(
             "notes",
-            [crate::schema::ColumnSchema::text("body")],
+            [crate::schema::ColumnSchema::blob("body")],
         )]),
     );
     let row = row(0x44);
@@ -301,6 +301,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 predicate_read_set: None,
                 user_metadata_json: None,
             source_branch: None,
+            merge_strategy: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
             u64::MAX - SKEW_TOLERANCE_MS,
@@ -330,6 +331,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 predicate_read_set: None,
                 user_metadata_json: None,
             source_branch: None,
+            merge_strategy: None,
             },
             vec![version_record(
                 row,
@@ -383,6 +385,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 predicate_read_set: None,
                 user_metadata_json: None,
             source_branch: None,
+            merge_strategy: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
             u64::MAX - SKEW_TOLERANCE_MS,
@@ -411,6 +414,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 predicate_read_set: None,
                 user_metadata_json: None,
             source_branch: None,
+            merge_strategy: None,
             },
             vec![version_record(
                 row,

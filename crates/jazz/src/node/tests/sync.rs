@@ -455,6 +455,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         predicate_read_set: None,
         user_metadata_json: None,
             source_branch: None,
+            merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
@@ -761,6 +762,7 @@ fn originating_causality_rejection_retains_child_payload() {
             predicate_read_set: None,
             user_metadata_json: None,
             source_branch: None,
+            merge_strategy: None,
         },
         vec![version_record(row, Vec::new(), title_cells("parent"), None)],
         u64::MAX - SKEW_TOLERANCE_MS,
@@ -2169,6 +2171,7 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         predicate_read_set: None,
         user_metadata_json: None,
             source_branch: None,
+            merge_strategy: None,
     };
     let versions = vec![
         version_record(row(1), Vec::new(), title_cells("a"), None),
