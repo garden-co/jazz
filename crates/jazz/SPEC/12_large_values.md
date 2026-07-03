@@ -739,6 +739,37 @@ since LCA).
   format to derived index, which removes their hardest constraint (the
   chunker as a compatibility contract).
 
+## Text storage after windowed encoding (target simplification, 2026-07-03)
+
+Groove ch. 2 §2.9 (windowed record encoding) retro-simplifies the text stack.
+These are committed design consequences, gated on the window codec landing;
+until then the current mechanisms remain in force.
+
+1. **One op representation.** Text ops live inline in version records,
+   period. The extent-backed op-log side-channel (the tagged hybrid that
+   split ops between cells and content extents by document size) is
+   deprecated-by-design: run-coded history makes inline ops compact at rest,
+   so the split loses its reason to exist — and with it the mis-tagging /
+   double-encoding bug class. The content store keeps exactly two roles:
+   materialized states (checkpoints) and genuinely large content bytes
+   (big insert payloads still spill as content, which is value separation,
+   not an op-log channel).
+2. **Eager chain shipping is the default.** A text version's op-chain
+   ancestors usually share its window; once shipping a history span costs
+   window-bytes under stream compression (ch. 8 wire posture), including
+   the chain with any text version is cheaper than deciding not to. The
+   receiver-side ancestor-repair lane remains as the fallback safety net,
+   no longer load-bearing.
+3. **Checkpoints align to window seals.** The sealed window replaces the
+   free-standing op-count cadence as the checkpoint unit: materialization
+   folds from the nearest window-boundary state plus the open tail. One
+   cadence concept; checkpoints stay node-local derived state.
+4. **State hashes at window seals (not per version).** A per-version state
+   hash would fight the run encoding (32 incompressible bytes against a
+   ~3 B/edit budget); a hash at each window seal costs ~32 B per few
+   hundred edits and verifies materialization at every boundary — the
+   affordable core of state-addressed versions.
+
 ## Future work (gated)
 
 - `[needs: text-merge]`: eg-walker replay since LCA at the merging node;
