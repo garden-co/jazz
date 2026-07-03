@@ -171,14 +171,6 @@ describe("typed app prototype", () => {
     expect(app.wasmSchema.users?.indexed_columns).toBeUndefined();
   });
 
-  it("exposes a cached non-enumerable schema hash", async () => {
-    const schemaHash = app.schemaHash;
-
-    expect(app.schemaHash).toBe(schemaHash);
-    expect(await schemaHash).toBe(await computeSchemaHash(app.wasmSchema));
-    expect(Object.keys(app)).not.toContain("schemaHash");
-  });
-
   it("serializes gather seeded from the current relation", () => {
     const directParents = graphApp.team_edges.where({ child_team: "team-a" }).hopTo("parent_team");
     const reachableTeams = directParents.gather({

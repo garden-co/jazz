@@ -514,8 +514,6 @@ export interface DefinedMigration<
   TFrom extends SchemaLike = SchemaLike,
   TTo extends SchemaLike = SchemaLike,
 > {
-  readonly fromHash?: string;
-  readonly toHash?: string;
   readonly from: TFrom;
   readonly to: TTo;
   readonly forward: Lens[];
@@ -1001,8 +999,6 @@ export function defineMigration<
   ) as NormalizedSchema<TTo>;
 
   return {
-    fromHash: config.fromHash,
-    toHash: config.toHash,
     from: config.from,
     to: config.to,
     forward: buildForwardLenses(
