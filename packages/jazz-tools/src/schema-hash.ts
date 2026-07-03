@@ -13,20 +13,5 @@ async function loadSchemaHashWasmModule(): Promise<any> {
 
 export async function computeSchemaHash(schema: WasmSchema): Promise<string> {
   const wasmModule = await loadSchemaHashWasmModule();
-  const runtime = new wasmModule.WasmRuntime(
-    JSON.stringify(schema),
-    "jazz-tools-cli",
-    "dev",
-    "main",
-    null,
-    null,
-  );
-
-  try {
-    return runtime.getSchemaHash();
-  } finally {
-    if (typeof runtime.free === "function") {
-      runtime.free();
-    }
-  }
+  return wasmModule.WasmRuntime.computeSchemaHash(JSON.stringify(schema));
 }
