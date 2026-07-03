@@ -27,7 +27,7 @@ use crate::ids::{
     AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias,
     SchemaVersionId,
 };
-use crate::merge_strategy::MergeStrategy as TextMergeStrategy;
+use crate::merge_strategy::{CanonicalizeInput, MergeStrategy as TextMergeStrategy};
 use crate::protocol::{
     BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ReadViewKey, ResultMemberEntry,
     ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
@@ -36,7 +36,7 @@ use crate::protocol::{
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
-    JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind, MergeStrategy, TableSchema,
+    ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind, MergeStrategy, TableSchema,
     registered_column_transform,
 };
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
@@ -874,6 +874,7 @@ where
             } else {
                 self.encode_large_value_cells(
                     &table_schema,
+                    write_schema_version,
                     commit.row_uuid,
                     commit.made_by,
                     commit.cells,
@@ -963,6 +964,11 @@ where
         if column.large_value.is_none() {
             return Err(Error::InvalidMergeableCommit(
                 "large-value edit column must be text or blob",
+            ));
+        }
+        if column.text_merge_spec.is_some() {
+            return Err(Error::InvalidMergeableCommit(
+                "op edits on format-declared columns not supported yet",
             ));
         }
 
@@ -1303,6 +1309,7 @@ where
     fn encode_large_value_cells(
         &mut self,
         table: &TableSchema,
+        schema_version: SchemaVersionId,
         row_uuid: RowUuid,
         writer: AuthorId,
         mut cells: BTreeMap<String, Value>,
@@ -1322,6 +1329,8 @@ where
             };
             match column.large_value {
                 Some(LargeValueKind::Text) => {
+                    let new_value =
+                        self.canonicalize_format_value(table, schema_version, column, &new_value)?;
                     let ops = text_oplog::diff(&parent_value, &new_value)
                         .into_iter()
                         .collect::<Vec<_>>();
@@ -1342,6 +1351,38 @@ where
             }
         }
         Ok(cells)
+    }
+
+    fn canonicalize_format_value(
+        &self,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        column: &ColumnSchema,
+        authored: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let Some(spec) = column.text_merge_spec.clone() else {
+            return Ok(authored.to_vec());
+        };
+        let Some(strategy) = self
+            .text_merge_strategies
+            .get(&(spec.strategy_id.clone(), spec.strategy_version))
+        else {
+            return Ok(authored.to_vec());
+        };
+        let input = CanonicalizeInput {
+            schema_version,
+            table: table.name.clone(),
+            column: column.name.clone(),
+            spec_hash: spec.spec_hash(),
+            spec,
+        };
+        match strategy.canonicalize(authored, &input) {
+            Ok(Some(canonical)) => Ok(canonical),
+            Ok(None) => Ok(authored.to_vec()),
+            Err(_) => Err(Error::InvalidMergeableCommit(
+                "format canonicalization failed",
+            )),
+        }
     }
 
     fn extent_back_text_ops(
