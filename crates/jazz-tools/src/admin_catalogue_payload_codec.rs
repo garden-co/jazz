@@ -1416,6 +1416,9 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
             write_u32(buf, bytes.len() as u32);
             buf.extend_from_slice(bytes);
         }
+        Value::LargeValue(_) => {
+            panic!("large-value handles cannot be encoded into catalogue payloads")
+        }
         Value::Array(elements) => {
             buf.push(VALUE_ARRAY);
             write_u32(buf, elements.len() as u32);

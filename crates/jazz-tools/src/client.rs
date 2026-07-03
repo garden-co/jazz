@@ -10,8 +10,8 @@ use std::time::Duration;
 use crate::public_api::types::{OrderedAdded, OrderedRemoved, OrderedUpdated};
 use crate::public_schema::Schema;
 use crate::public_schema::TableName;
+use crate::public_schema::{LargeValueHandle, Query, Session, Value, WriteContext};
 use crate::public_schema::{OrderedRowDelta, Row};
-use crate::public_schema::{Query, Session, Value, WriteContext};
 use crate::server::core_websocket_transport::WebSocketTransport;
 use crate::server::public_schema_convert::convert_public_schema;
 #[cfg(feature = "test-utils")]
@@ -50,6 +50,7 @@ type CoreRocksDb = CoreDb<CoreRocksDbStorage>;
 
 const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
+const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH1";
 
 fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
     let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
@@ -186,6 +187,17 @@ impl Backend {
             Self::Memory(db) => db.tick(),
             #[cfg(feature = "rocksdb")]
             Self::RocksDb(db) => db.tick(),
+        }
+    }
+
+    fn hydrate_large_value_handle(
+        &self,
+        handle: &[u8],
+    ) -> std::result::Result<Vec<u8>, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.hydrate_large_value_handle(handle),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.hydrate_large_value_handle(handle),
         }
     }
 
@@ -875,6 +887,14 @@ impl ClientDb {
         Ok(batch_id)
     }
 
+    fn hydrate_large_value_handle(&self, handle: &LargeValueHandle) -> Result<Vec<u8>> {
+        self.inner
+            .borrow()
+            .db
+            .hydrate_large_value_handle(handle.as_bytes())
+            .map_err(|error| JazzError::Query(error.to_string()))
+    }
+
     fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         inner.ensure_transaction_open(batch_id)?;
@@ -1370,6 +1390,10 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
         Value::Timestamp(value) => Ok(CoreValue::U64(value)),
         Value::Uuid(value) => Ok(CoreValue::Uuid(*value.uuid())),
         Value::Bytea(value) => Ok(CoreValue::Bytes(value)),
+        Value::LargeValue(_) => Err(JazzError::Write(
+            "large-value handles are read-only query results; write Bytea content instead"
+                .to_string(),
+        )),
         Value::Null => Ok(CoreValue::Nullable(None)),
         Value::Array(values) => values
             .into_iter()
@@ -1476,6 +1500,9 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
         CoreValue::Uuid(value) => Ok(Value::Uuid(ObjectId::from_uuid(value))),
+        CoreValue::Bytes(value) if value.starts_with(LARGE_VALUE_HANDLE_MAGIC) => {
+            Ok(Value::LargeValue(LargeValueHandle::from_bytes(value)))
+        }
         CoreValue::Bytes(value) => Ok(Value::Bytea(value)),
         CoreValue::Nullable(None) => Ok(Value::Null),
         CoreValue::Nullable(Some(value)) => core_to_public_value(*value),
@@ -2147,6 +2174,22 @@ impl JazzClient {
 
     pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
         self.db.wait_for_batch(batch_id, tier).await
+    }
+
+    /// Fetch and materialize the bytes behind a large-value handle returned by a query.
+    pub async fn hydrate_large_value(&self, handle: &LargeValueHandle) -> Result<Vec<u8>> {
+        let deadline = tokio::time::Instant::now() + QUERY_COVERAGE_TIMEOUT;
+        loop {
+            match self.db.hydrate_large_value_handle(handle) {
+                Ok(bytes) => return Ok(bytes),
+                Err(error) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// Unsubscribe from a subscription.
