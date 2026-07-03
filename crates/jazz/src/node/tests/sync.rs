@@ -1385,6 +1385,93 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
 }
 
 #[test]
+fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view() {
+    // Internal protocol coverage: public one-shot queries only expose this as a
+    // timeout race. This pins the shared-cache invariant directly: a short-lived
+    // usage subscription must not clear canonical settled state for the same
+    // shape/binding/read-view unless it carries a replacement snapshot.
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(9);
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let canonical_subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let binding_view_key = BindingViewKey::from_canonical_subscription_key(canonical_subscription);
+
+    let (_tx_id, visible_unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("shared")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = visible_unit else {
+        panic!("expected commit unit");
+    };
+    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    reader
+        .apply_sync_message(core.view_update_for_current_rows("todos").unwrap())
+        .unwrap();
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("shared"))])
+    );
+
+    let duplicate_subscription = crate::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x77; 16])),
+        read_view: Default::default(),
+    };
+    reader
+        .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: duplicate_subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+    assert_eq!(
+        reader
+            .binding_view_key_for_subscription(duplicate_subscription)
+            .unwrap(),
+        binding_view_key
+    );
+
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription: duplicate_subscription,
+            settled_through: GlobalSeq(2),
+            reset_result_set: true,
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("shared"))])
+    );
+    assert_eq!(
+        reader.settled_through_for_binding_view(binding_view_key),
+        Some(GlobalSeq(2))
+    );
+}
+
+#[test]
 fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
