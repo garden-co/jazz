@@ -1,7 +1,7 @@
 import type { QueryPropagation, StoredPermissionsResponse, WasmSchema } from "jazz-tools";
 import { createContext, useContext, useMemo, type PropsWithChildren } from "react";
 
-export type InspectorRuntime = "standalone" | "extension" | "overlay";
+export type InspectorRuntime = "standalone" | "overlay";
 
 interface DevtoolsContextValue {
   wasmSchema: WasmSchema;
