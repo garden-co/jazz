@@ -1996,6 +1996,7 @@ fn write_operation_bytes(operation: &crate::storage::WriteOperation<'_>) -> usiz
     match operation {
         crate::storage::WriteOperation::Set { key, value, .. } => key.len() + value.len(),
         crate::storage::WriteOperation::Delete { key, .. } => key.len(),
+        crate::storage::WriteOperation::Delta { key, delta, .. } => key.len() + delta.payload.len(),
     }
 }
 
@@ -2032,7 +2033,8 @@ fn storage_write_destination(
 ) -> StorageWriteDestination {
     match operation {
         crate::storage::WriteOperation::Set { cf, key, .. }
-        | crate::storage::WriteOperation::Delete { cf, key } => {
+        | crate::storage::WriteOperation::Delete { cf, key }
+        | crate::storage::WriteOperation::Delta { cf, key, .. } => {
             if *cf == "indices" {
                 storage_index_write_destination(key)
             } else {
@@ -2142,6 +2144,11 @@ fn owned_write_operation(operation: &crate::storage::WriteOperation<'_>) -> Owne
         crate::storage::WriteOperation::Delete { cf, key } => OwnedWriteOperation::Delete {
             cf: (*cf).to_owned(),
             key: (*key).to_vec(),
+        },
+        crate::storage::WriteOperation::Delta { cf, key, delta } => OwnedWriteOperation::Delta {
+            cf: (*cf).to_owned(),
+            key: (*key).to_vec(),
+            delta: (*delta).clone(),
         },
     }
 }

@@ -25,6 +25,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::records::{Record, RecordDescriptor};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use memory::MemoryStorage;
@@ -41,6 +42,136 @@ pub type KeyValue = (Vec<u8>, Vec<u8>);
 /// materialize large ranges before the caller can process them.
 pub type ScanVisitor<'visitor> =
     dyn for<'a, 'b> FnMut(&'a [u8], &'b [u8]) -> Result<(), Error> + 'visitor;
+
+/// Typed storage delta appended through backends that can durably merge without
+/// first reading the existing value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageDelta {
+    pub kind: StorageDeltaKind,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageDeltaKind {
+    CurrentWinnerV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurrentWinnerDelta {
+    pub tx_time: u64,
+    pub tx_node_uuid: [u8; 16],
+    pub parents: Vec<(u64, [u8; 16])>,
+    pub tx_time_offset: u32,
+    pub tx_node_uuid_offset: u32,
+    pub record: Vec<u8>,
+}
+
+impl StorageDelta {
+    pub fn current_winner(delta: CurrentWinnerDelta) -> Result<Self, Error> {
+        Ok(Self {
+            kind: StorageDeltaKind::CurrentWinnerV1,
+            payload: postcard::to_allocvec(&delta)
+                .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?,
+        })
+    }
+
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, Error> {
+        postcard::to_allocvec(&(self.kind, &self.payload))
+            .map_err(|error| Error::InvalidStorageDelta(error.to_string()))
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let (kind, payload): (StorageDeltaKind, Vec<u8>) = postcard::from_bytes(bytes)
+            .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
+        Ok(Self { kind, payload })
+    }
+}
+
+pub(crate) fn compact_storage_delta_operand(
+    template_operand: &[u8],
+    merged_record: Vec<u8>,
+) -> Result<Vec<u8>, Error> {
+    let template = StorageDelta::decode(template_operand)?;
+    match template.kind {
+        StorageDeltaKind::CurrentWinnerV1 => {
+            let template: CurrentWinnerDelta = postcard::from_bytes(&template.payload)
+                .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
+            let (tx_time, tx_node_uuid) = current_winner_key(
+                &merged_record,
+                template.tx_time_offset as usize,
+                template.tx_node_uuid_offset as usize,
+            )?;
+            StorageDelta::current_winner(CurrentWinnerDelta {
+                tx_time,
+                tx_node_uuid,
+                parents: Vec::new(),
+                tx_time_offset: template.tx_time_offset,
+                tx_node_uuid_offset: template.tx_node_uuid_offset,
+                record: merged_record,
+            })?
+            .encode()
+        }
+    }
+}
+
+pub fn apply_storage_delta(
+    existing: Option<&[u8]>,
+    encoded_delta: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let delta = StorageDelta::decode(encoded_delta)?;
+    match delta.kind {
+        StorageDeltaKind::CurrentWinnerV1 => {
+            let candidate: CurrentWinnerDelta = postcard::from_bytes(&delta.payload)
+                .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
+            apply_current_winner_delta(existing, &candidate)
+        }
+    }
+}
+
+fn apply_current_winner_delta(
+    existing: Option<&[u8]>,
+    candidate: &CurrentWinnerDelta,
+) -> Result<Vec<u8>, Error> {
+    let Some(existing) = existing else {
+        return Ok(candidate.record.clone());
+    };
+    let existing_key = current_winner_key(
+        existing,
+        candidate.tx_time_offset as usize,
+        candidate.tx_node_uuid_offset as usize,
+    )?;
+    let candidate_key = (candidate.tx_time, candidate.tx_node_uuid);
+    if candidate.parents.contains(&existing_key) || candidate_key > existing_key {
+        Ok(candidate.record.clone())
+    } else {
+        Ok(existing.to_vec())
+    }
+}
+
+fn current_winner_key(
+    record: &[u8],
+    tx_time_offset: usize,
+    tx_node_uuid_offset: usize,
+) -> Result<(u64, [u8; 16]), Error> {
+    let time_bytes = record
+        .get(tx_time_offset..tx_time_offset + 8)
+        .ok_or_else(|| {
+            Error::InvalidStorageDelta("current-winner tx_time offset out of bounds".to_owned())
+        })?;
+    let uuid_bytes = record
+        .get(tx_node_uuid_offset..tx_node_uuid_offset + 16)
+        .ok_or_else(|| {
+            Error::InvalidStorageDelta(
+                "current-winner tx_node_uuid offset out of bounds".to_owned(),
+            )
+        })?;
+    let mut uuid = [0; 16];
+    uuid.copy_from_slice(uuid_bytes);
+    Ok((
+        u64::from_le_bytes(time_bytes.try_into().expect("slice length checked")),
+        uuid,
+    ))
+}
 
 /// Backing-implementation interface for ordered key/value storage.
 ///
@@ -505,6 +636,14 @@ where
                         key: physical_key,
                     }
                 }
+                WriteOperation::Delta { cf, key, delta } => {
+                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                    OwnedWriteOperation::Delta {
+                        cf: physical_cf,
+                        key: physical_key,
+                        delta: (*delta).clone(),
+                    }
+                }
             })
             .collect::<Vec<_>>();
         let borrowed = translated
@@ -614,6 +753,10 @@ where
         WriteOperation::delete(self.column_family, key)
     }
 
+    pub fn delta<'op>(&'op self, key: &'op Key, delta: &'op StorageDelta) -> WriteOperation<'op> {
+        WriteOperation::delta(self.column_family, key, delta)
+    }
+
     pub fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         self.storage.write_many(operations)
     }
@@ -632,6 +775,11 @@ pub enum WriteOperation<'a> {
         cf: &'a str,
         key: &'a Key,
     },
+    Delta {
+        cf: &'a str,
+        key: &'a Key,
+        delta: &'a StorageDelta,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -645,6 +793,11 @@ pub enum OwnedWriteOperation {
         cf: String,
         key: Vec<u8>,
     },
+    Delta {
+        cf: String,
+        key: Vec<u8>,
+        delta: StorageDelta,
+    },
 }
 
 impl OwnedWriteOperation {
@@ -652,18 +805,19 @@ impl OwnedWriteOperation {
         match self {
             Self::Set { cf, key, value } => WriteOperation::set(cf, key, value),
             Self::Delete { cf, key } => WriteOperation::delete(cf, key),
+            Self::Delta { cf, key, delta } => WriteOperation::delta(cf, key, delta),
         }
     }
 
     fn cf(&self) -> &str {
         match self {
-            Self::Set { cf, .. } | Self::Delete { cf, .. } => cf,
+            Self::Set { cf, .. } | Self::Delete { cf, .. } | Self::Delta { cf, .. } => cf,
         }
     }
 
     fn key(&self) -> &[u8] {
         match self {
-            Self::Set { key, .. } | Self::Delete { key, .. } => key,
+            Self::Set { key, .. } | Self::Delete { key, .. } | Self::Delta { key, .. } => key,
         }
     }
 }
@@ -700,10 +854,25 @@ where
                 return match operation {
                     OwnedWriteOperation::Set { value, .. } => Ok(Some(value.clone())),
                     OwnedWriteOperation::Delete { .. } => Ok(None),
+                    OwnedWriteOperation::Delta { .. } => break,
                 };
             }
         }
-        self.base.get(cf, key)
+        let mut value = self.base.get(cf, key)?;
+        for operation in self.staged_writes.borrow().iter() {
+            if operation.cf() != cf || operation.key() != key {
+                continue;
+            }
+            match operation {
+                OwnedWriteOperation::Set { value: set, .. } => value = Some(set.clone()),
+                OwnedWriteOperation::Delete { .. } => value = None,
+                OwnedWriteOperation::Delta { delta, .. } => {
+                    let encoded = delta.encode()?;
+                    value = Some(apply_storage_delta(value.as_deref(), &encoded)?);
+                }
+            }
+        }
+        Ok(value)
     }
 
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
@@ -736,7 +905,7 @@ where
             cf,
             |key| key >= start && key < end,
             self.staged_writes,
-        );
+        )?;
         for (key, value) in values {
             visit(&key, &value)?;
         }
@@ -755,7 +924,7 @@ where
             cf,
             |key| key.starts_with(prefix),
             self.staged_writes,
-        );
+        )?;
         for (key, value) in values {
             visit(&key, &value)?;
         }
@@ -768,6 +937,24 @@ where
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
+        if self.staged_writes.borrow().iter().any(|operation| {
+            operation.cf() == cf
+                && operation.key().starts_with(prefix)
+                && matches!(operation, OwnedWriteOperation::Delta { .. })
+        }) {
+            let mut values = self.base.prefix(cf, prefix)?;
+            overlay_values(
+                &mut values,
+                cf,
+                |key| key.starts_with(prefix),
+                self.staged_writes,
+            )?;
+            for (key, value) in values.into_iter().rev() {
+                visit(&key, &value)?;
+            }
+            return Ok(());
+        }
+
         let staged = staged_prefix_overlay_desc(cf, prefix, self.staged_writes);
         let mut staged_index = 0;
         self.base
@@ -809,18 +996,20 @@ where
         cf: &ColumnFamilyName,
         prefix: &Key,
     ) -> Result<Option<KeyValue>, Error> {
-        let mut has_staged_delete = false;
+        let mut needs_full_merge = false;
         for operation in self.staged_writes.borrow().iter() {
             if operation.cf() != cf || !operation.key().starts_with(prefix) {
                 continue;
             }
             match operation {
                 OwnedWriteOperation::Set { .. } => {}
-                OwnedWriteOperation::Delete { .. } => has_staged_delete = true,
+                OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. } => {
+                    needs_full_merge = true
+                }
             }
         }
 
-        if !has_staged_delete {
+        if !needs_full_merge {
             let largest_staged_set = staged_prefix_overlay_desc(cf, prefix, self.staged_writes)
                 .into_iter()
                 .find_map(|(key, value)| value.map(|value| (key, value)));
@@ -837,7 +1026,7 @@ where
             cf,
             |key| key.starts_with(prefix),
             self.staged_writes,
-        );
+        )?;
         Ok(values.pop())
     }
 
@@ -846,6 +1035,13 @@ where
             match operation {
                 WriteOperation::Set { cf, key, value } => self.set(cf, key, value)?,
                 WriteOperation::Delete { cf, key } => self.delete(cf, key)?,
+                WriteOperation::Delta { cf, key, delta } => {
+                    self.stage(OwnedWriteOperation::Delta {
+                        cf: (*cf).to_owned(),
+                        key: (*key).to_vec(),
+                        delta: (*delta).clone(),
+                    });
+                }
             }
         }
         Ok(())
@@ -857,7 +1053,7 @@ fn overlay_values(
     cf: &ColumnFamilyName,
     include: impl Fn(&[u8]) -> bool,
     staged_writes: &RefCell<Vec<OwnedWriteOperation>>,
-) {
+) -> Result<(), Error> {
     let mut overlay = values
         .drain(..)
         .map(|(key, value)| (key, Some(value)))
@@ -873,6 +1069,11 @@ fn overlay_values(
             OwnedWriteOperation::Delete { key, .. } => {
                 overlay.insert(key.clone(), None);
             }
+            OwnedWriteOperation::Delta { key, delta, .. } => {
+                let encoded = delta.encode()?;
+                let existing = overlay.get(key).and_then(Option::as_deref);
+                overlay.insert(key.clone(), Some(apply_storage_delta(existing, &encoded)?));
+            }
         }
     }
     values.extend(
@@ -880,6 +1081,7 @@ fn overlay_values(
             .into_iter()
             .filter_map(|(key, value)| value.map(|value| (key, value))),
     );
+    Ok(())
 }
 
 fn staged_prefix_overlay_desc(
@@ -899,6 +1101,7 @@ fn staged_prefix_overlay_desc(
             OwnedWriteOperation::Delete { key, .. } => {
                 overlay.insert(key.clone(), None);
             }
+            OwnedWriteOperation::Delta { .. } => {}
         }
     }
     overlay.into_iter().rev().collect()
@@ -912,6 +1115,10 @@ impl<'a> WriteOperation<'a> {
     pub fn delete(cf: &'a str, key: &'a Key) -> Self {
         Self::Delete { cf, key }
     }
+
+    pub fn delta(cf: &'a str, key: &'a Key, delta: &'a StorageDelta) -> Self {
+        Self::Delta { cf, key, delta }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -922,6 +1129,8 @@ pub enum Error {
     InvalidStorageLayout(String),
     #[error("invalid storage key: {0}")]
     InvalidStorageKey(String),
+    #[error("invalid storage delta: {0}")]
+    InvalidStorageDelta(String),
     #[cfg(feature = "rocksdb")]
     #[error(transparent)]
     RocksDb(#[from] ::rocksdb::Error),
@@ -1002,6 +1211,75 @@ pub(crate) mod conformance {
             storage.get("indices", b"name:record").unwrap(),
             Some(b"1".to_vec())
         );
+    }
+
+    pub(crate) fn delta_append_current_winner_observes_merged_state<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            bytes.extend(time.to_le_bytes());
+            bytes.extend([node; 16]);
+            bytes.extend(payload);
+            bytes
+        }
+
+        fn delta(time: u64, node: u8, parents: Vec<(u64, u8)>, record: Vec<u8>) -> StorageDelta {
+            StorageDelta::current_winner(CurrentWinnerDelta {
+                tx_time: time,
+                tx_node_uuid: [node; 16],
+                parents: parents
+                    .into_iter()
+                    .map(|(time, node)| (time, [node; 16]))
+                    .collect(),
+                tx_time_offset: 0,
+                tx_node_uuid_offset: 8,
+                record,
+            })
+            .unwrap()
+        }
+
+        let older = record(10, 1, b"older");
+        let newer = record(20, 1, b"newer");
+        let child = record(11, 2, b"child");
+        let loser = record(9, 9, b"loser");
+
+        storage
+            .write_many(&[WriteOperation::delta(
+                "records",
+                b"row",
+                &delta(10, 1, Vec::new(), older.clone()),
+            )])
+            .unwrap();
+        assert_eq!(storage.get("records", b"row").unwrap(), Some(older.clone()));
+
+        storage
+            .write_many(&[WriteOperation::delta(
+                "records",
+                b"row",
+                &delta(20, 1, Vec::new(), newer.clone()),
+            )])
+            .unwrap();
+        assert_eq!(storage.get("records", b"row").unwrap(), Some(newer.clone()));
+
+        storage
+            .write_many(&[WriteOperation::delta(
+                "records",
+                b"row",
+                &delta(11, 2, vec![(20, 1)], child.clone()),
+            )])
+            .unwrap();
+        assert_eq!(storage.get("records", b"row").unwrap(), Some(child.clone()));
+
+        storage
+            .write_many(&[WriteOperation::delta(
+                "records",
+                b"row",
+                &delta(9, 9, Vec::new(), loser),
+            )])
+            .unwrap();
+        assert_eq!(storage.get("records", b"row").unwrap(), Some(child));
     }
 }
 
@@ -1780,6 +2058,12 @@ mod tests {
     }
 
     #[test]
+    fn memory_storage_conforms_to_delta_append_contract() {
+        let storage = MemoryStorage::new(&["records"]);
+        conformance::delta_append_current_winner_observes_merged_state(storage);
+    }
+
+    #[test]
     fn record_store_writes_and_reads_typed_records() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
@@ -1793,5 +2077,58 @@ mod tests {
 
         let stored = store.get(key).unwrap().unwrap();
         assert_eq!(stored.get_idx(0).unwrap(), Value::U64(42));
+    }
+
+    #[test]
+    fn rocksdb_storage_conforms_to_delta_append_contract() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        conformance::delta_append_current_winner_observes_merged_state(storage);
+    }
+
+    #[test]
+    fn rocksdb_delta_append_survives_reopen_with_pending_operands() {
+        fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            bytes.extend(time.to_le_bytes());
+            bytes.extend([node; 16]);
+            bytes.extend(payload);
+            bytes
+        }
+        fn delta(time: u64, node: u8, record: Vec<u8>) -> StorageDelta {
+            StorageDelta::current_winner(CurrentWinnerDelta {
+                tx_time: time,
+                tx_node_uuid: [node; 16],
+                parents: Vec::new(),
+                tx_time_offset: 0,
+                tx_node_uuid_offset: 8,
+                record,
+            })
+            .unwrap()
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+            storage
+                .write_many(&[WriteOperation::delta(
+                    "records",
+                    b"row",
+                    &delta(10, 1, record(10, 1, b"older")),
+                )])
+                .unwrap();
+            storage
+                .write_many(&[WriteOperation::delta(
+                    "records",
+                    b"row",
+                    &delta(20, 2, record(20, 2, b"newer")),
+                )])
+                .unwrap();
+        }
+        let reopened = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        assert_eq!(
+            reopened.get("records", b"row").unwrap(),
+            Some(record(20, 2, b"newer"))
+        );
     }
 }
