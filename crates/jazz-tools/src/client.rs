@@ -1,5 +1,6 @@
 //! Thin Rust client facade over `jazz::db`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -22,7 +23,8 @@ use crate::websocket_prelude_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;
 use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
-    LocalUpdates as CoreLocalUpdates, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
+    LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
+    Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, TextEdit as CoreTextEdit, TickScheduler,
     TickUrgency, Transport as CoreTransport, WireTransportAdapter,
 };
@@ -47,6 +49,12 @@ use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, Subscri
 type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
 #[cfg(feature = "rocksdb")]
 type CoreRocksDb = CoreDb<CoreRocksDbStorage>;
+
+enum BackendConnection {
+    Memory(Rc<RefCell<CorePeerConnection<CoreMemoryStorage>>>),
+    #[cfg(feature = "rocksdb")]
+    RocksDb(Rc<RefCell<CorePeerConnection<CoreRocksDbStorage>>>),
+}
 
 const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
@@ -100,15 +108,26 @@ impl Clone for JazzClient {
 }
 
 struct ClientDb {
-    inner: Rc<std::cell::RefCell<ClientDbInner>>,
+    inner: Rc<RefCell<ClientDbInner>>,
 }
 
 struct ClientDbInner {
     db: Backend,
+    identity: CoreDbIdentity,
+    connect_config: Option<ConnectConfig>,
+    scheduler: Rc<TickSchedulerImpl>,
+    upstream: Option<BackendConnection>,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<BatchId, ExclusiveTransactionState>,
     closed_transactions: HashMap<BatchId, ClosedTransactionState>,
+}
+
+#[derive(Clone)]
+struct ConnectConfig {
+    server_url: String,
+    app_id: crate::AppId,
+    auth: WsAuthConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,15 +181,25 @@ impl Backend {
         }
     }
 
-    fn connect_upstream(&self, transport: Box<dyn CoreTransport>) {
+    fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
         match self {
-            Self::Memory(db) => {
-                db.connect_upstream(transport);
+            Self::Memory(db) => BackendConnection::Memory(db.connect_upstream(transport)),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => BackendConnection::RocksDb(db.connect_upstream(transport)),
+        }
+    }
+
+    fn detach_connection(&self, connection: &BackendConnection) -> bool {
+        match (self, connection) {
+            (Self::Memory(db), BackendConnection::Memory(connection)) => {
+                db.detach_connection(connection)
             }
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => {
-                db.connect_upstream(transport);
+            (Self::RocksDb(db), BackendConnection::RocksDb(connection)) => {
+                db.detach_connection(connection)
             }
+            #[allow(unreachable_patterns)]
+            _ => false,
         }
     }
 
@@ -586,7 +615,7 @@ impl ClientDb {
             Rc::clone(&scheduler),
         )
         .await?;
-        let inner = Rc::new(std::cell::RefCell::new(inner));
+        let inner = Rc::new(RefCell::new(inner));
         if has_upstream {
             Self::spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
         }
@@ -944,8 +973,20 @@ impl ClientDb {
         ClientDbInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
     }
 
+    fn disconnect_upstream(&self) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(connection) = inner.upstream.take() else {
+            return false;
+        };
+        inner.db.detach_connection(&connection)
+    }
+
+    async fn reconnect_upstream(&self) -> Result<bool> {
+        ClientDbInner::reconnect_upstream(&self.inner).await
+    }
+
     fn spawn_local_tick_driver(
-        inner: Rc<std::cell::RefCell<ClientDbInner>>,
+        inner: Rc<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
     ) {
         let state = scheduler.wake_handle();
@@ -981,32 +1022,92 @@ impl ClientDbInner {
     ) -> Result<Self> {
         let db = Backend::open(schema, storage, identity).await?;
         db.set_tick_scheduler(scheduler.clone());
-        if let Some(server_url) = server_url {
+        let connect_config = if let Some(server_url) = server_url {
             let auth = auth.ok_or_else(|| {
                 JazzError::Connection("server connection missing auth config".to_string())
             })?;
-            let wake = scheduler.wake_handle();
-            let transport = WebSocketTransport::connect_with_wake(
-                &server_url,
+            Some(ConnectConfig {
+                server_url,
                 app_id,
-                identity.author,
                 auth,
-                Arc::new(move || {
-                    wake.immediate.store(true, Ordering::Release);
-                    wake.notify.notify_one();
-                }),
-            )
-            .await
-            .map_err(|error| JazzError::Connection(error.to_string()))?;
-            db.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
-        }
-        Ok(Self {
+            })
+        } else {
+            None
+        };
+        let mut inner = Self {
             db,
+            identity,
+            connect_config,
+            scheduler,
+            upstream: None,
             write_map: HashMap::new(),
             row_tables: HashMap::new(),
             transactions: HashMap::new(),
             closed_transactions: HashMap::new(),
-        })
+        };
+        inner.connect_upstream_transport().await?;
+        Ok(inner)
+    }
+
+    async fn reconnect_upstream(inner: &Rc<RefCell<Self>>) -> Result<bool> {
+        let (db, identity, scheduler, config) = {
+            let inner = inner.borrow();
+            if inner.upstream.is_some() {
+                return Ok(false);
+            }
+            let Some(config) = inner.connect_config.clone() else {
+                return Ok(false);
+            };
+            (
+                inner.db.clone(),
+                inner.identity,
+                Rc::clone(&inner.scheduler),
+                config,
+            )
+        };
+        let connection = Self::connect_with_config(&db, identity, scheduler, config).await?;
+        let mut inner = inner.borrow_mut();
+        if inner.upstream.is_some() {
+            return Ok(false);
+        }
+        inner.upstream = Some(connection);
+        Ok(true)
+    }
+
+    async fn connect_upstream_transport(&mut self) -> Result<()> {
+        if self.upstream.is_some() {
+            return Ok(());
+        }
+        let Some(config) = self.connect_config.clone() else {
+            return Ok(());
+        };
+        self.upstream = Some(
+            Self::connect_with_config(&self.db, self.identity, Rc::clone(&self.scheduler), config)
+                .await?,
+        );
+        Ok(())
+    }
+
+    async fn connect_with_config(
+        db: &Backend,
+        identity: CoreDbIdentity,
+        scheduler: Rc<TickSchedulerImpl>,
+        config: ConnectConfig,
+    ) -> Result<BackendConnection> {
+        let wake = scheduler.wake_handle();
+        let transport = WebSocketTransport::connect_with_wake(
+            &config.server_url,
+            config.app_id,
+            identity.author,
+            config.auth,
+            Arc::new(move || {
+                wake.immediate.store(true, Ordering::Release);
+                wake.notify.notify_one();
+            }),
+        )
+        .await
+        .map_err(|error| JazzError::Connection(error.to_string()))?;
+        Ok(db.connect_upstream(Box::new(WireTransportAdapter::current(transport))))
     }
 
     fn ensure_transaction_open(&self, batch_id: BatchId) -> Result<()> {
@@ -1035,7 +1136,7 @@ impl ClientDbInner {
     }
 
     async fn handle_query(
-        inner: &Rc<std::cell::RefCell<Self>>,
+        inner: &Rc<RefCell<Self>>,
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
@@ -1075,7 +1176,7 @@ impl ClientDbInner {
     }
 
     async fn wait_for_query_coverage(
-        inner: &Rc<std::cell::RefCell<Self>>,
+        inner: &Rc<RefCell<Self>>,
         attachment: &jazz::db::QueryAttachment,
     ) -> Result<()> {
         if inner.borrow().db.query_attachment_is_covered(attachment) {
@@ -1097,7 +1198,7 @@ impl ClientDbInner {
     }
 
     async fn handle_subscribe(
-        inner: &Rc<std::cell::RefCell<Self>>,
+        inner: &Rc<RefCell<Self>>,
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
@@ -1183,7 +1284,7 @@ impl ClientDbInner {
     }
 
     async fn handle_wait_for_batch(
-        inner: &Rc<std::cell::RefCell<Self>>,
+        inner: &Rc<RefCell<Self>>,
         batch_id: BatchId,
         tier: DurabilityTier,
     ) -> Result<()> {
@@ -2204,7 +2305,7 @@ impl JazzClient {
 
     /// Check if connected to server.
     pub fn is_connected(&self) -> bool {
-        false
+        self.db.inner.borrow().upstream.is_some()
     }
 
     /// Create a client that uses the given write context for mutations.
@@ -2224,6 +2325,7 @@ impl JazzClient {
 
     /// Shutdown the client and release resources.
     pub async fn shutdown(self) -> Result<()> {
+        self.db.disconnect_upstream();
         Ok(())
     }
 }
@@ -2239,6 +2341,14 @@ impl JazzClient {
         crate::JazzClient::connect(context)
             .await
             .expect("connect local JazzClient")
+    }
+
+    pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
+        self.db.disconnect_upstream()
+    }
+
+    pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {
+        self.db.reconnect_upstream().await
     }
 }
 

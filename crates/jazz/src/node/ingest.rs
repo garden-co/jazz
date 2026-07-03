@@ -1235,6 +1235,7 @@ where
         global_seq: Option<GlobalSeq>,
         durability: DurabilityTier,
     ) -> Result<(), Error> {
+        self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
         if let Some(existing) = self.query_transaction(tx.tx_id)? {
             let mut existing_versions = self
@@ -2209,6 +2210,9 @@ where
                 self.content_refs_in_version_records(versions)
             }
             SyncMessage::ViewUpdate {
+                version_bundles, ..
+            }
+            | SyncMessage::RowVersionPayloads {
                 version_bundles, ..
             } => {
                 let mut refs = BTreeSet::new();

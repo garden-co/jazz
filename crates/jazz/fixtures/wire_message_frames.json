@@ -114,7 +114,7 @@
       "frame_hex": "01010100020f00",
       "frame_base64": "AQEBAAIPAA==",
       "payload_hex": "0f00",
-      "decoded_debug": "RowVersionPayloads { versions: [] }"
+      "decoded_debug": "RowVersionPayloads { version_bundles: [] }"
     }
   ]
 }

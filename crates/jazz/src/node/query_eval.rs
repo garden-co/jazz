@@ -3540,6 +3540,7 @@ where
         ))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn subscription_is_known_state_declared(
         &self,
         subscription: SubscriptionKey,
