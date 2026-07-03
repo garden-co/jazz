@@ -132,6 +132,15 @@ bound to a different record. `INV-STORAGE-24` — an index scan resolves the
 entry's `"value"` as primary-key bytes and fetches the base record; a missing
 base record for a primary-keyed table means the persisted index is invalid.
 
+_Target amendment (unified arrangement model, ch. 4 §4.6)._ Indices are
+redefined as a degenerate case of the unified arrangement model: a declared
+index IS a durable, pk-ref, implicit-1 arrangement keyed by the declared
+columns. `IndexSchema` remains as declaration sugar; the maintenance and probe
+paths are the arrangement paths. The `INV-STORAGE-22`/`INV-STORAGE-24` key
+encodings become the durable arrangement key encoding. (Terminology: the
+spec-preferred term is _arrangement_; "index" remains acceptable user-facing
+shorthand for the declared durable pk-ref case.)
+
 ## 2.6 Commit ordering
 
 A committed `DatabaseBatch` is the storage boundary at which table writes become

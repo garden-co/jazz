@@ -44,6 +44,16 @@ _Further invariants._ `INV-QUERY-19` — a `BindingSourceOp` appears only inside
 prepared shape (ch. 5); a plain, non-prepared query — a parameterless subscription
 or one-shot read, still the common case — never evaluates one.
 
+_Target amendment (unified arrangement model, ch. 4 §4.6)._ A source operator
+MAY hydrate from a **static scan spec** (point / prefix / range over an
+arrangement key) supplied at graph construction, instead of a full scan. The
+scan spec participates in `NodeDescriptor` identity. Scan specs are static
+(values known at graph build — one-shots, hydration); parameterized
+steady-state probes remain binding joins (their storage-backed probe design is
+the ch. 4 overlay-probe direction: binding side resident, deletions ride
+deltas, binding-delta probes read the durable boundary arrangement through the
+staged-write overlay so probes see post-tick state).
+
 ## 3.3 Stateless operators
 
 Stateless operators transform or route deltas without keeping persistent
