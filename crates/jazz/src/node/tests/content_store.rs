@@ -695,6 +695,78 @@ fn authority_text_merge_dispatches_registered_rung3_strategy_and_records_spec_ha
 }
 
 #[test]
+fn authority_text_merge_dispatches_registered_markdown_strategy_and_records_spec_hash() {
+    let schema = text_large_value_schema_with_strategy(crate::markdown_strategy::STRATEGY_ID);
+    let row_uuid = row(0x98);
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(0x99), schema.clone());
+    let (_left_dir, mut left_writer) = open_node_with_schema(node(0x9a), schema.clone());
+    let (_right_dir, mut right_writer) = open_node_with_schema(node(0x9b), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x9c), schema.clone());
+    core.register_text_merge_strategy(Arc::new(
+        crate::markdown_strategy::SimpleMarkdownStrategy,
+    ));
+
+    let base_unit = commit_large_value_edit_unit(
+        &mut base_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+            .made_by(user(0xa1))
+            .insert(0, b"# Title\nSecond paragraph.\n"),
+    );
+    apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
+
+    let left = commit_large_value_edit_unit(
+        &mut left_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+            .made_by(user(0xa1))
+            .delete(2, 5)
+            .insert(2, b"New Title"),
+    );
+    let right = commit_large_value_edit_unit(
+        &mut right_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 21)
+            .made_by(user(0xa2))
+            .delete(15, 9)
+            .insert(15, b"changed paragraph"),
+    );
+    apply_large_value_unit(&mut core, &left_writer, left);
+    apply_large_value_unit(&mut core, &right_writer, right);
+
+    let merge = core
+        .query_all_versions()
+        .unwrap()
+        .into_iter()
+        .find(|version| {
+            version.row_uuid() == row_uuid
+                && core.version_tx_id(version).unwrap().node == node(0x9c)
+                && version.parents().len() == 2
+        })
+        .expect("core should create a markdown strategy merge version");
+    assert_eq!(
+        core.materialize_large_value_column(&schema.tables[0], &merge, "body")
+            .unwrap(),
+        b"# New Title\nSecond changed paragraph.\n".to_vec()
+    );
+    let merge_tx = core
+        .query_transaction(core.version_tx_id(&merge).unwrap())
+        .unwrap()
+        .expect("merge transaction should be recorded");
+    let strategy = merge_tx
+        .tx
+        .merge_strategy
+        .expect("text merge should record markdown strategy");
+    let spec_hash = schema.tables[0].columns[0]
+        .text_merge_spec
+        .as_ref()
+        .unwrap()
+        .spec_hash();
+    assert_eq!(strategy.id, crate::markdown_strategy::STRATEGY_ID);
+    assert_eq!(strategy.version, crate::markdown_strategy::STRATEGY_VERSION);
+    assert_eq!(strategy.column_spec_hash, spec_hash);
+}
+
+#[test]
 fn failing_rung3_text_strategy_falls_back_to_builtin_char_walk() {
     let calls = Arc::new(AtomicUsize::new(0));
     let (materialized, strategy, fallbacks) = rung3_fallback_text_merge(
