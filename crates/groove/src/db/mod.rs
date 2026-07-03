@@ -27,8 +27,8 @@ use crate::schema::{
     PrimaryKeyColumn, PrimaryKeyType, TableSchema,
 };
 use crate::storage::{
-    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StorageLayout,
-    WriteOperation,
+    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StorageDelta, StorageLayout,
+    WriteOperation, apply_storage_delta,
 };
 use thiserror::Error;
 
@@ -1307,6 +1307,14 @@ where
                         record,
                     });
                 }
+                BatchOperation::DeltaRaw { table, key, delta } => {
+                    self.table(&table)?;
+                    pending_writes.push(PendingTableWrite::Delta {
+                        table,
+                        key: key.into_bytes(),
+                        delta,
+                    });
+                }
                 BatchOperation::Delete { table, key } => {
                     self.table(&table)?;
                     let key = key.into_bytes();
@@ -1353,6 +1361,7 @@ where
             .map(|(write, store)| match write {
                 PendingTableWrite::Set { key, record, .. } => store.set(key, record),
                 PendingTableWrite::Delete { key, .. } => store.delete(key),
+                PendingTableWrite::Delta { key, delta, .. } => store.delta(key, delta),
             })
             .collect::<Vec<_>>();
         let mut staged_operations = base_operations
@@ -1996,6 +2005,7 @@ fn write_operation_bytes(operation: &crate::storage::WriteOperation<'_>) -> usiz
     match operation {
         crate::storage::WriteOperation::Set { key, value, .. } => key.len() + value.len(),
         crate::storage::WriteOperation::Delete { key, .. } => key.len(),
+        crate::storage::WriteOperation::Delta { key, delta, .. } => key.len() + delta.payload.len(),
     }
 }
 
@@ -2032,7 +2042,8 @@ fn storage_write_destination(
 ) -> StorageWriteDestination {
     match operation {
         crate::storage::WriteOperation::Set { cf, key, .. }
-        | crate::storage::WriteOperation::Delete { cf, key } => {
+        | crate::storage::WriteOperation::Delete { cf, key }
+        | crate::storage::WriteOperation::Delta { cf, key, .. } => {
             if *cf == "indices" {
                 storage_index_write_destination(key)
             } else {
@@ -2143,6 +2154,11 @@ fn owned_write_operation(operation: &crate::storage::WriteOperation<'_>) -> Owne
             cf: (*cf).to_owned(),
             key: (*key).to_vec(),
         },
+        crate::storage::WriteOperation::Delta { cf, key, delta } => OwnedWriteOperation::Delta {
+            cf: (*cf).to_owned(),
+            key: (*key).to_vec(),
+            delta: (*delta).clone(),
+        },
     }
 }
 
@@ -2159,6 +2175,11 @@ enum PendingTableWrite {
         table: String,
         key: Vec<u8>,
     },
+    Delta {
+        table: String,
+        key: Vec<u8>,
+        delta: StorageDelta,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -2170,13 +2191,15 @@ enum WriteMode {
 impl PendingTableWrite {
     fn table(&self) -> &str {
         match self {
-            Self::Set { table, .. } | Self::Delete { table, .. } => table,
+            Self::Set { table, .. } | Self::Delete { table, .. } | Self::Delta { table, .. } => {
+                table
+            }
         }
     }
 
     fn key(&self) -> &[u8] {
         match self {
-            Self::Set { key, .. } | Self::Delete { key, .. } => key,
+            Self::Set { key, .. } | Self::Delete { key, .. } | Self::Delta { key, .. } => key,
         }
     }
 
@@ -2184,7 +2207,7 @@ impl PendingTableWrite {
         &self,
         descriptor: RecordDescriptor,
         current: Option<Vec<u8>>,
-    ) -> TableDelta {
+    ) -> Result<TableDelta, Error> {
         let deltas = match self {
             Self::Set { record, .. } => {
                 let mut deltas = current
@@ -2201,13 +2224,27 @@ impl PendingTableWrite {
                 .into_iter()
                 .map(|record| RecordDelta { record, weight: -1 })
                 .collect(),
+            Self::Delta { delta, .. } => {
+                let encoded = delta.encode().map_err(Error::Storage)?;
+                let next =
+                    apply_storage_delta(current.as_deref(), &encoded).map_err(Error::Storage)?;
+                let mut deltas = current
+                    .into_iter()
+                    .map(|record| RecordDelta { record, weight: -1 })
+                    .collect::<Vec<_>>();
+                deltas.push(RecordDelta {
+                    record: next,
+                    weight: 1,
+                });
+                deltas
+            }
         };
 
-        TableDelta {
+        Ok(TableDelta {
             table: self.table().to_owned(),
             descriptor,
             deltas,
-        }
+        })
     }
 }
 
@@ -2244,10 +2281,14 @@ where
                 key: write.key().to_vec(),
             });
         }
-        table_deltas.push(write.delta_from_current(*store.descriptor(), current.clone()));
+        table_deltas.push(write.delta_from_current(*store.descriptor(), current.clone())?);
         let next = match write {
             PendingTableWrite::Set { record, .. } => Some(record.clone()),
             PendingTableWrite::Delete { .. } => None,
+            PendingTableWrite::Delta { delta, .. } => {
+                let encoded = delta.encode().map_err(Error::Storage)?;
+                Some(apply_storage_delta(current.as_deref(), &encoded).map_err(Error::Storage)?)
+            }
         };
         overlay.insert(overlay_key, next);
     }
@@ -2324,6 +2365,19 @@ impl DatabaseBatch {
         });
     }
 
+    pub fn delta_raw(
+        &mut self,
+        table: impl Into<String>,
+        key: PrimaryKeyValue,
+        delta: StorageDelta,
+    ) {
+        self.operations.push(BatchOperation::DeltaRaw {
+            table: table.into(),
+            key,
+            delta,
+        });
+    }
+
     pub fn delete(&mut self, table: impl Into<String>, key: PrimaryKeyValue) {
         self.operations.push(BatchOperation::Delete {
             table: table.into(),
@@ -2355,6 +2409,11 @@ pub enum BatchOperation {
         table: String,
         key: PrimaryKeyValue,
         record: Vec<u8>,
+    },
+    DeltaRaw {
+        table: String,
+        key: PrimaryKeyValue,
+        delta: StorageDelta,
     },
     Delete {
         table: String,

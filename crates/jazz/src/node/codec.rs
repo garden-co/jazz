@@ -51,13 +51,14 @@ groove::define_record! {
         0 => row_uuid: RowUuid,
         1 => tx_time: TxTime,
         2 => tx_node_id: NodeAlias,
-        3 => schema_version: SchemaVersionAlias,
-        4 => parents: ParentRefs,
-        5 => created_by: AuthorId,
-        6 => created_at: TxTime,
-        7 => updated_by: AuthorId,
-        8 => updated_at: TxTime,
-        9 => global_seq: Option<GlobalSeq>,
+        3 => tx_node_uuid: NodeUuid,
+        4 => schema_version: SchemaVersionAlias,
+        5 => parents: ParentRefs,
+        6 => created_by: AuthorId,
+        7 => created_at: TxTime,
+        8 => updated_by: AuthorId,
+        9 => updated_at: TxTime,
+        10 => global_seq: Option<GlobalSeq>,
         .. user_cells,
     }
 }
@@ -67,14 +68,15 @@ groove::define_record! {
         0 => row_uuid: RowUuid,
         1 => tx_time: TxTime,
         2 => tx_node_id: NodeAlias,
-        3 => schema_version: SchemaVersionAlias,
-        4 => parents: ParentRefs,
-        5 => created_by: AuthorId,
-        6 => created_at: TxTime,
-        7 => updated_by: AuthorId,
-        8 => updated_at: TxTime,
-        9 => global_seq: Option<GlobalSeq>,
-        10 => _deletion: DeletionEvent,
+        3 => tx_node_uuid: NodeUuid,
+        4 => schema_version: SchemaVersionAlias,
+        5 => parents: ParentRefs,
+        6 => created_by: AuthorId,
+        7 => created_at: TxTime,
+        8 => updated_by: AuthorId,
+        9 => updated_at: TxTime,
+        10 => global_seq: Option<GlobalSeq>,
+        11 => _deletion: DeletionEvent,
     }
 }
 
@@ -1382,11 +1384,14 @@ pub(super) fn global_current_primary_key(row_uuid: RowUuid) -> PrimaryKeyValue {
     PrimaryKeyValue::Composite(vec![PrimaryKeyValue::Uuid(row_uuid.0)])
 }
 
-fn stored_version_prefix_values(version: &VersionRow) -> Vec<Value> {
+fn stored_version_prefix_values(version: &VersionRow, tx_node_id: Option<NodeUuid>) -> Vec<Value> {
     vec![
         Value::Uuid(version.row_uuid().0),
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),
+        tx_node_id
+            .map(|node| Value::Uuid(node.0))
+            .unwrap_or(Value::Uuid(uuid::Uuid::nil())),
         Value::U64(version.schema_version_alias().0),
         Value::Array(
             version
@@ -1405,9 +1410,10 @@ fn stored_version_prefix_values(version: &VersionRow) -> Vec<Value> {
 pub(super) fn global_current_values(
     table: &TableSchema,
     version: &VersionRow,
+    tx_node_id: NodeUuid,
     global_seq: Option<GlobalSeq>,
 ) -> Result<Vec<Value>, Error> {
-    let mut values = stored_version_prefix_values(version);
+    let mut values = stored_version_prefix_values(version, Some(tx_node_id));
     values.push(Value::Nullable(
         global_seq.map(|seq| Box::new(Value::U64(seq.0))),
     ));
@@ -1422,9 +1428,10 @@ pub(super) fn global_current_values(
 
 pub(super) fn register_global_current_values(
     version: &VersionRow,
+    tx_node_id: NodeUuid,
     global_seq: Option<GlobalSeq>,
 ) -> Vec<Value> {
-    let mut values = stored_version_prefix_values(version);
+    let mut values = stored_version_prefix_values(version, Some(tx_node_id));
     values.push(Value::Nullable(
         global_seq.map(|seq| Box::new(Value::U64(seq.0))),
     ));

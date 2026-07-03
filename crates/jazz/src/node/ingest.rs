@@ -19,6 +19,7 @@ use crate::text_merge::{
     EventId as TextEventId, TextEvent, TextEventGraph, TieBreak as TextTieBreak,
 };
 use crate::time::TxTimeSortKey;
+use groove::storage::{CurrentWinnerDelta, StorageDelta};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct CommitUnitParkMode {
@@ -3395,7 +3396,12 @@ where
                     base_for_current_names,
                 ),
                 &storage_tables[0],
-                global_current_values(&table, version, Some(global_seq))?,
+                global_current_values(
+                    &table,
+                    version,
+                    self.version_tx_id(version)?.node,
+                    Some(global_seq),
+                )?,
             ),
             VersionLayer::Deletion => (
                 register_global_current_table_name_for_schema(
@@ -3404,7 +3410,11 @@ where
                     base_for_current_names,
                 ),
                 &storage_tables[1],
-                register_global_current_values(version, Some(global_seq)),
+                register_global_current_values(
+                    version,
+                    self.version_tx_id(version)?.node,
+                    Some(global_seq),
+                ),
             ),
         };
         let rows = self
@@ -3500,43 +3510,47 @@ where
         } else {
             schema_version
         };
+        let tx_id = self.version_tx_id(version)?;
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
-                batch.update_raw(
+                let storage_table = table.global_current_storage_tables()[0].clone();
+                let record = owned_record_from_storage_values(
+                    &storage_table,
+                    global_current_values(&table, version, tx_id.node, Some(global_seq))
+                        .expect("valid global current values"),
+                )
+                .expect("valid global current row");
+                batch.delta_raw(
                     global_current_table_name_for_schema(
                         version.table(),
                         schema_version,
                         base_for_current_names,
                     ),
                     global_current_primary_key(version.row_uuid()),
-                    owned_record_from_storage_values(
-                        &table.global_current_storage_tables()[0],
-                        global_current_values(&table, version, Some(global_seq))
-                            .expect("valid global current values"),
-                    )
-                    .expect("valid global current row")
-                    .raw()
-                    .to_vec(),
+                    current_winner_delta(&storage_table, version, tx_id, record.raw())?,
                 );
             }
-            VersionLayer::Deletion => batch.update_raw(
-                register_global_current_table_name_for_schema(
-                    version.table(),
-                    schema_version,
-                    base_for_current_names,
-                ),
-                global_current_primary_key(version.row_uuid()),
-                owned_record_from_storage_values(
-                    &self
-                        .table_in_schema(version.table(), schema_version)?
-                        .global_current_storage_tables()[1],
-                    register_global_current_values(version, Some(global_seq)),
+            VersionLayer::Deletion => {
+                let storage_table = self
+                    .table_in_schema(version.table(), schema_version)?
+                    .global_current_storage_tables()[1]
+                    .clone();
+                let record = owned_record_from_storage_values(
+                    &storage_table,
+                    register_global_current_values(version, tx_id.node, Some(global_seq)),
                 )
-                .expect("valid register global current row")
-                .raw()
-                .to_vec(),
-            ),
+                .expect("valid register global current row");
+                batch.delta_raw(
+                    register_global_current_table_name_for_schema(
+                        version.table(),
+                        schema_version,
+                        base_for_current_names,
+                    ),
+                    global_current_primary_key(version.row_uuid()),
+                    current_winner_delta(&storage_table, version, tx_id, record.raw())?,
+                );
+            }
         }
         batch.update(
             "jazz_global_changes",
@@ -3573,8 +3587,13 @@ where
                     history_primary_key(version),
                     owned_record_from_storage_values(
                         &table.ahead_current_storage_tables()[0],
-                        global_current_values(&table, version, None)
-                            .expect("valid ahead current values"),
+                        global_current_values(
+                            &table,
+                            version,
+                            self.version_tx_id(version)?.node,
+                            None,
+                        )
+                        .expect("valid ahead current values"),
                     )
                     .expect("valid ahead current row")
                     .raw()
@@ -3592,7 +3611,11 @@ where
                     &self
                         .table_in_schema(version.table(), schema_version)?
                         .ahead_current_storage_tables()[1],
-                    register_global_current_values(version, None),
+                    register_global_current_values(
+                        version,
+                        self.version_tx_id(version)?.node,
+                        None,
+                    ),
                 )
                 .expect("valid register ahead current row")
                 .raw()
@@ -4276,6 +4299,38 @@ fn counter_value_from_i128(
             "counter strategy requires integer column",
         )),
     }
+}
+
+fn current_winner_delta(
+    storage_table: &groove::schema::TableSchema,
+    version: &VersionRow,
+    tx_id: TxId,
+    record: &[u8],
+) -> Result<StorageDelta, Error> {
+    let descriptor = storage_table.record_schema();
+    let tx_time_offset = descriptor
+        .field_span(record, GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?
+        .start;
+    let tx_node_uuid_offset = descriptor
+        .field_span(record, GlobalCurrentRowRecord::FIELD_TX_NODE_UUID_IDX)?
+        .start;
+    let tx_time_offset = u32::try_from(tx_time_offset)
+        .map_err(|_| Error::InvalidStoredValue("current winner tx_time offset overflow"))?;
+    let tx_node_uuid_offset = u32::try_from(tx_node_uuid_offset)
+        .map_err(|_| Error::InvalidStoredValue("current winner tx_node_uuid offset overflow"))?;
+    StorageDelta::current_winner(CurrentWinnerDelta {
+        tx_time: tx_id.time.0,
+        tx_node_uuid: *tx_id.node.as_bytes(),
+        parents: version
+            .parents()
+            .into_iter()
+            .map(|parent| (parent.time.0, *parent.node.as_bytes()))
+            .collect(),
+        tx_time_offset,
+        tx_node_uuid_offset,
+        record: record.to_vec(),
+    })
+    .map_err(Error::Storage)
 }
 
 #[cfg(test)]

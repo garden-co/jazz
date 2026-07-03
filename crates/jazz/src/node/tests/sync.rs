@@ -694,6 +694,52 @@ fn accepted_fates_maintain_global_current_tables() {
         Some(second)
     );
 }
+
+#[test]
+fn global_current_blind_winner_merge_matches_history_across_ties_and_parents() {
+    let schema = schema();
+    let core_dir = tempfile::tempdir().unwrap();
+    let refs = schema.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
+    let mut core = NodeState::new(node(9), schema.clone(), storage).unwrap();
+    let (_writer_a_dir, mut writer_a) = open_node_with_schema(node(1), schema.clone());
+    let (_writer_b_dir, mut writer_b) = open_node_with_schema(node(2), schema.clone());
+    let row = row(8);
+
+    let (left, left_message) = writer_a
+        .commit_mergeable_unit(MergeableCommit::new("todos", row, 20).cells(title_cells("left")))
+        .unwrap();
+    let (right, right_message) = writer_b
+        .commit_mergeable_unit(MergeableCommit::new("todos", row, 20).cells(title_cells("right")))
+        .unwrap();
+
+    core.apply_sync_message(right_message).unwrap();
+    core.apply_sync_message(left_message).unwrap();
+    let merge = core
+        .query_all_versions()
+        .unwrap()
+        .into_iter()
+        .find(|version| {
+            version.row_uuid() == row
+                && version.parents().contains(&left)
+                && version.parents().contains(&right)
+        })
+        .map(|version| core.version_tx_id(&version).unwrap())
+        .expect("concurrent same-row heads should create a merge winner");
+    assert_eq!(
+        global_winner_tx(&mut core, "todos", row, VersionLayer::Content),
+        Some(merge)
+    );
+
+    drop(core);
+    let mut reopened = reopen_node_at(&core_dir, node(9), schema);
+    assert_eq!(
+        global_winner_tx(&mut reopened, "todos", row, VersionLayer::Content),
+        Some(merge)
+    );
+}
+
 #[test]
 fn reopened_core_continues_sync_after_restart() {
     let schema = schema();
