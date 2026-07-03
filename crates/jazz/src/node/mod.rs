@@ -891,6 +891,7 @@ where
                 history_primary_key(&stored),
                 stored.record.raw().to_vec(),
             );
+            self.update_merge_heads_for_content_version(&mut batch, &stored)?;
             self.write_ahead_current_insert(&mut batch, &stored);
             for parent in stored.parents() {
                 if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
@@ -1026,6 +1027,7 @@ where
             history_primary_key(&stored),
             stored.record.raw().to_vec(),
         );
+        self.update_merge_heads_for_content_version(&mut batch, &stored)?;
         self.write_ahead_current_insert(&mut batch, &stored);
         for parent in stored.parents() {
             if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {

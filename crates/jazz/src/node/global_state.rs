@@ -128,27 +128,6 @@ where
         Some(TxId::new(tx_time, tx_node))
     }
 
-    /// Return locally held content heads for a row.
-    pub(super) fn content_heads(
-        &mut self,
-        table: &str,
-        row_uuid: RowUuid,
-    ) -> Result<Vec<VersionRow>, Error> {
-        let versions = self.query_row_versions(table, row_uuid)?;
-        let candidate_indices = versions
-            .iter()
-            .enumerate()
-            .filter(|(_, version)| version.layer() == VersionLayer::Content)
-            .map(|(idx, _)| idx)
-            .collect::<Vec<_>>();
-        Ok(
-            content_head_indices(&versions, &candidate_indices, &self.node_aliases)
-                .into_iter()
-                .map(|idx| versions[idx].clone())
-                .collect(),
-        )
-    }
-
     pub(super) fn global_current_updates(&mut self, tx_id: TxId) -> Result<Vec<VersionRow>, Error> {
         let mut updates = BTreeMap::<(String, RowUuid, VersionLayer), VersionRow>::new();
         let version_made_at = self
