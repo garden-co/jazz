@@ -285,6 +285,9 @@ fn estimated_variable_value_len(col: &ColumnDescriptor, val: &Value) -> usize {
                     id_len
                 }
             }
+            Value::LargeValue(_) => {
+                panic!("large-value handles cannot be encoded into catalogue rows")
+            }
             _ => 0,
         }
 }
@@ -486,6 +489,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         }
         Value::Text(_) => unreachable!("Text is not fixed-size"),
         Value::Bytea(_) => unreachable!("Bytea is not fixed-size"),
+        Value::LargeValue(_) => unreachable!("LargeValue is not fixed-size"),
         Value::Array(_) => unreachable!("Array is not fixed-size"),
         Value::Row { .. } => unreachable!("Row is not fixed-size"),
     }
@@ -505,6 +509,9 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
     match val {
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
         Value::Bytea(bytes) => buf.extend_from_slice(bytes),
+        Value::LargeValue(_) => {
+            panic!("large-value handles cannot be encoded into catalogue rows")
+        }
         Value::Array(elements) => encode_array_into(buf, elements, &col.column_type),
         Value::Row { id, values } => {
             // Encode row using its descriptor from the column type
@@ -918,6 +925,9 @@ fn encode_value(value: &Value) -> Vec<u8> {
         Value::BatchId(bytes) => bytes.to_vec(),
         Value::Text(s) => s.as_bytes().to_vec(),
         Value::Bytea(bytes) => bytes.clone(),
+        Value::LargeValue(_) => {
+            panic!("large-value handles cannot be encoded into catalogue rows")
+        }
         Value::Array(elements) => encode_array_simple(elements),
         Value::Row { .. } => panic!("Row values require a descriptor - use encode_value_with_type"),
         Value::Null => vec![],

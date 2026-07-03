@@ -278,7 +278,10 @@ fn blob_column_round_trips_opaque_bytes() {
 
     let rows = node.current_rows("notes", DurabilityTier::Local).unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].cell_at(0), Some(Value::Bytes(body)));
+    let Some(Value::Bytes(handle)) = rows[0].cell_at(0) else {
+        panic!("expected large-value handle");
+    };
+    assert_eq!(node.hydrate_large_value_handle(&handle).unwrap(), body);
 }
 #[test]
 fn late_lower_hlc_child_is_rejected_at_admission() {
