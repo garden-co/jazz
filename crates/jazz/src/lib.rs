@@ -117,6 +117,8 @@ pub mod protocol_limits;
 pub mod query;
 /// Jazz schema and storage lowering.
 pub mod schema;
+/// Pure plaintext operation substrate and deterministic text-merge walk.
+pub mod text_merge;
 /// Logical time and sequence counters.
 pub mod time;
 /// Transaction, fate, and history vocabulary.
