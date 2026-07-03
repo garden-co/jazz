@@ -3322,6 +3322,13 @@ where
                                     })
                                 {
                                     announced_shapes.remove(&registration_key);
+                                    if handle_transport_backpressure(
+                                        &self.node,
+                                        &self.scheduler,
+                                        &error,
+                                    ) {
+                                        return Ok(stats);
+                                    }
                                     return Err(transport_error(error));
                                 }
                             }
@@ -3353,6 +3360,13 @@ where
                             if let Err(error) =
                                 self.transport.send(SyncMessage::Subscribe(subscribe))
                             {
+                                if handle_transport_backpressure(
+                                    &self.node,
+                                    &self.scheduler,
+                                    &error,
+                                ) {
+                                    return Ok(stats);
+                                }
                                 return Err(transport_error(error));
                             }
                         }
@@ -3361,6 +3375,13 @@ where
                             if let Err(error) = self.transport.send(SyncMessage::Unsubscribe {
                                 subscription: *subscription,
                             }) {
+                                if handle_transport_backpressure(
+                                    &self.node,
+                                    &self.scheduler,
+                                    &error,
+                                ) {
+                                    return Ok(stats);
+                                }
                                 return Err(transport_error(error));
                             }
                         }
@@ -3371,6 +3392,13 @@ where
                                     extent: extent.clone(),
                                 })
                             {
+                                if handle_transport_backpressure(
+                                    &self.node,
+                                    &self.scheduler,
+                                    &error,
+                                ) {
+                                    return Ok(stats);
+                                }
                                 return Err(transport_error(error));
                             }
                         }
@@ -3379,6 +3407,13 @@ where
                                 identity: *identity,
                                 claims: claims.clone(),
                             }) {
+                                if handle_transport_backpressure(
+                                    &self.node,
+                                    &self.scheduler,
+                                    &error,
+                                ) {
+                                    return Ok(stats);
+                                }
                                 return Err(transport_error(error));
                             }
                         }
@@ -3400,7 +3435,14 @@ where
                         .and_then(|pending| pending.unit.clone())
                         .map(Ok)
                         .unwrap_or_else(|| self.node.borrow_mut().commit_unit_for(tx_id))?;
-                    send_with_local_content_extents(&self.node, self.transport.as_mut(), unit)?;
+                    if let Err(error) =
+                        send_with_local_content_extents(&self.node, self.transport.as_mut(), unit)
+                    {
+                        if handle_db_backpressure(&self.node, &self.scheduler, &error) {
+                            return Ok(stats);
+                        }
+                        return Err(error);
+                    }
                     uploaded.insert(tx_id);
                 }
                 let mut applied = false;
@@ -3415,10 +3457,8 @@ where
                     match received.message {
                         SyncMessage::RowVersionPayloads { version_bundles } => {
                             let Some(repair) = pending_row_version_repairs.pop_front() else {
-                                return Err(Error::new(
-                                    ErrorCode::Protocol,
-                                    "row-version repair payload arrived without pending request",
-                                ));
+                                drop_peer_request(&self.node);
+                                continue;
                             };
                             {
                                 let mut node = self.node.borrow_mut();
@@ -3515,35 +3555,56 @@ where
                             ast,
                         } => {
                             if let Err(message) = validate_shape_ast_size(&ast) {
-                                return Err(Error::new(ErrorCode::Protocol, message));
+                                let _ = message;
+                                drop_peer_request(&self.node);
+                                continue;
                             }
-                            ensure_supported_register_shape_options(&opts)?;
+                            if ensure_supported_register_shape_options(&opts).is_err() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                             if let Some(query) = ast.query() {
-                                ensure_supported_maintained_coverage_query_shape(query)?;
+                                if ensure_supported_maintained_coverage_query_shape(query).is_err()
+                                {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
                             }
                             let registration_key = (shape_id, opts.read_view_key());
                             if let Some(existing) = registered_shape_opts.get(&registration_key)
                                 && existing != &opts
                             {
-                                return Err(Error::new(
-                                    ErrorCode::Protocol,
-                                    "conflicting RegisterShape options for shape/read-view key",
-                                ));
+                                drop_peer_request(&self.node);
+                                continue;
                             }
                             registered_shape_opts.insert(registration_key, opts);
-                            self.node.borrow_mut().apply_sync_message(
-                                SyncMessage::RegisterShape {
-                                    shape_id,
-                                    ast,
-                                    opts: RegisterShapeOptions::default(),
-                                },
-                            )?;
+                            let register_result = {
+                                self.node.borrow_mut().apply_sync_message(
+                                    SyncMessage::RegisterShape {
+                                        shape_id,
+                                        ast,
+                                        opts: RegisterShapeOptions::default(),
+                                    },
+                                )
+                            };
+                            if let Err(error) = register_result {
+                                if matches!(
+                                    error,
+                                    crate::node::Error::Storage(_) | crate::node::Error::Groove(_)
+                                ) {
+                                    return Err(error.into());
+                                }
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                         }
                         SyncMessage::Subscribe(subscribe) => {
                             if let Err(message) =
                                 validate_known_state_declaration(&subscribe.known_state)
                             {
-                                return Err(Error::new(ErrorCode::Protocol, message));
+                                let _ = message;
+                                drop_peer_request(&self.node);
+                                continue;
                             }
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
@@ -3552,14 +3613,23 @@ where
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 continue;
                             };
-                            ensure_supported_subscription_shape(&shape)?;
+                            if ensure_supported_subscription_shape(&shape).is_err() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                             let value_map = shape
                                 .params()
                                 .keys()
                                 .cloned()
                                 .zip(values)
                                 .collect::<BTreeMap<_, _>>();
-                            let binding = shape.bind(value_map)?;
+                            let binding = match shape.bind(value_map) {
+                                Ok(binding) => binding,
+                                Err(_) => {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                            };
                             let opts = registered_shape_opts
                                 .get(&(shape_id, subscription.read_view))
                                 .cloned()
@@ -3568,8 +3638,18 @@ where
                                         ErrorCode::Protocol,
                                         "subscription referenced unregistered shape/read view",
                                     )
-                                })?;
-                            ensure_supported_register_shape_options(&opts)?;
+                                });
+                            let opts = match opts {
+                                Ok(opts) => opts,
+                                Err(_) => {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                            };
+                            if ensure_supported_register_shape_options(&opts).is_err() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                             let coverage = coverage_key(&shape, &binding, opts.clone());
                             let group_subscription = SubscriptionKey {
                                 shape_id: coverage.shape_id,
@@ -3695,7 +3775,9 @@ where
                         }
                         SyncMessage::FetchRowVersions { requests } => {
                             if let Err(message) = validate_fetch_row_versions(&requests) {
-                                return Err(Error::new(ErrorCode::Protocol, message));
+                                let _ = message;
+                                drop_peer_request(&self.node);
+                                continue;
                             }
                             let responses = {
                                 let mut node = self.node.borrow_mut();
@@ -3721,7 +3803,9 @@ where
                             if let SyncMessage::ContentExtents { extents } = &other
                                 && let Err(message) = validate_content_extents(extents)
                             {
-                                return Err(Error::new(ErrorCode::Protocol, message));
+                                let _ = message;
+                                drop_peer_request(&self.node);
+                                continue;
                             }
                             let relay_upload = match &other {
                                 SyncMessage::CommitUnit { tx, .. } => {
@@ -3861,6 +3945,48 @@ fn transport_error(error: TransportError) -> Error {
             Error::new(ErrorCode::Backpressure, "transport backpressure")
         }
         TransportError::Failed(message) => Error::new(ErrorCode::Protocol, message),
+    }
+}
+
+fn drop_peer_request<S>(node: &Rc<RefCell<NodeState<S>>>)
+where
+    S: OrderedKvStorage,
+{
+    node.borrow_mut().record_dropped_peer_request();
+}
+
+fn handle_transport_backpressure<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    scheduler: &SharedTickScheduler,
+    error: &TransportError,
+) -> bool
+where
+    S: OrderedKvStorage,
+{
+    match error {
+        TransportError::Backpressure => {
+            node.borrow_mut().record_transport_backpressure_retry();
+            schedule_tick_in(scheduler, TickUrgency::Deferred);
+            true
+        }
+        TransportError::Failed(_) => false,
+    }
+}
+
+fn handle_db_backpressure<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    scheduler: &SharedTickScheduler,
+    error: &Error,
+) -> bool
+where
+    S: OrderedKvStorage,
+{
+    if error.code == ErrorCode::Backpressure {
+        node.borrow_mut().record_transport_backpressure_retry();
+        schedule_tick_in(scheduler, TickUrgency::Deferred);
+        true
+    } else {
+        false
     }
 }
 
