@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompressionType, Direction,
-    IteratorMode, Options, ReadOptions, WriteBatch, WriteBufferManager, WriteOptions,
+    IteratorMode, Options, ReadOptions, WriteBatch, WriteBufferManager, WriteOptions, properties,
 };
 
 use super::{ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation};
@@ -145,6 +145,19 @@ impl super::ReopenableStorage for RocksDbStorage {
 impl OrderedKvStorage for RocksDbStorage {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         Ok(self.db.get_cf(self.cf_handle(cf)?, key)?)
+    }
+
+    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+        let handle = self.cf_handle(cf)?;
+        let sst = self
+            .db
+            .property_int_value_cf(handle, properties::TOTAL_SST_FILES_SIZE)?
+            .unwrap_or(0);
+        let mem = self
+            .db
+            .property_int_value_cf(handle, properties::SIZE_ALL_MEM_TABLES)?
+            .unwrap_or(0);
+        Ok(Some(sst.saturating_add(mem)))
     }
 
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
