@@ -4389,7 +4389,13 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
         ])),
     );
 
+    core.reset_query_engine_read_metrics();
     assert!(core.dry_run_write_current_allows("docs", direct_doc, reader).unwrap());
+    let direct_metrics = core.query_engine_read_metrics().clone();
+    assert_eq!(
+        direct_metrics.source_primary_key_scans, 1,
+        "dry-run update probe should point-scan the proposed row source"
+    );
     assert!(core.dry_run_write_current_allows("docs", closure_doc, reader).unwrap());
     assert!(!core.dry_run_write_current_allows("docs", hidden_doc, reader).unwrap());
 }

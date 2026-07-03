@@ -902,21 +902,20 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
-        if tier != DurabilityTier::Global {
-            return Ok(None);
-        }
         let Some(access_path) = self.access_paths.get(&request.source).cloned() else {
             return Ok(None);
         };
         match access_path {
             CurrentAccessPath::PrimaryKey(prefix) => {
                 self.node.query_engine_read_metrics.source_primary_key_scans += 1;
-                Ok(Some(GraphBuilder::table_scan(
-                    global_current_table_name(&table.name),
-                    static_scan_for_prefix(prefix, 1),
+                Ok(Some(selected_visible_current_primary_key_graph(
+                    table, tier, prefix,
                 )))
             }
             CurrentAccessPath::Index { index, prefix } => {
+                if tier != DurabilityTier::Global {
+                    return Ok(None);
+                }
                 let rows = self
                     .node
                     .global_current_rows_for_index_scan(table, &index, &prefix)
@@ -1154,6 +1153,129 @@ fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> Gr
         ["tx_time", "tx_node_id"],
     )
     .project(key_fields)
+}
+
+fn selected_visible_current_primary_key_graph(
+    table: &TableSchema,
+    tier: DurabilityTier,
+    prefix: Vec<Value>,
+) -> GraphBuilder {
+    let user_fields = table
+        .columns
+        .iter()
+        .map(|column| user_column_field(&column.name))
+        .collect::<Vec<_>>();
+    let mut content_fields = vec!["row_uuid".to_owned()];
+    content_fields.extend(user_fields.iter().cloned());
+    content_fields.extend([
+        "created_by".to_owned(),
+        "created_at".to_owned(),
+        "updated_by".to_owned(),
+        "updated_at".to_owned(),
+        "tx_time".to_owned(),
+        "tx_node_id".to_owned(),
+    ]);
+    let content_scan = static_scan_for_prefix(prefix.clone(), 1);
+    let deletion_scan = static_scan_for_prefix(prefix, 1);
+    let edge_visible_ahead = |table_name: String, fields: Vec<String>, scan: StaticScanSpec| {
+        GraphBuilder::join(
+            GraphBuilder::table_scan(table_name, scan).project(fields.clone()),
+            GraphBuilder::table("jazz_transactions")
+                .filter(
+                    PredicateExpr::And(vec![
+                        PredicateExpr::eq("fate", Value::Enum(FateTag::Accepted as u8)),
+                        PredicateExpr::Or(vec![
+                            PredicateExpr::eq("durability", Value::Enum(2)),
+                            PredicateExpr::eq("durability", Value::Enum(3)),
+                        ])
+                        .canonicalize(),
+                    ])
+                    .canonicalize(),
+                )
+                .project(["time", "node_id"]),
+            ["tx_time", "tx_node_id"],
+            ["time", "node_id"],
+        )
+        .project_fields(
+            fields
+                .into_iter()
+                .map(|field| ProjectField::renamed(left_field(&field), field)),
+        )
+    };
+    let (content_current, deleted_winners) = if tier == DurabilityTier::Global {
+        (
+            GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
+                .project(content_fields.clone()),
+            GraphBuilder::table_scan(
+                register_global_current_table_name(&table.name),
+                deletion_scan,
+            )
+            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .project(["row_uuid"]),
+        )
+    } else {
+        let ahead_content = if tier == DurabilityTier::Edge {
+            edge_visible_ahead(
+                ahead_current_table_name(&table.name),
+                content_fields.clone(),
+                content_scan.clone(),
+            )
+        } else {
+            GraphBuilder::table_scan(ahead_current_table_name(&table.name), content_scan.clone())
+                .project(content_fields.clone())
+        };
+        let deletion_fields = vec![
+            "row_uuid".to_owned(),
+            "tx_time".to_owned(),
+            "tx_node_id".to_owned(),
+            "created_by".to_owned(),
+            "created_at".to_owned(),
+            "updated_by".to_owned(),
+            "updated_at".to_owned(),
+            "_deletion".to_owned(),
+        ];
+        let ahead_deleted = if tier == DurabilityTier::Edge {
+            edge_visible_ahead(
+                register_ahead_current_table_name(&table.name),
+                deletion_fields.clone(),
+                deletion_scan.clone(),
+            )
+        } else {
+            GraphBuilder::table_scan(
+                register_ahead_current_table_name(&table.name),
+                deletion_scan.clone(),
+            )
+            .project(deletion_fields.clone())
+        };
+        (
+            GraphBuilder::arg_max_by(
+                GraphBuilder::union([
+                    GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
+                        .project(content_fields.clone()),
+                    ahead_content,
+                ]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            )
+            .project(content_fields.clone()),
+            GraphBuilder::arg_max_by(
+                GraphBuilder::union([
+                    GraphBuilder::table_scan(
+                        register_global_current_table_name(&table.name),
+                        deletion_scan,
+                    )
+                    .project(deletion_fields),
+                    ahead_deleted,
+                ]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            )
+            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .project(["row_uuid"]),
+        )
+    };
+    GraphBuilder::anti_join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
+        .project(content_fields)
 }
 
 fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<ProjectField> {
@@ -1840,8 +1962,15 @@ fn root_literal_equalities(
     query: &JazzQuery,
     binding: &Binding,
 ) -> Result<BTreeMap<String, Value>, Error> {
+    literal_equalities_for_filters(&query.filters, binding)
+}
+
+fn literal_equalities_for_filters(
+    filters: &[Predicate],
+    binding: &Binding,
+) -> Result<BTreeMap<String, Value>, Error> {
     let mut equalities = BTreeMap::new();
-    for predicate in &query.filters {
+    for predicate in filters {
         collect_root_literal_equalities(predicate, binding, &mut equalities)?;
     }
     Ok(equalities)
@@ -3547,7 +3676,37 @@ where
         self.compile_query_program_request_with_access_paths(request, access_paths)
     }
 
+    fn compile_current_query_program_with_selected_access_paths(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+    ) -> Result<QueryProgram, Error> {
+        let access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
+        let request = self.current_query_program_request(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            &ReadViewSpec::default(),
+            None,
+        )?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+    }
+
     fn one_shot_access_paths(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        self.current_query_access_paths(shape, binding, tier)
+    }
+
+    fn current_query_access_paths(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -3559,21 +3718,100 @@ where
         let query = shape.query();
         if !query.joins.is_empty()
             || !query.policy_branches.is_empty()
-            || !query.reachable.is_empty()
             || !query.array_subqueries.is_empty()
             || query.aggregate.is_some()
         {
             return Ok(BTreeMap::new());
         }
+        let mut access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
         let equalities = root_literal_equalities(query, binding)?;
         let Some(access_path) = select_current_access_path(&table, &equalities) else {
-            return Ok(BTreeMap::new());
+            return Ok(access_paths);
         };
-        Ok(BTreeMap::from([(
-            root_source_id(&query.table),
-            access_path,
-        )]))
+        access_paths.insert(root_source_id(&query.table), access_path);
+        self.add_reachable_access_paths(query, shape.schema_version(), binding, &mut access_paths)?;
+        Ok(access_paths)
+    }
+
+    fn current_query_primary_key_access_paths(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        let query = shape.query();
+        let mut access_paths = BTreeMap::new();
+        let equalities = root_literal_equalities(query, binding)?;
+        if let Some(value) = equalities.get("id").cloned() {
+            access_paths.insert(
+                root_source_id(&query.table),
+                CurrentAccessPath::PrimaryKey(vec![value]),
+            );
+        }
+        self.add_reachable_access_paths(query, shape.schema_version(), binding, &mut access_paths)?;
+        Ok(access_paths)
+    }
+
+    fn add_reachable_access_paths(
+        &self,
+        query: &JazzQuery,
+        schema_version: SchemaVersionId,
+        binding: &Binding,
+        access_paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<(), Error> {
+        for (index, reachable) in query.reachable.iter().enumerate() {
+            if let Some(seed) = &reachable.seed {
+                let source = reachable_seed_source_id(seed, index);
+                self.add_primary_key_access_path_for_filters(
+                    &source,
+                    &seed.table,
+                    schema_version,
+                    &seed.filters,
+                    binding,
+                    access_paths,
+                )?;
+            }
+            let edge_source = reachable_edge_source_id(reachable, index);
+            self.add_primary_key_access_path_for_filters(
+                &edge_source,
+                &reachable.edge_table,
+                schema_version,
+                &reachable.edge_filters,
+                binding,
+                access_paths,
+            )?;
+            let access_source = reachable_access_source_id(reachable, index);
+            self.add_primary_key_access_path_for_filters(
+                &access_source,
+                &reachable.access_table,
+                schema_version,
+                &reachable.access_filters,
+                binding,
+                access_paths,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn add_primary_key_access_path_for_filters(
+        &self,
+        source: &SourceId,
+        table_name: &str,
+        schema_version: SchemaVersionId,
+        filters: &[Predicate],
+        binding: &Binding,
+        access_paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<(), Error> {
+        let table = self.table_in_schema(table_name, schema_version)?;
+        let equalities = literal_equalities_for_filters(filters, binding)?;
+        if let Some(value) = equalities.get("id").cloned() {
+            access_paths.insert(source.clone(), CurrentAccessPath::PrimaryKey(vec![value]));
+        } else if let Some(access_path) = select_current_access_path(&table, &equalities)
+            && matches!(access_path, CurrentAccessPath::PrimaryKey(_))
+        {
+            access_paths.insert(source.clone(), access_path);
+        }
+        Ok(())
     }
 
     fn global_current_rows_for_index_scan(
@@ -3773,18 +4011,6 @@ where
             request,
             BTreeMap::new(),
             access_paths,
-        )
-    }
-
-    fn compile_query_program_request_with_inline_sources(
-        &mut self,
-        request: QueryProgramRequest,
-        inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-    ) -> Result<QueryProgram, Error> {
-        self.compile_query_program_request_with_inline_sources_and_access_paths(
-            request,
-            inline_sources,
-            BTreeMap::new(),
         )
     }
 
@@ -4241,46 +4467,13 @@ where
             ParamBindingMode::InlineAllReachableSeeds,
         )?;
         let binding = policy_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let input = RowSetProgramInput {
-            shape: input_shape,
-            binding: self.program_binding_for_shape(
-                &policy_shape,
-                &binding,
-                Some(self.query_binding_source_shape_for_binding(&policy_shape, &binding)),
-                BTreeMap::new(),
-            ),
-        };
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
-        let request = QueryProgramRequest {
-            reads: current_query_read_set(
-                &input.shape,
-                policy_shape.schema_version(),
-                policy_shape.schema_version(),
-                DurabilityTier::Local,
-                None,
-            ),
-            policy,
-            input,
-            output: current_query_output_request(
-                CurrentQueryProgramOutput::AppRows,
-                policy_shape.query(),
-            ),
-        };
-        let program = self.compile_query_program_request(request)?;
+        let program = self.compile_current_query_program_with_selected_access_paths(
+            &policy_shape,
+            &binding,
+            DurabilityTier::Local,
+            identity,
+            CurrentQueryProgramOutput::AppRows,
+        )?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
     }
 
@@ -4343,8 +4536,12 @@ where
         };
         let candidate = current_row_from_cells(table, row_uuid, cells)?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
-        let program =
-            self.compile_query_program_request_with_inline_sources(request, inline_sources)?;
+        let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
+        let program = self.compile_query_program_request_with_inline_sources_and_access_paths(
+            request,
+            inline_sources,
+            access_paths,
+        )?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
     }
 
@@ -5084,6 +5281,43 @@ where
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_prepared_plan_for_identity(shape, binding, tier, None, identity)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_rows_for_link_forced_full_scan_for_test(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table = self
+            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .clone();
+        let request = self.current_query_program_request(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::AppRows,
+            &ReadViewSpec::default(),
+            None,
+        )?;
+        let program =
+            self.compile_query_program_request_with_access_paths(request, BTreeMap::new())?;
+        let deltas = self
+            .database
+            .query_graph(lowered_app_rows_graph(&program)?)
+            .map_err(Error::Groove)?;
+        let mut rows = if shape.query().aggregate.is_some() {
+            self.materialize_aggregate_query_rows(shape.query(), &table, deltas)?
+        } else {
+            self.materialize_inline_current_query_rows(&table, deltas)?
+        };
+        let query = shape.query();
+        self.finish_engine_query_rows(query, &mut rows)?;
+        self.apply_projection(query, &mut rows)?;
+        Ok(rows)
     }
 
     pub(crate) fn query_rows_for_link_with_prepared_plan(
@@ -8537,6 +8771,143 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(rows, BTreeSet::from([resource1]));
+    }
+
+    #[test]
+    fn reachable_relation_seed_hydrates_from_primary_key_scan() {
+        let (_dir, mut node) = open_recursive_node();
+        let schema = recursive_schema();
+        let team1 = row(1);
+        let team2 = row(2);
+        let team3 = row(3);
+        let team4 = row(4);
+        let resource1 = row(101);
+        let resource2 = row(102);
+        let seed = row(401);
+        commit_global_cells(
+            &mut node,
+            "resources",
+            resource1,
+            BTreeMap::from([("name".to_owned(), Value::String("r1".to_owned()))]),
+            10,
+            1,
+        );
+        commit_global_cells(
+            &mut node,
+            "resources",
+            resource2,
+            BTreeMap::from([("name".to_owned(), Value::String("r2".to_owned()))]),
+            11,
+            2,
+        );
+        commit_global_cells(
+            &mut node,
+            "resourceAccess",
+            row(201),
+            BTreeMap::from([
+                ("resource".to_owned(), Value::Uuid(resource1.0)),
+                ("team".to_owned(), Value::Uuid(team3.0)),
+            ]),
+            12,
+            3,
+        );
+        commit_global_cells(
+            &mut node,
+            "resourceAccess",
+            row(202),
+            BTreeMap::from([
+                ("resource".to_owned(), Value::Uuid(resource2.0)),
+                ("team".to_owned(), Value::Uuid(team4.0)),
+            ]),
+            13,
+            4,
+        );
+        for idx in 0..128 {
+            commit_global_cells(
+                &mut node,
+                "teamSeeds",
+                row(500 + idx),
+                BTreeMap::from([
+                    ("team".to_owned(), Value::Uuid(team4.0)),
+                    ("kind".to_owned(), Value::String(format!("noise-{idx}"))),
+                ]),
+                1_000 + idx as u64,
+                20 + idx as u64,
+            );
+        }
+        commit_global_cells(
+            &mut node,
+            "teamSeeds",
+            seed,
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(team1.0)),
+                ("kind".to_owned(), Value::String("sync".to_owned())),
+            ]),
+            14,
+            5,
+        );
+        for (idx, member, parent, seq) in [(301, team1, team2, 7), (302, team2, team3, 8)] {
+            commit_global_cells(
+                &mut node,
+                "teamTeamMemberships",
+                row(idx),
+                BTreeMap::from([
+                    ("member".to_owned(), Value::Uuid(member.0)),
+                    ("parent".to_owned(), Value::Uuid(parent.0)),
+                    ("onlyAdmins".to_owned(), Value::Bool(false)),
+                ]),
+                10 + seq,
+                seq,
+            );
+        }
+
+        let mut query = Query::from("resources").reachable_via(
+            "resourceAccess",
+            "resource",
+            "team",
+            lit("ignored-by-relation-seed"),
+            "teamTeamMemberships",
+            "member",
+            "parent",
+            [eq(col("onlyAdmins"), lit(false))],
+        );
+        query.reachable[0].seed = Some(crate::query::ReachableSeed {
+            table: "teamSeeds".to_owned(),
+            team_column: "team".to_owned(),
+            filters: vec![eq(col("id"), lit(Value::Uuid(seed.0)))],
+        });
+        let shape = query.validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+
+        node.reset_query_engine_read_metrics();
+        let selected = node
+            .query_rows_for_link(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        let selected_metrics = node.query_engine_read_metrics().clone();
+        node.reset_query_engine_read_metrics();
+        let forced = node
+            .query_rows_for_link_forced_full_scan_for_test(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorId::SYSTEM,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        let forced_metrics = node.query_engine_read_metrics().clone();
+
+        assert_eq!(selected, forced);
+        assert_eq!(selected, BTreeSet::from([resource1]));
+        assert_eq!(selected_metrics.source_primary_key_scans, 1);
+        assert!(
+            forced_metrics.source_full_scans > selected_metrics.source_full_scans,
+            "forced full scan must scan the seed source instead of using its point lookup"
+        );
     }
 
     #[test]
