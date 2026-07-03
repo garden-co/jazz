@@ -1,7 +1,10 @@
 use crate::ids::AuthorId;
-use crate::json_merge::{JsonMergeStrategy, STRATEGY_ID as JSON_STRATEGY_ID, STRATEGY_VERSION as JSON_STRATEGY_VERSION};
+use crate::json_merge::{
+    JsonMergeStrategy, STRATEGY_ID as JSON_STRATEGY_ID, STRATEGY_VERSION as JSON_STRATEGY_VERSION,
+};
 use crate::node::EdgeCacheClass;
 use crate::peer::PeerEvictionPins;
+use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::schema::{CONTENT_META_STORE, TextMergeSpec};
 use crate::tx::{RecordedMergeStrategy, TxId};
 use std::sync::Arc;
@@ -702,6 +705,79 @@ fn large_value_checkpoints_survive_reopen() {
 }
 
 #[test]
+fn sequential_text_document_crosses_extent_limit_and_replays_from_checkpoint_suffix() {
+    let schema = text_large_value_schema();
+    let row_uuid = row(0xc1);
+    let (dir, mut opened) =
+        open_node_with_schema_and_checkpoint_interval(node(0xc1), schema.clone(), 2);
+    let first = repeated_bytes(b'a', MAX_CONTENT_EXTENT_BYTES / 2 + 11);
+    let second = repeated_bytes(b'b', MAX_CONTENT_EXTENT_BYTES / 2 + 13);
+    let third = b"tail".to_vec();
+
+    let first_tx = opened
+        .commit_large_value_edit(
+            LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+                .made_by(user(0xa1))
+                .insert(0, first.clone()),
+        )
+        .unwrap();
+    opened.finalize_local_mergeable_commit(first_tx).unwrap();
+    let second_tx = opened
+        .commit_large_value_edit(
+            LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+                .made_by(user(0xa1))
+                .insert(first.len(), second.clone()),
+        )
+        .unwrap();
+    opened.finalize_local_mergeable_commit(second_tx).unwrap();
+    let third_tx = opened
+        .commit_large_value_edit(
+            LargeValueEditCommit::new("docs", row_uuid, "body", 30)
+                .made_by(user(0xa1))
+                .insert(first.len() + second.len(), third.clone()),
+        )
+        .unwrap();
+    opened.finalize_local_mergeable_commit(third_tx).unwrap();
+
+    let mut expected = first;
+    expected.extend(second);
+    expected.extend(third);
+    assert!(expected.len() > MAX_CONTENT_EXTENT_BYTES);
+    assert!(opened
+        .content_store()
+        .checkpoint("docs", row_uuid, "body", second_tx)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        hydrated_large_value_cell(&mut opened, &schema.tables[0], "body"),
+        expected
+    );
+
+    drop(opened);
+    let mut reopened = reopen_node_at_with_checkpoint_interval(&dir, node(0xc1), schema.clone(), 2);
+    reopened.reset_large_value_metrics();
+    reopened.large_value_materialization_cache.clear();
+    let third_version = reopened
+        .query_versions_for_tx(third_tx)
+        .unwrap()
+        .into_iter()
+        .find(|version| version.row_uuid() == row_uuid)
+        .expect("third text version should survive reopen");
+    assert_eq!(
+        reopened
+            .materialize_large_value_column(&schema.tables[0], &third_version, "body")
+            .unwrap(),
+        expected
+    );
+    assert_eq!(reopened.large_value_metrics().checkpoint_hits, 1);
+    assert!(reopened.large_value_metrics().last_replayed_ops <= 1);
+    assert_eq!(
+        hydrated_large_value_cell(&mut reopened, &schema.tables[0], "body"),
+        expected
+    );
+}
+
+#[test]
 fn authority_merge_version_op_merges_concurrent_large_value_edits() {
     let left_first = merged_concurrent_large_value_body(true);
     let right_first = merged_concurrent_large_value_body(false);
@@ -717,6 +793,69 @@ fn authority_merge_version_merges_concurrent_text_edits_and_records_strategy() {
 
     assert_eq!(left_first, Some(Value::Bytes(b"aLEFTRIGHTbc".to_vec())));
     assert_eq!(left_first, right_first);
+}
+
+#[test]
+fn concurrent_text_document_merge_over_extent_limit_is_extent_backed_and_checkpointed() {
+    let schema = text_large_value_schema();
+    let row_uuid = row(0xc2);
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(0xc2), schema.clone());
+    let (_left_dir, mut left_writer) = open_node_with_schema(node(0xc3), schema.clone());
+    let (_right_dir, mut right_writer) = open_node_with_schema(node(0xc4), schema.clone());
+    let (_core_dir, mut core) =
+        open_node_with_schema_and_checkpoint_interval(node(0xc5), schema.clone(), 1);
+    let big_left = repeated_bytes(b'L', MAX_CONTENT_EXTENT_BYTES + 17);
+
+    let base_unit = commit_large_value_edit_unit(
+        &mut base_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+            .made_by(user(0xa1))
+            .insert(0, b"abc"),
+    );
+    apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
+
+    let left = commit_large_value_edit_unit(
+        &mut left_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 20)
+            .made_by(user(0xa1))
+            .insert(1, big_left.clone()),
+    );
+    let right = commit_large_value_edit_unit(
+        &mut right_writer,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 21)
+            .made_by(user(0xa2))
+            .insert(1, b"R"),
+    );
+    apply_large_value_unit(&mut core, &left_writer, left);
+    apply_large_value_unit(&mut core, &right_writer, right);
+
+    let merge = merge_version_for(&mut core, row_uuid, node(0xc5));
+    let payload = merge.cell(&schema.tables[0], "body").unwrap().unwrap();
+    let Value::Bytes(payload) = payload else {
+        panic!("expected merge text payload");
+    };
+    let refs = extent_refs_in_payload(&payload);
+    assert!(refs.len() >= 2);
+    assert!(refs.iter().all(|extent| {
+        usize::try_from(extent.len).unwrap() <= MAX_CONTENT_EXTENT_BYTES
+    }));
+    let merge_tx = core.version_tx_id(&merge).unwrap();
+    assert!(core
+        .content_store()
+        .checkpoint("docs", row_uuid, "body", merge_tx)
+        .unwrap()
+        .is_some());
+
+    let mut expected = b"a".to_vec();
+    expected.extend(big_left);
+    expected.extend_from_slice(b"Rbc");
+    assert_eq!(
+        core.materialize_large_value_column(&schema.tables[0], &merge, "body")
+            .unwrap(),
+        expected
+    );
 }
 
 #[test]
@@ -870,6 +1009,68 @@ fn authority_text_merge_dispatches_registered_markdown_strategy_and_records_spec
 }
 
 #[test]
+fn registered_markdown_strategy_merge_over_extent_limit_is_extent_backed() {
+    let schema = text_large_value_schema_with_strategy(crate::markdown_strategy::STRATEGY_ID);
+    let row_uuid = row(0xca);
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(0xca), schema.clone());
+    let (_left_dir, mut left_writer) = open_node_with_schema(node(0xcb), schema.clone());
+    let (_right_dir, mut right_writer) = open_node_with_schema(node(0xcc), schema.clone());
+    let (_core_dir, mut core) =
+        open_node_with_schema_and_checkpoint_interval(node(0xcd), schema.clone(), 1);
+    core.register_text_merge_strategy(Arc::new(
+        crate::markdown_strategy::SimpleMarkdownStrategy,
+    ));
+    let body = repeated_string('m', MAX_CONTENT_EXTENT_BYTES + 29);
+    let base = format!("# Title\n\n{body}\n").into_bytes();
+    let left_value = format!("# New Title\n\n{body}\n").into_bytes();
+    let right_value = format!("# Title\n\n{body}\n\nTail.\n").into_bytes();
+    let expected = format!("# New Title\n\n{body}\n\nTail.\n").into_bytes();
+
+    let base_unit = commit_large_value_unit(
+        &mut base_writer,
+        MergeableCommit::new("docs", row_uuid, 10)
+            .made_by(user(0xa1))
+            .cell("body", Value::Bytes(base)),
+    );
+    apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
+
+    let left = commit_large_value_unit(
+        &mut left_writer,
+        MergeableCommit::new("docs", row_uuid, 20)
+            .made_by(user(0xa1))
+            .cell("body", Value::Bytes(left_value)),
+    );
+    let right = commit_large_value_unit(
+        &mut right_writer,
+        MergeableCommit::new("docs", row_uuid, 21)
+            .made_by(user(0xa2))
+            .cell("body", Value::Bytes(right_value)),
+    );
+    apply_large_value_unit(&mut core, &left_writer, left);
+    apply_large_value_unit(&mut core, &right_writer, right);
+
+    let merge = merge_version_for(&mut core, row_uuid, node(0xcd));
+    let payload = merge.cell(&schema.tables[0], "body").unwrap().unwrap();
+    let Value::Bytes(payload) = payload else {
+        panic!("expected markdown merge payload");
+    };
+    assert!(extent_refs_in_payload(&payload).len() >= 2);
+    let merge_tx = core.version_tx_id(&merge).unwrap();
+    assert!(core
+        .content_store()
+        .checkpoint("docs", row_uuid, "body", merge_tx)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        core.materialize_large_value_column(&schema.tables[0], &merge, "body")
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn failing_rung3_text_strategy_falls_back_to_builtin_char_walk() {
     let calls = Arc::new(AtomicUsize::new(0));
     let (materialized, strategy, fallbacks) = rung3_fallback_text_merge(
@@ -976,6 +1177,68 @@ fn registered_json_strategy_merges_and_records_json_strategy_metadata() {
             .as_ref()
             .unwrap()
             .spec_hash()
+    );
+}
+
+#[test]
+fn registered_json_strategy_merge_over_extent_limit_is_extent_backed() {
+    let schema = json_document_schema(br#"{"paths":{"tags":"set"}}"#);
+    let row_uuid = row(0xc6);
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(0xc6), schema.clone());
+    let (_left_dir, mut left_writer) = open_node_with_schema(node(0xc7), schema.clone());
+    let (_right_dir, mut right_writer) = open_node_with_schema(node(0xc8), schema.clone());
+    let (_core_dir, mut core) =
+        open_node_with_schema_and_checkpoint_interval(node(0xc9), schema.clone(), 1);
+    for node in [&mut base_writer, &mut left_writer, &mut right_writer, &mut core] {
+        node.register_text_merge_strategy(Arc::new(JsonMergeStrategy));
+    }
+    let body = repeated_string('x', MAX_CONTENT_EXTENT_BYTES + 23);
+    let base = format!(r#"{{"body":"{body}","tags":["a"]}}"#).into_bytes();
+    let left_value = format!(r#"{{"body":"{body}","tags":["a","b"]}}"#).into_bytes();
+    let right_value = format!(r#"{{"body":"{body}","tags":["a","c"]}}"#).into_bytes();
+    let expected = format!(r#"{{"body":"{body}","tags":["a","b","c"]}}"#).into_bytes();
+
+    let base_unit = commit_large_value_unit(
+        &mut base_writer,
+        MergeableCommit::new("docs", row_uuid, 10)
+            .made_by(user(0xa1))
+            .cell("body", Value::Bytes(base)),
+    );
+    apply_large_value_unit(&mut core, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut left_writer, &base_writer, base_unit.clone());
+    apply_large_value_unit(&mut right_writer, &base_writer, base_unit);
+
+    let left = commit_large_value_unit(
+        &mut left_writer,
+        MergeableCommit::new("docs", row_uuid, 20)
+            .made_by(user(0xa1))
+            .cell("body", Value::Bytes(left_value)),
+    );
+    let right = commit_large_value_unit(
+        &mut right_writer,
+        MergeableCommit::new("docs", row_uuid, 21)
+            .made_by(user(0xa2))
+            .cell("body", Value::Bytes(right_value)),
+    );
+    apply_large_value_unit(&mut core, &left_writer, left);
+    apply_large_value_unit(&mut core, &right_writer, right);
+
+    let merge = merge_version_for(&mut core, row_uuid, node(0xc9));
+    let payload = merge.cell(&schema.tables[0], "body").unwrap().unwrap();
+    let Value::Bytes(payload) = payload else {
+        panic!("expected json merge payload");
+    };
+    assert!(extent_refs_in_payload(&payload).len() >= 2);
+    let merge_tx = core.version_tx_id(&merge).unwrap();
+    assert!(core
+        .content_store()
+        .checkpoint("docs", row_uuid, "body", merge_tx)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        core.materialize_large_value_column(&schema.tables[0], &merge, "body")
+            .unwrap(),
+        expected
     );
 }
 
@@ -1448,6 +1711,48 @@ fn merged_concurrent_text_body(left_first: bool) -> Option<Value> {
         core.materialize_large_value_column(&schema.tables[0], &merge, "body")
             .unwrap(),
     ))
+}
+
+fn repeated_bytes(byte: u8, len: usize) -> Vec<u8> {
+    std::iter::repeat_n(byte, len).collect()
+}
+
+fn repeated_string(ch: char, len: usize) -> String {
+    std::iter::repeat_n(ch, len).collect()
+}
+
+fn merge_version_for(
+    node_state: &mut NodeState<RocksDbStorage>,
+    row_uuid: RowUuid,
+    merge_node: NodeUuid,
+) -> VersionRow {
+    node_state
+        .query_all_versions()
+        .unwrap()
+        .into_iter()
+        .find(|version| {
+            version.row_uuid() == row_uuid
+                && node_state.version_tx_id(version).unwrap().node == merge_node
+                && version.parents().len() == 2
+        })
+        .expect("core should create a merge version")
+}
+
+fn extent_refs_in_payload(payload: &[u8]) -> Vec<crate::node::content_store::Extent> {
+    let payload = payload
+        .strip_prefix(b"JTXTREF1")
+        .expect("text document payload should use extent-backed op encoding");
+    text_oplog::decode(payload)
+        .unwrap()
+        .into_iter()
+        .filter_map(|op| match op {
+            TextOp::Insert {
+                content: TextContent::Ref(extent),
+                ..
+            } => Some(extent),
+            TextOp::Insert { .. } | TextOp::Delete { .. } => None,
+        })
+        .collect()
 }
 
 fn commit_large_value_unit(
