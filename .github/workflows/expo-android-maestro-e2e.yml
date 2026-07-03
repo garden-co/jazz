@@ -121,6 +121,7 @@ jobs:
       - name: Build Expo E2E JS dependencies
         run: |
           pnpm --filter jazz-wasm run build
+          pnpm --filter jazz-broker-wasm run build
           pnpm --filter jazz-tools run build:runtime
 
       - name: Validate Expo app schema and types
