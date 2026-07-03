@@ -601,6 +601,30 @@ pub struct Query {
     /// instead of returning flattened combined rows.
     #[serde(default)]
     pub result_element_index: Option<usize>,
+    /// Optional scalar/grouped aggregate output.
+    #[serde(default)]
+    pub aggregate: Option<AggregateSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateSpec {
+    #[serde(default)]
+    pub group_by: Option<String>,
+    #[serde(default)]
+    pub outputs: Vec<AggregateOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateOutput {
+    pub function: AggregateFunction,
+    #[serde(default)]
+    pub column: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AggregateFunction {
+    Count,
+    Sum,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -658,6 +682,7 @@ impl Query {
             array_subqueries: Vec::new(),
             recursive: None,
             result_element_index: None,
+            aggregate: None,
         }
     }
 
@@ -979,6 +1004,53 @@ impl QueryBuilder {
     /// Example: `query("users").select(&["name", "email"])`
     pub fn select(mut self, columns: &[&str]) -> Self {
         self.query.select_columns = Some(columns.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
+    pub fn count(mut self) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Count,
+                column: None,
+            });
+        self
+    }
+
+    pub fn sum(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Sum,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    pub fn group_by(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .group_by = Some(column.into());
         self
     }
 

@@ -1,6 +1,8 @@
 use super::*;
 use groove::ivm::{
-    LiteralValue, PredicateExpr as GroovePredicateExpr, PredicateKind, ProjectField, TopByOrder,
+    AggregateExpr as GrooveAggregateExpr, AggregateFunction as GrooveAggregateFunction,
+    LiteralValue, PlanExpr as GroovePlanExpr, PredicateExpr as GroovePredicateExpr, PredicateKind,
+    ProjectField, TopByOrder,
 };
 use groove::records::ValueType;
 
@@ -588,7 +590,8 @@ fn first_step_source(steps: &[LinearStep]) -> Option<&SourceId> {
         LinearStep::Filter(_)
         | LinearStep::Project(_)
         | LinearStep::OrderBy(_)
-        | LinearStep::Slice { .. } => None,
+        | LinearStep::Slice { .. }
+        | LinearStep::Aggregate { .. } => None,
     })
 }
 
@@ -689,6 +692,10 @@ enum LinearStep {
         tie_breaker: Vec<NormalizedValueRef>,
         rank_output: Option<TypedOutputField>,
     },
+    Aggregate {
+        group_by: Vec<NormalizedValueRef>,
+        outputs: Vec<AggregateExpr>,
+    },
 }
 
 fn analyze_query_plan(
@@ -758,16 +765,7 @@ fn validate_output_capabilities(
     {
         return;
     }
-    if request
-        .input
-        .shape
-        .nodes
-        .values()
-        .any(|node| matches!(node, RowSetExpr::Aggregate { .. }))
-    {
-        gaps.push(UnsupportedReason::Operator(
-            "maintained subscription view aggregate shape is not lowered yet".to_owned(),
-        ));
+    if plan_contains_aggregate(plan) {
         return;
     }
     if matches!(plan, AnalyzedQueryPlan::CorrelatedPath(_)) && request.output.app_rows.is_none() {
@@ -791,6 +789,27 @@ fn maintained_result_membership_window_supported(plan: &AnalyzedQueryPlan) -> bo
         .all(|fragment| linear_window_supported(fragment.steps))
 }
 
+fn plan_contains_aggregate(plan: &AnalyzedQueryPlan) -> bool {
+    collect_plan_fragments(plan).linears.iter().any(|fragment| {
+        fragment
+            .steps
+            .iter()
+            .any(|step| matches!(step, LinearStep::Aggregate { .. }))
+    })
+}
+
+fn root_aggregate_step(
+    plan: &AnalyzedQueryPlan,
+) -> Option<(&[NormalizedValueRef], &[AggregateExpr])> {
+    let AnalyzedQueryPlan::Linear(linear) = plan else {
+        return None;
+    };
+    match linear.steps.last()? {
+        LinearStep::Aggregate { group_by, outputs } => Some((group_by, outputs)),
+        _ => None,
+    }
+}
+
 fn linear_window_supported(steps: &[LinearStep]) -> bool {
     let mut has_order = false;
     for step in steps {
@@ -801,7 +820,10 @@ fn linear_window_supported(steps: &[LinearStep]) -> bool {
                     return false;
                 }
             }
-            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
+            LinearStep::Filter(_)
+            | LinearStep::Join { .. }
+            | LinearStep::Project(_)
+            | LinearStep::Aggregate { .. } => {}
         }
     }
     true
@@ -1369,9 +1391,18 @@ fn analyze_current_node(
         RowSetExpr::CorrelatedPathProjection { .. } => Err(UnsupportedReason::Operator(
             "correlated path projection row-set nodes are not lowered yet".to_owned(),
         )),
-        // INV-LOWER-13: aggregation is node-side post-processing; maintained
-        // aggregate outputs are capability-gated in validate_output_capabilities.
-        RowSetExpr::Aggregate { input, .. } => analyze_current_node(input, nodes, visited),
+        RowSetExpr::Aggregate {
+            input,
+            group_by,
+            outputs,
+        } => {
+            let (source, mut steps) = analyze_current_node(input, nodes, visited)?;
+            steps.push(LinearStep::Aggregate {
+                group_by: group_by.clone(),
+                outputs: outputs.clone(),
+            });
+            Ok((source, steps))
+        }
     }
 }
 
@@ -1453,9 +1484,9 @@ fn validate_join_relation(plan: &LinearCurrentRoot) -> Result<(), UnsupportedRea
     for step in &plan.steps {
         match step {
             LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
-            LinearStep::OrderBy(_) | LinearStep::Slice { .. } => {
+            LinearStep::OrderBy(_) | LinearStep::Slice { .. } | LinearStep::Aggregate { .. } => {
                 return Err(UnsupportedReason::Operator(
-                    "join inputs do not support order/slice operators yet".to_owned(),
+                    "join inputs do not support order/slice/aggregate operators yet".to_owned(),
                 ));
             }
         }
@@ -1500,16 +1531,23 @@ fn value_contains_param(value: &NormalizedValueRef) -> bool {
 fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) {
     let mut seen_order = false;
     let mut seen_slice = false;
+    let mut seen_aggregate = false;
     for step in steps {
         match step {
             LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_)
-                if seen_order || seen_slice =>
+                if seen_order || seen_slice || seen_aggregate =>
             {
                 gaps.push(UnsupportedReason::Operator(
-                    "filters/joins/projects after order/slice are not lowered yet".to_owned(),
+                    "filters/joins/projects after order/slice/aggregate are not lowered yet"
+                        .to_owned(),
                 ));
             }
             LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
+            LinearStep::OrderBy(_) | LinearStep::Slice { .. } if seen_aggregate => {
+                gaps.push(UnsupportedReason::Operator(
+                    "order/slice after aggregate is not lowered yet".to_owned(),
+                ));
+            }
             LinearStep::OrderBy(_) if seen_slice => {
                 gaps.push(UnsupportedReason::Operator(
                     "order-by after slice is not lowered yet".to_owned(),
@@ -1535,6 +1573,9 @@ fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) 
                     ));
                 }
                 seen_slice = true;
+            }
+            LinearStep::Aggregate { .. } => {
+                seen_aggregate = true;
             }
         }
     }
@@ -1761,6 +1802,17 @@ fn collect_step_requirements(
         } => (|| {
             for value in partition_by.iter().chain(tie_breaker) {
                 collect_value_requirements(value, source, requirements)?;
+            }
+            Ok(())
+        })(),
+        LinearStep::Aggregate { group_by, outputs } => (|| {
+            for value in group_by {
+                collect_value_requirements(value, source, requirements)?;
+            }
+            for aggregate in outputs {
+                if let Some(input) = &aggregate.input {
+                    collect_value_requirements(input, source, requirements)?;
+                }
             }
             Ok(())
         })(),
@@ -2587,6 +2639,20 @@ fn lower_linear_plan_steps(
                     root_source,
                     request,
                 )?;
+            }
+            LinearStep::Aggregate { group_by, outputs } => {
+                last_join_right = None;
+                if pending_order.take().is_some() {
+                    return Err(UnsupportedReason::Operator(
+                        "order-by before aggregate is not lowered yet".to_owned(),
+                    ));
+                }
+                let lowered =
+                    lower_aggregate(graph, group_by, outputs, plan, root_source, request)?;
+                graph = lowered.graph;
+                fields = lowered.fields;
+                nullable_fields = BTreeSet::new();
+                available_route_fields = BTreeSet::new();
             }
         }
     }
@@ -3542,6 +3608,82 @@ fn lower_window(
     ))
 }
 
+fn lower_aggregate(
+    mut graph: GraphBuilder,
+    group_by: &[NormalizedValueRef],
+    outputs: &[AggregateExpr],
+    plan: &LinearCurrentRoot,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    let group_cols = group_by
+        .iter()
+        .map(|value| lower_field_ref(value, plan, source, request, "aggregate group key"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let aggregates = outputs
+        .iter()
+        .map(|aggregate| lower_aggregate_expr(aggregate, plan, source, request))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut unwrap_fields = BTreeSet::new();
+    for field in &group_cols {
+        if source_field_is_nullable(source, field) {
+            unwrap_fields.insert(field.clone());
+        }
+    }
+    for aggregate in outputs {
+        let Some(input) = &aggregate.input else {
+            continue;
+        };
+        let field = lower_field_ref(input, plan, source, request, "aggregate input")?;
+        if source_field_is_nullable(source, &field) {
+            unwrap_fields.insert(field);
+        }
+    }
+    for field in unwrap_fields {
+        graph = graph.unwrap_nullable(field);
+    }
+    let mut fields = group_cols.iter().cloned().collect::<BTreeSet<_>>();
+    fields.extend(
+        outputs
+            .iter()
+            .map(|aggregate| logical_user_column(&aggregate.output.name).to_owned()),
+    );
+    Ok(LoweredRelationInput {
+        graph: GraphBuilder::aggregate(graph, group_cols, aggregates),
+        root_source: Some(source.clone()),
+        fields,
+        nullable_fields: BTreeSet::new(),
+    })
+}
+
+fn lower_aggregate_expr(
+    aggregate: &AggregateExpr,
+    plan: &LinearCurrentRoot,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<GrooveAggregateExpr, UnsupportedReason> {
+    let expression = aggregate
+        .input
+        .as_ref()
+        .map(|value| {
+            lower_field_ref(value, plan, source, request, "aggregate input")
+                .map(GroovePlanExpr::field)
+        })
+        .transpose()?;
+    Ok(GrooveAggregateExpr {
+        function: match aggregate.function {
+            AggregateFunction::Count => GrooveAggregateFunction::Count,
+            AggregateFunction::Sum => GrooveAggregateFunction::Sum,
+            AggregateFunction::Avg => GrooveAggregateFunction::Avg,
+            AggregateFunction::Min => GrooveAggregateFunction::Min,
+            AggregateFunction::Max => GrooveAggregateFunction::Max,
+        },
+        expression,
+        distinct: false,
+        output_name: Some(logical_user_column(&aggregate.output.name).to_owned()),
+    })
+}
+
 fn lower_order_key(
     key: &OrderKey,
     plan: &LinearCurrentRoot,
@@ -4029,6 +4171,16 @@ fn lowered_terminals(
     routing_param_fields: &BTreeSet<String>,
     available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Vec<LoweredTerminal>> {
+    if root_aggregate_step(plan).is_some() {
+        return lowered_aggregate_terminals(
+            graph,
+            request,
+            plan,
+            source,
+            routing_param_fields,
+            available_fields,
+        );
+    }
     let mut terminals = Vec::new();
     let closure = lower_closure_membership(
         graph.clone(),
@@ -4268,6 +4420,68 @@ fn lowered_terminals(
         }
     }
 
+    Ok(terminals)
+}
+
+fn lowered_aggregate_terminals(
+    graph: GraphBuilder,
+    request: &QueryProgramRequest,
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    routing_param_fields: &BTreeSet<String>,
+    available_fields: &BTreeSet<String>,
+) -> CapabilityResult<Vec<LoweredTerminal>> {
+    let mut terminals = Vec::new();
+    let root_route_fields = routing_param_fields
+        .intersection(available_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let aggregate_graph = if root_route_fields.is_empty() {
+        graph
+    } else {
+        graph.project_fields(
+            available_fields
+                .iter()
+                .map(ProjectField::named)
+                .chain(root_route_fields.iter().map(ProjectField::named))
+                .collect::<Vec<_>>(),
+        )
+    };
+    if request.output.app_rows.is_some() {
+        terminals.push(LoweredTerminal {
+            sink: "app_rows".to_owned(),
+            graph: aggregate_graph.clone(),
+            output: OutputTerminalSchema::AppRows(AppRowSchema {
+                descriptor: aggregate_app_row_descriptor(plan, source)?,
+                hidden_fields: root_route_fields.clone(),
+            }),
+        });
+    }
+    for fact in &request.output.facts {
+        if matches!(fact, ProgramFactKey::ResultMembership) {
+            let output = fact_output(
+                fact,
+                plan,
+                source,
+                &BTreeMap::new(),
+                root_route_fields.clone(),
+            )?;
+            let graph = fact_terminal_graph(
+                fact,
+                aggregate_graph.clone(),
+                plan,
+                source,
+                &BTreeMap::new(),
+                request,
+                output_routing_fields(&output),
+            )?;
+            terminals.push(LoweredTerminal {
+                sink: fact_sink_name(fact),
+                graph,
+                output: OutputTerminalSchema::Fact(output),
+            });
+        }
+    }
     Ok(terminals)
 }
 
@@ -4761,6 +4975,17 @@ fn fact_output_with_terminal(
             routing_param_fields,
         }),
         ProgramFactKey::ResultMembership => {
+            if root_aggregate_step(plan).is_some() {
+                return Ok(ProgramFactOutput {
+                    key: key.clone(),
+                    terminal,
+                    schema: ProgramFactSchema::AggregateResult(aggregate_result_schema(
+                        plan,
+                        source,
+                        routing_param_fields,
+                    )?),
+                });
+            }
             let version = version_witness_fields(&source.row_shape)?;
             ProgramFactSchema::ResultMembership(ResultMembershipSchema {
                 table_field: "table_name".to_owned(),
@@ -4830,6 +5055,7 @@ fn output_routing_fields(output: &ProgramFactOutput) -> BTreeSet<String> {
     match &output.schema {
         ProgramFactSchema::AuthorizedRows(schema) => schema.routing_param_fields.clone(),
         ProgramFactSchema::ResultMembership(schema) => schema.routing_param_fields.clone(),
+        ProgramFactSchema::AggregateResult(schema) => schema.routing_param_fields.clone(),
         ProgramFactSchema::SourceCoverage(schema) => schema.routing_param_fields.clone(),
         ProgramFactSchema::ReadFrontierSettled(schema) => schema.routing_param_fields.clone(),
         _ => BTreeSet::new(),
@@ -4915,6 +5141,13 @@ fn fact_terminal_graph(
                 .collect::<Vec<_>>(),
         )),
         ProgramFactKey::ResultMembership => {
+            if root_aggregate_step(plan).is_some() {
+                return Ok(graph.project_fields(aggregate_result_membership_fields(
+                    plan,
+                    source,
+                    routing_param_fields,
+                )?));
+            }
             Ok(graph.project_fields(result_membership_fields(source, routing_param_fields)?))
         }
         ProgramFactKey::VersionWitnesses => {
@@ -5171,6 +5404,226 @@ fn result_membership_fields(
     }
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
     Ok(fields)
+}
+
+fn aggregate_app_row_descriptor(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+) -> CapabilityResult<RecordDescriptor> {
+    let (group_by, outputs) = root_aggregate_step(plan).ok_or_else(|| {
+        Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(
+                "aggregate app row descriptor requested for non-aggregate plan".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    let mut fields = Vec::new();
+    for value in group_by {
+        let field = aggregate_source_field_name(value, source)?;
+        let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
+            Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Runtime(format!(
+                    "aggregate group field {field:?} is missing from resolved descriptor"
+                ))],
+                explain: ExplainPlan::default(),
+            })
+        })?;
+        fields.push((field, value_type));
+    }
+    fields.extend(
+        outputs
+            .iter()
+            .map(|output| {
+                Ok((
+                    logical_user_column(&output.output.name).to_owned(),
+                    aggregate_output_value_type(output, source)?,
+                ))
+            })
+            .collect::<CapabilityResult<Vec<_>>>()?,
+    );
+    Ok(RecordDescriptor::new(fields))
+}
+
+fn aggregate_result_schema(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    routing_param_fields: BTreeSet<String>,
+) -> CapabilityResult<AggregateResultSchema> {
+    let (group_by, outputs) = root_aggregate_step(plan).ok_or_else(|| {
+        Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(
+                "aggregate result schema requested for non-aggregate plan".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    let group_key_fields = group_by
+        .iter()
+        .map(|value| aggregate_typed_group_field(value, source))
+        .collect::<CapabilityResult<Vec<_>>>()?;
+    Ok(AggregateResultSchema {
+        synthetic: SyntheticResultMembershipSchema {
+            table_field: "table_name".to_owned(),
+            row_field: "synthetic_row".to_owned(),
+            revision_field: "synthetic_revision".to_owned(),
+            routing_param_fields: routing_param_fields.clone(),
+        },
+        group_key_fields,
+        value_fields: outputs
+            .iter()
+            .map(|output| aggregate_typed_output_field(output, source))
+            .collect::<CapabilityResult<Vec<_>>>()?,
+        routing_param_fields,
+    })
+}
+
+fn aggregate_result_membership_fields(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    routing_param_fields: BTreeSet<String>,
+) -> CapabilityResult<Vec<ProjectField>> {
+    let (group_by, outputs) = root_aggregate_step(plan).ok_or_else(|| {
+        Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(
+                "aggregate result fields requested for non-aggregate plan".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    if group_by.len() > 1 {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Operator(
+                "multi-column aggregate group result identity is not lowered yet".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        }));
+    }
+    let mut fields = vec![ProjectField::literal(
+        "table_name",
+        Value::String(format!("{}_aggregate", source.table_schema.name)),
+    )];
+    if let Some(group) = group_by.first() {
+        fields.push(ProjectField::renamed(
+            aggregate_source_field_name(group, source)?,
+            "synthetic_row",
+        ));
+    } else {
+        fields.push(ProjectField::literal(
+            "synthetic_row",
+            Value::String("global".to_owned()),
+        ));
+    }
+    if let Some(first_output) = outputs.first() {
+        fields.push(ProjectField::renamed(
+            logical_user_column(&first_output.output.name),
+            "synthetic_revision",
+        ));
+    } else {
+        fields.push(ProjectField::literal(
+            "synthetic_revision",
+            Value::String("empty".to_owned()),
+        ));
+    }
+    for group in group_by {
+        let field = aggregate_source_field_name(group, source)?;
+        fields.push(ProjectField::named(field));
+    }
+    fields.extend(
+        outputs
+            .iter()
+            .map(|output| ProjectField::named(logical_user_column(&output.output.name))),
+    );
+    fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
+    Ok(fields)
+}
+
+fn aggregate_typed_group_field(
+    value: &NormalizedValueRef,
+    source: &ResolvedSource,
+) -> CapabilityResult<TypedOutputField> {
+    let field = aggregate_source_field_name(value, source)?;
+    let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
+        Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(format!(
+                "aggregate group field {field:?} is missing from resolved descriptor"
+            ))],
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    Ok(TypedOutputField {
+        name: field,
+        ty: column_type_from_value_type(&value_type),
+    })
+}
+
+fn aggregate_typed_output_field(
+    output: &AggregateExpr,
+    source: &ResolvedSource,
+) -> CapabilityResult<TypedOutputField> {
+    Ok(TypedOutputField {
+        name: logical_user_column(&output.output.name).to_owned(),
+        ty: column_type_from_value_type(&aggregate_output_value_type(output, source)?),
+    })
+}
+
+fn aggregate_output_value_type(
+    output: &AggregateExpr,
+    source: &ResolvedSource,
+) -> CapabilityResult<ValueType> {
+    match output.function {
+        AggregateFunction::Count => Ok(ValueType::U64),
+        AggregateFunction::Avg => Ok(ValueType::F64),
+        AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
+            let input = output.input.as_ref().ok_or_else(|| {
+                Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Operator(
+                        "aggregate input is required for sum/min/max".to_owned(),
+                    )],
+                    explain: ExplainPlan::default(),
+                })
+            })?;
+            let field = aggregate_source_field_name(input, source)?;
+            source_field_type(source, &field).cloned().ok_or_else(|| {
+                Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Runtime(format!(
+                        "aggregate input field {field:?} is missing from resolved descriptor"
+                    ))],
+                    explain: ExplainPlan::default(),
+                })
+            })
+        }
+    }
+}
+
+fn aggregate_source_field_name(
+    value: &NormalizedValueRef,
+    source: &ResolvedSource,
+) -> CapabilityResult<String> {
+    match value {
+        NormalizedValueRef::SourceField {
+            source: value_source,
+            field,
+        } if value_source == &source.row_shape.source => {
+            require_source_field(source, &user_column_field(field)).map_err(|gap| {
+                Box::new(CapabilityReport {
+                    gaps: vec![gap],
+                    explain: ExplainPlan::default(),
+                })
+            })
+        }
+        NormalizedValueRef::RowId(RowIdRef::Source(value_source))
+            if value_source == &source.row_shape.source =>
+        {
+            Ok(source.row_shape.row_uuid_field.clone())
+        }
+        _ => Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Operator(
+                "aggregate group keys must be root source fields".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        })),
+    }
 }
 
 fn version_witness_fields_for_tagged_rows(

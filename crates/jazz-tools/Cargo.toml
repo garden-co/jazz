@@ -201,6 +201,10 @@ name = "scope_revocation"
 required-features = ["test"]
 
 [[test]]
+name = "aggregate_subscriptions"
+required-features = ["test-utils"]
+
+[[test]]
 name = "transactions"
 required-features = ["test-utils"]
 
