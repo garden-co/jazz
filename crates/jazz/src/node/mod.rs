@@ -2417,6 +2417,31 @@ where
             .map_err(Error::Groove)
     }
 
+    #[cfg(feature = "testing")]
+    /// Test/bench-only estimate of all Jazz physical-class bytes. This is the
+    /// cheap class-CF meter used for memory-amplification receipts; it is not a
+    /// logical table-prefix scan.
+    pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
+        let mut total = 0_u64;
+        for class_cf in [
+            "__groove_class_history",
+            "__groove_class_register",
+            "__groove_class_global_current",
+            "__groove_class_ahead_current",
+            "__groove_class_changes",
+            "__groove_class_indices",
+            "__groove_class_content",
+            "__groove_class_meta",
+        ] {
+            total += self
+                .database
+                .approximate_class_bytes(class_cf)
+                .map_err(Error::Groove)?
+                .unwrap_or_default();
+        }
+        Ok(total)
+    }
+
     pub(crate) fn groove_runtime_token(&self) -> u64 {
         self.groove_runtime_token
     }

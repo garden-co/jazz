@@ -2529,6 +2529,13 @@ where
     }
 
     #[cfg(feature = "testing")]
+    /// Test/bench-only encoded storage byte estimate across Jazz physical
+    /// classes.
+    pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
+        Ok(self.node.node.borrow().encoded_storage_bytes_for_test()?)
+    }
+
+    #[cfg(feature = "testing")]
     /// Test/bench-only durability boundary for harnesses that reopen the same
     /// storage path immediately after a synthetic lifecycle transition.
     pub fn flush_for_test(&self) -> Result<(), Error> {
@@ -2627,6 +2634,13 @@ where
     /// boundaries that call this as a boundary effect.
     pub fn mark_subscriber_connections_dirty_for_test(&self) {
         self.mark_subscriber_connections_dirty();
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only encoded storage byte estimate across Jazz physical
+    /// classes.
+    pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
+        Ok(self.node.borrow().encoded_storage_bytes_for_test()?)
     }
 
     fn next_subscription_key(
