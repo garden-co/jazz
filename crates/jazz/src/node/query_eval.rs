@@ -3523,9 +3523,11 @@ where
         {
             self.query.settled_result_sets.remove(&binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
-            let _ = self.clear_known_state_fact(binding_view_key);
             self.query
                 .known_state_declared_binding_views
+                .remove(&binding_view_key);
+            self.query
+                .initial_hydration_binding_views
                 .remove(&binding_view_key);
         }
     }
@@ -3650,6 +3652,12 @@ where
             read_view: subscription.read_view,
         };
         if let Some(position) = self.settled_through_for_binding_view(binding_view_key) {
+            return Ok(Some(KnownStateDeclaration::Fast {
+                completeness: KnownStateCompleteness::FastCurrentMembership,
+                position,
+            }));
+        }
+        if let Some(position) = self.load_known_state_fact(binding_view_key)? {
             return Ok(Some(KnownStateDeclaration::Fast {
                 completeness: KnownStateCompleteness::FastCurrentMembership,
                 position,

@@ -2186,17 +2186,26 @@ where
         Ok(())
     }
 
-    pub(crate) fn clear_known_state_fact(
+    pub(crate) fn load_known_state_fact(
         &mut self,
         binding_view_key: BindingViewKey,
-    ) -> Result<(), Error> {
-        self.database
-            .direct_record_store(KNOWN_STATE_FACTS_STORE)?
-            .delete(&known_state_fact_key(binding_view_key))?;
+    ) -> Result<Option<GlobalSeq>, Error> {
+        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
+        let Some(record) = store.get(&known_state_fact_key(binding_view_key))? else {
+            return Ok(None);
+        };
+        let settled_through = match record.get_idx(0)? {
+            Value::U64(value) => GlobalSeq(value),
+            _ => {
+                return Err(Error::InvalidStoredValue(
+                    "known-state settled-through must be u64",
+                ));
+            }
+        };
         self.query
             .settled_through_by_binding_view
-            .remove(&binding_view_key);
-        Ok(())
+            .insert(binding_view_key, settled_through);
+        Ok(Some(settled_through))
     }
 
     pub(crate) fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {

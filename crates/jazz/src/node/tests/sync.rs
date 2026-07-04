@@ -1856,6 +1856,51 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
 }
 
 #[test]
+fn fast_known_state_fact_survives_storage_reopen() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(25);
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row_uuid, 14).cells(title_cells("persisted storage")),
+    );
+    let mut peer = PeerState::relay();
+    let update = peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap();
+    reader.apply_sync_message(update).unwrap();
+    drop(reader);
+
+    let mut reopened = open_node_at(&reader_dir, schema());
+    let declaration = reopened
+        .known_state_declaration_for_subscription(
+            &shape,
+            &binding,
+            subscription,
+            &[],
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
+    assert_eq!(
+        declaration,
+        Some(crate::protocol::KnownStateDeclaration::Fast {
+            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalSeq(1),
+        })
+    );
+}
+
+#[test]
 fn known_state_declaration_never_skips_unfated_edge_members() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_edge_dir, mut edge) = open_node_with_uuid(node(7));
