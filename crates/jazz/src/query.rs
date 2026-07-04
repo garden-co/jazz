@@ -496,6 +496,33 @@ impl Query {
         self
     }
 
+    /// Use a seed relation for the most recently added reachable traversal.
+    ///
+    /// The seed relation contributes initial teams by filtering `seed_table`
+    /// rows where `user_column == claim(claim_path)`, then projecting
+    /// `team_column` into the recursive frontier.
+    pub fn seeded_by(
+        mut self,
+        seed_table: impl Into<String>,
+        user_column: impl Into<String>,
+        claim_path: impl Into<String>,
+        team_column: impl Into<String>,
+    ) -> Self {
+        let Some(reachable) = self.reachable.last_mut() else {
+            panic!("seeded_by requires a preceding reachable_via traversal");
+        };
+        let user_column = user_column.into();
+        let claim_path = claim_path.into();
+        reachable.seed = Some(ReachableSeed {
+            table: seed_table.into(),
+            user_column: Some(user_column.clone()),
+            user_claim: Some(claim_path.clone()),
+            team_column: team_column.into(),
+            filters: Vec::new(),
+        });
+        self
+    }
+
     /// Add an include path such as `project.org`.
     ///
     /// ```rust
@@ -1097,6 +1124,12 @@ pub struct ReachableVia {
 pub struct ReachableSeed {
     /// Table containing seed rows.
     pub table: String,
+    /// Seed-table column matched against the authenticated claim.
+    #[serde(default)]
+    pub user_column: Option<String>,
+    /// Claim path used as the seed-table user value.
+    #[serde(default)]
+    pub user_claim: Option<String>,
     /// Seed-table column referencing the initial team frontier.
     pub team_column: String,
     /// Filters applied to seed rows.
@@ -1427,6 +1460,13 @@ impl Binding {
     pub fn values(&self) -> &BTreeMap<String, Value> {
         &self.values
     }
+}
+
+pub(crate) fn binding_id_for_values(values: &BTreeMap<String, Value>) -> BindingId {
+    BindingId(uuid::Uuid::new_v5(
+        &QUERY_NAMESPACE,
+        &canonical_binding_bytes(values),
+    ))
 }
 
 /// Query validation error.
@@ -2356,6 +2396,11 @@ fn canonical_reachable_key(reachable: &ReachableVia) -> Vec<u8> {
     if let Some(seed) = &reachable.seed {
         bytes.push(b's');
         put_str(&mut bytes, &seed.table);
+        if let (Some(user_column), Some(user_claim)) = (&seed.user_column, &seed.user_claim) {
+            bytes.push(b'u');
+            put_str(&mut bytes, user_column);
+            put_str(&mut bytes, user_claim);
+        }
         put_str(&mut bytes, &seed.team_column);
         put_len(&mut bytes, seed.filters.len());
         for filter in &seed.filters {
