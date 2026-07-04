@@ -10,8 +10,8 @@ use super::*;
 use std::sync::mpsc::TryRecvError;
 
 use crate::ivm::{
-    AggregateExpr, AggregateFunction, LiteralValue, PlanExpr, PredicateExpr, ProjectField,
-    StaticScanSpec, TopByOrder,
+    AggregateExpr, AggregateFunction, IvmRuntimeError, LiteralValue, PlanExpr, PredicateExpr,
+    ProjectField, StaticScanSpec, TopByOrder,
 };
 use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
@@ -2037,6 +2037,39 @@ fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
             1,
         )]
     );
+}
+
+#[test]
+fn prepared_binding_source_reuse_validates_descriptor() {
+    let storage = MemoryStorage::new(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let string_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let string_graph = GraphBuilder::binding_source("shared_params", string_descriptor)
+        .project_fields([ProjectField::named("wanted")]);
+
+    database
+        .prepare_one_sink(
+            string_graph.clone(),
+            "shared_params",
+            string_descriptor,
+            ["wanted"],
+        )
+        .unwrap();
+    database
+        .prepare_one_sink(string_graph, "shared_params", string_descriptor, ["wanted"])
+        .unwrap();
+
+    let u64_descriptor = RecordDescriptor::new([("wanted", ColumnType::U64.value_type())]);
+    let u64_graph = GraphBuilder::binding_source("shared_params", u64_descriptor)
+        .project_fields([ProjectField::named("wanted")]);
+    let err = database
+        .prepare_one_sink(u64_graph, "shared_params", u64_descriptor, ["wanted"])
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::IvmRuntime(IvmRuntimeError::BindingSourceDescriptorMismatch(shape))
+            if shape == "shared_params"
+    ));
 }
 
 #[test]

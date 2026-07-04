@@ -622,12 +622,20 @@ impl IvmRuntime {
             .sum::<usize>() as u64;
         let shape = binding_source_shape.into();
         let shape_id = self.next_shape_id();
-        self.binding_sources
-            .entry(shape.clone())
-            .or_insert_with(|| BindingSourceState {
-                descriptor: binding_descriptor,
-                refcounts: HashMap::new(),
-            });
+        match self.binding_sources.entry(shape.clone()) {
+            std::collections::hash_map::Entry::Occupied(existing)
+                if existing.get().descriptor != binding_descriptor =>
+            {
+                return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(shape));
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {}
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(BindingSourceState {
+                    descriptor: binding_descriptor,
+                    refcounts: HashMap::new(),
+                });
+            }
+        }
         let mut terminal_states = BTreeMap::new();
         for terminal in terminals {
             let output = self.add_dedup_graph(&terminal.graph)?;
@@ -6590,6 +6598,8 @@ pub enum IvmRuntimeError {
     },
     #[error("binding source not found: {0}")]
     BindingSourceNotFound(String),
+    #[error("binding source descriptor mismatch: {0}")]
+    BindingSourceDescriptorMismatch(String),
     #[error(transparent)]
     RecordEncoding(#[from] records::Error),
     #[error("recursive node {node:?} exceeded iteration limit {max_iters}")]
