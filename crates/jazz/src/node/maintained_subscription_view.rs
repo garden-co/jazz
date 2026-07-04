@@ -88,6 +88,7 @@ pub(crate) struct ResultTransitions {
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
     pub(crate) allow_storage_witness_fallback: bool,
+    pub(crate) observed_delta_batches: usize,
 }
 
 #[derive(Clone, Debug)]
