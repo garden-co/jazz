@@ -183,11 +183,36 @@ where
     }
 
     let mut emitted = Vec::new();
-    let seed_delta = runtime.eval_root(seed)?;
+    let seed_delta = if has_binding_deltas {
+        // A new binding can make existing seed-table rows visible even when no
+        // table delta occurs in this tick. Evaluate the seed over a current
+        // snapshot so binding-as-data opens produce their initial frontier
+        // without forcing a full recursive recompute.
+        let full_table_deltas =
+            snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, seed)?;
+        runtime.eval_with_binding_and_table_deltas(
+            &full_table_deltas,
+            0,
+            recursive.frontier.clone(),
+            RecordDeltas::empty(output_desc),
+            seed,
+        )?
+    } else {
+        runtime.eval_root(seed)?
+    };
+    let seed_delta_count = seed_delta.deltas.len();
     if seed_delta.descriptor != output_desc {
         return Err(IvmRuntimeError::GraphOutputMismatch);
     }
     let seed_frontier = recursive_state.accept_positive(seed_delta.deltas)?;
+    if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
+        eprintln!(
+            "CLOSURE_TRACE event=recursive_positive node={node:?} scope={:?} seed_delta={} seed_frontier={} has_table_delta={has_table_delta} has_binding_deltas={has_binding_deltas}",
+            runtime.scope,
+            seed_delta_count,
+            seed_frontier.len(),
+        );
+    }
     emitted.extend(seed_frontier.clone());
 
     let mut frontier = if has_table_delta {
