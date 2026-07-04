@@ -4,6 +4,8 @@ use crate::schema::ColumnSchema;
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::Snapshot;
 use groove::records::ValueType;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 fn schema(byte: u8) -> SchemaVersionId {
     SchemaVersionId::from_bytes([byte; 16])
@@ -31,6 +33,51 @@ fn source(table: &str, role: SourceRole) -> SourceId {
         path: SourcePath {
             components: vec![role],
         },
+    }
+}
+
+fn lowered_binding_source_fingerprint(program: &QueryProgram) -> BTreeSet<(String, u64)> {
+    let mut sources = BTreeSet::new();
+    for terminal in &program.lowered.terminals {
+        collect_binding_source_fingerprint(&terminal.graph, &mut sources);
+    }
+    sources
+}
+
+fn collect_binding_source_fingerprint(graph: &GraphBuilder, sources: &mut BTreeSet<(String, u64)>) {
+    match graph {
+        GraphBuilder::BindingSource { shape, output } => {
+            let mut hasher = DefaultHasher::new();
+            format!("{output:?}").hash(&mut hasher);
+            sources.insert((shape.clone(), hasher.finish()));
+        }
+        GraphBuilder::Recursive { seed, step, .. } => {
+            collect_binding_source_fingerprint(seed, sources);
+            collect_binding_source_fingerprint(step, sources);
+        }
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::Project { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => {
+            collect_binding_source_fingerprint(input, sources);
+        }
+        GraphBuilder::Union { inputs } => {
+            for input in inputs {
+                collect_binding_source_fingerprint(input, sources);
+            }
+        }
+        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+            collect_binding_source_fingerprint(left, sources);
+            collect_binding_source_fingerprint(right, sources);
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. } => {}
     }
 }
 
@@ -96,6 +143,7 @@ fn row_set_input(byte: u8) -> RowSetProgramInput {
             source_shape: None,
             extra_user_params: BTreeMap::new(),
             param_types: BTreeMap::new(),
+            claim_params: BTreeMap::new(),
             values: BTreeMap::new(),
         },
     }
@@ -175,6 +223,7 @@ fn chained_row_set_input(byte: u8, binding_values: BTreeMap<String, Value>) -> R
             source_shape: None,
             extra_user_params: BTreeMap::new(),
             param_types: BTreeMap::from([("title".to_owned(), ColumnType::String)]),
+            claim_params: BTreeMap::new(),
             values: binding_values,
         },
     }
@@ -260,6 +309,7 @@ fn aggregate_over_window_row_set_input(byte: u8) -> RowSetProgramInput {
             source_shape: None,
             extra_user_params: BTreeMap::new(),
             param_types: BTreeMap::new(),
+            claim_params: BTreeMap::new(),
             values: BTreeMap::new(),
         },
     }
@@ -313,6 +363,7 @@ fn claim_filtered_row_set_input(byte: u8, claim: &str) -> RowSetProgramInput {
             source_shape: None,
             extra_user_params: BTreeMap::new(),
             param_types: BTreeMap::new(),
+            claim_params: BTreeMap::new(),
             values: BTreeMap::new(),
         },
     }
@@ -855,6 +906,7 @@ fn current_source_select_projection_and_unordered_slice_lower() {
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
                 param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -979,6 +1031,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
                 param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1174,6 +1227,7 @@ fn current_join_via_can_use_union_relation_input() {
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
                 param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1297,6 +1351,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
                 param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1448,6 +1503,7 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
                 param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1541,6 +1597,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
                 param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -1683,6 +1740,7 @@ fn correlated_path_request(
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
                 param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
                 values: BTreeMap::new(),
             },
         },
@@ -2087,6 +2145,13 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
                 param_types: BTreeMap::from([("route".to_owned(), ColumnType::String)]),
+                claim_params: BTreeMap::from([(
+                    claim_param_field(&ClaimPath(vec!["sub".to_owned()])),
+                    ProgramClaimParam {
+                        path: ClaimPath(vec!["sub".to_owned()]),
+                        ty: ColumnType::Uuid,
+                    },
+                )]),
                 values: BTreeMap::from([("route".to_owned(), Value::String("sync".to_owned()))]),
             },
         },
@@ -2377,6 +2442,13 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
                 source_shape: None,
                 extra_user_params: BTreeMap::new(),
                 param_types: BTreeMap::new(),
+                claim_params: BTreeMap::from([(
+                    claim_param_field(&ClaimPath(vec!["sub".to_owned()])),
+                    ProgramClaimParam {
+                        path: ClaimPath(vec!["sub".to_owned()]),
+                        ty: ColumnType::Uuid,
+                    },
+                )]),
                 values: BTreeMap::new(),
             },
         },
@@ -2386,8 +2458,18 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
         },
     };
 
+    let mut old_order_request = request.clone();
+    old_order_request.input.binding.claim_params.clear();
+    let old_order_program =
+        lower_query_program(old_order_request, &mut FakeSourceResolver::default())
+            .expect("old-order recursive claim seed should lower");
     let program = lower_query_program(request, &mut FakeSourceResolver::default())
         .expect("recursive claim seed should lower");
+    assert_eq!(
+        lowered_binding_source_fingerprint(&program),
+        lowered_binding_source_fingerprint(&old_order_program),
+        "pre-retarget claim discovery must not change emitted binding source names or descriptors"
+    );
     let GraphBuilder::Recursive { seed, .. } = &program.lowered.terminals[0].graph else {
         panic!("expected recursive graph");
     };

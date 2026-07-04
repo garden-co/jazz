@@ -49,8 +49,17 @@ pub(crate) struct ProgramBinding {
     pub(crate) extra_user_params: BTreeMap<String, ColumnType>,
     /// Validated user parameter types for this program instance.
     pub(crate) param_types: BTreeMap<String, ColumnType>,
+    /// Trusted claim parameters discovered before binding-source retargeting.
+    pub(crate) claim_params: BTreeMap<String, ProgramClaimParam>,
     /// Values by parameter name.
     pub(crate) values: BTreeMap<String, Value>,
+}
+
+/// One claim parameter required by a prepared binding source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProgramClaimParam {
+    pub(crate) path: ClaimPath,
+    pub(crate) ty: ColumnType,
 }
 
 /// Binding-independent normalized query shape.
