@@ -64,3 +64,7 @@ harness = false
 [[bench]]
 name = "s9_durable_execution"
 harness = false
+
+[[bench]]
+name = "customer_cold_start"
+harness = false
