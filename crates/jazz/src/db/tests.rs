@@ -440,6 +440,73 @@ fn owner_id_public_schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
+fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
+    let resource_policy = Policy::shape(Query::from("res_a").reachable_via_with_access_filters(
+        "res_a_access_edges",
+        "resource",
+        "team",
+        claim("sub"),
+        [eq(col("administrator"), lit(false))],
+        "group_entry",
+        "member_id",
+        "target_id",
+        [eq(col("administrator"), lit(false))],
+    ));
+
+    JazzSchema::new([
+        TableSchema::new(
+            "res_a",
+            [
+                ColumnSchema::new("org_id", ColumnType::Uuid),
+                ColumnSchema::new("created_by", ColumnType::Uuid),
+                ColumnSchema::new("updated_by", ColumnType::Uuid),
+                ColumnSchema::new("archived", ColumnType::Bool),
+                ColumnSchema::new("label", ColumnType::String),
+                ColumnSchema::new("date_created", ColumnType::U64),
+                ColumnSchema::new("date_updated", ColumnType::U64),
+                ColumnSchema::new("col_text_a", ColumnType::String.nullable()),
+                ColumnSchema::new("col_text_b", ColumnType::String.nullable()),
+                ColumnSchema::new("col_float", ColumnType::F64.nullable()),
+                ColumnSchema::new("col_int", ColumnType::U64.nullable()),
+                ColumnSchema::new("col_json", ColumnType::String.nullable()),
+                ColumnSchema::new("col_tags", ColumnType::String.nullable()),
+            ],
+        )
+        .with_reference("created_by", "group")
+        .with_reference("updated_by", "group")
+        .with_read_policy(resource_policy)
+        .with_write_policy(Policy::public()),
+        TableSchema::new("group", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "res_a_access_edges",
+            [
+                ColumnSchema::new("resource", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+                ColumnSchema::new("grant_role", ColumnType::String),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+            ],
+        )
+        .with_reference("resource", "res_a")
+        .with_reference("team", "group")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "group_entry",
+            [
+                ColumnSchema::new("member_id", ColumnType::Uuid),
+                ColumnSchema::new("target_id", ColumnType::Uuid),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+                ColumnSchema::new("date_added", ColumnType::U64),
+            ],
+        )
+        .with_reference("member_id", "group")
+        .with_reference("target_id", "group")
+        .with_write_policy(Policy::public()),
+    ])
+}
+
 fn owner_blob_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "assets",
@@ -5319,6 +5386,266 @@ fn accepted_subscriber_is_served_under_subscriber_author_identity() {
     assert_eq!(
         rows[0].cell(&schema.tables[0], "title"),
         Some(Value::String("for subscriber".to_owned()))
+    );
+}
+
+fn resource_test_cells(title: &str) -> RowCells {
+    BTreeMap::from([
+        ("org_id".to_owned(), Value::Uuid(row(0x01).0)),
+        ("created_by".to_owned(), Value::Uuid(row(0x11).0)),
+        ("updated_by".to_owned(), Value::Uuid(row(0x11).0)),
+        ("archived".to_owned(), Value::Bool(false)),
+        ("label".to_owned(), Value::String(title.to_owned())),
+        ("date_created".to_owned(), Value::U64(1)),
+        ("date_updated".to_owned(), Value::U64(2)),
+        ("col_text_a".to_owned(), Value::Nullable(None)),
+        ("col_text_b".to_owned(), Value::Nullable(None)),
+        ("col_float".to_owned(), Value::Nullable(None)),
+        ("col_int".to_owned(), Value::Nullable(None)),
+        ("col_json".to_owned(), Value::Nullable(None)),
+        ("col_tags".to_owned(), Value::Nullable(None)),
+    ])
+}
+
+fn resource_access_test_cells(resource: RowUuid, team: RowUuid, administrator: bool) -> RowCells {
+    BTreeMap::from([
+        ("resource".to_owned(), Value::Uuid(resource.0)),
+        ("team".to_owned(), Value::Uuid(team.0)),
+        ("grant_role".to_owned(), Value::String("viewer".to_owned())),
+        ("administrator".to_owned(), Value::Bool(administrator)),
+    ])
+}
+
+fn team_cells(name: &str) -> RowCells {
+    BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))])
+}
+
+fn group_entry_test_cells(member: RowUuid, target: RowUuid, administrator: bool) -> RowCells {
+    BTreeMap::from([
+        ("member_id".to_owned(), Value::Uuid(member.0)),
+        ("target_id".to_owned(), Value::Uuid(target.0)),
+        ("administrator".to_owned(), Value::Bool(administrator)),
+        ("date_added".to_owned(), Value::U64(1)),
+    ])
+}
+
+fn seed_recursive_reachable_read_fixture(server: &CoreDb, member: AuthorId) -> (RowUuid, RowUuid) {
+    let direct_doc = row(0xd1);
+    let inherited_doc = row(0xd2);
+    let hidden_doc = row(0xd3);
+    let member_team = RowUuid(member.0);
+    let parent_team = row(0xa1);
+    let hidden_team = row(0xa2);
+
+    for (team, name) in [
+        (member_team, "member"),
+        (parent_team, "parent"),
+        (hidden_team, "hidden"),
+    ] {
+        server
+            .insert_with_id("group", team, team_cells(name))
+            .unwrap();
+    }
+
+    for (doc, title) in [
+        (direct_doc, "direct"),
+        (inherited_doc, "inherited"),
+        (hidden_doc, "hidden"),
+    ] {
+        server
+            .insert_with_id("res_a", doc, resource_test_cells(title))
+            .unwrap();
+    }
+
+    server
+        .insert_with_id(
+            "res_a_access_edges",
+            row(0xb1),
+            resource_access_test_cells(direct_doc, member_team, false),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "res_a_access_edges",
+            row(0xb2),
+            resource_access_test_cells(inherited_doc, parent_team, false),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "res_a_access_edges",
+            row(0xb3),
+            resource_access_test_cells(hidden_doc, hidden_team, false),
+        )
+        .unwrap();
+    for i in 0..42 {
+        let member = if i == 0 { member_team } else { parent_team };
+        let target = parent_team;
+        server
+            .insert_with_id(
+                "group_entry",
+                row(0xc1 + i),
+                group_entry_test_cells(member, target, false),
+            )
+            .unwrap();
+    }
+
+    (direct_doc, inherited_doc)
+}
+
+fn served_subscription_rows_for_author(
+    schema: &JazzSchema,
+    server: &CoreDb,
+    author: AuthorId,
+    table: &str,
+) -> Vec<RowUuid> {
+    let client = open_db(author.0.as_bytes()[0], author, schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let query = Query::from(table);
+    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    row_ids(&added)
+}
+
+fn served_many_subscription_rows_for_author(
+    schema: &JazzSchema,
+    server: &CoreDb,
+    author: AuthorId,
+    tables: &[&str],
+) -> BTreeMap<String, Vec<RowUuid>> {
+    let client = open_db(author.0.as_bytes()[0].wrapping_add(0x40), author, schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut subscriptions = Vec::new();
+    for table in tables {
+        let query = Query::from(*table);
+        let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+        assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+        subscriptions.push(((*table).to_owned(), subscription));
+    }
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    subscriptions
+        .into_iter()
+        .map(|(table, mut subscription)| {
+            let (added, updated, removed) =
+                delta_rows(block_on(subscription.next_event()).unwrap());
+            assert!(updated.is_empty());
+            assert!(removed.is_empty());
+            (table, row_ids(&added))
+        })
+        .collect()
+}
+
+fn served_group_entry_rows_via_relay(
+    schema: &JazzSchema,
+    server: &CoreDb,
+    author: AuthorId,
+) -> (Vec<RowUuid>, usize, usize) {
+    let relay = open_db(0x71, AuthorId::SYSTEM, schema);
+    let client = open_db(0x72, author, schema);
+    let (relay_transport, core_transport) = duplex();
+    let _relay_upstream = relay.connect_upstream(relay_transport);
+    let _core_subscriber = server.accept_subscriber(core_transport, AuthorId::SYSTEM);
+    let (client_transport, relay_sub_transport) = duplex();
+    let _client_upstream = client.connect_upstream(client_transport);
+    let _relay_subscriber = relay.accept_subscriber(relay_sub_transport, author);
+
+    let query = Query::from("group_entry");
+    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    let mut rows = BTreeSet::new();
+    for _ in 0..20 {
+        server.server.tick().unwrap();
+        relay.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            match event {
+                SubscriptionEvent::Opened { current, .. }
+                | SubscriptionEvent::Reset { current, .. } => {
+                    rows = current.rows.into_iter().map(|row| row.row_uuid()).collect();
+                }
+                SubscriptionEvent::Delta {
+                    added,
+                    updated,
+                    removed,
+                    ..
+                } => {
+                    for row in removed {
+                        rows.remove(&row.row_uuid);
+                    }
+                    for row in added.into_iter().chain(updated) {
+                        rows.insert(row.row_uuid());
+                    }
+                }
+                SubscriptionEvent::Closed => {}
+            }
+        }
+    }
+    let client_query = client.prepare_query(&Query::from("group_entry")).unwrap();
+    let client_one_shot = block_on(client.all(&client_query, ReadOpts::default()))
+        .unwrap()
+        .len();
+    let relay_query = relay.prepare_query(&Query::from("group_entry")).unwrap();
+    let relay_one_shot = block_on(relay.all(&relay_query, ReadOpts::default()))
+        .unwrap()
+        .len();
+    (rows.into_iter().collect(), client_one_shot, relay_one_shot)
+}
+
+#[test]
+fn db_surface_recursive_reachable_claim_policy_subscription_routes_per_identity() {
+    let schema = benchmark_shaped_recursive_reachable_read_schema();
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x11; 16]);
+    let admin = AuthorId::SYSTEM;
+    let spy = AuthorId::from_bytes([0x33; 16]);
+    let (direct_doc, inherited_doc) = seed_recursive_reachable_read_fixture(&server, member);
+
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "res_a"),
+        vec![direct_doc, inherited_doc]
+    );
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, admin, "res_a"),
+        vec![direct_doc, inherited_doc, row(0xd3)]
+    );
+    assert!(served_subscription_rows_for_author(&schema, &server, spy, "res_a").is_empty());
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "group_entry"),
+        (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>()
+    );
+    let rows = served_many_subscription_rows_for_author(
+        &schema,
+        &server,
+        member,
+        &["group", "res_a_access_edges", "res_a", "group_entry"],
+    );
+    assert_eq!(
+        rows["group_entry"],
+        (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>()
+    );
+    let (relay_rows, client_one_shot, relay_one_shot) =
+        served_group_entry_rows_via_relay(&schema, &server, member);
+    assert_eq!(relay_one_shot, 42);
+    assert_eq!(client_one_shot, 42);
+    assert_eq!(
+        relay_rows,
+        (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>()
     );
 }
 
