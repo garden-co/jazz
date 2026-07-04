@@ -3628,6 +3628,7 @@ where
                 program_fact_removes: previous_facts.difference(&current_facts).cloned().collect(),
                 allow_storage_witness_fallback: true,
                 observed_delta_batches: 0,
+                observed_result_delta_batches: 0,
             },
         ))
     }
