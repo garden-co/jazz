@@ -328,6 +328,8 @@ impl IvmRuntime {
             evaluator.update_node(node)?;
         }
         drop(evaluator);
+        self.operator_states
+            .retain(|key, _| key.scope == ScopePath::root());
 
         for subscription_id in dropped_subscriptions {
             self.unsubscribe(subscription_id);
@@ -4281,6 +4283,11 @@ where
         evaluator.update_node(node)
     }
 
+    pub(super) fn clear_operator_state_for_scope(&mut self) {
+        self.operator_states
+            .retain(|key, _| key.scope != self.scope);
+    }
+
     pub(super) fn eval_root(&mut self, node: NodeId) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut evaluator = TickEvaluator {
             schema: self.schema,
@@ -4478,7 +4485,11 @@ where
 
     fn memo_key(&self, node: NodeId) -> Result<EvalMemoKey, IvmRuntimeError> {
         Ok(EvalMemoKey {
-            scope: self.operator_scope(node)?,
+            scope: if self.context.scope == ScopePath::root() {
+                self.operator_scope(node)?
+            } else {
+                self.context.scope.clone()
+            },
             node,
             tick: self.current_tick,
             sub_tick: self.context.sub_tick,
@@ -4493,6 +4504,16 @@ where
     }
 
     fn operator_scope(&self, node: NodeId) -> Result<ScopePath, IvmRuntimeError> {
+        // Recursive step evaluation must be isolated per recursive node even
+        // for context-independent table/index inputs. Sibling recursive nodes
+        // can evaluate the same base-table delta in one outer tick; sharing
+        // root-scoped child operator state would let the first sibling advance
+        // the table side and make later siblings miss the same positive edge.
+        // Scoped child operator state is tick-local and is cleared before the
+        // public tick exits.
+        if self.context.scope != ScopePath::root() {
+            return Ok(self.context.scope.clone());
+        }
         // Only fragments downstream of FrontierSource are scoped. Base table
         // arrangements stay global and can be reused by unrelated queries.
         if self.depends_on_context(node, &mut HashSet::new())? {

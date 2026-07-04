@@ -2720,6 +2720,93 @@ fn routed_prepared_recursive_subscription_joins_new_closure_to_preexisting_downs
 }
 
 #[test]
+fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() {
+    fn routed_reach_graph(binding_shape: &str, route_field: &str) -> GraphBuilder {
+        let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+        let reach = RecordDescriptor::new([
+            ("seed", ColumnType::U64.value_type()),
+            ("dst", ColumnType::U64.value_type()),
+            (route_field, ColumnType::U64.value_type()),
+        ]);
+        let seed =
+            GraphBuilder::binding_source(binding_shape, binding_descriptor).project_fields([
+                ProjectField::renamed("seed", "seed"),
+                ProjectField::renamed("seed", "dst"),
+                ProjectField::renamed("seed", route_field),
+            ]);
+        let frontier = GraphBuilder::frontier_source("frontier", reach);
+        let step = GraphBuilder::join(
+            frontier,
+            GraphBuilder::table("edges").project(["src", "dst"]),
+            ["dst"],
+            ["src"],
+        )
+        .project_fields([
+            ProjectField::renamed("left.seed", "seed"),
+            ProjectField::renamed("right.dst", "dst"),
+            ProjectField::renamed(format!("left.{route_field}"), route_field),
+        ]);
+        GraphBuilder::recursive(seed, step, "frontier", 16)
+    }
+
+    fn routed_docs_graph(binding_shape: &str, route_field: &str) -> GraphBuilder {
+        let reach = routed_reach_graph(binding_shape, route_field);
+        GraphBuilder::join(GraphBuilder::table("docs"), reach, ["team"], ["dst"]).project_fields([
+            ProjectField::renamed("left.id", "id"),
+            ProjectField::renamed("left.team", "team"),
+            ProjectField::renamed("right.seed", "seed"),
+            ProjectField::renamed(format!("right.{route_field}"), route_field),
+        ])
+    }
+
+    let storage = MemoryStorage::new(&["edges", "docs"]);
+    let mut database = Database::new(edges_docs_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let shape = database
+        .prepare(
+            [
+                RoutedMultisinkTerminal::new(
+                    "route_seed",
+                    routed_docs_graph("prepared-sibling-reach", "__routing_seed"),
+                    ["__routing_seed"],
+                    ["id", "team", "seed"],
+                ),
+                RoutedMultisinkTerminal::new(
+                    "route_claim",
+                    routed_docs_graph("prepared-sibling-reach", "__jazz_claim_sub"),
+                    ["__jazz_claim_sub"],
+                    ["id", "team", "seed"],
+                ),
+            ],
+            "prepared-sibling-reach",
+            binding_descriptor,
+        )
+        .unwrap();
+    let subscription = database.bind_shape(shape.id(), &[Value::U64(1)]).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    database.commit_batch(batch).unwrap();
+
+    let deltas = subscription.recv().unwrap();
+    let expected = [(vec![Value::U64(11), Value::U64(3), Value::U64(1)], 1)];
+    assert_eq!(
+        deltas.get("route_seed").unwrap().to_values().unwrap(),
+        expected
+    );
+    assert_eq!(
+        deltas.get("route_claim").unwrap().to_values().unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas() {
     let storage = MemoryStorage::new(&["edges", "docs"]);
     let mut database = Database::new(edges_docs_schema(), storage).unwrap();

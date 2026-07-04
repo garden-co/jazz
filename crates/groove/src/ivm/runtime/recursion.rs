@@ -190,9 +190,22 @@ where
     let seed_frontier = recursive_state.accept_positive(seed_delta.deltas)?;
     emitted.extend(seed_frontier.clone());
 
-    let mut frontier = RecordDeltas {
-        descriptor: output_desc,
-        deltas: seed_frontier,
+    let mut frontier = if has_table_delta {
+        // Table-side positive deltas must probe the existing recursive closure
+        // as well as any newly accepted seed rows. Step arrangements usually
+        // provide that old closure, but maintained routed graphs can have
+        // sibling recursive nodes whose arrangements are not populated on this
+        // exact path. Feeding the accumulated set is conservative: duplicate
+        // derivations are filtered by `accept_positive`.
+        RecordDeltas {
+            descriptor: output_desc,
+            deltas: recursive_state.accumulated_deltas(),
+        }
+    } else {
+        RecordDeltas {
+            descriptor: output_desc,
+            deltas: seed_frontier,
+        }
     };
     let mut sub_tick = 1;
     let mut must_run_step = true;
@@ -296,9 +309,6 @@ pub(super) fn hydrate_recursive_arrangements<S>(
 where
     S: OrderedKvStorage,
 {
-    if accumulated.is_empty() {
-        return Ok(());
-    }
     // Evaluate the step once against snapshot table deltas and the full
     // accumulated relation. The result is discarded; the purpose is to prepare
     // shared arrangements so later positive ticks can probe old state.
@@ -328,6 +338,7 @@ where
         accumulated,
         step,
     )?;
+    runtime.clear_operator_state_for_scope();
     Ok(())
 }
 
