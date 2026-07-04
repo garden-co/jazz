@@ -564,39 +564,61 @@ where
             }
             Err(error) => return Err(error),
         };
-        let incoming_bundle_tx_ids = version_bundles
-            .iter()
-            .map(|bundle| bundle.tx.tx_id)
-            .collect::<BTreeSet<_>>();
-        let cold_bulk_loaded = reset_result_set
+        if reset_result_set {
+            self.query
+                .initial_hydration_binding_views
+                .insert(binding_view_key);
+        }
+        let in_initial_hydration = self
+            .query
+            .initial_hydration_binding_views
+            .contains(&binding_view_key);
+        let bulk_loaded_tx_ids = if (reset_result_set || in_initial_hydration)
             && peer_complete_tx_payload_refs.is_empty()
             && result_member_removes.is_empty()
-            && self.ingest_cold_view_bundles_if_empty(&version_bundles)?;
+        {
+            // A reset with bundles is a snapshot for this subscription even
+            // when other subscriptions already advanced the node watermark.
+            // Empty reset stamps stay orthogonal below: with no bundles there
+            // is no payload to bulk ingest and the stamp must not clear shared
+            // state that is already more settled.
+            // Some initial hydrations arrive as an empty reset followed by one
+            // or more non-reset payload updates. Keep the receiver in the
+            // initial-hydration bulk path until the sender emits a settled
+            // stamp with no payload below; complete bundles can be bulk-loaded
+            // safely, and non-eligible bundles still fall back to normal ingest.
+            self.ingest_reset_view_bundles_in_bulk(&version_bundles)?
+        } else {
+            BTreeSet::new()
+        };
         let row_result_adds = result_member_adds
             .iter()
             .filter_map(ResultMemberEntry::as_row)
             .collect::<Vec<_>>();
+        let incoming_settled_state_change = reset_result_set
+            || !result_member_adds.is_empty()
+            || !result_member_removes.is_empty()
+            || !program_fact_adds.is_empty()
+            || !program_fact_removes.is_empty();
         let version_bundles_is_empty = version_bundles.is_empty();
-        if !cold_bulk_loaded {
+        if bulk_loaded_tx_ids.len() != version_bundles.len() {
             for bundle in version_bundles {
+                if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
+                    continue;
+                }
                 self.ingest_view_bundle(bundle)?;
             }
         }
-        if !cold_bulk_loaded {
-            for tx_id in peer_complete_tx_payload_refs
-                .iter()
-                .chain(row_result_adds.iter().map(|(_, _, tx_id)| tx_id))
-            {
-                if incoming_bundle_tx_ids.contains(tx_id) {
-                    continue;
-                }
-                if self.query_transaction(*tx_id)?.is_none() {
-                    self.sync_metrics.parked_orphans += 1;
-                    // M2 keeps peer state and receiver storage in memory only, and
-                    // both are discarded on restart. Until either becomes durable,
-                    // an unknown ref means the sender violated per-link ordering.
-                    return Err(Error::MissingTransaction(*tx_id));
-                }
+        for tx_id in peer_complete_tx_payload_refs
+            .iter()
+            .chain(row_result_adds.iter().map(|(_, _, tx_id)| tx_id))
+        {
+            if self.query_transaction(*tx_id)?.is_none() {
+                self.sync_metrics.parked_orphans += 1;
+                // M2 keeps peer state and receiver storage in memory only, and
+                // both are discarded on restart. Until either becomes durable,
+                // an unknown ref means the sender violated per-link ordering.
+                return Err(Error::MissingTransaction(*tx_id));
             }
         }
         // Removals are self-sufficient: the removed version can be invisible
@@ -681,7 +703,21 @@ where
                 );
             }
         }
+        if incoming_settled_state_change {
+            self.invalidate_query_runtime_handles();
+        }
         self.persist_known_state_fact(binding_view_key, settled_through)?;
+        if self
+            .query
+            .initial_hydration_binding_views
+            .contains(&binding_view_key)
+            && version_bundles_is_empty
+            && !reset_result_set
+        {
+            self.query
+                .initial_hydration_binding_views
+                .remove(&binding_view_key);
+        }
         Ok(())
     }
 

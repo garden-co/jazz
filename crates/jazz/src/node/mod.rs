@@ -297,6 +297,10 @@ struct QueryServing {
     settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalSeq>,
     /// Binding views whose current subscription declared known-state repair.
     known_state_declared_binding_views: BTreeSet<BindingViewKey>,
+    /// Binding views that have begun receiving an initial snapshot. Some
+    /// snapshot payloads arrive after an empty reset stamp, and every payload
+    /// in that phase is eligible for complete-bundle bulk ingest.
+    initial_hydration_binding_views: BTreeSet<BindingViewKey>,
 }
 
 /// One usage-site query binding registration.
@@ -501,6 +505,7 @@ where
                 settled_program_facts: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
                 known_state_declared_binding_views: BTreeSet::new(),
+                initial_hydration_binding_views: BTreeSet::new(),
             },
             open_tx: OpenTxState {
                 open_exclusive: BTreeMap::new(),
@@ -626,6 +631,7 @@ where
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
         self.query.known_state_declared_binding_views.clear();
+        self.query.initial_hydration_binding_views.clear();
         self.parking.parked_shape_registrations.clear();
         self.parking.parked_binding_deltas.clear();
         self.recover_from_storage()?;
