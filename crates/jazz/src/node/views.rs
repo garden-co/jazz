@@ -537,6 +537,54 @@ where
 
     /// Apply a downstream current-row view update.
     pub(super) fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
+        self.apply_view_update_inner(update, None)
+    }
+
+    pub(crate) fn apply_view_updates_in_batch(
+        &mut self,
+        updates: Vec<ViewUpdateParts>,
+    ) -> Result<(), Error> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut bulk_candidates = Vec::new();
+        for update in &updates {
+            let Ok(binding_view_key) = self.binding_view_key_for_subscription(update.subscription)
+            else {
+                continue;
+            };
+            if update.reset_result_set {
+                self.query
+                    .initial_hydration_binding_views
+                    .insert(binding_view_key);
+            }
+            let in_initial_hydration = self
+                .query
+                .initial_hydration_binding_views
+                .contains(&binding_view_key);
+            if (update.reset_result_set || in_initial_hydration)
+                && update.peer_complete_tx_payload_refs.is_empty()
+                && update.result_member_removes.is_empty()
+            {
+                bulk_candidates.extend(update.version_bundles.iter().cloned());
+            }
+        }
+        let bulk_loaded_tx_ids = self.ingest_reset_view_bundles_in_bulk(&bulk_candidates)?;
+        // Cross-subscription ordering within one receiver tick carries no
+        // protocol semantics beyond per-link FIFO. Table writes are coalesced
+        // above; per-subscription settled-state mutations still apply in
+        // arrival order below.
+        for update in updates {
+            self.apply_view_update_inner(update, Some(&bulk_loaded_tx_ids))?;
+        }
+        Ok(())
+    }
+
+    fn apply_view_update_inner(
+        &mut self,
+        update: ViewUpdateParts,
+        preloaded_tx_ids: Option<&BTreeSet<TxId>>,
+    ) -> Result<(), Error> {
         let ViewUpdateParts {
             subscription,
             settled_through,
@@ -573,7 +621,9 @@ where
             .query
             .initial_hydration_binding_views
             .contains(&binding_view_key);
-        let bulk_loaded_tx_ids = if (reset_result_set || in_initial_hydration)
+        let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
+            preloaded.clone()
+        } else if (reset_result_set || in_initial_hydration)
             && peer_complete_tx_payload_refs.is_empty()
             && result_member_removes.is_empty()
         {
@@ -595,11 +645,6 @@ where
             .iter()
             .filter_map(ResultMemberEntry::as_row)
             .collect::<Vec<_>>();
-        let incoming_settled_state_change = reset_result_set
-            || !result_member_adds.is_empty()
-            || !result_member_removes.is_empty()
-            || !program_fact_adds.is_empty()
-            || !program_fact_removes.is_empty();
         let version_bundles_is_empty = version_bundles.is_empty();
         if bulk_loaded_tx_ids.len() != version_bundles.len() {
             for bundle in version_bundles {
@@ -702,9 +747,6 @@ where
                     "settled binding view {binding_view_key:?} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
                 );
             }
-        }
-        if incoming_settled_state_change {
-            self.invalidate_query_runtime_handles();
         }
         self.persist_known_state_fact(binding_view_key, settled_through)?;
         if self

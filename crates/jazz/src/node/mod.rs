@@ -2421,10 +2421,6 @@ where
         self.groove_runtime_token
     }
 
-    pub(crate) fn invalidate_query_runtime_handles(&mut self) {
-        self.groove_runtime_token = next_groove_runtime_token();
-    }
-
     /// Return metrics for the most recent committed storage batch, if any.
     pub fn last_commit_metrics(&self) -> Option<&CommitMetrics> {
         self.database.last_commit_metrics()
@@ -3728,16 +3724,16 @@ impl MergeableCommit {
     }
 }
 
-struct ViewUpdateParts {
-    subscription: SubscriptionKey,
-    settled_through: GlobalSeq,
-    reset_result_set: bool,
-    version_bundles: Vec<VersionBundle>,
-    peer_complete_tx_payload_refs: Vec<TxId>,
-    result_member_adds: Vec<ResultMemberEntry>,
-    result_member_removes: Vec<ResultMemberEntry>,
-    program_fact_adds: Vec<ViewFactEntry>,
-    program_fact_removes: Vec<ViewFactEntry>,
+pub(crate) struct ViewUpdateParts {
+    pub(crate) subscription: SubscriptionKey,
+    pub(crate) settled_through: GlobalSeq,
+    pub(crate) reset_result_set: bool,
+    pub(crate) version_bundles: Vec<VersionBundle>,
+    pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
+    pub(crate) result_member_adds: Vec<ResultMemberEntry>,
+    pub(crate) result_member_removes: Vec<ResultMemberEntry>,
+    pub(crate) program_fact_adds: Vec<ViewFactEntry>,
+    pub(crate) program_fact_removes: Vec<ViewFactEntry>,
 }
 
 #[derive(Default)]
