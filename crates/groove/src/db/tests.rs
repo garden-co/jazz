@@ -730,6 +730,111 @@ fn insert_edge(batch: &mut DatabaseBatch, id: u64, src: u64, dst: u64) {
     );
 }
 
+fn grant_shape_schema() -> DatabaseSchema {
+    DatabaseSchema::new([
+        TableSchema::new(
+            "group_edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "access_edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("resource", ColumnType::U64),
+                ColumnSchema::new("group", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "resources",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("payload", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ])
+}
+
+fn grant_shape_graph() -> GraphBuilder {
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let reach_descriptor = RecordDescriptor::new([
+        ("seed", ColumnType::U64.value_type()),
+        ("group", ColumnType::U64.value_type()),
+    ]);
+    let seed = GraphBuilder::binding_source("grant-claim", binding_descriptor).project_fields([
+        ProjectField::renamed("seed", "seed"),
+        ProjectField::renamed("seed", "group"),
+    ]);
+    let frontier = GraphBuilder::frontier_source("frontier", reach_descriptor);
+    let step = GraphBuilder::join(
+        frontier,
+        GraphBuilder::table("group_edges").project(["src", "dst"]),
+        ["group"],
+        ["src"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.seed", "seed"),
+        ProjectField::renamed("right.dst", "group"),
+    ]);
+    let reach = GraphBuilder::recursive(seed, step, "frontier", 16);
+    let visible_access = GraphBuilder::join(
+        GraphBuilder::table("access_edges"),
+        reach,
+        ["group"],
+        ["group"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.resource", "resource"),
+        ProjectField::renamed("right.seed", "seed"),
+    ]);
+    GraphBuilder::join(
+        GraphBuilder::table("resources"),
+        visible_access,
+        ["id"],
+        ["resource"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.id", "id"),
+        ProjectField::renamed("left.payload", "payload"),
+        ProjectField::renamed("right.seed", "seed"),
+    ])
+}
+
+fn prepare_grant_shape(database: &mut Database<MemoryStorage>) -> crate::ivm::PreparedShape {
+    database
+        .prepare_one_sink(
+            grant_shape_graph(),
+            "grant-claim",
+            RecordDescriptor::new([("seed", ColumnType::U64.value_type())]),
+            ["seed"],
+        )
+        .unwrap()
+}
+
+fn insert_group_edge(batch: &mut DatabaseBatch, id: u64, src: u64, dst: u64) {
+    batch.insert(
+        "group_edges",
+        vec![Value::U64(id), Value::U64(src), Value::U64(dst)],
+    );
+}
+
+fn insert_access_edge(batch: &mut DatabaseBatch, id: u64, resource: u64, group: u64) {
+    batch.insert(
+        "access_edges",
+        vec![Value::U64(id), Value::U64(resource), Value::U64(group)],
+    );
+}
+
+fn insert_resource(batch: &mut DatabaseBatch, id: u64, payload: u64) {
+    batch.insert("resources", vec![Value::U64(id), Value::U64(payload)]);
+}
+
 fn update_edge(batch: &mut DatabaseBatch, id: u64, src: u64, dst: u64) {
     batch.update(
         "edges",
@@ -941,8 +1046,13 @@ fn staged_batch_commit_ticks_once_for_multiple_writes() {
     assert_eq!(metrics.tick.table_delta_records, 2);
     assert_eq!(metrics.tick.notifications_sent, 1);
     assert_eq!(metrics.tick.notification_records, 2);
+    let mut observed = subscription.recv().unwrap().to_values().unwrap();
+    observed.sort_by_key(|(values, _)| match values[0] {
+        Value::U64(id) => id,
+        _ => panic!("expected u64 id"),
+    });
     assert_eq!(
-        subscription.recv().unwrap().to_values().unwrap(),
+        observed,
         vec![
             (
                 vec![Value::U64(1), Value::String("A Love Supreme".to_owned())],
@@ -3029,6 +3139,74 @@ fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas() {
         expect_recv_vals(&subscription),
         [(vec![Value::U64(11), Value::U64(3), Value::U64(1)], 1)]
     );
+}
+
+#[test]
+fn prepared_recursive_grant_shape_joins_resource_and_access_added_in_one_tick() {
+    fn run(split_ticks: bool) -> Vec<(Vec<Value>, i64)> {
+        let storage = MemoryStorage::new(&["group_edges", "access_edges", "resources"]);
+        let mut database = Database::new(grant_shape_schema(), storage).unwrap();
+        let shape = prepare_grant_shape(&mut database);
+        let subscription = database
+            .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+            .unwrap();
+        assert!(subscription.recv().unwrap().is_empty());
+
+        if split_ticks {
+            let mut batch = database.open_batch();
+            insert_resource(&mut batch, 10, 777);
+            database.commit_batch(batch).unwrap();
+            assert!(subscription.try_recv().is_err());
+
+            let mut batch = database.open_batch();
+            insert_access_edge(&mut batch, 20, 10, 1);
+            database.commit_batch(batch).unwrap();
+        } else {
+            let mut batch = database.open_batch();
+            insert_resource(&mut batch, 10, 777);
+            insert_access_edge(&mut batch, 20, 10, 1);
+            database.commit_batch(batch).unwrap();
+        }
+
+        expect_recv_vals(&subscription)
+    }
+
+    assert_eq!(run(false), run(true));
+}
+
+#[test]
+fn prepared_recursive_grant_shape_joins_membership_step_and_resource_in_one_tick() {
+    fn run(split_ticks: bool) -> Vec<(Vec<Value>, i64)> {
+        let storage = MemoryStorage::new(&["group_edges", "access_edges", "resources"]);
+        let mut database = Database::new(grant_shape_schema(), storage).unwrap();
+        let shape = prepare_grant_shape(&mut database);
+        let subscription = database
+            .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+            .unwrap();
+        assert!(subscription.recv().unwrap().is_empty());
+
+        if split_ticks {
+            let mut batch = database.open_batch();
+            insert_resource(&mut batch, 10, 777);
+            insert_access_edge(&mut batch, 20, 10, 2);
+            database.commit_batch(batch).unwrap();
+            assert!(subscription.try_recv().is_err());
+
+            let mut batch = database.open_batch();
+            insert_group_edge(&mut batch, 30, 1, 2);
+            database.commit_batch(batch).unwrap();
+        } else {
+            let mut batch = database.open_batch();
+            insert_resource(&mut batch, 10, 777);
+            insert_access_edge(&mut batch, 20, 10, 2);
+            insert_group_edge(&mut batch, 30, 1, 2);
+            database.commit_batch(batch).unwrap();
+        }
+
+        expect_recv_vals(&subscription)
+    }
+
+    assert_eq!(run(false), run(true));
 }
 
 #[test]

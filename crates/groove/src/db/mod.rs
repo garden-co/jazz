@@ -863,6 +863,21 @@ where
         self.primary_key_scan_raw_with_storage(&storage, table, prefix)
     }
 
+    /// Return encoded primary-key records while also observing writes already
+    /// staged in `batch`.
+    pub fn primary_key_scan_raw_in_batch(
+        &self,
+        batch: &DatabaseBatch,
+        table: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        let staged = self.staged_operations_from_batch(batch)?;
+        let staged = RefCell::new(staged);
+        let overlay = StagedWriteOverlay::new(&self.storage, &staged);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        self.primary_key_scan_raw_with_storage(&storage, table, prefix)
+    }
+
     fn primary_key_scan_raw_with_storage<'a, T>(
         &'a self,
         storage: &T,
@@ -1003,6 +1018,21 @@ where
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.primary_key_last_raw_with_storage(&storage, table, prefix)
+    }
+
+    /// Return the last encoded primary-key record while also observing writes
+    /// already staged in `batch`.
+    pub fn primary_key_last_raw_in_batch(
+        &self,
+        batch: &DatabaseBatch,
+        table: &str,
+        prefix: &[Value],
+    ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
+        let staged = self.staged_operations_from_batch(batch)?;
+        let staged = RefCell::new(staged);
+        let overlay = StagedWriteOverlay::new(&self.storage, &staged);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.primary_key_last_raw_with_storage(&storage, table, prefix)
     }
 
@@ -1187,6 +1217,36 @@ where
         index_name: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.index_scan_raw_with_storage(&storage, table, index_name, prefix)
+    }
+
+    /// Return encoded index-probe records while also observing writes already
+    /// staged in `batch`.
+    pub fn index_scan_raw_in_batch(
+        &self,
+        batch: &DatabaseBatch,
+        table: &str,
+        index_name: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        let staged = self.staged_operations_from_batch(batch)?;
+        let staged = RefCell::new(staged);
+        let overlay = StagedWriteOverlay::new(&self.storage, &staged);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        self.index_scan_raw_with_storage(&storage, table, index_name, prefix)
+    }
+
+    fn index_scan_raw_with_storage<'a, T>(
+        &'a self,
+        storage: &T,
+        table: &str,
+        index_name: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'a>>, Error>
+    where
+        T: OrderedKvStorage,
+    {
         let index = self.index(table, index_name)?;
         if prefix.len() > index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -1197,11 +1257,10 @@ where
         }
         let storage_prefix = self.persisted_index_scan_prefix(table, index_name, prefix)?;
         let index_descriptor = index_record_descriptor();
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let raw_entries = self
-            .durable_indices_store_with_storage(&storage, &index_descriptor)
+            .durable_indices_store_with_storage(storage, &index_descriptor)
             .prefix(&storage_prefix)?;
-        self.decode_raw_index_entries(table, index_name, raw_entries)
+        self.decode_raw_index_entries_with_storage(storage, table, index_name, raw_entries)
     }
 
     /// Return the last encoded record whose explicit schema index starts with
@@ -1230,7 +1289,7 @@ where
             return Ok(None);
         };
         Ok(self
-            .decode_raw_index_entries(table, index_name, vec![raw_entry])?
+            .decode_raw_index_entries_with_storage(&storage, table, index_name, vec![raw_entry])?
             .into_iter()
             .next())
     }
@@ -1268,26 +1327,29 @@ where
         let raw_entries = self
             .durable_indices_store_with_storage(&storage, &index_descriptor)
             .range(&start, &end)?;
-        self.decode_raw_index_entries(table, index_name, raw_entries)
+        self.decode_raw_index_entries_with_storage(&storage, table, index_name, raw_entries)
     }
 
-    fn decode_raw_index_entries(
-        &self,
+    fn decode_raw_index_entries_with_storage<'a, T>(
+        &'a self,
+        storage: &T,
         table: &str,
         index_name: &str,
         raw_entries: Vec<crate::storage::KeyValue>,
-    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+    ) -> Result<Vec<EncodedKeyValue<'a>>, Error>
+    where
+        T: OrderedKvStorage,
+    {
         let table_schema = self.table(table)?;
         let descriptor = self
             .ivm_runtime
             .table_descriptor(table)
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let key_descriptor = table_schema
             .primary_key
             .as_ref()
             .map(primary_key_descriptor);
-        let store = record_store_for_table(&storage, table, key_descriptor, descriptor);
+        let store = record_store_for_table(storage, table, key_descriptor, descriptor);
         let index_descriptor = index_record_descriptor();
         let mut records = Vec::new();
         for (storage_key, persisted_record) in raw_entries {
@@ -1542,6 +1604,38 @@ where
         }
 
         Ok(pending_writes)
+    }
+
+    fn staged_operations_from_batch(
+        &self,
+        batch: &DatabaseBatch,
+    ) -> Result<Vec<OwnedWriteOperation>, Error> {
+        let pending = self.pending_writes_from_batch(batch.clone())?;
+        let descriptors = pending
+            .iter()
+            .map(|write| self.table(write.table()).map(|table| table.record_schema()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let stores = pending
+            .iter()
+            .zip(&descriptors)
+            .map(|(write, descriptor)| {
+                let key_descriptor = self
+                    .table(write.table())
+                    .ok()
+                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
+                record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
+            })
+            .collect::<Vec<_>>();
+        Ok(pending
+            .iter()
+            .zip(&stores)
+            .map(|(write, store)| match write {
+                PendingTableWrite::Set { key, record, .. } => {
+                    owned_write_operation(&store.set(key, record))
+                }
+                PendingTableWrite::Delete { key, .. } => owned_write_operation(&store.delete(key)),
+            })
+            .collect())
     }
 
     fn table(&self, table: &str) -> Result<&TableSchema, Error> {
@@ -2562,44 +2656,7 @@ where
     }
 
     fn staged_operations(&self) -> Result<Vec<OwnedWriteOperation>, Error> {
-        let pending = self
-            .database
-            .pending_writes_from_batch(self.batch.clone())?;
-        let descriptors = pending
-            .iter()
-            .map(|write| {
-                self.database
-                    .table(write.table())
-                    .map(|table| table.record_schema())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let stores = pending
-            .iter()
-            .zip(&descriptors)
-            .map(|(write, descriptor)| {
-                let key_descriptor = self
-                    .database
-                    .table(write.table())
-                    .ok()
-                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
-                record_store_for_table(
-                    &self.database.storage,
-                    write.table(),
-                    key_descriptor,
-                    descriptor,
-                )
-            })
-            .collect::<Vec<_>>();
-        Ok(pending
-            .iter()
-            .zip(&stores)
-            .map(|(write, store)| match write {
-                PendingTableWrite::Set { key, record, .. } => {
-                    owned_write_operation(&store.set(key, record))
-                }
-                PendingTableWrite::Delete { key, .. } => owned_write_operation(&store.delete(key)),
-            })
-            .collect())
+        self.database.staged_operations_from_batch(&self.batch)
     }
 }
 
