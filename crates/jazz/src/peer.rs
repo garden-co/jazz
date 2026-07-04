@@ -553,6 +553,7 @@ impl PeerState {
             program_fact_adds,
             program_fact_removes,
             allow_storage_witness_fallback,
+            observed_delta_batches,
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -563,6 +564,34 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
+        if observed_delta_batches > 0
+            && result_member_adds.is_empty()
+            && result_member_removes.is_empty()
+            && program_fact_adds.is_empty()
+            && program_fact_removes.is_empty()
+        {
+            let tier = self
+                .subscriptions
+                .get(&subscription)
+                .and_then(|state| state.prepared_query.as_ref())
+                .map(CachedPeerQueryPlan::tier)
+                .ok_or(Error::InvalidStoredValue(
+                    "maintained subscription view is missing prepared state",
+                ))?;
+            return self.rehydrate_query_maintained_subscription_view(
+                node,
+                MaintainedRehydrateRequest {
+                    shape,
+                    binding: _binding,
+                    subscription,
+                    previous_member_result_set: &previous_member_result_set,
+                    reset_result_set: false,
+                    result_table_filter,
+                    tier,
+                    read_view: &ReadViewSpec::default(),
+                },
+            );
+        }
         for added in &result_member_adds {
             let ResultMemberEntry::Synthetic { table, row, .. } = added else {
                 continue;
@@ -716,6 +745,7 @@ impl PeerState {
         let mut program_fact_adds = Vec::new();
         let mut program_fact_removes = Vec::new();
         let mut allow_storage_witness_fallback = false;
+        let mut observed_delta_batches = 0_usize;
         {
             let Some(maintained_subscription_view) = self
                 .subscriptions
@@ -728,6 +758,7 @@ impl PeerState {
                 match maintained_subscription_view.subscription.try_recv() {
                     Ok(deltas) => {
                         self.metrics.maintained_subscription_view.delta_batches_in += 1;
+                        observed_delta_batches += 1;
                         let transitions = maintained_subscription_view
                             .maintained
                             .apply_multisink_deltas(
@@ -766,7 +797,8 @@ impl PeerState {
                 }
             }
         }
-        if result_table_filter.is_none()
+        if self.role == PeerRole::Relay
+            && result_table_filter.is_none()
             && let Some(settled) = node.settled_result_transitions_for_subscription(
                 subscription,
                 &previous_member_result_set,
@@ -819,6 +851,7 @@ impl PeerState {
             program_fact_adds,
             program_fact_removes,
             allow_storage_witness_fallback,
+            observed_delta_batches,
         })
     }
 
@@ -1079,6 +1112,7 @@ impl PeerState {
             program_fact_adds: source_program_fact_adds,
             program_fact_removes: source_program_fact_removes,
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
+            observed_delta_batches: _,
         } = source_transitions;
         if !source_adds.is_empty()
             || !source_removes.is_empty()

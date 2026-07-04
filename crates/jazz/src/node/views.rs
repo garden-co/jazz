@@ -712,7 +712,7 @@ where
             .initial_hydration_binding_views
             .contains(&binding_view_key)
             && version_bundles_is_empty
-            && !reset_result_set
+            && (!reset_result_set || peer_complete_tx_payload_refs.is_empty())
         {
             self.query
                 .initial_hydration_binding_views
