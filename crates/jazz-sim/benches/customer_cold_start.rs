@@ -203,6 +203,11 @@ struct RunSummary {
     client_receiver_per_bundle_ingests: u64,
     client_receiver_bulk_ingest_commits: u64,
     peak_rss_bytes: u64,
+    core_encoded_storage_bytes: u64,
+    relay_encoded_storage_bytes: u64,
+    client_encoded_storage_bytes: u64,
+    encoded_storage_bytes: u64,
+    memory_amplification: f64,
     slowest_subscription: String,
     slowest_subscription_ms: u128,
     served_view_updates: Vec<ViewUpdateSummary>,
@@ -989,6 +994,17 @@ fn run_connect_and_subscribe(
         .unwrap();
     let relay_sync_metrics = relay.db.sync_metrics_for_test();
     let client_sync_metrics = client.db.sync_metrics_for_test();
+    let core_encoded_storage_bytes = seeded.core.encoded_storage_bytes_for_test().unwrap();
+    let relay_encoded_storage_bytes = relay.db.encoded_storage_bytes_for_test().unwrap();
+    let client_encoded_storage_bytes = client.db.encoded_storage_bytes_for_test().unwrap();
+    let encoded_storage_bytes =
+        core_encoded_storage_bytes + relay_encoded_storage_bytes + client_encoded_storage_bytes;
+    let peak_rss_bytes = peak_rss_bytes();
+    let memory_amplification = if encoded_storage_bytes == 0 {
+        0.0
+    } else {
+        peak_rss_bytes as f64 / encoded_storage_bytes as f64
+    };
     RunSummary {
         wall_ms: start.elapsed().as_millis(),
         connect_ms,
@@ -1012,7 +1028,12 @@ fn run_connect_and_subscribe(
         client_receiver_bulk_bundle_ingests: client_sync_metrics.receiver_bulk_bundle_ingests,
         client_receiver_per_bundle_ingests: client_sync_metrics.receiver_per_bundle_ingests,
         client_receiver_bulk_ingest_commits: client_sync_metrics.receiver_bulk_ingest_commits,
-        peak_rss_bytes: peak_rss_bytes(),
+        peak_rss_bytes,
+        core_encoded_storage_bytes,
+        relay_encoded_storage_bytes,
+        client_encoded_storage_bytes,
+        encoded_storage_bytes,
+        memory_amplification,
         slowest_subscription: slowest.name.clone(),
         slowest_subscription_ms: slowest.materialized_ms,
         served_view_updates: summarized_view_updates(&client_relay.right_to_left),
@@ -1434,6 +1455,26 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         json!(summary.client_receiver_bulk_ingest_commits),
     );
     fields.insert("peak_rss_bytes".to_owned(), json!(summary.peak_rss_bytes));
+    fields.insert(
+        "core_encoded_storage_bytes".to_owned(),
+        json!(summary.core_encoded_storage_bytes),
+    );
+    fields.insert(
+        "relay_encoded_storage_bytes".to_owned(),
+        json!(summary.relay_encoded_storage_bytes),
+    );
+    fields.insert(
+        "client_encoded_storage_bytes".to_owned(),
+        json!(summary.client_encoded_storage_bytes),
+    );
+    fields.insert(
+        "encoded_storage_bytes".to_owned(),
+        json!(summary.encoded_storage_bytes),
+    );
+    fields.insert(
+        "memory_amplification".to_owned(),
+        json!(summary.memory_amplification),
+    );
     fields.insert(
         "slowest_subscription".to_owned(),
         json!(summary.slowest_subscription),
