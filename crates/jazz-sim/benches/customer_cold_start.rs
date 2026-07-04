@@ -19,6 +19,14 @@ use jazz::wire::TransportError;
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
+// Customer-shaped cold-start fixture. Fidelity note: the real child tables
+// inherit read through parent_ref (`allowedTo.read(parent_ref)`). The public
+// query API cannot currently express `reachable_via` through a root reference
+// column, and `join_via_row_id(parent, parent_id)` only proves parent existence
+// rather than composing the parent's read policy. The benchmark therefore uses
+// derived child access-edge tables as a sound approximation; real customer
+// children do not carry that denormalized relation.
+
 const ORG: &str = "org";
 const GROUP: &str = "group";
 const GROUP_ACCESS: &str = "group_access_edges";
@@ -47,8 +55,10 @@ fn main() {
     let config = Config::from_env();
     let schema = schema();
     let seeded = seed_core(&schema, &config);
-    let expected = expected_visible_counts(&seeded);
-    assert_policy_active(&seeded, &expected);
+    let expected = expected_visible_counts(&seeded, config.identity);
+    if config.identity == BenchIdentity::Member {
+        assert_policy_active(&seeded, &expected);
+    }
 
     if config.runs_phase("cold") {
         let cold = run_cold(&schema, &seeded, &expected, &config);
@@ -91,6 +101,10 @@ impl ResourceSpec {
     fn child_table(self, index: usize) -> String {
         format!("{}_child_{}", self.table, index)
     }
+
+    fn child_access_table(self, index: usize) -> String {
+        format!("{}_child_{}_access_edges", self.table, index)
+    }
 }
 
 struct Config {
@@ -98,10 +112,24 @@ struct Config {
     scale: f64,
     max_ticks: usize,
     phases: Vec<String>,
+    identity: BenchIdentity,
 }
 
 impl Config {
     fn from_env() -> Self {
+        let identity = match std::env::var("JAZZ_CUSTOMER_IDENTITY")
+            .unwrap_or_else(|_| "member".to_owned())
+            .as_str()
+        {
+            "member" => BenchIdentity::Member,
+            "spy" => BenchIdentity::Spy,
+            "admin" => BenchIdentity::Admin,
+            other => {
+                panic!(
+                    "unsupported JAZZ_CUSTOMER_IDENTITY {other:?}; supported: member, spy, admin"
+                )
+            }
+        };
         Self {
             seed: env_u64("JAZZ_CUSTOMER_SEED", 0xC057_A271),
             scale: env_f64("JAZZ_CUSTOMER_SCALE", 1.0),
@@ -113,6 +141,7 @@ impl Config {
                 .filter(|phase| !phase.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            identity,
         }
     }
 
@@ -120,9 +149,24 @@ impl Config {
         self.phases.iter().any(|candidate| candidate == phase)
     }
 
+    fn client_author(&self, seeded: &Seeded) -> AuthorId {
+        match self.identity {
+            BenchIdentity::Member => AuthorId(seeded.ordinary_user.0),
+            BenchIdentity::Spy => AuthorId(row(9_999_999).0),
+            BenchIdentity::Admin => AuthorId::SYSTEM,
+        }
+    }
+
     fn scaled_count(&self, count: usize) -> usize {
         ((count as f64 * self.scale).round() as usize).clamp(1, count.max(1))
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BenchIdentity {
+    Member,
+    Spy,
+    Admin,
 }
 
 struct Seeded {
@@ -215,6 +259,7 @@ struct DuplexTransport {
 struct CountedDuplex {
     left_transport: Box<dyn Transport>,
     right_transport: Box<dyn Transport>,
+    right_inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     left_to_right: Rc<TransportMetrics>,
     right_to_left: Rc<TransportMetrics>,
 }
@@ -282,10 +327,11 @@ fn duplex_counted() -> CountedDuplex {
             metrics: Rc::clone(&left_to_right),
         }),
         right_transport: Box::new(DuplexTransport {
-            outbound: right,
-            inbound: left,
+            outbound: Rc::clone(&right),
+            inbound: Rc::clone(&left),
             metrics: Rc::clone(&right_to_left),
         }),
+        right_inbound: right,
         left_to_right,
         right_to_left,
     }
@@ -377,7 +423,12 @@ fn schema() -> JazzSchema {
         );
         if spec.child_rows.is_some() {
             let table = spec.child_table(child_slot);
+            let child_access_table = spec.child_access_table(child_slot);
             child_slot += 1;
+            // Public queries cannot currently express reachable_via through
+            // child.parent_id. The faithful customer rule is child readable iff
+            // parent is readable; this benchmark approximates it soundly by
+            // denormalizing the parent's access edges onto child rows.
             tables.push(
                 TableSchema::new(
                     &table,
@@ -389,7 +440,20 @@ fn schema() -> JazzSchema {
                         ColumnSchema::new("sort", ColumnType::U64),
                     ],
                 )
-                .with_reference("parent_id", spec.table),
+                .with_reference("parent_id", spec.table)
+                .with_read_policy(child_access_policy(&table, &child_access_table)),
+            );
+            tables.push(
+                TableSchema::new(
+                    &child_access_table,
+                    [
+                        ColumnSchema::new("child", ColumnType::Uuid),
+                        ColumnSchema::new("team", ColumnType::Uuid),
+                        ColumnSchema::new("administrator", ColumnType::Bool),
+                    ],
+                )
+                .with_reference("child", &table)
+                .with_reference("team", GROUP),
             );
         }
     }
@@ -436,6 +500,20 @@ fn resource_policy(table: &str, access_table: &str) -> Option<Query> {
     Policy::shape(Query::from(table).reachable_via_with_access_filters(
         access_table,
         "resource",
+        "team",
+        claim("sub"),
+        [eq(col("administrator"), lit(false))],
+        GROUP_ENTRY,
+        "member_id",
+        "target_id",
+        [eq(col("administrator"), lit(false))],
+    ))
+}
+
+fn child_access_policy(child_table: &str, access_table: &str) -> Option<Query> {
+    Policy::shape(Query::from(child_table).reachable_via_with_access_filters(
+        access_table,
+        "child",
         "team",
         claim("sub"),
         [eq(col("administrator"), lit(false))],
@@ -567,14 +645,15 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
                 .map(|i| row(access_base + i as u64))
                 .collect(),
         );
-        access.insert(spec.table.to_owned(), edges);
-
         if let Some(children) = spec.child_rows {
             let child_table = spec.child_table(child_slot);
+            let child_access_table = spec.child_access_table(child_slot);
             let distribution = child_counts(config.scaled_count(children), resource_rows.len());
             let mut rows = Vec::new();
             let mut parents = Vec::new();
+            let mut child_access_rows = Vec::new();
             let mut idx = 0_u64;
+            let mut child_access_idx = 0_u64;
             for (parent_index, count) in distribution.into_iter().enumerate() {
                 for _ in 0..count {
                     let child = row(500_000 + (child_slot as u64 * 100_000) + idx);
@@ -587,13 +666,29 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
                     );
                     rows.push(child);
                     parents.push((child, parent));
+                    for (_resource, team) in
+                        edges.iter().filter(|(resource, _team)| *resource == parent)
+                    {
+                        let access_row =
+                            row(2_000_000 + (child_slot as u64 * 1_000_000) + child_access_idx);
+                        seed_db(
+                            &core,
+                            &child_access_table,
+                            access_row,
+                            child_access_cells(child, *team),
+                        );
+                        child_access_rows.push(access_row);
+                        child_access_idx += 1;
+                    }
                     idx += 1;
                 }
             }
             table_rows.insert(child_table.clone(), rows);
+            table_rows.insert(child_access_table, child_access_rows);
             child_parent.insert(child_table, parents);
             child_slot += 1;
         }
+        access.insert(spec.table.to_owned(), edges);
         resource_base += 10_000;
         access_base += 10_000;
     }
@@ -614,7 +709,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     }
 }
 
-fn expected_visible_counts(seeded: &Seeded) -> BTreeMap<String, usize> {
+fn expected_visible_counts(seeded: &Seeded, identity: BenchIdentity) -> BTreeMap<String, usize> {
     let mut out = BTreeMap::new();
     out.insert(ORG.to_owned(), seeded.table_rows[ORG].len());
     out.insert(GROUP.to_owned(), seeded.table_rows[GROUP].len());
@@ -625,15 +720,19 @@ fn expected_visible_counts(seeded: &Seeded) -> BTreeMap<String, usize> {
     out.insert(GROUP_ENTRY.to_owned(), seeded.table_rows[GROUP_ENTRY].len());
     out.insert(PROFILE.to_owned(), 21);
     for spec in RESOURCE_SPECS {
-        let visible_resources = seeded
-            .access
-            .get(spec.table)
-            .into_iter()
-            .flatten()
-            .filter_map(|(resource, group)| {
-                seeded.visible_groups.contains(group).then_some(*resource)
-            })
-            .collect::<BTreeSet<_>>();
+        let visible_resources = match identity {
+            BenchIdentity::Member => seeded
+                .access
+                .get(spec.table)
+                .into_iter()
+                .flatten()
+                .filter_map(|(resource, group)| {
+                    seeded.visible_groups.contains(group).then_some(*resource)
+                })
+                .collect::<BTreeSet<_>>(),
+            BenchIdentity::Spy => BTreeSet::new(),
+            BenchIdentity::Admin => seeded.table_rows[spec.table].iter().copied().collect(),
+        };
         out.insert(spec.table.to_owned(), visible_resources.len());
         out.insert(
             spec.access_table(),
@@ -641,7 +740,12 @@ fn expected_visible_counts(seeded: &Seeded) -> BTreeMap<String, usize> {
         );
     }
     for (child, parents) in &seeded.child_parent {
-        out.insert(child.clone(), parents.len());
+        let visible = match identity {
+            BenchIdentity::Member => parents.len(),
+            BenchIdentity::Spy => 0,
+            BenchIdentity::Admin => parents.len(),
+        };
+        out.insert(child.clone(), visible);
     }
     for slot in 0..CHILD_TABLES {
         out.entry(format!("empty_child_{slot}")).or_insert(0);
@@ -669,12 +773,7 @@ fn run_cold(
         AuthorId::SYSTEM,
         Some(Rc::new(tempfile::tempdir().unwrap())),
     );
-    let client = open_client_db(
-        node(3),
-        schema.clone(),
-        AuthorId(seeded.ordinary_user.0),
-        None,
-    );
+    let client = open_client_db(node(3), schema.clone(), config.client_author(seeded), None);
     run_connect_and_subscribe("cold", seeded, relay, client, expected, config)
 }
 
@@ -691,12 +790,7 @@ fn run_warm(
         AuthorId::SYSTEM,
         Some(Rc::clone(&relay_dir)),
     );
-    let client = open_client_db(
-        node(5),
-        schema.clone(),
-        AuthorId(seeded.ordinary_user.0),
-        None,
-    );
+    let client = open_client_db(node(5), schema.clone(), config.client_author(seeded), None);
     let mut first =
         run_connect_and_subscribe("warm_prime", seeded, relay, client, expected, config);
     assert_eq!(first.rows_materialized, first.expected_rows);
@@ -708,12 +802,7 @@ fn run_warm(
         AuthorId::SYSTEM,
         Some(Rc::clone(&relay_dir)),
     );
-    let client = open_client_db(
-        node(5),
-        schema.clone(),
-        AuthorId(seeded.ordinary_user.0),
-        None,
-    );
+    let client = open_client_db(node(5), schema.clone(), config.client_author(seeded), None);
     first = run_connect_and_subscribe("warm", seeded, relay, client, expected, config);
     assert!(
         first.relay_known_state_declared > 0,
@@ -723,7 +812,7 @@ fn run_warm(
 }
 
 fn run_connect_and_subscribe(
-    _label: &str,
+    label: &str,
     seeded: &Seeded,
     relay: DbNode,
     client: DbClient,
@@ -738,10 +827,9 @@ fn run_connect_and_subscribe(
         .core
         .accept_subscriber(relay_core.right_transport, AuthorId::SYSTEM);
     let _client_upstream = client.db.connect_upstream(client_relay.left_transport);
-    let _relay_sub = relay.db.accept_subscriber(
-        client_relay.right_transport,
-        AuthorId(seeded.ordinary_user.0),
-    );
+    let _relay_sub = relay
+        .db
+        .accept_subscriber(client_relay.right_transport, config.client_author(seeded));
     let connect_ms = start.elapsed().as_millis();
 
     let subscribe_start = Instant::now();
@@ -790,13 +878,43 @@ fn run_connect_and_subscribe(
                 pending_description(&subscriptions)
             );
         }
+        let trace_ticks = std::env::var_os("JAZZ_CUSTOMER_TRACE_TICKS").is_some();
+        let before_core_to_relay = relay_core.right_to_left.messages.get();
         seeded.core.tick().unwrap();
+        let after_core_to_relay = relay_core.right_to_left.messages.get();
+        let relay_inbound_before = relay_core.right_inbound.borrow().len();
+        let relay_to_core_before = relay_core.left_to_right.messages.get();
+        let relay_to_client_before = client_relay.right_to_left.messages.get();
         relay.db.tick().unwrap();
+        let relay_to_core_after = relay_core.left_to_right.messages.get();
+        let relay_to_client_after = client_relay.right_to_left.messages.get();
+        let client_inbound_before = client_relay.right_inbound.borrow().len();
+        let client_to_relay_before = client_relay.left_to_right.messages.get();
         client.db.tick().unwrap();
+        let client_to_relay_after = client_relay.left_to_right.messages.get();
+        if trace_ticks {
+            eprintln!(
+                "CUSTOMER_TICK tick={ticks} core_sent_to_relay={} relay_inbound_before={} relay_sent_to_core={} relay_sent_to_client={} client_inbound_before={} client_sent_to_relay={}",
+                after_core_to_relay.saturating_sub(before_core_to_relay),
+                relay_inbound_before,
+                relay_to_core_after.saturating_sub(relay_to_core_before),
+                relay_to_client_after.saturating_sub(relay_to_client_before),
+                client_inbound_before,
+                client_to_relay_after.saturating_sub(client_to_relay_before),
+            );
+        }
         drain_subscriptions(start, &mut subscriptions);
         ticks += 1;
     }
     let settle_ms = settle_start.elapsed().as_millis();
+    if label == "warm" {
+        // Warm readiness is relay-local, but the benchmark also asserts that
+        // the hot relay declares known state when it reconnects upstream. Drive
+        // one post-readiness relay/core cycle so the queued coverage subscribe
+        // reaches the core without changing the client readiness condition.
+        relay.db.tick().unwrap();
+        seeded.core.tick().unwrap();
+    }
     let materialize_start = Instant::now();
     for sub in &subscriptions {
         let prepared = client
@@ -817,6 +935,12 @@ fn run_connect_and_subscribe(
         .iter()
         .map(|sub| sub.rows.len())
         .sum::<usize>();
+    if label == "warm_prime" {
+        relay
+            .db
+            .flush_for_test()
+            .expect("warm-prime relay state should flush before reopen");
+    }
     let expected_rows = expected.values().sum::<usize>();
     let timelines = subscriptions
         .into_iter()
@@ -1120,6 +1244,14 @@ fn resource_access_cells(resource: RowUuid, group: RowUuid, i: usize) -> BTreeMa
         ("resource".to_owned(), Value::Uuid(resource.0)),
         ("team".to_owned(), Value::Uuid(group.0)),
         ("grant_role".to_owned(), Value::Enum((i % 3) as u8)),
+        ("administrator".to_owned(), Value::Bool(false)),
+    ])
+}
+
+fn child_access_cells(child: RowUuid, team: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("child".to_owned(), Value::Uuid(child.0)),
+        ("team".to_owned(), Value::Uuid(team.0)),
         ("administrator".to_owned(), Value::Bool(false)),
     ])
 }

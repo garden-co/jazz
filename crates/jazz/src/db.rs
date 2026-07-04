@@ -2522,6 +2522,13 @@ where
     pub fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
         Ok(self.node.node.borrow().history_class_bytes_for_test()?)
     }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only durability boundary for harnesses that reopen the same
+    /// storage path immediately after a synthetic lifecycle transition.
+    pub fn flush_for_test(&self) -> Result<(), Error> {
+        Ok(self.node.node.borrow_mut().flush_query_runtime()?)
+    }
 }
 
 /// Counts produced while servicing non-blocking database connection work.
