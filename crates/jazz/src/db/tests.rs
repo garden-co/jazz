@@ -20,7 +20,7 @@ use crate::query::{
     ArraySubquery, Include, JoinMode, OrderDirection, all_of, any_of, claim, col, contains, eq, gt,
     in_list, is_null, lit, lte, ne, not,
 };
-use crate::schema::{Policy, TableSchema};
+use crate::schema::{Policy, TableSchema, WritePolicies};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -589,6 +589,136 @@ fn customer_resource_policy_minimal_schema() -> JazzSchema {
         .with_reference("team", "group")
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
+    ])
+}
+
+fn customer_inherited_child_policy_schema() -> JazzSchema {
+    let resource_policy = Query::from("res_i")
+        .reachable_via_with_access_filters(
+            "res_i_access_edges",
+            "resource",
+            "team",
+            lit("relation-seeded"),
+            [eq(col("administrator"), lit(false))],
+            "group_entry",
+            "member_id",
+            "target_id",
+            [eq(col("administrator"), lit(false))],
+        )
+        .seeded_by("group_access_edges", "user_id", "sub", "group_id");
+    JazzSchema::new([
+        TableSchema::new("org", [ColumnSchema::new("label", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new("group", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "group_access_edges",
+            [
+                ColumnSchema::new("group_id", ColumnType::Uuid),
+                ColumnSchema::new("user_id", ColumnType::Uuid),
+                ColumnSchema::new("role", ColumnType::String),
+            ],
+        )
+        .with_reference("group_id", "group")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "group_entry",
+            [
+                ColumnSchema::new("member_id", ColumnType::Uuid),
+                ColumnSchema::new("target_id", ColumnType::Uuid),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+                ColumnSchema::new("date_added", ColumnType::U64),
+            ],
+        )
+        .with_reference("member_id", "group")
+        .with_reference("target_id", "group")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new("res_i", resource_columns_for_customer_fixture())
+            .with_reference("org_id", "org")
+            .with_reference("created_by", "group")
+            .with_reference("updated_by", "group")
+            .with_read_policy(Policy::shape(resource_policy))
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "res_i_access_edges",
+            [
+                ColumnSchema::new("resource", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+                ColumnSchema::new("grant_role", ColumnType::String),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+            ],
+        )
+        .with_reference("resource", "res_i")
+        .with_reference("team", "group")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "res_i_child",
+            [
+                ColumnSchema::new("resource", ColumnType::Uuid),
+                ColumnSchema::new("status", ColumnType::String),
+                ColumnSchema::new("label", ColumnType::String),
+            ],
+        )
+        .with_reference("resource", "res_i")
+        .with_read_policy(Policy::shape(
+            Query::from("res_i_child")
+                .inherits("resource")
+                .filter(eq(col("status"), lit("open"))),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "res_i_grandchild",
+            [
+                ColumnSchema::new("child", ColumnType::Uuid),
+                ColumnSchema::new("label", ColumnType::String),
+            ],
+        )
+        .with_reference("child", "res_i_child")
+        .with_read_policy(Policy::shape(
+            Query::from("res_i_grandchild").inherits("child"),
+        ))
+        .with_write_policy(Policy::public()),
+    ])
+}
+
+fn inherited_insert_policy_schema() -> JazzSchema {
+    let parent_update_using = Query::from("parents").filter(eq(col("owner"), claim("sub")));
+    let parent_update_check = Query::from("parents").filter(eq(col("locked"), lit(false)));
+    JazzSchema::new([
+        TableSchema::new(
+            "parents",
+            [
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("locked", ColumnType::Bool),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policies(WritePolicies {
+            insert_check: Policy::public(),
+            update_using: Some(parent_update_using),
+            update_check: Some(parent_update_check),
+            delete_using: None,
+        }),
+        TableSchema::new(
+            "children",
+            [
+                ColumnSchema::new("parent_id", ColumnType::Uuid),
+                ColumnSchema::new("label", ColumnType::String),
+            ],
+        )
+        .with_reference("parent_id", "parents")
+        .with_read_policy(Policy::public())
+        .with_write_policies(WritePolicies {
+            insert_check: Some(Query::from("children").inherits("parent_id")),
+            update_using: None,
+            update_check: None,
+            delete_using: None,
+        }),
     ])
 }
 
@@ -5696,6 +5826,152 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     );
 }
 
+#[test]
+fn inherited_child_policy_allows_two_and_three_level_chains_per_identity() {
+    let schema = customer_inherited_child_policy_schema();
+    let server = open_core(0x62, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x15; 16]);
+    let other = AuthorId::from_bytes([0x16; 16]);
+    let (member_child, member_grandchild, other_child, other_grandchild) =
+        seed_inherited_child_fixture(&server, member, other);
+
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "res_i_child"),
+        vec![member_child]
+    );
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "res_i_grandchild"),
+        vec![member_grandchild]
+    );
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, other, "res_i_child"),
+        vec![other_child]
+    );
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, other, "res_i_grandchild"),
+        vec![other_grandchild]
+    );
+    let spy = AuthorId::from_bytes([0x99; 16]);
+    assert!(served_subscription_rows_for_author(&schema, &server, spy, "res_i_child").is_empty());
+    assert!(
+        served_subscription_rows_for_author(&schema, &server, spy, "res_i_grandchild").is_empty()
+    );
+}
+
+#[test]
+fn inherited_child_policy_parent_revocation_propagates_incrementally() {
+    let schema = customer_inherited_child_policy_schema();
+    let server = open_core(0x63, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x17; 16]);
+    let other = AuthorId::from_bytes([0x18; 16]);
+    let (child, _grandchild, _other_child, _other_grandchild) =
+        seed_inherited_child_fixture(&server, member, other);
+
+    let client = open_db(0x64, member, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, member);
+    let mut subscription =
+        prepared_subscribe(&client, &Query::from("res_i_child"), ReadOpts::default()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![child]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    server
+        .update(
+            "res_i_access_edges",
+            row(0xbb),
+            BTreeMap::from([("administrator".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![child]
+    );
+}
+
+#[test]
+fn inherited_child_policy_composes_with_local_predicates() {
+    let schema = customer_inherited_child_policy_schema();
+    let server = open_core(0x65, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x19; 16]);
+    let other = AuthorId::from_bytes([0x1a; 16]);
+    let (open_child, _grandchild, _other_child, _other_grandchild) =
+        seed_inherited_child_fixture(&server, member, other);
+    let closed_child = row(0xee);
+    server
+        .insert_with_id(
+            "res_i_child",
+            closed_child,
+            child_cells(row(0xdd), "closed", "closed child"),
+        )
+        .unwrap();
+
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "res_i_child"),
+        vec![open_child]
+    );
+}
+
+#[test]
+fn inherited_child_insert_uses_parent_update_where_old_only() {
+    let schema = inherited_insert_policy_schema();
+    let member = AuthorId::from_bytes([0x21; 16]);
+    let other = AuthorId::from_bytes([0x22; 16]);
+    let member_db = open_db(0x66, member, &schema);
+    let parent = row(0xf1);
+    member_db
+        .insert_with_id(
+            "parents",
+            parent,
+            BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(member.0)),
+                ("locked".to_owned(), Value::Bool(true)),
+            ]),
+        )
+        .unwrap();
+
+    member_db
+        .insert_with_id("children", row(0xf2), child_insert_cells(parent, "allowed"))
+        .unwrap();
+
+    let other_db = open_db(0x67, other, &schema);
+    other_db
+        .insert_with_id(
+            "parents",
+            parent,
+            BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(member.0)),
+                ("locked".to_owned(), Value::Bool(true)),
+            ]),
+        )
+        .unwrap();
+    let err = match other_db.insert_with_id(
+        "children",
+        row(0xf3),
+        child_insert_cells(parent, "denied"),
+    ) {
+        Ok(_) => panic!("child insert should be rejected when parent update_using denies"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+}
+
 fn seed_customer_resource_base(server: &CoreDb) {
     server
         .insert_with_id(
@@ -5774,6 +6050,102 @@ fn seed_seeded_membership_resource_fixture(
     (direct, transitive, hidden)
 }
 
+fn seed_inherited_child_fixture(
+    server: &CoreDb,
+    member: AuthorId,
+    other: AuthorId,
+) -> (RowUuid, RowUuid, RowUuid, RowUuid) {
+    seed_customer_resource_base(server);
+    let member_group = row(0xd1);
+    let other_group = row(0xd2);
+    let member_resource = row(0xdd);
+    let other_resource = row(0xde);
+    let member_child = row(0xe1);
+    let other_child = row(0xe2);
+    let member_grandchild = row(0xe3);
+    let other_grandchild = row(0xe4);
+
+    for (group, label) in [(member_group, "member"), (other_group, "other")] {
+        server
+            .insert_with_id("group", group, team_cells(label))
+            .unwrap();
+    }
+    server
+        .insert_with_id(
+            "group_access_edges",
+            row(0xaa),
+            group_access_test_cells(member_group, member),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "group_access_edges",
+            row(0xab),
+            group_access_test_cells(other_group, other),
+        )
+        .unwrap();
+    for (resource, group, label) in [
+        (member_resource, member_group, "member-resource"),
+        (other_resource, other_group, "other-resource"),
+    ] {
+        server
+            .insert_with_id(
+                "res_i",
+                resource,
+                resource_test_cells_with_group(label, group),
+            )
+            .unwrap();
+    }
+    server
+        .insert_with_id(
+            "res_i_access_edges",
+            row(0xbb),
+            resource_access_test_cells(member_resource, member_group, false),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "res_i_access_edges",
+            row(0xbc),
+            resource_access_test_cells(other_resource, other_group, false),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "res_i_child",
+            member_child,
+            child_cells(member_resource, "open", "member-child"),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "res_i_child",
+            other_child,
+            child_cells(other_resource, "open", "other-child"),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "res_i_grandchild",
+            member_grandchild,
+            grandchild_cells(member_child, "member-grandchild"),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "res_i_grandchild",
+            other_grandchild,
+            grandchild_cells(other_child, "other-grandchild"),
+        )
+        .unwrap();
+    (
+        member_child,
+        member_grandchild,
+        other_child,
+        other_grandchild,
+    )
+}
+
 fn team_cells(name: &str) -> RowCells {
     BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))])
 }
@@ -5784,6 +6156,28 @@ fn group_entry_test_cells(member: RowUuid, target: RowUuid, administrator: bool)
         ("target_id".to_owned(), Value::Uuid(target.0)),
         ("administrator".to_owned(), Value::Bool(administrator)),
         ("date_added".to_owned(), Value::U64(1)),
+    ])
+}
+
+fn child_cells(resource: RowUuid, status: &str, label: &str) -> RowCells {
+    BTreeMap::from([
+        ("resource".to_owned(), Value::Uuid(resource.0)),
+        ("status".to_owned(), Value::String(status.to_owned())),
+        ("label".to_owned(), Value::String(label.to_owned())),
+    ])
+}
+
+fn grandchild_cells(child: RowUuid, label: &str) -> RowCells {
+    BTreeMap::from([
+        ("child".to_owned(), Value::Uuid(child.0)),
+        ("label".to_owned(), Value::String(label.to_owned())),
+    ])
+}
+
+fn child_insert_cells(parent: RowUuid, label: &str) -> RowCells {
+    BTreeMap::from([
+        ("parent_id".to_owned(), Value::Uuid(parent.0)),
+        ("label".to_owned(), Value::String(label.to_owned())),
     ])
 }
 

@@ -340,6 +340,50 @@ where
         self.policy_base_allows(table, policy, row_uuid, identity, &mut column_value)
     }
 
+    pub(super) fn policy_allows_insert_candidate(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        identity: AuthorId,
+        cells: &BTreeMap<String, Value>,
+    ) -> Result<bool, Error> {
+        if !policy.policy_branches.is_empty() {
+            let mut column_value = |column: &str| cells.get(column).cloned();
+            if self.policy_base_allows_insert_candidate(
+                table,
+                policy,
+                row_uuid,
+                identity,
+                &mut column_value,
+            )? {
+                return Ok(true);
+            }
+            for branch in &policy.policy_branches {
+                let branch_policy = branch.as_query(&policy.table);
+                let mut column_value = |column: &str| cells.get(column).cloned();
+                if self.policy_base_allows_insert_candidate(
+                    table,
+                    &branch_policy,
+                    row_uuid,
+                    identity,
+                    &mut column_value,
+                )? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        let mut column_value = |column: &str| cells.get(column).cloned();
+        self.policy_base_allows_insert_candidate(
+            table,
+            policy,
+            row_uuid,
+            identity,
+            &mut column_value,
+        )
+    }
+
     fn policy_base_allows(
         &mut self,
         table: &TableSchema,
@@ -352,6 +396,43 @@ where
             return Ok(false);
         }
         if !self.policy_joins_allow(table, policy, row_uuid, identity, column_value)? {
+            return Ok(false);
+        }
+        if !self.policy_inherits_allow(
+            table,
+            policy,
+            row_uuid,
+            identity,
+            &mut *column_value,
+            DurabilityTier::Local,
+        )? {
+            return Ok(false);
+        }
+        self.policy_reachable_allow(
+            table,
+            policy,
+            row_uuid,
+            identity,
+            column_value,
+            DurabilityTier::Local,
+        )
+    }
+
+    fn policy_base_allows_insert_candidate(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        identity: AuthorId,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
+    ) -> Result<bool, Error> {
+        if !self.policy_filters_allow(table, policy, identity, &mut *column_value)? {
+            return Ok(false);
+        }
+        if !self.policy_joins_allow(table, policy, row_uuid, identity, column_value)? {
+            return Ok(false);
+        }
+        if !self.policy_insert_inherits_allow(table, policy, identity, &mut *column_value)? {
             return Ok(false);
         }
         self.policy_reachable_allow(
@@ -521,6 +602,7 @@ where
                 joins: join.nested_joins.clone(),
                 policy_branches: Vec::new(),
                 reachable: Vec::new(),
+                inherits: Vec::new(),
                 includes: Vec::new(),
                 array_subqueries: Vec::new(),
                 select: None,
@@ -550,6 +632,84 @@ where
             }
         }
         let _ = table;
+        Ok(true)
+    }
+
+    fn policy_inherits_allow(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        _row_uuid: RowUuid,
+        identity: AuthorId,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
+        tier: DurabilityTier,
+    ) -> Result<bool, Error> {
+        for inherits in &policy.inherits {
+            let Some(Value::Uuid(parent_row_uuid)) = column_value(&inherits.parent_column) else {
+                return Ok(false);
+            };
+            let Some(parent_table_name) = table.references.get(&inherits.parent_column).cloned()
+            else {
+                return Ok(false);
+            };
+            let parent_table = self.table(&parent_table_name)?.clone();
+            let Some(parent_row) =
+                self.policy_current_row(&parent_table, RowUuid(parent_row_uuid), tier)?
+            else {
+                return Ok(false);
+            };
+            if let Some(parent_policy) = parent_table.read_policy.clone()
+                && !self.policy_allows_current_row(
+                    &parent_table,
+                    &parent_policy,
+                    &parent_row,
+                    identity,
+                )?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn policy_insert_inherits_allow(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        identity: AuthorId,
+        column_value: &mut dyn FnMut(&str) -> Option<Value>,
+    ) -> Result<bool, Error> {
+        for inherits in &policy.inherits {
+            let Some(Value::Uuid(parent_row_uuid)) = column_value(&inherits.parent_column) else {
+                return Ok(false);
+            };
+            let Some(parent_table_name) = table.references.get(&inherits.parent_column).cloned()
+            else {
+                return Ok(false);
+            };
+            let parent_table = self.table(&parent_table_name)?.clone();
+            let Some(parent_row) = self.policy_current_row(
+                &parent_table,
+                RowUuid(parent_row_uuid),
+                DurabilityTier::Local,
+            )?
+            else {
+                return Ok(false);
+            };
+            if let Some(update_using) = parent_table.write_policies.update_using.clone()
+                && !self.policy_allows_current_row(
+                    &parent_table,
+                    &update_using,
+                    &parent_row,
+                    identity,
+                )?
+            {
+                return Ok(false);
+            }
+            // Child insert inherits parent updateability from whereOld only:
+            // parent state is unchanged, so parent update_check/whereNew is
+            // intentionally not evaluated here. Pending BoreDM confirmation.
+        }
         Ok(true)
     }
 
@@ -606,6 +766,7 @@ where
                     joins: Vec::new(),
                     policy_branches: Vec::new(),
                     reachable: Vec::new(),
+                    inherits: Vec::new(),
                     includes: Vec::new(),
                     array_subqueries: Vec::new(),
                     select: None,
@@ -651,6 +812,7 @@ where
                 joins: Vec::new(),
                 policy_branches: Vec::new(),
                 reachable: Vec::new(),
+                inherits: Vec::new(),
                 includes: Vec::new(),
                 array_subqueries: Vec::new(),
                 select: None,
@@ -702,6 +864,7 @@ where
                 joins: Vec::new(),
                 policy_branches: Vec::new(),
                 reachable: Vec::new(),
+                inherits: Vec::new(),
                 includes: Vec::new(),
                 array_subqueries: Vec::new(),
                 select: None,

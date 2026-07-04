@@ -2563,14 +2563,25 @@ fn normalize_reachable(
     root_source: &SourceId,
     reachable: &crate::query::ReachableVia,
     index: usize,
+    prefix: &str,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<(RowSetNodeId, ReachableContribution), Error> {
-    let frontier = FrontierId(format!("reachable:{index}:frontier"));
-    let (seed_node, columns) =
-        normalize_reachable_seed(nodes, reachable, index, binding_source_shape, param_types)?;
+    let reachable_id = if prefix.is_empty() {
+        format!("reachable:{index}")
+    } else {
+        format!("{prefix}:reachable:{index}")
+    };
+    let frontier = FrontierId(format!("{reachable_id}:frontier"));
+    let (seed_node, columns) = normalize_reachable_seed(
+        nodes,
+        reachable,
+        &reachable_id,
+        binding_source_shape,
+        param_types,
+    )?;
 
-    let frontier_node = RowSetNodeId(format!("reachable:{index}:frontier"));
+    let frontier_node = RowSetNodeId(format!("{reachable_id}:frontier"));
     nodes.insert(
         frontier_node.clone(),
         RowSetExpr::FrontierSource {
@@ -2579,8 +2590,8 @@ fn normalize_reachable(
         },
     );
 
-    let edge_source = reachable_edge_source_id(reachable, index);
-    let edge_source_node = RowSetNodeId(format!("reachable:{index}:edge_source"));
+    let edge_source = reachable_edge_source_id(reachable, &reachable_id);
+    let edge_source_node = RowSetNodeId(format!("{reachable_id}:edge_source"));
     nodes.insert(
         edge_source_node.clone(),
         RowSetExpr::Source {
@@ -2590,7 +2601,7 @@ fn normalize_reachable(
     );
     let mut edge_current = edge_source_node;
     if !reachable.edge_filters.is_empty() {
-        let edge_filter_node = RowSetNodeId(format!("reachable:{index}:edge_filter"));
+        let edge_filter_node = RowSetNodeId(format!("{reachable_id}:edge_filter"));
         nodes.insert(
             edge_filter_node.clone(),
             RowSetExpr::Filter {
@@ -2601,7 +2612,7 @@ fn normalize_reachable(
         edge_current = edge_filter_node;
     }
 
-    let step_join_node = RowSetNodeId(format!("reachable:{index}:step_join"));
+    let step_join_node = RowSetNodeId(format!("{reachable_id}:step_join"));
     nodes.insert(
         step_join_node.clone(),
         RowSetExpr::Join {
@@ -2621,7 +2632,7 @@ fn normalize_reachable(
             },
         },
     );
-    let step_project_node = RowSetNodeId(format!("reachable:{index}:step_project"));
+    let step_project_node = RowSetNodeId(format!("{reachable_id}:step_project"));
     let mut step_columns = vec![
         RowProjection {
             output: typed_output_field("team", ColumnType::Uuid),
@@ -2658,7 +2669,7 @@ fn normalize_reachable(
         },
     );
 
-    let closure_node = RowSetNodeId(format!("reachable:{index}:closure"));
+    let closure_node = RowSetNodeId(format!("{reachable_id}:closure"));
     nodes.insert(
         closure_node.clone(),
         RowSetExpr::RecursiveRelation {
@@ -2674,8 +2685,8 @@ fn normalize_reachable(
         },
     );
 
-    let access_source = reachable_access_source_id(reachable, index);
-    let access_source_node = RowSetNodeId(format!("reachable:{index}:access_source"));
+    let access_source = reachable_access_source_id(reachable, &reachable_id);
+    let access_source_node = RowSetNodeId(format!("{reachable_id}:access_source"));
     nodes.insert(
         access_source_node.clone(),
         RowSetExpr::Source {
@@ -2685,7 +2696,7 @@ fn normalize_reachable(
     );
     let mut access_current = access_source_node;
     if !reachable.access_filters.is_empty() {
-        let access_filter_node = RowSetNodeId(format!("reachable:{index}:access_filter"));
+        let access_filter_node = RowSetNodeId(format!("{reachable_id}:access_filter"));
         nodes.insert(
             access_filter_node.clone(),
             RowSetExpr::Filter {
@@ -2696,7 +2707,7 @@ fn normalize_reachable(
         access_current = access_filter_node;
     }
 
-    let access_join_node = RowSetNodeId(format!("reachable:{index}:access_join"));
+    let access_join_node = RowSetNodeId(format!("{reachable_id}:access_join"));
     nodes.insert(
         access_join_node.clone(),
         RowSetExpr::Join {
@@ -2717,7 +2728,7 @@ fn normalize_reachable(
         },
     );
 
-    let root_join_node = RowSetNodeId(format!("reachable:{index}:root_join"));
+    let root_join_node = RowSetNodeId(format!("{reachable_id}:root_join"));
     nodes.insert(
         root_join_node.clone(),
         RowSetExpr::Join {
@@ -2737,7 +2748,7 @@ fn normalize_reachable(
     Ok((
         root_join_node,
         ReachableContribution {
-            id: format!("reachable:{index}"),
+            id: reachable_id,
             access_source,
             access_input: access_join_node,
             root_ref_field: reachable.access_row_column.clone(),
@@ -2873,7 +2884,7 @@ fn reachable_dedupe_keys(
 fn normalize_reachable_seed(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     reachable: &crate::query::ReachableVia,
-    index: usize,
+    reachable_id: &str,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<(RowSetNodeId, Vec<ValueSourceColumn>), Error> {
@@ -2883,9 +2894,9 @@ fn normalize_reachable_seed(
                 "reachable_via relation seed filters with retained params need binding-param filter lowering",
             ));
         }
-        let seed_source = reachable_seed_source_id(seed, index);
+        let seed_source = reachable_seed_source_id(seed, reachable_id);
         let columns = reachable_seed_frontier_columns(&seed_source, seed);
-        let seed_source_node = RowSetNodeId(format!("reachable:{index}:seed_source"));
+        let seed_source_node = RowSetNodeId(format!("{reachable_id}:seed_source"));
         nodes.insert(
             seed_source_node.clone(),
             RowSetExpr::Source {
@@ -2900,8 +2911,7 @@ fn normalize_reachable_seed(
         });
         if let (Some(user_column), Some((_, claim_field))) = (&seed.user_column, &claim_route_field)
         {
-            let seed_claim_filter_node =
-                RowSetNodeId(format!("reachable:{index}:seed_claim_filter"));
+            let seed_claim_filter_node = RowSetNodeId(format!("{reachable_id}:seed_claim_filter"));
             nodes.insert(
                 seed_claim_filter_node.clone(),
                 RowSetExpr::Filter {
@@ -2919,7 +2929,7 @@ fn normalize_reachable_seed(
             seed_current = seed_claim_filter_node;
         }
         if !seed.filters.is_empty() {
-            let seed_filter_node = RowSetNodeId(format!("reachable:{index}:seed_filter"));
+            let seed_filter_node = RowSetNodeId(format!("{reachable_id}:seed_filter"));
             nodes.insert(
                 seed_filter_node.clone(),
                 RowSetExpr::Filter {
@@ -2929,7 +2939,7 @@ fn normalize_reachable_seed(
             );
             seed_current = seed_filter_node;
         }
-        let seed_project_node = RowSetNodeId(format!("reachable:{index}:seed_project"));
+        let seed_project_node = RowSetNodeId(format!("{reachable_id}:seed_project"));
         let mut seed_columns = vec![
             RowProjection {
                 output: typed_output_field("team", ColumnType::Uuid),
@@ -2963,7 +2973,7 @@ fn normalize_reachable_seed(
     }
 
     let columns = reachable_frontier_columns(&reachable.from, param_types)?;
-    let seed_node = RowSetNodeId(format!("reachable:{index}:seed"));
+    let seed_node = RowSetNodeId(format!("{reachable_id}:seed"));
     nodes.insert(
         seed_node.clone(),
         RowSetExpr::ValueSource {
@@ -3206,38 +3216,53 @@ fn join_via_predicate(
     }
 }
 
-fn reachable_edge_source_id(reachable: &crate::query::ReachableVia, index: usize) -> SourceId {
+fn reachable_edge_source_id(
+    reachable: &crate::query::ReachableVia,
+    reachable_id: &str,
+) -> SourceId {
     SourceId {
         table: reachable.edge_table.clone(),
         path: SourcePath {
             components: vec![
                 SourceRole::Root,
-                SourceRole::RecursiveStep(format!("{index}:{}", reachable.edge_table)),
+                SourceRole::RecursiveStep(format!("{reachable_id}:{}", reachable.edge_table)),
             ],
         },
     }
 }
 
-fn reachable_access_source_id(reachable: &crate::query::ReachableVia, index: usize) -> SourceId {
+fn reachable_access_source_id(
+    reachable: &crate::query::ReachableVia,
+    reachable_id: &str,
+) -> SourceId {
     SourceId {
         table: reachable.access_table.clone(),
         path: SourcePath {
             components: vec![SourceRole::Alias(format!(
-                "reachable:{index}:{}",
+                "{reachable_id}:{}",
                 reachable.access_table
             ))],
         },
     }
 }
 
-fn reachable_seed_source_id(seed: &crate::query::ReachableSeed, index: usize) -> SourceId {
+fn reachable_seed_source_id(seed: &crate::query::ReachableSeed, reachable_id: &str) -> SourceId {
     SourceId {
         table: seed.table.clone(),
         path: SourcePath {
             components: vec![
                 SourceRole::Root,
-                SourceRole::RecursiveSeed(format!("{index}:{}", seed.table)),
+                SourceRole::RecursiveSeed(format!("{reachable_id}:{}", seed.table)),
             ],
+        },
+    }
+}
+
+fn inherited_parent_source_id(table: &str, prefix: &str) -> SourceId {
+    SourceId {
+        table: table.to_owned(),
+        path: SourcePath {
+            components: vec![SourceRole::Alias(prefix.to_owned())],
         },
     }
 }
@@ -3245,6 +3270,13 @@ fn reachable_seed_source_id(seed: &crate::query::ReachableSeed, index: usize) ->
 struct FilterJoinChain<'a> {
     filters: &'a [Predicate],
     joins: &'a [JoinVia],
+}
+
+struct PolicyAtomChain<'a> {
+    filters: &'a [Predicate],
+    joins: &'a [JoinVia],
+    inherits: &'a [crate::query::InheritsVia],
+    reachable: &'a [crate::query::ReachableVia],
 }
 
 fn normalize_filter_join_chain(
@@ -3303,6 +3335,146 @@ fn normalize_filter_join_chain(
     Ok(current)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn normalize_policy_atom_chain(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    join_contributions: &mut Vec<JoinContribution>,
+    reachable_contributions: &mut Vec<ReachableContribution>,
+    schema: &JazzSchema,
+    root_source: &SourceId,
+    start: RowSetNodeId,
+    prefix: &str,
+    chain: PolicyAtomChain<'_>,
+    binding_source_shape: &str,
+    param_types: &BTreeMap<String, ColumnType>,
+    record_join_contributions: bool,
+) -> Result<RowSetNodeId, Error> {
+    let mut current = normalize_filter_join_chain(
+        nodes,
+        auxiliary_sources,
+        join_contributions,
+        schema,
+        root_source,
+        start,
+        prefix,
+        FilterJoinChain {
+            filters: chain.filters,
+            joins: chain.joins,
+        },
+        record_join_contributions,
+    )?;
+    for (index, inherits) in chain.inherits.iter().enumerate() {
+        current = normalize_inherited_parent_policy(
+            nodes,
+            auxiliary_sources,
+            join_contributions,
+            reachable_contributions,
+            schema,
+            root_source,
+            current,
+            inherits,
+            &format!("{prefix}:inherits:{index}"),
+            binding_source_shape,
+            param_types,
+        )?;
+    }
+    for (index, reachable) in chain.reachable.iter().enumerate() {
+        let reachable_prefix = if prefix == "query" { "" } else { prefix };
+        let (next, contribution) = normalize_reachable(
+            nodes,
+            current,
+            root_source,
+            reachable,
+            index,
+            reachable_prefix,
+            binding_source_shape,
+            param_types,
+        )?;
+        current = next;
+        reachable_contributions.push(contribution);
+    }
+    Ok(current)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalize_inherited_parent_policy(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    join_contributions: &mut Vec<JoinContribution>,
+    reachable_contributions: &mut Vec<ReachableContribution>,
+    schema: &JazzSchema,
+    child_source: &SourceId,
+    child_current: RowSetNodeId,
+    inherits: &crate::query::InheritsVia,
+    prefix: &str,
+    binding_source_shape: &str,
+    param_types: &BTreeMap<String, ColumnType>,
+) -> Result<RowSetNodeId, Error> {
+    let child_table = table_schema(schema, &child_source.table)?;
+    let parent_table_name = child_table
+        .references
+        .get(&inherits.parent_column)
+        .cloned()
+        .ok_or_else(|| {
+            Error::QueryLowering(format!(
+                "{}.{} is not a parent reference",
+                child_source.table, inherits.parent_column
+            ))
+        })?;
+    let parent_table = table_schema(schema, &parent_table_name)?;
+    let parent_source = inherited_parent_source_id(&parent_table_name, prefix);
+    auxiliary_sources.insert(parent_source.clone());
+    let parent_source_node = RowSetNodeId(format!("{prefix}:source"));
+    nodes.insert(
+        parent_source_node.clone(),
+        RowSetExpr::Source {
+            source: parent_source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    let mut parent_current = parent_source_node;
+    if let Some(policy) = &parent_table.read_policy {
+        parent_current = normalize_policy_atom_chain(
+            nodes,
+            auxiliary_sources,
+            join_contributions,
+            reachable_contributions,
+            schema,
+            &parent_source,
+            parent_current,
+            &format!("{prefix}:parent_policy"),
+            PolicyAtomChain {
+                filters: &policy.filters,
+                joins: &policy.joins,
+                inherits: &policy.inherits,
+                reachable: &policy.reachable,
+            },
+            binding_source_shape,
+            param_types,
+            false,
+        )?;
+    }
+    let join_node = RowSetNodeId(format!("{prefix}:join"));
+    nodes.insert(
+        join_node.clone(),
+        RowSetExpr::Join {
+            left: child_current,
+            right: parent_current,
+            mode: NormalizedJoinMode::Inner,
+            on: NormalizedPredicateExpr::Compare {
+                left: NormalizedValueRef::SourceField {
+                    source: child_source.clone(),
+                    field: inherits.parent_column.clone(),
+                },
+                op: NormalizedComparisonOp::Eq,
+                right: NormalizedValueRef::RowId(RowIdRef::Source(parent_source)),
+            },
+        },
+    );
+    Ok(join_node)
+}
+
 fn normalize_row_id_projection(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     input: RowSetNodeId,
@@ -3326,28 +3498,8 @@ fn normalize_row_id_projection(
 }
 
 fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
-    if query.policy_branches.is_empty() {
-        return None;
-    }
-
-    let mut reasons = Vec::new();
-    if !query.reachable.is_empty() {
-        reasons.push("base reachable");
-    }
-    if query
-        .policy_branches
-        .iter()
-        .any(|branch| !branch.reachable.is_empty())
-    {
-        reasons.push("branch reachable");
-    }
-
-    (!reasons.is_empty()).then(|| {
-        format!(
-            "policy_branches with {} are not lowered yet",
-            reasons.join(", ")
-        )
-    })
+    let _ = query;
+    None
 }
 
 impl<S> NodeState<S>
@@ -4001,8 +4153,9 @@ where
         access_paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<(), Error> {
         for (index, reachable) in query.reachable.iter().enumerate() {
+            let reachable_id = format!("reachable:{index}");
             if let Some(seed) = &reachable.seed {
-                let source = reachable_seed_source_id(seed, index);
+                let source = reachable_seed_source_id(seed, &reachable_id);
                 self.add_primary_key_access_path_for_filters(
                     &source,
                     &seed.table,
@@ -4012,7 +4165,7 @@ where
                     access_paths,
                 )?;
             }
-            let edge_source = reachable_edge_source_id(reachable, index);
+            let edge_source = reachable_edge_source_id(reachable, &reachable_id);
             self.add_primary_key_access_path_for_filters(
                 &edge_source,
                 &reachable.edge_table,
@@ -4021,7 +4174,7 @@ where
                 binding,
                 access_paths,
             )?;
-            let access_source = reachable_access_source_id(reachable, index);
+            let access_source = reachable_access_source_id(reachable, &reachable_id);
             self.add_primary_key_access_path_for_filters(
                 &access_source,
                 &reachable.access_table,
@@ -4499,6 +4652,7 @@ where
         let mut join_contributions = Vec::new();
         let mut reachable_contributions = Vec::new();
 
+        let binding_source_shape = PENDING_BINDING_SOURCE_SHAPE.to_owned();
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
         if unsupported_policy_branch.is_none() && !query.policy_branches.is_empty() {
             let mut union_inputs = Vec::new();
@@ -4510,18 +4664,23 @@ where
                     visibility: RowVisibility::Visible,
                 },
             );
-            let base = normalize_filter_join_chain(
+            let base = normalize_policy_atom_chain(
                 &mut nodes,
                 &mut auxiliary_sources,
                 &mut join_contributions,
+                &mut reachable_contributions,
                 &self.catalogue.schema,
                 &root_source,
                 base_source_node,
                 "policy_branch:base",
-                FilterJoinChain {
+                PolicyAtomChain {
                     filters: &query.filters,
                     joins: &query.joins,
+                    inherits: &query.inherits,
+                    reachable: &query.reachable,
                 },
+                &binding_source_shape,
+                shape.params(),
                 false,
             )?;
             union_inputs.push(UnionInput {
@@ -4543,18 +4702,23 @@ where
                         visibility: RowVisibility::Visible,
                     },
                 );
-                let branch_current = normalize_filter_join_chain(
+                let branch_current = normalize_policy_atom_chain(
                     &mut nodes,
                     &mut auxiliary_sources,
                     &mut join_contributions,
+                    &mut reachable_contributions,
                     &self.catalogue.schema,
                     &root_source,
                     branch_source_node,
                     &format!("policy_branch:{index}"),
-                    FilterJoinChain {
+                    PolicyAtomChain {
                         filters: &branch.filters,
                         joins: &branch.joins,
+                        inherits: &branch.inherits,
+                        reachable: &branch.reachable,
                     },
+                    &binding_source_shape,
+                    shape.params(),
                     false,
                 )?;
                 union_inputs.push(UnionInput {
@@ -4594,35 +4758,25 @@ where
             );
             current = join_node;
         } else {
-            current = normalize_filter_join_chain(
+            current = normalize_policy_atom_chain(
                 &mut nodes,
                 &mut auxiliary_sources,
                 &mut join_contributions,
+                &mut reachable_contributions,
                 &self.catalogue.schema,
                 &root_source,
                 current,
                 "query",
-                FilterJoinChain {
+                PolicyAtomChain {
                     filters: &query.filters,
                     joins: &query.joins,
+                    inherits: &query.inherits,
+                    reachable: &query.reachable,
                 },
-                true,
-            )?;
-        }
-
-        let binding_source_shape = PENDING_BINDING_SOURCE_SHAPE.to_owned();
-        for (index, reachable) in query.reachable.iter().enumerate() {
-            let (next, contribution) = normalize_reachable(
-                &mut nodes,
-                current,
-                &root_source,
-                reachable,
-                index,
                 &binding_source_shape,
                 shape.params(),
+                true,
             )?;
-            current = next;
-            reachable_contributions.push(contribution);
         }
 
         for (index, subquery) in query.array_subqueries.iter().enumerate() {
@@ -4784,6 +4938,14 @@ where
         cells: &BTreeMap<String, Value>,
         identity: AuthorId,
     ) -> Result<bool, Error> {
+        if !policy.inherits.is_empty()
+            || policy
+                .policy_branches
+                .iter()
+                .any(|branch| !branch.inherits.is_empty())
+        {
+            return self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells);
+        }
         let policy_shape = policy.clone().validate(&self.catalogue.schema)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
@@ -6842,6 +7004,7 @@ fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
     query.filters = policy.filters.clone();
     query.joins = policy.joins.clone();
     query.reachable = policy.reachable.clone();
+    query.inherits = policy.inherits.clone();
     query.includes = policy.includes.clone();
     query.policy_branches = policy.policy_branches.clone();
     query

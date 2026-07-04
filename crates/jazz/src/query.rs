@@ -33,6 +33,9 @@ pub struct Query {
     pub policy_branches: Vec<PolicyBranch>,
     /// Recursive reachability traversals.
     pub reachable: Vec<ReachableVia>,
+    /// Parent-policy inheritance atoms.
+    #[serde(default)]
+    pub inherits: Vec<InheritsVia>,
     /// Included reference paths.
     pub includes: Vec<Include>,
     /// Correlated relation arrays materialized as relation payload edges.
@@ -245,6 +248,7 @@ impl Query {
             joins: Vec::new(),
             policy_branches: Vec::new(),
             reachable: Vec::new(),
+            inherits: Vec::new(),
             includes: Vec::new(),
             array_subqueries: Vec::new(),
             select: None,
@@ -523,6 +527,15 @@ impl Query {
         self
     }
 
+    /// Require the row referenced by `parent_column` to be readable under the
+    /// parent table's composed read policy.
+    pub fn inherits(mut self, parent_column: impl Into<String>) -> Self {
+        self.inherits.push(InheritsVia {
+            parent_column: parent_column.into(),
+        });
+        self
+    }
+
     /// Add an include path such as `project.org`.
     ///
     /// ```rust
@@ -662,6 +675,9 @@ pub struct PolicyBranch {
     pub joins: Vec<JoinVia>,
     /// Recursive reachability traversals that must be satisfied for this alternative.
     pub reachable: Vec<ReachableVia>,
+    /// Parent-policy inheritance atoms that must be satisfied for this alternative.
+    #[serde(default)]
+    pub inherits: Vec<InheritsVia>,
 }
 
 impl PolicyBranch {
@@ -677,11 +693,13 @@ impl PolicyBranch {
             joins,
             policy_branches,
             reachable,
+            inherits,
             ..
         } = query;
         let base_is_converter_false = matches!(filters.as_slice(), [Predicate::Any(predicates)] if predicates.is_empty())
             && joins.is_empty()
-            && reachable.is_empty();
+            && reachable.is_empty()
+            && inherits.is_empty();
 
         let mut alternatives = Vec::new();
         if !base_is_converter_false {
@@ -689,6 +707,7 @@ impl PolicyBranch {
                 filters,
                 joins,
                 reachable,
+                inherits,
             });
         }
         alternatives.extend(policy_branches);
@@ -717,6 +736,7 @@ impl PolicyBranch {
             joins: self.joins.clone(),
             policy_branches: Vec::new(),
             reachable: self.reachable.clone(),
+            inherits: self.inherits.clone(),
             includes: Vec::new(),
             array_subqueries: Vec::new(),
             select: None,
@@ -1134,6 +1154,13 @@ pub struct ReachableSeed {
     pub team_column: String,
     /// Filters applied to seed rows.
     pub filters: Vec<Predicate>,
+}
+
+/// Parent-policy inheritance through a root-table reference column.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct InheritsVia {
+    /// Root-table column referencing the parent row.
+    pub parent_column: String,
 }
 
 /// Recursion semantics for reachability and relation gather.
@@ -1572,6 +1599,9 @@ fn validate_query_canonical_parts(
     for reachable in &query.reachable {
         validate_reachable(schema, &root, reachable, &mut params)?;
     }
+    for inherits in &query.inherits {
+        validate_inherits(&root, inherits)?;
+    }
     for branch in &query.policy_branches {
         for predicate in &branch.filters {
             validate_predicate(&root, predicate, &mut params)?;
@@ -1581,6 +1611,9 @@ fn validate_query_canonical_parts(
         }
         for reachable in &branch.reachable {
             validate_reachable(schema, &root, reachable, &mut params)?;
+        }
+        for inherits in &branch.inherits {
+            validate_inherits(&root, inherits)?;
         }
     }
     for include in &query.includes {
@@ -2002,6 +2035,18 @@ fn validate_reachable(
     Ok(())
 }
 
+fn validate_inherits(root: &TableSchema, inherits: &InheritsVia) -> Result<(), QueryError> {
+    planner_column_type(root, &inherits.parent_column)?;
+    root.references
+        .get(&inherits.parent_column)
+        .ok_or_else(|| QueryError::JoinNotRefCompatible {
+            join_table: root.name.clone(),
+            column: inherits.parent_column.clone(),
+            target_table: "referenced table".to_owned(),
+        })?;
+    Ok(())
+}
+
 fn validate_predicate(
     table: &TableSchema,
     predicate: &Predicate,
@@ -2228,6 +2273,8 @@ fn normalize_query(query: &Query) -> Query {
             }
         }
         branch.reachable.sort_by_key(canonical_reachable_key);
+        branch.inherits.sort_by_key(canonical_inherits_key);
+        branch.inherits.dedup();
     }
     query
         .policy_branches
@@ -2242,6 +2289,8 @@ fn normalize_query(query: &Query) -> Query {
         }
     }
     query.reachable.sort_by_key(canonical_reachable_key);
+    query.inherits.sort_by_key(canonical_inherits_key);
+    query.inherits.dedup();
     query.includes.sort();
     query.includes.dedup();
     for subquery in &mut query.array_subqueries {
@@ -2299,6 +2348,10 @@ fn canonical_policy_branch_key(branch: &PolicyBranch) -> Vec<u8> {
     put_len(&mut bytes, branch.reachable.len());
     for reachable in &branch.reachable {
         put_bytes(&mut bytes, &canonical_reachable_key(reachable));
+    }
+    put_len(&mut bytes, branch.inherits.len());
+    for inherits in &branch.inherits {
+        put_bytes(&mut bytes, &canonical_inherits_key(inherits));
     }
     bytes
 }
@@ -2407,6 +2460,12 @@ fn canonical_reachable_key(reachable: &ReachableVia) -> Vec<u8> {
             put_bytes(&mut bytes, &canonical_predicate_key(filter));
         }
     }
+    bytes
+}
+
+fn canonical_inherits_key(inherits: &InheritsVia) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    put_str(&mut bytes, &inherits.parent_column);
     bytes
 }
 
@@ -2590,6 +2649,13 @@ fn canonical_query_bytes(query: &Query) -> Vec<u8> {
         put_len(&mut bytes, query.reachable.len());
         for reachable in &query.reachable {
             put_bytes(&mut bytes, &canonical_reachable_key(reachable));
+        }
+    }
+    if !query.inherits.is_empty() {
+        bytes.push(b'i');
+        put_len(&mut bytes, query.inherits.len());
+        for inherits in &query.inherits {
+            put_bytes(&mut bytes, &canonical_inherits_key(inherits));
         }
     }
     put_len(&mut bytes, query.includes.len());

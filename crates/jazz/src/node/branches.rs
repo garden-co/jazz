@@ -582,6 +582,7 @@ where
                 joins: join.nested_joins.clone(),
                 policy_branches: Vec::new(),
                 reachable: Vec::new(),
+                inherits: Vec::new(),
                 includes: Vec::new(),
                 array_subqueries: Vec::new(),
                 select: None,
