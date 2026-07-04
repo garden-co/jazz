@@ -2,12 +2,14 @@ use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::thread;
 
-use jazz::db::{CommitUnitTrust, DbIdentity};
+use jazz::db::{CommitUnitTrust, DbIdentity, Transport};
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, SchemaVersionId};
+use jazz::node::EdgeCacheBudget;
 use jazz::schema::JazzSchema;
 use jazz_server::{
-    AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, ServerSession, StorageConfig,
+    AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
+    StorageConfig,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -30,6 +32,15 @@ impl ServerShellHandle {
         schema: JazzSchema,
         storage_config: StorageConfig,
     ) -> Result<Self, String> {
+        Self::start_with_storage_config(schema, storage_config, NodeRole::Core, None)
+    }
+
+    pub(crate) fn start_with_storage_config(
+        schema: JazzSchema,
+        storage_config: StorageConfig,
+        role: NodeRole,
+        edge_cache_budget: Option<EdgeCacheBudget>,
+    ) -> Result<Self, String> {
         let (jobs, receiver) = mpsc::channel::<ServerShellJob>();
         let (started_tx, started_rx) = mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
@@ -44,7 +55,12 @@ impl ServerShellHandle {
                         author: AuthorId::SYSTEM,
                     },
                 )
-                .with_row_id_seed(0x5e);
+                .with_row_id_seed(0x5e)
+                .with_role(role);
+                let config = match edge_cache_budget {
+                    Some(budget) => config.with_edge_cache_budget(budget),
+                    None => config,
+                };
                 let shell = match InMemoryServerShell::start_with_storage(config, storage_config) {
                     Ok(shell) => {
                         let _ = started_tx.send(Ok(()));
@@ -125,6 +141,23 @@ impl ServerShellHandle {
             let result = shell
                 .tick()
                 .and_then(|()| shell.take_frames(session))
+                .map_err(|error| error.to_string());
+            if result.is_ok() {
+                notify_shell_activity(&activity_tx);
+            }
+            result
+        })
+        .await
+    }
+
+    pub(crate) async fn connect_upstream(
+        &self,
+        transport: Box<dyn Transport + Send>,
+    ) -> Result<(), String> {
+        let activity_tx = self.activity_tx.clone();
+        self.run(move |shell| {
+            let result = shell
+                .connect_upstream(transport)
                 .map_err(|error| error.to_string());
             if result.is_ok() {
                 notify_shell_activity(&activity_tx);
