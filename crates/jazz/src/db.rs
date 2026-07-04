@@ -389,6 +389,7 @@ where
             .borrow_mut()
             .finalize_local_mergeable_commit(tx_id)?;
         self.refresh_subscriptions()?;
+        self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
 
@@ -2513,7 +2514,11 @@ where
     }
 
     fn refresh_subscriptions(&self) -> Result<usize, Error> {
-        self.node.refresh_subscriptions()
+        let refreshed = self.node.refresh_subscriptions()?;
+        if refreshed > 0 {
+            self.node.mark_subscriber_connections_dirty();
+        }
+        Ok(refreshed)
     }
 
     #[cfg(feature = "testing")]
@@ -2536,6 +2541,8 @@ where
 pub struct DbTickStats {
     /// Number of live subscriptions that received a queued event.
     pub subscription_events: usize,
+    /// Number of connection ticks that applied remote sync state locally.
+    pub remote_sync_applied: usize,
     /// Number of history codec windows built by post-tick maintenance.
     pub consolidated_windows: usize,
     /// Number of plain history records folded into codec windows.
@@ -2590,7 +2597,17 @@ where
 
     fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
         self.outbox.borrow_mut().push(PendingUpload { tx_id, unit });
+        self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
+    }
+
+    fn mark_subscriber_connections_dirty(&self) {
+        for connection in self.connections.borrow().iter() {
+            let mut connection = connection.borrow_mut();
+            if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut connection.link {
+                *serve_dirty = true;
+            }
+        }
     }
 
     fn next_subscription_key(
@@ -2861,6 +2878,7 @@ where
                 coverage_groups: BTreeMap::new(),
                 registered_shape_opts: BTreeMap::new(),
                 served_current_rows: BTreeMap::new(),
+                serve_dirty: true,
             },
             last_resume_bytes: None,
         }));
@@ -2880,9 +2898,21 @@ where
     /// Service every accepted subscriber connection once.
     pub fn tick(&self) -> Result<DbTickStats, Error> {
         let mut stats = DbTickStats::default();
+        let mut remote_sync_applied = false;
         for connection in self.connections.borrow().iter() {
             let next = connection.borrow_mut().tick()?;
             stats.subscription_events += next.subscription_events;
+            stats.remote_sync_applied += next.remote_sync_applied;
+            remote_sync_applied |= next.remote_sync_applied > 0;
+        }
+        if remote_sync_applied {
+            for connection in self.connections.borrow().iter() {
+                if connection.borrow_mut().mark_subscriber_dirty() {
+                    let next = connection.borrow_mut().tick()?;
+                    stats.subscription_events += next.subscription_events;
+                    stats.remote_sync_applied += next.remote_sync_applied;
+                }
+            }
         }
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
@@ -2899,10 +2929,11 @@ where
             .node
             .borrow_mut()
             .post_tick_consolidate_history_windows(POST_TICK_HISTORY_WINDOW_BUDGET)?;
+        let consolidation_us = consolidation_start.elapsed().as_micros();
         stats.consolidated_windows += consolidation.windows;
         stats.consolidated_window_records += consolidation.records;
         if consolidation.windows > 0 {
-            stats.history_window_consolidation_us += consolidation_start.elapsed().as_micros();
+            stats.history_window_consolidation_us += consolidation_us;
         }
         Ok(stats)
     }
@@ -3333,6 +3364,9 @@ enum ConnectionLink {
         registered_shape_opts: BTreeMap<ShapeRegistrationKey, RegisterShapeOptions>,
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
+        /// True when this subscriber's maintained views may have queued deltas
+        /// to serve. Idle transport ticks must not poll every view.
+        serve_dirty: bool,
     },
 }
 
@@ -3377,6 +3411,9 @@ where
         self.transport.send(update).map_err(transport_error)?;
         if let Some(subscription) = subscription {
             served_current_rows.insert(subscription, table.to_owned());
+        }
+        if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut self.link {
+            *serve_dirty = true;
         }
         Ok(())
     }
@@ -3675,6 +3712,7 @@ where
                 if applied {
                     stats.subscription_events +=
                         refresh_subscriptions_in(&self.node, &self.subscriptions)?;
+                    stats.remote_sync_applied += 1;
                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                 }
             }
@@ -3687,6 +3725,7 @@ where
                 coverage_groups,
                 registered_shape_opts,
                 served_current_rows,
+                serve_dirty,
             } => {
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
@@ -4003,35 +4042,55 @@ where
                 if applied_inbound && !scheduled_immediate {
                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                 }
-                for (coverage, group) in coverage_groups.iter() {
-                    let group_subscription = SubscriptionKey {
-                        shape_id: coverage.shape_id,
-                        binding_id: coverage.binding_id,
-                        read_view: coverage.opts.read_view_key(),
-                    };
-                    let update = {
-                        let mut node = self.node.borrow_mut();
-                        peer.query_update_for_subscription(
-                            &mut node,
-                            group_subscription,
-                            &group.shape,
-                            &group.binding,
-                        )?
-                    };
-                    if !view_update_is_empty(&update) {
-                        #[cfg(feature = "sync-autopsy")]
-                        sync_autopsy::record(format!(
-                            "subscriber generated group delta group={} update={}",
-                            summarize_subscription_key(group_subscription),
-                            summarize_sync_message(&update)
-                        ));
-                        for subscription in group.subscribers.iter().copied() {
-                            let update = retarget_view_update(update.clone(), subscription);
+                if applied_inbound {
+                    *serve_dirty = true;
+                }
+                if *serve_dirty {
+                    for (coverage, group) in coverage_groups.iter() {
+                        let group_subscription = SubscriptionKey {
+                            shape_id: coverage.shape_id,
+                            binding_id: coverage.binding_id,
+                            read_view: coverage.opts.read_view_key(),
+                        };
+                        let update = {
+                            let mut node = self.node.borrow_mut();
+                            peer.query_update_for_subscription_with_opts(
+                                &mut node,
+                                group_subscription,
+                                &group.shape,
+                                &group.binding,
+                                coverage.opts.clone(),
+                            )?
+                        };
+                        if !view_update_is_empty(&update) {
                             #[cfg(feature = "sync-autopsy")]
                             sync_autopsy::record(format!(
-                                "subscriber send group delta {}",
+                                "subscriber generated group delta group={} update={}",
+                                summarize_subscription_key(group_subscription),
                                 summarize_sync_message(&update)
                             ));
+                            for subscription in group.subscribers.iter().copied() {
+                                let update = retarget_view_update(update.clone(), subscription);
+                                #[cfg(feature = "sync-autopsy")]
+                                sync_autopsy::record(format!(
+                                    "subscriber send group delta {}",
+                                    summarize_sync_message(&update)
+                                ));
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    update,
+                                )?;
+                            }
+                        }
+                    }
+                    for table in served_current_rows.values() {
+                        let update = {
+                            let mut node = self.node.borrow_mut();
+                            peer.current_rows_update(&mut node, table)?
+                        };
+                        if !view_update_is_empty(&update) {
                             send_with_content_extents(
                                 &self.node,
                                 peer,
@@ -4040,20 +4099,7 @@ where
                             )?;
                         }
                     }
-                }
-                for table in served_current_rows.values() {
-                    let update = {
-                        let mut node = self.node.borrow_mut();
-                        peer.current_rows_update(&mut node, table)?
-                    };
-                    if !view_update_is_empty(&update) {
-                        send_with_content_extents(
-                            &self.node,
-                            peer,
-                            self.transport.as_mut(),
-                            update,
-                        )?;
-                    }
+                    *serve_dirty = false;
                 }
                 let fate_updates = {
                     let mut node = self.node.borrow_mut();
@@ -4072,6 +4118,15 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage,
 {
+    fn mark_subscriber_dirty(&mut self) -> bool {
+        if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut self.link {
+            *serve_dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
     fn next_now_ms(&self) -> u64 {
         let next = self.next_now_ms.get();
         self.next_now_ms.set(next + 1);
