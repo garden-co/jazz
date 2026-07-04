@@ -1024,6 +1024,76 @@ fn staged_batch_reads_observe_uncommitted_writes() {
 }
 
 #[test]
+fn staged_batch_read_cache_handles_large_accumulated_batches() {
+    let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+    let mut batch = database.open_batch();
+    for id in 0..10_000 {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("album-{id}"))],
+        );
+    }
+
+    assert!(batch.staged_operations_cache.borrow().is_none());
+    let rows = database
+        .primary_key_scan_raw_in_batch(&mut batch, "albums", &[Value::U64(9_999)])
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].record().get("title").unwrap(),
+        Value::String("album-9999".to_owned())
+    );
+    assert_eq!(
+        batch
+            .staged_operations_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .len(),
+        10_000
+    );
+
+    let cached_rows = database
+        .primary_key_scan_raw_in_batch(&mut batch, "albums", &[Value::U64(42)])
+        .unwrap();
+    assert_eq!(
+        cached_rows[0].record().get("title").unwrap(),
+        Value::String("album-42".to_owned())
+    );
+    assert_eq!(
+        batch
+            .staged_operations_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .len(),
+        10_000
+    );
+
+    batch.update(
+        "albums",
+        vec![Value::U64(42), Value::String("updated".to_owned())],
+    );
+    assert!(batch.staged_operations_cache.borrow().is_none());
+    let updated = database
+        .primary_key_scan_raw_in_batch(&mut batch, "albums", &[Value::U64(42)])
+        .unwrap();
+    assert_eq!(
+        updated[0].record().get("title").unwrap(),
+        Value::String("updated".to_owned())
+    );
+
+    batch.delete("albums", PrimaryKeyValue::U64(42));
+    assert!(batch.staged_operations_cache.borrow().is_none());
+    assert!(
+        database
+            .primary_key_scan_raw_in_batch(&mut batch, "albums", &[Value::U64(42)])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn staged_batch_commit_ticks_once_for_multiple_writes() {
     let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
     let subscription = database
