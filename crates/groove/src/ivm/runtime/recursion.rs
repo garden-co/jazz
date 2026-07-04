@@ -147,6 +147,15 @@ where
         // Retractions are handled by full recompute + diff until we implement
         // DRed or DBSP-style nested negative deltas.
         runtime.metrics.recursive_recomputes += 1;
+        if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
+            eprintln!(
+                "CLOSURE_TRACE event=recursive_recompute node={node:?} scope={:?} has_recompute_table_delta={has_recompute_table_delta} has_table_delta={has_table_delta} has_recompute_binding_delta={has_recompute_binding_delta} has_binding_source={has_binding_source} has_binding_deltas={has_binding_deltas} state_empty={} step_hydrated={} total_recomputes={}",
+                runtime.scope,
+                recursive_state.is_empty(),
+                recursive_state.step_arrangements_hydrated(),
+                runtime.metrics.recursive_recomputes,
+            );
+        }
         let next = recompute_recursive(
             runtime.schema,
             runtime.graph,
@@ -313,6 +322,23 @@ where
     // shared arrangements so later positive ticks can probe old state.
     let full_table_deltas =
         snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, step)?;
+    if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
+        let records = full_table_deltas
+            .iter()
+            .map(|delta| delta.deltas.len())
+            .sum::<usize>();
+        let tables = full_table_deltas
+            .iter()
+            .map(|delta| format!("{}:{}", delta.table, delta.deltas.len()))
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "CLOSURE_TRACE event=hydrate_recursive_arrangements step={step:?} tables={} records={} accumulated={}",
+            tables,
+            records,
+            accumulated.deltas.len(),
+        );
+    }
     runtime.eval_with_binding_and_table_deltas(
         &full_table_deltas,
         0,
