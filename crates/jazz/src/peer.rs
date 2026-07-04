@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::TryRecvError;
+use std::time::Instant;
 
 use groove::ivm::MultisinkSubscription;
 use groove::storage::OrderedKvStorage;
@@ -533,12 +534,19 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        let trace_rehydrate = std::env::var_os("JAZZ_CUSTOMER_TRACE_REHYDRATE").is_some();
+        let trace_start = Instant::now();
+        if trace_rehydrate {
+            node.reset_storage_read_metrics();
+        }
         let transitions = self.drain_maintained_subscription_view_changes(
             node,
             shape,
             subscription,
             result_table_filter,
         )?;
+        let drain_elapsed = trace_start.elapsed();
+        let drain_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let ResultTransitions {
             adds: result_member_adds,
             removes: mut result_member_removes,
@@ -546,6 +554,10 @@ impl PeerState {
             program_fact_removes,
             allow_storage_witness_fallback,
         } = transitions;
+        let result_add_count = result_member_adds.len();
+        let result_remove_count = result_member_removes.len();
+        let fact_add_count = program_fact_adds.len();
+        let fact_remove_count = program_fact_removes.len();
         let previous_member_result_set = self
             .subscriptions
             .get(&subscription)
@@ -608,6 +620,10 @@ impl PeerState {
             .subscriptions
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
+        let bundle_start = Instant::now();
+        if trace_rehydrate {
+            node.reset_storage_read_metrics();
+        }
         let update = {
             let maintained = &self
                 .subscriptions
@@ -636,6 +652,33 @@ impl PeerState {
             )
         };
         let update = update?;
+        let bundle_elapsed = bundle_start.elapsed();
+        let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
+        if trace_rehydrate {
+            let bundle_count = match &update {
+                SyncMessage::ViewUpdate {
+                    version_bundles, ..
+                } => version_bundles.len(),
+                _ => 0,
+            };
+            let drain_reads = drain_reads.expect("trace reads captured");
+            let bundle_reads = bundle_reads.expect("trace reads captured");
+            eprintln!(
+                "CUSTOMER_REHYDRATE stage=update subscription={subscription:?} drain_ms={} bundle_ms={} adds={} removes={} fact_adds={} fact_removes={} bundles={} fallback={} drain_reads={} drain_ranges={} bundle_reads={} bundle_ranges={}",
+                drain_elapsed.as_millis(),
+                bundle_elapsed.as_millis(),
+                result_add_count,
+                result_remove_count,
+                fact_add_count,
+                fact_remove_count,
+                bundle_count,
+                allow_storage_witness_fallback,
+                drain_reads.total.reads,
+                drain_reads.total.ranges,
+                bundle_reads.total.reads,
+                bundle_reads.total.ranges,
+            );
+        }
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(subscription);
         self.record_outgoing_view_update(&update);
@@ -797,6 +840,11 @@ impl PeerState {
             tier,
             read_view,
         } = request;
+        let trace_rehydrate = std::env::var_os("JAZZ_CUSTOMER_TRACE_REHYDRATE").is_some();
+        let open_start = Instant::now();
+        if trace_rehydrate {
+            node.reset_storage_read_metrics();
+        }
         let (receiver, maintained, terminal_schemas, transitions, tables) = node
             .open_seeded_maintained_subscription_view(
                 shape,
@@ -805,6 +853,12 @@ impl PeerState {
                 tier,
                 read_view,
             )?;
+        let open_elapsed = open_start.elapsed();
+        let open_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
+        let raw_add_count = transitions.adds.len();
+        let raw_remove_count = transitions.removes.len();
+        let raw_fact_add_count = transitions.program_fact_adds.len();
+        let filter_start = Instant::now();
         let output_tables = tables.clone();
         let result_member_adds = transitions
             .adds
@@ -823,11 +877,18 @@ impl PeerState {
             .difference(&current_member_result_set)
             .cloned()
             .collect::<Vec<_>>();
+        let filter_elapsed = filter_start.elapsed();
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let known_state = self
             .subscriptions
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
+        let result_add_count = result_member_adds.len();
+        let result_remove_count = result_member_removes.len();
+        let bundle_start = Instant::now();
+        if trace_rehydrate {
+            node.reset_storage_read_metrics();
+        }
         let update = node.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
                 subscription,
@@ -845,6 +906,8 @@ impl PeerState {
                 allow_storage_witness_fallback: false,
             },
         );
+        let bundle_elapsed = bundle_start.elapsed();
+        let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let mut update = match update {
             Ok(update) => update,
             Err(err) => {
@@ -854,6 +917,33 @@ impl PeerState {
         };
         if reset_result_set {
             view_update_reset_result_set(&mut update);
+        }
+        if trace_rehydrate {
+            let bundle_count = match &update {
+                SyncMessage::ViewUpdate {
+                    version_bundles, ..
+                } => version_bundles.len(),
+                _ => 0,
+            };
+            let open_reads = open_reads.expect("trace reads captured");
+            let bundle_reads = bundle_reads.expect("trace reads captured");
+            eprintln!(
+                "CUSTOMER_REHYDRATE stage=rehydrate subscription={subscription:?} reset={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} bundle_reads={} bundle_ranges={}",
+                reset_result_set,
+                open_elapsed.as_millis(),
+                filter_elapsed.as_millis(),
+                bundle_elapsed.as_millis(),
+                raw_add_count,
+                raw_remove_count,
+                raw_fact_add_count,
+                result_add_count,
+                result_remove_count,
+                bundle_count,
+                open_reads.total.reads,
+                open_reads.total.ranges,
+                bundle_reads.total.reads,
+                bundle_reads.total.ranges,
+            );
         }
         let maintained_subscription = MaintainedSubscriptionViewSubscription {
             subscription: receiver,
