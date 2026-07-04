@@ -89,6 +89,7 @@ pub(crate) struct ResultTransitions {
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_delta_batches: usize,
+    pub(crate) observed_result_delta_batches: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +162,7 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
+        let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
         let decoded = deltas
             .iter()
             .map(|(record, weight)| {
@@ -168,7 +170,11 @@ impl MaintainedSubscriptionView {
                     .map(|event| (event, weight))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.apply_decoded_deltas(decoded, node_aliases)
+        let mut transitions = self.apply_decoded_deltas(decoded, node_aliases)?;
+        if observed_result_delta_batch {
+            transitions.observed_result_delta_batches += 1;
+        }
+        Ok(transitions)
     }
 
     pub(crate) fn apply_multisink_deltas(
@@ -190,6 +196,8 @@ impl MaintainedSubscriptionView {
             transitions
                 .program_fact_removes
                 .extend(delta_transitions.program_fact_removes);
+            transitions.observed_result_delta_batches +=
+                delta_transitions.observed_result_delta_batches;
         }
         Ok(transitions)
     }
@@ -486,6 +494,15 @@ impl MaintainedTerminalSchemas {
         self.sinks.get(sink).ok_or(super::Error::InvalidStoredValue(
             "maintained view delta arrived for an unknown query-engine terminal",
         ))
+    }
+}
+
+impl MaintainedTerminalKind {
+    fn is_result_terminal(&self) -> bool {
+        matches!(
+            self,
+            MaintainedTerminalKind::ResultCurrent(_) | MaintainedTerminalKind::AggregateResult(_)
+        )
     }
 }
 

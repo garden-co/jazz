@@ -430,7 +430,29 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.query_update_inner_for_subscription(node, subscription, shape, binding)
+        self.query_update_for_subscription_with_opts(
+            node,
+            subscription,
+            shape,
+            binding,
+            RegisterShapeOptions::default(),
+        )
+    }
+
+    /// Build an incremental view update addressed to a usage-site subscription,
+    /// preserving the read view and tier used when the shape was registered.
+    pub fn query_update_for_subscription_with_opts<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts)
     }
 
     fn query_update_inner<S>(
@@ -447,7 +469,13 @@ impl PeerState {
             binding_id: binding.binding_id(),
             read_view: Default::default(),
         };
-        self.query_update_inner_for_subscription(node, subscription, shape, binding)
+        self.query_update_inner_for_subscription(
+            node,
+            subscription,
+            shape,
+            binding,
+            RegisterShapeOptions::default(),
+        )
     }
 
     fn query_update_inner_for_subscription<S>(
@@ -456,6 +484,7 @@ impl PeerState {
         subscription: SubscriptionKey,
         shape: &ValidatedQuery,
         binding: &Binding,
+        opts: RegisterShapeOptions,
     ) -> Result<SyncMessage, Error>
     where
         S: OrderedKvStorage,
@@ -495,15 +524,11 @@ impl PeerState {
             .and_then(|state| state.prepared_query.as_ref())
             .is_none()
         {
-            let (_prepared_shape, _prepared_binding, plan) = node.prepare_query_binding_for_link(
-                shape,
-                binding,
-                DurabilityTier::Global,
-                self.identity(),
-            )?;
+            let (_prepared_shape, _prepared_binding, plan) =
+                node.prepare_query_binding_for_link(shape, binding, opts.tier, self.identity())?;
             let state = self.subscriptions.entry(subscription).or_default();
             state.prepared_query = Some(CachedPeerQueryPlan {
-                tier: DurabilityTier::Global,
+                tier: opts.tier,
                 plan,
             });
             state.groove_runtime_token = Some(node.groove_runtime_token());
@@ -517,8 +542,8 @@ impl PeerState {
                 previous_member_result_set: &previous_member_result_set,
                 reset_result_set: false,
                 result_table_filter: None,
-                tier: DurabilityTier::Global,
-                read_view: &ReadViewSpec::default(),
+                tier: opts.tier,
+                read_view: &opts.read_view,
             },
         )
     }
@@ -553,7 +578,8 @@ impl PeerState {
             program_fact_adds,
             program_fact_removes,
             allow_storage_witness_fallback,
-            observed_delta_batches,
+            observed_delta_batches: _,
+            observed_result_delta_batches,
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -564,7 +590,7 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        if observed_delta_batches > 0
+        if observed_result_delta_batches > 0
             && result_member_adds.is_empty()
             && result_member_removes.is_empty()
             && program_fact_adds.is_empty()
@@ -746,6 +772,7 @@ impl PeerState {
         let mut program_fact_removes = Vec::new();
         let mut allow_storage_witness_fallback = false;
         let mut observed_delta_batches = 0_usize;
+        let mut observed_result_delta_batches = 0_usize;
         {
             let Some(maintained_subscription_view) = self
                 .subscriptions
@@ -767,6 +794,7 @@ impl PeerState {
                                 &maintained_subscription_view.tables,
                                 &node.node_aliases,
                             )?;
+                        observed_result_delta_batches += transitions.observed_result_delta_batches;
                         program_fact_adds.extend(filter_program_facts_for_result_table(
                             transitions.program_fact_adds,
                             result_table_filter,
@@ -852,6 +880,7 @@ impl PeerState {
             program_fact_removes,
             allow_storage_witness_fallback,
             observed_delta_batches,
+            observed_result_delta_batches,
         })
     }
 
@@ -1113,6 +1142,7 @@ impl PeerState {
             program_fact_removes: source_program_fact_removes,
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
             observed_delta_batches: _,
+            observed_result_delta_batches: _,
         } = source_transitions;
         if !source_adds.is_empty()
             || !source_removes.is_empty()
