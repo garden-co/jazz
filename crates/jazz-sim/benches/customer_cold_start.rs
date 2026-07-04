@@ -25,7 +25,11 @@ use serde_json::{Value as JsonValue, json};
 // column, and `join_via_row_id(parent, parent_id)` only proves parent existence
 // rather than composing the parent's read policy. The benchmark therefore uses
 // derived child access-edge tables as a sound approximation; real customer
-// children do not carry that denormalized relation.
+// children do not carry that denormalized relation. The generator constrains a
+// small fixed subset of resource access edges to groups reached by the member
+// at depth 1 and depth 2 so every scale exercises the member->resource path;
+// the current member runs are still expected to fail until the pinned
+// membership-seed policy gap is fixed.
 
 const ORG: &str = "org";
 const GROUP: &str = "group";
@@ -33,6 +37,7 @@ const GROUP_ACCESS: &str = "group_access_edges";
 const GROUP_ENTRY: &str = "group_entry";
 const PROFILE: &str = "profile";
 const CHILD_TABLES: usize = 6;
+const MEMBER_POLICY_GAP_NOTE: &str = "known gap: resource access-edge policy currently seeds reachability from claim(\"sub\") as a group id instead of group_access_edges user->group; member rungs keep strict expected counts and may fail until that policy arc lands";
 
 const RESOURCE_SPECS: [ResourceSpec; 14] = [
     ResourceSpec::new("res_a", 4, 7, Some(108)),
@@ -637,11 +642,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         let mut edges = Vec::new();
         for i in 0..edge_count {
             let resource = resource_rows[i % resource_rows.len()];
-            let group = if spec.table == "res_n" || i % 5 == 0 {
-                groups[34 + (i % 4)]
-            } else {
-                groups[(i + kind) % 34]
-            };
+            let group = resource_access_group(spec, kind, i, &groups);
             seed_db(
                 &core,
                 &spec.access_table(),
@@ -717,6 +718,27 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         table_rows,
         access,
         child_parent,
+    }
+}
+
+fn resource_access_group(
+    spec: ResourceSpec,
+    kind: usize,
+    edge_index: usize,
+    groups: &[RowUuid],
+) -> RowUuid {
+    match (spec.table, edge_index) {
+        // Direct member group: keeps at least one parent-visible child-bearing
+        // resource at every scale.
+        ("res_a", 0) => groups[1],
+        // Transitive member group reached through group_entry: exercises the
+        // recursive policy path even at the smallest scale.
+        ("res_l", 0) => groups[24],
+        // Another direct visible resource kind without children so the member
+        // slice is not child-only.
+        ("res_e", 0) => groups[2],
+        _ if spec.table == "res_n" || edge_index % 5 == 0 => groups[34 + (edge_index % 4)],
+        _ => groups[(edge_index + kind) % 34],
     }
 }
 
@@ -1495,6 +1517,12 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         "shape_note".to_owned(),
         json!("43 subscriptions: parent/resource/access tables plus six child subscriptions; four populated child tables include derived child-access-edge subscriptions because the public API cannot yet express inherited parent visibility directly"),
     );
+    if config.identity == BenchIdentity::Member {
+        fields.insert(
+            "known_member_policy_gap".to_owned(),
+            json!(MEMBER_POLICY_GAP_NOTE),
+        );
+    }
     fields.insert(
         "subscription_timeline".to_owned(),
         JsonValue::Array(
