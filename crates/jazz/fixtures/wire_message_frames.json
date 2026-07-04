@@ -15,10 +15,10 @@
     {
       "name": "register_shape_todos",
       "message_family": "RegisterShape",
-      "frame_hex": "010101003a0310222222222222222222222222222222220010444444444444444444444444444444440005746f646f73000000000000000000000003000000",
-      "frame_base64": "AQEBADoDECIiIiIiIiIiIiIiIiIiIiIAEEREREREREREREREREREREQABXRvZG9zAAAAAAAAAAAAAAADAAAA",
-      "payload_hex": "0310222222222222222222222222222222220010444444444444444444444444444444440005746f646f73000000000000000000000003000000",
-      "decoded_debug": "RegisterShape { shape_id: ShapeId(22222222-2222-2222-2222-222222222222), ast: ShapeAst { version: 0, schema_version: SchemaVersionId(44444444-4444-4444-4444-444444444444), body: Query(Query { table: \"todos\", filters: [], joins: [], policy_branches: [], reachable: [], includes: [], array_subqueries: [], select: None, order_by: [], aggregate: None, limit: None, offset: 0 }) }, opts: RegisterShapeOptions { tier: Global, read_view: ReadViewSpec { source: Current, schema: Current, overlays: [] } } }"
+      "frame_hex": "010101003b0310222222222222222222222222222222220010444444444444444444444444444444440005746f646f7300000000000000000000000003000000",
+      "frame_base64": "AQEBADsDECIiIiIiIiIiIiIiIiIiIiIAEEREREREREREREREREREREQABXRvZG9zAAAAAAAAAAAAAAAAAwAAAA==",
+      "payload_hex": "0310222222222222222222222222222222220010444444444444444444444444444444440005746f646f7300000000000000000000000003000000",
+      "decoded_debug": "RegisterShape { shape_id: ShapeId(22222222-2222-2222-2222-222222222222), ast: ShapeAst { version: 0, schema_version: SchemaVersionId(44444444-4444-4444-4444-444444444444), body: Query(Query { table: \"todos\", filters: [], joins: [], policy_branches: [], reachable: [], inherits: [], includes: [], array_subqueries: [], select: None, order_by: [], aggregate: None, limit: None, offset: 0 }) }, opts: RegisterShapeOptions { tier: Global, read_view: ReadViewSpec { source: Current, schema: Current, overlays: [] } } }"
     },
     {
       "name": "subscribe_empty_todos_binding",
