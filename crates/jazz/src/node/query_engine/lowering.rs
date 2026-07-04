@@ -4169,18 +4169,18 @@ fn lowered_terminals(
             available_fields,
         );
     }
+    let root_route_fields = routing_param_fields
+        .intersection(available_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut terminals = Vec::new();
     let closure = lower_closure_membership(
         graph.clone(),
         request,
         source,
         resolved_sources,
-        routing_param_fields,
+        &root_route_fields,
     )?;
-    let root_route_fields = routing_param_fields
-        .intersection(available_fields)
-        .cloned()
-        .collect::<BTreeSet<_>>();
     let visible_root_with_routes = if root_route_fields.is_empty() {
         closure.visible_root.clone()
     } else {
@@ -4551,7 +4551,6 @@ fn lower_closure_membership(
             )?;
         }
     }
-
     let mut result_members = BTreeMap::<SourceId, GraphBuilder>::new();
     for path in &request.input.shape.closure_paths {
         for (_, source, graph) in closure_membership_graph_for_path(
@@ -4559,6 +4558,7 @@ fn lower_closure_membership(
             path,
             root_source,
             resolved_sources,
+            route_fields,
         )? {
             let Some(resolved_source) = resolved_sources.get(&source) else {
                 continue;
@@ -4848,10 +4848,11 @@ fn closure_membership_graph_for_path(
     path: &ClosurePath,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Vec<(usize, SourceId, GraphBuilder)>> {
     let segments = closure_path_segments(path);
     let mut current_graph = root_graph.project_fields(
-        project_source_fields_from_prefix(root_source, "")
+        project_source_fields_with_routes(root_source, route_fields)
             .into_iter()
             .chain([ProjectField::renamed(
                 root_source.row_shape.row_uuid_field.clone(),
@@ -4883,7 +4884,12 @@ fn closure_membership_graph_for_path(
                 .chain([ProjectField::renamed(
                     "left.__closure_root_row_uuid",
                     "__closure_root_row_uuid",
-                )]),
+                )])
+                .chain(
+                    route_fields
+                        .iter()
+                        .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+                ),
         );
         outputs.push((index, segment.target.clone(), joined.clone()));
         current_graph = joined;
