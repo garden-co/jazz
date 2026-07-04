@@ -621,22 +621,6 @@ where
         self.inner.delete(&physical_cf, &physical_key)
     }
 
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
-        let mapping = self.layout.map_cf(cf);
-        if mapping.logical_prefix.is_none() {
-            return self.inner.approximate_class_bytes(mapping.physical_cf);
-        }
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, b"");
-        let mut bytes = 0_u64;
-        self.inner
-            .scan_prefix(&physical_cf, &physical_prefix, &mut |key, value| {
-                let logical_key = self.strip_key(key, strip_len)?;
-                bytes = bytes.saturating_add(logical_key.len().saturating_add(value.len()) as u64);
-                Ok(())
-            })?;
-        Ok(Some(bytes))
-    }
-
     fn scan_range(
         &self,
         cf: &ColumnFamilyName,
@@ -744,6 +728,11 @@ where
 
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.inner.column_family_names()
+    }
+
+    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+        let physical_cf = self.layout.map_cf(cf).physical_cf.to_owned();
+        self.inner.approximate_class_bytes(&physical_cf)
     }
 }
 

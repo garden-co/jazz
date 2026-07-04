@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use jazz::db::{
     CommitUnitTrust, Db, DbConfig, DbIdentity, Error as DbError, PeerConnection, ResumeCursor,
-    RowCells, SeededRowIdSource, WireTransportAdapter,
+    RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
@@ -84,6 +84,8 @@ pub struct InMemoryServerShellConfig {
     pub row_id_seed: Option<u64>,
     /// Optional edge-cache byte budget. `None` disables automatic eviction.
     pub edge_cache_budget: Option<EdgeCacheBudget>,
+    /// Server role used for client-link semantics.
+    pub role: NodeRole,
 }
 
 impl InMemoryServerShellConfig {
@@ -94,6 +96,7 @@ impl InMemoryServerShellConfig {
             identity,
             row_id_seed: None,
             edge_cache_budget: None,
+            role: NodeRole::Core,
         }
     }
 
@@ -108,12 +111,19 @@ impl InMemoryServerShellConfig {
         self.edge_cache_budget = Some(budget);
         self
     }
+
+    /// Configure this shell's server role.
+    pub fn with_role(mut self, role: NodeRole) -> Self {
+        self.role = role;
+        self
+    }
 }
 
 /// Library-only in-memory server shell backed by one ABI runtime and database.
 #[derive(Debug)]
 pub struct InMemoryServerShell {
     db: ShellDb,
+    role: NodeRole,
     sessions: Vec<Option<ServerSessionState>>,
     resume_cursors: BTreeMap<u64, (AuthorId, ResumeCursor)>,
     next_resume_token: u64,
@@ -251,6 +261,14 @@ impl ShellDb {
         }
     }
 
+    fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
+        match self {
+            Self::Memory(db) => ShellPeerConnection::Memory(db.connect_upstream(transport)),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => ShellPeerConnection::Rocks(db.connect_upstream(transport)),
+        }
+    }
+
     fn publish_schema(&self, schema: SchemaVersion) -> ShellResult<Vec<SyncMessage>> {
         match self {
             Self::Memory(db) => db.publish_schema(schema).map_err(Into::into),
@@ -309,6 +327,23 @@ impl ShellDb {
             #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => ShellPeerConnection::Rocks(
                 db.accept_subscriber_with_claims_and_trust(transport, identity, claims, trust),
+            ),
+        }
+    }
+
+    fn accept_edge_subscriber_with_claims(
+        &self,
+        transport: Box<dyn jazz::db::Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> ShellPeerConnection {
+        match self {
+            Self::Memory(db) => ShellPeerConnection::Memory(
+                db.accept_edge_subscriber_with_claims(transport, identity, claims),
+            ),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => ShellPeerConnection::Rocks(
+                db.accept_edge_subscriber_with_claims(transport, identity, claims),
             ),
         }
     }
@@ -386,6 +421,7 @@ impl InMemoryServerShell {
         storage_config: StorageConfig,
     ) -> ShellResult<Self> {
         let edge_cache_budget = config.edge_cache_budget;
+        let role = config.role;
         let db = match &storage_config {
             StorageConfig::InMemory => {
                 let refs = config.schema.column_families();
@@ -427,6 +463,7 @@ impl InMemoryServerShell {
 
         Ok(Self {
             db,
+            role,
             sessions: Vec::new(),
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
@@ -522,12 +559,18 @@ impl InMemoryServerShell {
             });
         }
         let transport = SharedWireTransport::default();
-        let connection = self.db.accept_subscriber_with_claims_and_trust(
-            Box::new(WireTransportAdapter::current(transport.clone())),
-            identity,
-            claims,
-            trust,
-        );
+        let transport_adapter = Box::new(WireTransportAdapter::current(transport.clone()));
+        let connection = if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
+            self.db
+                .accept_edge_subscriber_with_claims(transport_adapter, identity, claims)
+        } else {
+            self.db.accept_subscriber_with_claims_and_trust(
+                transport_adapter,
+                identity,
+                claims,
+                trust,
+            )
+        };
         let session_id = self.sessions.len();
         self.sessions.push(Some(ServerSessionState {
             connection,
@@ -541,6 +584,13 @@ impl InMemoryServerShell {
             transport: session_id,
             identity,
         })
+    }
+
+    /// Attach this edge shell to an upstream core transport.
+    pub fn connect_upstream(&mut self, transport: Box<dyn Transport>) -> ShellResult<()> {
+        let _connection = self.db.connect_upstream(transport);
+        self.tick()?;
+        Ok(())
     }
 
     /// Disconnect a subscriber session while preserving an in-process cursor.
