@@ -1023,8 +1023,43 @@ fn staged_batch_reads_observe_uncommitted_writes() {
     );
 }
 
+fn vec_derived_primary_key_scan_raw(
+    database: &Database<MemoryStorage>,
+    batch: &DatabaseBatch,
+    table: &str,
+    prefix: &[Value],
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut key_prefix = Vec::new();
+    for value in prefix {
+        encode_primary_key_part(&mut key_prefix, value);
+    }
+    let mut rows = database
+        .primary_key_scan_raw(table, prefix)
+        .unwrap()
+        .into_iter()
+        .map(EncodedKeyValue::into_parts)
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for write in database
+        .pending_writes_from_operations(&batch.operations)
+        .unwrap()
+    {
+        if write.table() != table || !write.key().starts_with(&key_prefix) {
+            continue;
+        }
+        match write {
+            PendingTableWrite::Set { key, record, .. } => {
+                rows.insert(key, record);
+            }
+            PendingTableWrite::Delete { key, .. } => {
+                rows.remove(&key);
+            }
+        }
+    }
+    rows.into_iter().collect()
+}
+
 #[test]
-fn staged_batch_read_cache_handles_large_accumulated_batches() {
+fn staged_batch_read_index_handles_large_accumulated_batches() {
     let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
     let mut batch = database.open_batch();
     for id in 0..10_000 {
@@ -1034,63 +1069,156 @@ fn staged_batch_read_cache_handles_large_accumulated_batches() {
         );
     }
 
-    assert!(batch.staged_operations_cache.borrow().is_none());
     let rows = database
-        .primary_key_scan_raw_in_batch(&mut batch, "albums", &[Value::U64(9_999)])
+        .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(9_999)])
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].record().get("title").unwrap(),
         Value::String("album-9999".to_owned())
     );
+    assert_eq!(batch.read_index.borrow().entries.len(), 10_000);
     assert_eq!(
-        batch
-            .staged_operations_cache
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .len(),
-        10_000
+        rows.iter()
+            .cloned()
+            .map(EncodedKeyValue::into_parts)
+            .collect::<Vec<_>>(),
+        vec_derived_primary_key_scan_raw(&database, &batch, "albums", &[Value::U64(9_999)])
     );
 
     let cached_rows = database
-        .primary_key_scan_raw_in_batch(&mut batch, "albums", &[Value::U64(42)])
+        .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(42)])
         .unwrap();
     assert_eq!(
         cached_rows[0].record().get("title").unwrap(),
         Value::String("album-42".to_owned())
-    );
-    assert_eq!(
-        batch
-            .staged_operations_cache
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .len(),
-        10_000
     );
 
     batch.update(
         "albums",
         vec![Value::U64(42), Value::String("updated".to_owned())],
     );
-    assert!(batch.staged_operations_cache.borrow().is_none());
     let updated = database
-        .primary_key_scan_raw_in_batch(&mut batch, "albums", &[Value::U64(42)])
+        .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(42)])
         .unwrap();
     assert_eq!(
         updated[0].record().get("title").unwrap(),
         Value::String("updated".to_owned())
     );
+    assert_eq!(
+        updated
+            .iter()
+            .cloned()
+            .map(EncodedKeyValue::into_parts)
+            .collect::<Vec<_>>(),
+        vec_derived_primary_key_scan_raw(&database, &batch, "albums", &[Value::U64(42)])
+    );
 
     batch.delete("albums", PrimaryKeyValue::U64(42));
-    assert!(batch.staged_operations_cache.borrow().is_none());
     assert!(
         database
-            .primary_key_scan_raw_in_batch(&mut batch, "albums", &[Value::U64(42)])
+            .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(42)])
             .unwrap()
             .is_empty()
     );
+    assert_eq!(
+        database
+            .primary_key_scan_raw_in_batch(&batch, "albums", &[])
+            .unwrap()
+            .len(),
+        9_999
+    );
+    assert_eq!(
+        batch.read_index.borrow().indexed_operations,
+        batch.operations.len()
+    );
+}
+
+#[test]
+fn staged_batch_read_index_overlays_storage_for_prefix_scans() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("stored-one".to_owned())],
+    );
+    seed.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("stored-two".to_owned())],
+    );
+    database.commit_batch(seed).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.update(
+        "albums",
+        vec![Value::U64(1), Value::String("staged-one".to_owned())],
+    );
+    batch.delete("albums", PrimaryKeyValue::U64(2));
+    batch.insert(
+        "albums",
+        vec![Value::U64(3), Value::String("staged-three".to_owned())],
+    );
+
+    let rows = database
+        .primary_key_scan_raw_in_batch(&batch, "albums", &[])
+        .unwrap()
+        .into_iter()
+        .map(|row| row.record().get("title").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![
+            Value::String("staged-one".to_owned()),
+            Value::String("staged-three".to_owned())
+        ]
+    );
+    assert_eq!(
+        database
+            .primary_key_scan_raw_in_batch(&batch, "albums", &[])
+            .unwrap()
+            .into_iter()
+            .map(EncodedKeyValue::into_parts)
+            .collect::<Vec<_>>(),
+        vec_derived_primary_key_scan_raw(&database, &batch, "albums", &[])
+    );
+}
+
+#[test]
+fn staged_batch_read_index_advances_only_new_operations() {
+    let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+    let mut batch = database.open_batch();
+    for id in 0..10_000 {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("album-{id}"))],
+        );
+    }
+    database
+        .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(9_999)])
+        .unwrap();
+    assert_eq!(batch.read_index.borrow().indexed_operations, 10_000);
+
+    for id in 10_000..20_000 {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("album-{id}"))],
+        );
+    }
+    database
+        .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(19_999)])
+        .unwrap();
+    assert_eq!(batch.read_index.borrow().indexed_operations, 20_000);
+    assert_eq!(batch.read_index.borrow().entries.len(), 20_000);
+
+    batch.update(
+        "albums",
+        vec![Value::U64(19_999), Value::String("tail-updated".to_owned())],
+    );
+    database
+        .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(19_999)])
+        .unwrap();
+    assert_eq!(batch.read_index.borrow().indexed_operations, 20_001);
+    assert_eq!(batch.read_index.borrow().entries.len(), 20_000);
 }
 
 #[test]
