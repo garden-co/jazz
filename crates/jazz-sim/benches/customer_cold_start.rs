@@ -1,5 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -32,6 +35,8 @@ const GROUP_ACCESS: &str = "group_access_edges";
 const GROUP_ENTRY: &str = "group_entry";
 const PROFILE: &str = "profile";
 const CHILD_TABLES: usize = 6;
+const SEED_CACHE_VERSION: &str = "customer-cold-start-seed-v3";
+const SEED_CACHE_READY: &str = ".jazz_customer_seed_ready";
 
 const RESOURCE_SPECS: [ResourceSpec; 14] = [
     ResourceSpec::new("res_a", 4, 7, Some(108)),
@@ -172,6 +177,23 @@ struct Seeded {
     table_rows: BTreeMap<String, Vec<RowUuid>>,
     access: BTreeMap<String, Vec<(RowUuid, RowUuid)>>,
     child_parent: BTreeMap<String, Vec<(RowUuid, RowUuid)>>,
+    seed_cache_hit: bool,
+    seed_ms: u128,
+}
+
+struct SeedPlan {
+    ordinary_user: RowUuid,
+    visible_groups: BTreeSet<RowUuid>,
+    table_rows: BTreeMap<String, Vec<RowUuid>>,
+    access: BTreeMap<String, Vec<(RowUuid, RowUuid)>>,
+    child_parent: BTreeMap<String, Vec<(RowUuid, RowUuid)>>,
+    writes: Vec<SeedWrite>,
+}
+
+struct SeedWrite {
+    table: String,
+    row: RowUuid,
+    cells: BTreeMap<String, Value>,
 }
 
 struct RunSummary {
@@ -203,6 +225,8 @@ struct RunSummary {
     client_encoded_storage_bytes: u64,
     encoded_storage_bytes: u64,
     memory_amplification: f64,
+    seed_cache_hit: bool,
+    seed_ms: u128,
     slowest_subscription: String,
     slowest_subscription_ms: u128,
     served_view_updates: Vec<ViewUpdateSummary>,
@@ -506,20 +530,70 @@ fn resource_policy(table: &str, access_table: &str) -> Option<Query> {
 }
 
 fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
-    let (core_dir, core) = open_node(node(1), schema.clone());
+    let seed_start = Instant::now();
+    let plan = build_seed_plan(config);
+    let cache_key = seed_cache_key(schema, config);
+    let cache_dir = seed_cache_root().join(&cache_key);
+    let fresh_seed = std::env::var_os("JAZZ_CUSTOMER_FRESH_SEED").is_some();
+    let cache_hit = !fresh_seed && cache_dir.join(SEED_CACHE_READY).is_file();
+
+    if !cache_hit {
+        if cache_dir.exists() {
+            fs::remove_dir_all(&cache_dir).expect("remove stale customer seed cache");
+        }
+        let tmp_cache = cache_dir.with_extension(format!("tmp-{}", std::process::id()));
+        if tmp_cache.exists() {
+            fs::remove_dir_all(&tmp_cache).expect("remove stale temporary customer seed cache");
+        }
+        fs::create_dir_all(&tmp_cache).expect("create temporary customer seed cache");
+        {
+            let storage = open_storage(&tmp_cache, schema);
+            let state =
+                jazz::node::NodeState::new_history_complete(node(1), schema.clone(), storage)
+                    .unwrap();
+            let core = Node::new(state);
+            write_seed_plan(&core, &plan);
+        }
+        fs::write(tmp_cache.join(SEED_CACHE_READY), cache_key.as_bytes())
+            .expect("write customer seed cache marker");
+        fs::rename(&tmp_cache, &cache_dir).expect("install customer seed cache");
+    }
+
+    let core_dir = tempfile::tempdir().unwrap();
+    copy_dir_contents(&cache_dir, core_dir.path()).expect("copy cached customer seed store");
+    let storage = open_storage(core_dir.path(), schema);
+    let state =
+        jazz::node::NodeState::new_history_complete(node(1), schema.clone(), storage).unwrap();
+    let core = Node::new(state);
+
+    Seeded {
+        _core_dir: Rc::new(core_dir),
+        core,
+        ordinary_user: plan.ordinary_user,
+        visible_groups: plan.visible_groups,
+        table_rows: plan.table_rows,
+        access: plan.access,
+        child_parent: plan.child_parent,
+        seed_cache_hit: cache_hit,
+        seed_ms: seed_start.elapsed().as_millis(),
+    }
+}
+
+fn build_seed_plan(config: &Config) -> SeedPlan {
+    let mut writes = Vec::new();
     let org = row(1);
-    seed_db(&core, ORG, org, org_cells());
+    push_seed(&mut writes, ORG, org, org_cells());
 
     let mut groups = Vec::new();
     for i in 0..38 {
         let group = row(1_000 + i as u64);
         groups.push(group);
-        seed_db(&core, GROUP, group, group_cells(org, i));
+        push_seed(&mut writes, GROUP, group, group_cells(org, i));
     }
     let ordinary_user = groups[0];
     for i in 0..21 {
-        seed_db(
-            &core,
+        push_seed(
+            &mut writes,
             PROFILE,
             row(2_000 + i as u64),
             profile_cells(groups[i % groups.len()], i),
@@ -529,8 +603,8 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     let mut group_edges = Vec::new();
     for i in 0..34 {
         let group = if i < 24 { groups[i] } else { groups[i - 24] };
-        seed_db(
-            &core,
+        push_seed(
+            &mut writes,
             GROUP_ACCESS,
             row(3_000 + i as u64),
             group_access_cells(group, ordinary_user, i),
@@ -553,8 +627,8 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         };
         let member = groups[member_index];
         let target = groups[target_index];
-        seed_db(
-            &core,
+        push_seed(
+            &mut writes,
             GROUP_ENTRY,
             row(4_000 + i as u64),
             group_entry_cells(member, target, i),
@@ -595,8 +669,8 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
             .map(|i| row(resource_base + i as u64))
             .collect::<Vec<_>>();
         for (i, resource) in resource_rows.iter().copied().enumerate() {
-            seed_db(
-                &core,
+            push_seed(
+                &mut writes,
                 spec.table,
                 resource,
                 resource_cells(org, groups[i % 34], i),
@@ -608,8 +682,8 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         for i in 0..edge_count {
             let resource = resource_rows[i % resource_rows.len()];
             let group = resource_access_group(spec, kind, i, &groups);
-            seed_db(
-                &core,
+            push_seed(
+                &mut writes,
                 &spec.access_table(),
                 row(access_base + i as u64),
                 resource_access_cells(resource, group, i),
@@ -632,8 +706,8 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
                 for _ in 0..count {
                     let child = row(500_000 + (child_slot as u64 * 100_000) + idx);
                     let parent = resource_rows[parent_index % resource_rows.len()];
-                    seed_db(
-                        &core,
+                    push_seed(
+                        &mut writes,
                         &child_table,
                         child,
                         child_cells(parent, idx as usize, child_slot),
@@ -657,15 +731,65 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         child_slot += 1;
     }
 
-    Seeded {
-        _core_dir: Rc::new(core_dir),
-        core,
+    SeedPlan {
         ordinary_user,
         visible_groups,
         table_rows,
         access,
         child_parent,
+        writes,
     }
+}
+
+fn push_seed(
+    writes: &mut Vec<SeedWrite>,
+    table: &str,
+    row: RowUuid,
+    cells: BTreeMap<String, Value>,
+) {
+    writes.push(SeedWrite {
+        table: table.to_owned(),
+        row,
+        cells,
+    });
+}
+
+fn write_seed_plan(core: &Node<RocksDbStorage>, plan: &SeedPlan) {
+    for write in &plan.writes {
+        seed_db(core, &write.table, write.row, write.cells.clone());
+    }
+}
+
+fn seed_cache_key(schema: &JazzSchema, config: &Config) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    SEED_CACHE_VERSION.hash(&mut hasher);
+    config.seed.hash(&mut hasher);
+    config.scale.to_bits().hash(&mut hasher);
+    format!("{:?}", schema).hash(&mut hasher);
+    format!("{}-{:016x}", SEED_CACHE_VERSION, hasher.finish())
+}
+
+fn seed_cache_root() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target"))
+        .join("customer_cold_start_seed_cache")
+}
+
+fn copy_dir_contents(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let source = entry.path();
+        let dest = to.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_contents(&source, &dest)?;
+        } else if file_type.is_file() {
+            fs::copy(&source, &dest)?;
+        }
+    }
+    Ok(())
 }
 
 fn resource_access_group(
@@ -998,6 +1122,8 @@ fn run_connect_and_subscribe(
         client_encoded_storage_bytes,
         encoded_storage_bytes,
         memory_amplification,
+        seed_cache_hit: seeded.seed_cache_hit,
+        seed_ms: seeded.seed_ms,
         slowest_subscription: slowest.name.clone(),
         slowest_subscription_ms: slowest.materialized_ms,
         served_view_updates: summarized_view_updates(&client_relay.right_to_left),
@@ -1097,13 +1223,6 @@ fn seed_db(core: &Node<RocksDbStorage>, table: &str, row: RowUuid, cells: BTreeM
     node.borrow_mut()
         .finalize_local_mergeable_commit(tx_id)
         .unwrap();
-}
-
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, Node<RocksDbStorage>) {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = open_storage(dir.path(), &schema);
-    let state = jazz::node::NodeState::new_history_complete(node_uuid, schema, storage).unwrap();
-    (dir, Node::new(state))
 }
 
 fn open_db_node(
@@ -1430,6 +1549,8 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         "memory_amplification".to_owned(),
         json!(summary.memory_amplification),
     );
+    fields.insert("seed_cache_hit".to_owned(), json!(summary.seed_cache_hit));
+    fields.insert("seed_ms".to_owned(), json!(summary.seed_ms));
     fields.insert(
         "slowest_subscription".to_owned(),
         json!(summary.slowest_subscription),
