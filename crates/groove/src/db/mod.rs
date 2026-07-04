@@ -1549,55 +1549,62 @@ where
         &self,
         batch: DatabaseBatch,
     ) -> Result<Vec<PendingTableWrite>, Error> {
-        let mut pending_writes = Vec::with_capacity(batch.operations.len());
+        self.pending_writes_from_operations(&batch.operations)
+    }
 
-        for operation in batch.operations {
+    fn pending_writes_from_operations(
+        &self,
+        operations: &[BatchOperation],
+    ) -> Result<Vec<PendingTableWrite>, Error> {
+        let mut pending_writes = Vec::with_capacity(operations.len());
+
+        for operation in operations {
             match operation {
                 BatchOperation::Insert { table, values } => {
-                    let table_schema = self.table(&table)?;
-                    let record = encode_record(table_schema, &values)?;
+                    let table_schema = self.table(table)?;
+                    let record = encode_record(table_schema, values)?;
                     let key = primary_key_bytes(table_schema, &record)?;
                     pending_writes.push(PendingTableWrite::Set {
                         mode: WriteMode::Insert,
-                        table,
+                        table: table.clone(),
                         key,
                         record,
                     });
                 }
                 BatchOperation::InsertRaw { table, key, record } => {
-                    self.table(&table)?;
+                    self.table(table)?;
                     pending_writes.push(PendingTableWrite::Set {
                         mode: WriteMode::Insert,
-                        table,
-                        key: key.into_bytes(),
-                        record,
+                        table: table.clone(),
+                        key: key.clone().into_bytes(),
+                        record: record.clone(),
                     });
                 }
                 BatchOperation::Update { table, values } => {
-                    let table_schema = self.table(&table)?;
-                    let record = encode_record(table_schema, &values)?;
+                    let table_schema = self.table(table)?;
+                    let record = encode_record(table_schema, values)?;
                     let key = primary_key_bytes(table_schema, &record)?;
                     pending_writes.push(PendingTableWrite::Set {
                         mode: WriteMode::Update,
-                        table,
+                        table: table.clone(),
                         key,
                         record,
                     });
                 }
                 BatchOperation::UpdateRaw { table, key, record } => {
-                    self.table(&table)?;
+                    self.table(table)?;
                     pending_writes.push(PendingTableWrite::Set {
                         mode: WriteMode::Update,
-                        table,
-                        key: key.into_bytes(),
-                        record,
+                        table: table.clone(),
+                        key: key.clone().into_bytes(),
+                        record: record.clone(),
                     });
                 }
                 BatchOperation::Delete { table, key } => {
-                    self.table(&table)?;
+                    self.table(table)?;
                     pending_writes.push(PendingTableWrite::Delete {
-                        table,
-                        key: key.into_bytes(),
+                        table: table.clone(),
+                        key: key.clone().into_bytes(),
                     });
                 }
             }
@@ -1610,7 +1617,10 @@ where
         &self,
         batch: &DatabaseBatch,
     ) -> Result<Vec<OwnedWriteOperation>, Error> {
-        let pending = self.pending_writes_from_batch(batch.clone())?;
+        if let Some(staged_operations) = batch.staged_operations_cache.borrow().as_ref() {
+            return Ok(staged_operations.clone());
+        }
+        let pending = self.pending_writes_from_operations(&batch.operations)?;
         let descriptors = pending
             .iter()
             .map(|write| self.table(write.table()).map(|table| table.record_schema()))
@@ -1626,7 +1636,7 @@ where
                 record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
             })
             .collect::<Vec<_>>();
-        Ok(pending
+        let staged_operations = pending
             .iter()
             .zip(&stores)
             .map(|(write, store)| match write {
@@ -1635,7 +1645,9 @@ where
                 }
                 PendingTableWrite::Delete { key, .. } => owned_write_operation(&store.delete(key)),
             })
-            .collect())
+            .collect::<Vec<_>>();
+        *batch.staged_operations_cache.borrow_mut() = Some(staged_operations.clone());
+        Ok(staged_operations)
     }
 
     fn table(&self, table: &str) -> Result<&TableSchema, Error> {
@@ -2661,9 +2673,16 @@ where
 }
 
 /// Mutable collection of table writes committed atomically at storage level.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct DatabaseBatch {
     operations: Vec<BatchOperation>,
+    staged_operations_cache: RefCell<Option<Vec<OwnedWriteOperation>>>,
+}
+
+impl PartialEq for DatabaseBatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.operations == other.operations
+    }
 }
 
 impl DatabaseBatch {
@@ -2672,14 +2691,14 @@ impl DatabaseBatch {
     }
 
     pub fn insert(&mut self, table: impl Into<String>, values: Vec<Value>) {
-        self.operations.push(BatchOperation::Insert {
+        self.push_operation(BatchOperation::Insert {
             table: table.into(),
             values,
         });
     }
 
     pub fn insert_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
-        self.operations.push(BatchOperation::InsertRaw {
+        self.push_operation(BatchOperation::InsertRaw {
             table: table.into(),
             key,
             record,
@@ -2687,14 +2706,14 @@ impl DatabaseBatch {
     }
 
     pub fn update(&mut self, table: impl Into<String>, values: Vec<Value>) {
-        self.operations.push(BatchOperation::Update {
+        self.push_operation(BatchOperation::Update {
             table: table.into(),
             values,
         });
     }
 
     pub fn update_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
-        self.operations.push(BatchOperation::UpdateRaw {
+        self.push_operation(BatchOperation::UpdateRaw {
             table: table.into(),
             key,
             record,
@@ -2702,7 +2721,7 @@ impl DatabaseBatch {
     }
 
     pub fn delete(&mut self, table: impl Into<String>, key: PrimaryKeyValue) {
-        self.operations.push(BatchOperation::Delete {
+        self.push_operation(BatchOperation::Delete {
             table: table.into(),
             key,
         });
@@ -2710,6 +2729,11 @@ impl DatabaseBatch {
 
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
+    }
+
+    fn push_operation(&mut self, operation: BatchOperation) {
+        *self.staged_operations_cache.borrow_mut() = None;
+        self.operations.push(operation);
     }
 }
 
