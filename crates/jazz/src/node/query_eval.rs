@@ -24,10 +24,10 @@ use super::query_engine::{
     NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
     OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
     PayloadProjection, PolicyContext, PolicyDecisionRole, PolicyEnforcementMode,
-    PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramFactKey, ProgramOutputSchemas,
-    ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest, QueryReadSet,
-    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
-    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramClaimParam, ProgramFactKey,
+    ProgramOutputSchemas, ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest,
+    QueryReadSet, ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage,
+    ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
@@ -51,6 +51,7 @@ use crate::query::{
 use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
+const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 
 pub(crate) struct LocalMaintainedViewSubscription {
     subscription: MultisinkSubscription,
@@ -3366,6 +3367,7 @@ where
         binding: &Binding,
         source_shape: Option<String>,
         extra_user_params: BTreeMap<String, ColumnType>,
+        claim_params: BTreeMap<String, ProgramClaimParam>,
     ) -> ProgramBinding {
         let mut param_types = shape.params().clone();
         param_types.extend(extra_user_params.clone());
@@ -3374,6 +3376,7 @@ where
             source_shape,
             extra_user_params,
             param_types,
+            claim_params,
             values: binding.values().clone(),
         }
     }
@@ -4024,14 +4027,19 @@ where
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
+        let input_shape = self.normalized_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
-            shape: self.normalized_row_set_shape(shape, binding)?,
             binding: self.program_binding_for_shape(
                 shape,
                 binding,
-                Some(self.query_binding_source_shape_for_binding(shape, binding)),
+                Some(query_binding_source_shape_for_parts(
+                    shape.params(),
+                    &binding_claim_params_for_shape(&input_shape),
+                )),
                 BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape),
             ),
+            shape: input_shape,
         };
         let request = QueryProgramRequest {
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
@@ -4049,14 +4057,19 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<QueryProgram, Error> {
+        let input_shape = self.normalized_include_deleted_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
-            shape: self.normalized_include_deleted_row_set_shape(shape, binding)?,
             binding: self.program_binding_for_shape(
                 shape,
                 binding,
-                Some(self.query_binding_source_shape_for_binding(shape, binding)),
+                Some(query_binding_source_shape_for_parts(
+                    shape.params(),
+                    &binding_claim_params_for_shape(&input_shape),
+                )),
                 BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape),
             ),
+            shape: input_shape,
         };
         let request = QueryProgramRequest {
             reads: current_query_read_set(
@@ -4090,14 +4103,19 @@ where
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let binding = lowered_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&lowered_shape, &binding)?;
         let input = RowSetProgramInput {
-            shape: self.normalized_row_set_shape(&lowered_shape, &binding)?,
             binding: self.program_binding_for_shape(
                 &lowered_shape,
                 &binding,
-                Some(self.query_binding_source_shape_for_binding(&lowered_shape, &binding)),
+                Some(query_binding_source_shape_for_parts(
+                    lowered_shape.params(),
+                    &binding_claim_params_for_shape(&input_shape),
+                )),
                 BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape),
             ),
+            shape: input_shape,
         };
         let request = QueryProgramRequest {
             reads: tx_query_read_set(
@@ -4129,14 +4147,19 @@ where
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let binding = lowered_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&lowered_shape, &binding)?;
         let input = RowSetProgramInput {
-            shape: self.normalized_row_set_shape(&lowered_shape, &binding)?,
             binding: self.program_binding_for_shape(
                 &lowered_shape,
                 &binding,
-                Some(self.query_binding_source_shape_for_binding(&lowered_shape, &binding)),
+                Some(query_binding_source_shape_for_parts(
+                    lowered_shape.params(),
+                    &binding_claim_params_for_shape(&input_shape),
+                )),
                 BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape),
             ),
+            shape: input_shape,
         };
         let request = QueryProgramRequest {
             reads: branch_query_read_set(
@@ -4268,8 +4291,14 @@ where
         let binding = policy_shape.bind(BTreeMap::new())?;
         let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
         let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                None,
+                BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape),
+            ),
             shape: input_shape,
-            binding: self.program_binding_for_shape(&policy_shape, &binding, None, BTreeMap::new()),
         };
         let request = QueryProgramRequest {
             reads: current_query_read_set(
@@ -4343,14 +4372,19 @@ where
         } else {
             (shape, binding)
         };
+        let input_shape = self.normalized_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
-            shape: self.normalized_row_set_shape(shape, binding)?,
             binding: self.program_binding_for_shape(
                 shape,
                 binding,
-                Some(self.query_binding_source_shape_for_binding(shape, binding)),
+                Some(query_binding_source_shape_for_parts(
+                    shape.params(),
+                    &binding_claim_params_for_shape(&input_shape),
+                )),
                 BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape),
             ),
+            shape: input_shape,
         };
         Ok(QueryProgramRequest {
             reads: query_read_set_for_read_view(
@@ -4370,7 +4404,7 @@ where
     fn normalized_row_set_shape(
         &self,
         shape: &ValidatedQuery,
-        binding: &Binding,
+        _binding: &Binding,
     ) -> Result<NormalizedRowSetShape, Error> {
         let query = shape.query();
         let root_source = root_source_id(&query.table);
@@ -4499,7 +4533,7 @@ where
             )?;
         }
 
-        let binding_source_shape = self.query_binding_source_shape_for_binding(shape, binding);
+        let binding_source_shape = PENDING_BINDING_SOURCE_SHAPE.to_owned();
         for (index, reachable) in query.reachable.iter().enumerate() {
             let (next, contribution) = normalize_reachable(
                 &mut nodes,
@@ -4577,7 +4611,7 @@ where
             current = aggregate_node;
         }
 
-        Ok(NormalizedRowSetShape {
+        let mut normalized = NormalizedRowSetShape {
             identity: NormalizedShapeIdentity {
                 shape_id: shape.shape_id(),
                 canonical: shape.canonical_bytes().to_vec(),
@@ -4592,7 +4626,12 @@ where
             join_contributions,
             reachable_contributions,
             nodes,
-        })
+        };
+        let claim_params = binding_claim_params_for_shape(&normalized);
+        let binding_source_shape =
+            query_binding_source_shape_for_parts(shape.params(), &claim_params);
+        retarget_binding_value_sources(&mut normalized, &binding_source_shape);
+        Ok(normalized)
     }
 
     fn normalized_include_deleted_row_set_shape(
@@ -4680,13 +4719,17 @@ where
         let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
         let root_source = root_source_id(policy_shape.query().table.as_str());
         let input = RowSetProgramInput {
-            shape: input_shape,
             binding: self.program_binding_for_shape(
                 &policy_shape,
                 &binding,
-                Some(self.query_binding_source_shape_for_binding(&policy_shape, &binding)),
+                Some(query_binding_source_shape_for_parts(
+                    policy_shape.params(),
+                    &binding_claim_params_for_shape(&input_shape),
+                )),
                 BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape),
             ),
+            shape: input_shape,
         };
         let policy = match self.query_program_policy_context(identity) {
             PolicyContext::Identity {
@@ -6052,8 +6095,8 @@ where
     fn prepared_query_plan_from_program(
         &mut self,
         program: &QueryProgram,
-        shape: &ValidatedQuery,
-        binding: &Binding,
+        _shape: &ValidatedQuery,
+        _binding: &Binding,
     ) -> Result<PreparedQueryPlan, Error> {
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_app_rows_graph(&program)?;
@@ -6078,7 +6121,9 @@ where
                 .binding
                 .source_shape
                 .clone()
-                .unwrap_or_else(|| self.query_binding_source_shape_for_binding(shape, binding));
+                .unwrap_or_else(|| {
+                    query_binding_source_shape_for_program_binding(&program.request.input.binding)
+                });
             let route_fields = terminal_route_fields(
                 &route_params,
                 &app_row_terminal_route_eligible_fields(&program.lowered.output)?,
@@ -6143,7 +6188,15 @@ where
         let subscription = self.subscribe_lowered_program(
             &program,
             &binding,
-            self.query_binding_source_shape_for_binding(&shape, &binding),
+            program
+                .request
+                .input
+                .binding
+                .source_shape
+                .clone()
+                .unwrap_or_else(|| {
+                    query_binding_source_shape_for_program_binding(&program.request.input.binding)
+                }),
         )?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
@@ -6356,17 +6409,19 @@ where
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let claim_params = binding_claim_params_for_shape(&input_shape);
         if let Some(binding_source_shape) = binding_source_shape.clone() {
             retarget_binding_value_sources(&mut input_shape, &binding_source_shape);
         }
         let input = RowSetProgramInput {
-            shape: input_shape,
             binding: self.program_binding_for_shape(
                 &policy_shape,
                 &binding,
                 binding_source_shape,
                 binding_user_params,
+                claim_params,
             ),
+            shape: input_shape,
         };
         Ok(QueryProgramRequest {
             reads: historical_query_read_set(&input.shape, policy_schema_version, position),
@@ -6467,17 +6522,19 @@ where
         } else {
             self.normalized_row_set_shape(&policy_shape, &binding)?
         };
+        let claim_params = binding_claim_params_for_shape(&input_shape);
         if let Some(binding_source_shape) = binding_source_shape.clone() {
             retarget_binding_value_sources(&mut input_shape, &binding_source_shape);
         }
         let input = RowSetProgramInput {
-            shape: input_shape,
             binding: self.program_binding_for_shape(
                 &policy_shape,
                 &binding,
                 binding_source_shape,
                 binding_user_params,
+                claim_params,
             ),
+            shape: input_shape,
         };
         Ok(QueryProgramRequest {
             reads: current_query_read_set(
@@ -6539,17 +6596,19 @@ where
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let claim_params = binding_claim_params_for_shape(&input_shape);
         if let Some(binding_source_shape) = binding_source_shape.clone() {
             retarget_binding_value_sources(&mut input_shape, &binding_source_shape);
         }
         let input = RowSetProgramInput {
-            shape: input_shape,
             binding: self.program_binding_for_shape(
                 &policy_shape,
                 &binding,
                 binding_source_shape,
                 binding_user_params,
+                claim_params,
             ),
+            shape: input_shape,
         };
         Ok(QueryProgramRequest {
             reads: branch_query_read_set(
@@ -7092,6 +7151,35 @@ fn retarget_binding_value_sources(shape: &mut NormalizedRowSetShape, binding_sou
     }
 }
 
+fn binding_claim_params_for_shape(
+    shape: &NormalizedRowSetShape,
+) -> BTreeMap<String, ProgramClaimParam> {
+    let mut params = BTreeMap::new();
+    for node in shape.nodes.values() {
+        let RowSetExpr::ValueSource {
+            columns,
+            mode: ValueSourceMode::Binding,
+            ..
+        } = node
+        else {
+            continue;
+        };
+        for column in columns {
+            let NormalizedValueRef::Claim(path) = &column.value else {
+                continue;
+            };
+            params.insert(
+                claim_param_field(path),
+                ProgramClaimParam {
+                    path: path.clone(),
+                    ty: column.ty.clone(),
+                },
+            );
+        }
+    }
+    params
+}
+
 fn bind_query_predicate(
     predicate: Predicate,
     binding: &Binding,
@@ -7261,19 +7349,41 @@ pub(crate) fn exact_known_state_declaration_for_test(
     exact_known_state_declaration_if_within_limits(shape_id, subscription, values, refs)
 }
 
-impl<S: OrderedKvStorage> NodeState<S> {
-    fn query_binding_source_shape_for_binding(
-        &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-    ) -> String {
-        format!(
-            "jazz-query:{}:{}:{}",
-            self.groove_runtime_token(),
-            shape.shape_id().0,
-            query_binding_value_signature(binding)
-        )
+fn query_binding_source_shape_for_program_binding(binding: &ProgramBinding) -> String {
+    query_binding_source_shape_for_parts(&binding.param_types, &binding.claim_params)
+}
+
+fn query_binding_source_shape_for_parts(
+    param_types: &BTreeMap<String, ColumnType>,
+    claim_params: &BTreeMap<String, ProgramClaimParam>,
+) -> String {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"jazz-binding-source-v1");
+    push_usize(&mut bytes, param_types.len());
+    for (name, ty) in param_types {
+        push_str(&mut bytes, name);
+        push_str(&mut bytes, &format!("{ty:?}"));
     }
+    push_usize(&mut bytes, claim_params.len());
+    for (name, claim) in claim_params {
+        push_str(&mut bytes, name);
+        push_usize(&mut bytes, claim.path.0.len());
+        for segment in &claim.path.0 {
+            push_str(&mut bytes, segment);
+        }
+        push_str(&mut bytes, &format!("{:?}", claim.ty));
+    }
+    let hash = blake3::hash(&bytes);
+    format!("jazz-query-binding:{}", hash.to_hex())
+}
+
+fn push_usize(bytes: &mut Vec<u8>, value: usize) {
+    bytes.extend_from_slice(&(value as u64).to_le_bytes());
+}
+
+fn push_str(bytes: &mut Vec<u8>, value: &str) {
+    push_usize(bytes, value.len());
+    bytes.extend_from_slice(value.as_bytes());
 }
 
 fn binding_values_for_plan(
@@ -8156,6 +8266,43 @@ mod tests {
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn binding_source_shape_is_descriptor_and_claim_path_identity() {
+        let mut params = BTreeMap::new();
+        params.insert("route".to_owned(), ColumnType::String);
+        let claims = BTreeMap::from([(
+            claim_param_field(&ClaimPath(vec!["sub".to_owned()])),
+            ProgramClaimParam {
+                path: ClaimPath(vec!["sub".to_owned()]),
+                ty: ColumnType::Uuid,
+            },
+        )]);
+
+        let first = query_binding_source_shape_for_parts(&params, &claims);
+        let second = query_binding_source_shape_for_parts(&params, &claims);
+        assert_eq!(first, second);
+        assert!(!first.contains("jazz-query:"));
+
+        let mut different_params = params.clone();
+        different_params.insert("route".to_owned(), ColumnType::Uuid);
+        assert_ne!(
+            first,
+            query_binding_source_shape_for_parts(&different_params, &claims)
+        );
+
+        let different_claims = BTreeMap::from([(
+            claim_param_field(&ClaimPath(vec!["team".to_owned(), "id".to_owned()])),
+            ProgramClaimParam {
+                path: ClaimPath(vec!["team".to_owned(), "id".to_owned()]),
+                ty: ColumnType::Uuid,
+            },
+        )]);
+        assert_ne!(
+            first,
+            query_binding_source_shape_for_parts(&params, &different_claims)
+        );
+    }
 
     fn register_query_shape(
         node: &mut NodeState<RocksDbStorage>,

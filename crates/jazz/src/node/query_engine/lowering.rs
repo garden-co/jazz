@@ -111,7 +111,12 @@ pub(crate) fn lower_query_program(
         })
     })?;
 
-    let mut parameters = parameter_domain(&request.input.shape);
+    let mut parameters = parameter_domain_for_request(&request).map_err(|gap| {
+        Box::new(CapabilityReport {
+            gaps: vec![gap],
+            explain: explain_with_request(&request, explain.clone()),
+        })
+    })?;
     collect_binding_source_params(&lowered.graph, &mut parameters);
     parameters.routing_params.retain(|field| {
         route_param_from_field(field)
@@ -395,6 +400,41 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
         }
     }
     domain
+}
+
+fn parameter_domain_for_request(
+    request: &QueryProgramRequest,
+) -> Result<ParameterDomain, UnsupportedReason> {
+    let mut domain = parameter_domain(&request.input.shape);
+    if request.input.binding.claim_params.is_empty() {
+        return Ok(domain);
+    }
+
+    let pre_retarget_claims = request
+        .input
+        .binding
+        .claim_params
+        .iter()
+        .map(|(name, param)| {
+            (
+                name.clone(),
+                ClaimParameter {
+                    path: param.path.clone(),
+                    ty: param.ty.clone(),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if domain.claim_params != pre_retarget_claims {
+        return Err(UnsupportedReason::Runtime(
+            "pre-retarget claim parameter domain diverged from lowered binding sources".to_owned(),
+        ));
+    }
+    for name in pre_retarget_claims.keys() {
+        domain.routing_params.insert(name.clone());
+    }
+    domain.claim_params = pre_retarget_claims;
+    Ok(domain)
 }
 
 fn collect_equality_filter_route_params(predicate: &PredicateExpr, routing: &mut BTreeSet<String>) {
@@ -2456,7 +2496,7 @@ fn lower_linear_plan_steps(
     } else {
         BTreeSet::new()
     };
-    let route_fields = parameter_domain(&request.input.shape).routing_params;
+    let route_fields = parameter_domain_for_request(request)?.routing_params;
 
     for (step_index, step) in plan.steps.iter().enumerate() {
         match step {
@@ -2685,12 +2725,12 @@ fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
 fn binding_descriptor_params_with_user_params(
     request: &QueryProgramRequest,
     additional_user_params: impl IntoIterator<Item = (String, ColumnType)>,
-) -> Vec<(String, ColumnType)> {
-    let domain = parameter_domain(&request.input.shape);
+) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
+    let domain = parameter_domain_for_request(request)?;
     let mut user_params = request.input.binding.extra_user_params.clone();
     user_params.extend(domain.user_params);
     user_params.extend(additional_user_params);
-    user_params
+    Ok(user_params
         .into_iter()
         .chain(
             domain
@@ -2698,22 +2738,24 @@ fn binding_descriptor_params_with_user_params(
                 .into_iter()
                 .map(|(name, param)| (name, param.ty)),
         )
-        .collect()
+        .collect())
 }
 
-fn binding_descriptor_params(request: &QueryProgramRequest) -> Vec<(String, ColumnType)> {
+fn binding_descriptor_params(
+    request: &QueryProgramRequest,
+) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
     binding_descriptor_params_with_user_params(request, [])
 }
 
 fn binding_source_descriptor_with_user_params(
     request: &QueryProgramRequest,
     additional_user_params: impl IntoIterator<Item = (String, ColumnType)>,
-) -> RecordDescriptor {
-    RecordDescriptor::new(
-        binding_descriptor_params_with_user_params(request, additional_user_params)
+) -> Result<RecordDescriptor, UnsupportedReason> {
+    Ok(RecordDescriptor::new(
+        binding_descriptor_params_with_user_params(request, additional_user_params)?
             .into_iter()
             .map(|(name, column_type)| (name, column_type.value_type())),
-    )
+    ))
 }
 
 fn lower_value_source(
@@ -2725,8 +2767,8 @@ fn lower_value_source(
     let descriptor = value_source_descriptor(columns);
     match mode {
         ValueSourceMode::Binding => {
-            let domain = parameter_domain(&request.input.shape);
-            let params = binding_descriptor_params(request);
+            let domain = parameter_domain_for_request(request)?;
+            let params = binding_descriptor_params(request)?;
             for column in columns {
                 match &column.value {
                     NormalizedValueRef::Param(param) => {
@@ -3369,7 +3411,7 @@ fn lower_equality_param_filter_joins(
                     join.param.clone(),
                     column_type_from_value_type(&join.value_type),
                 )],
-            ),
+            )?,
         );
         let route_field = route_param_field(&join.param);
         let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
