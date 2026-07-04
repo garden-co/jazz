@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::future::Future;
+use std::ops::AddAssign;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::process::Command;
@@ -258,6 +259,8 @@ struct ReplaySummary {
     peak_doc_bytes: usize,
     peak_rss_bytes: u64,
     history_bytes: u64,
+    history_class_bytes: u64,
+    tail_consolidation: TailConsolidationSummary,
     zstd_final_doc_bytes: u64,
     zstd19_final_doc_bytes: u64,
     zstd_json_log_bytes: u64,
@@ -273,12 +276,29 @@ struct DbSurfaceReplaySummary {
     peak_doc_bytes: usize,
     peak_rss_bytes: u64,
     history_bytes: u64,
+    history_class_bytes: u64,
     consolidated_windows: usize,
     consolidated_window_records: usize,
     history_window_consolidation_us: u128,
+    tail_consolidation: TailConsolidationSummary,
     edge_acceptance: Histogram<u64>,
     edge_hydration_bytes: u64,
     edge_hydration_rows: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TailConsolidationSummary {
+    windows: usize,
+    records: usize,
+    elapsed_us: u128,
+}
+
+impl AddAssign for TailConsolidationSummary {
+    fn add_assign(&mut self, rhs: Self) {
+        self.windows += rhs.windows;
+        self.records += rhs.records;
+        self.elapsed_us += rhs.elapsed_us;
+    }
 }
 
 struct QueueTransport {
@@ -540,6 +560,12 @@ fn run_replay(_config: &Config, trace: &Trace, batch: usize) -> ReplaySummary {
         commits += 1;
     }
     assert_eq!(read_doc(&mut node), trace.final_doc);
+    let tail_consolidation = if consolidate_to_tail_enabled() {
+        consolidate_node_history_to_tail(&mut node)
+    } else {
+        TailConsolidationSummary::default()
+    };
+    let history_class_bytes = history_class_bytes_node(&node);
     ReplaySummary {
         edits: trace.edits.len(),
         commits,
@@ -548,6 +574,8 @@ fn run_replay(_config: &Config, trace: &Trace, batch: usize) -> ReplaySummary {
         peak_doc_bytes,
         peak_rss_bytes: mem::peak_rss_bytes(),
         history_bytes: storage_bytes(dir.path()),
+        history_class_bytes,
+        tail_consolidation,
         zstd_final_doc_bytes: zstd::bulk::compress(trace.final_doc.as_bytes(), 3)
             .unwrap()
             .len() as u64,
@@ -566,7 +594,7 @@ fn run_replay(_config: &Config, trace: &Trace, batch: usize) -> ReplaySummary {
 fn run_db_surface_replay(trace: &Trace, batch: usize) -> DbSurfaceReplaySummary {
     let schema = schema();
     let (core_dir, mut core) = open_node(node_id(250), schema.clone());
-    let (_edge_dir, mut edge) = open_node(node_id(170), schema.clone());
+    let (edge_dir, mut edge) = open_node(node_id(170), schema.clone());
     let mut edge_peer = PeerState::new();
     let (dir, db) = open_db(node_id(70), schema.clone());
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
@@ -670,6 +698,20 @@ fn run_db_surface_replay(trace: &Trace, batch: usize) -> DbSurfaceReplaySummary 
     let edge_hydration_rows = result_row_count(&update);
     edge.apply_sync_message(update).unwrap();
     assert_eq!(read_db_doc(&db, &schema), trace.final_doc);
+    let tail_consolidation = if consolidate_to_tail_enabled() {
+        let mut total = consolidate_db_history_to_tail(&db);
+        total += consolidate_node_history_to_tail(&mut edge);
+        total += consolidate_node_history_to_tail(&mut core);
+        consolidated_windows += total.windows;
+        consolidated_window_records += total.records;
+        history_window_consolidation_us += total.elapsed_us;
+        total
+    } else {
+        TailConsolidationSummary::default()
+    };
+    let history_class_bytes = history_class_bytes_db(&db)
+        + history_class_bytes_node(&edge)
+        + history_class_bytes_node(&core);
     DbSurfaceReplaySummary {
         edits: trace.edits.len(),
         commits,
@@ -677,10 +719,14 @@ fn run_db_surface_replay(trace: &Trace, batch: usize) -> DbSurfaceReplaySummary 
         echo,
         peak_doc_bytes,
         peak_rss_bytes: mem::peak_rss_bytes(),
-        history_bytes: storage_bytes(dir.path()) + storage_bytes(core_dir.path()),
+        history_bytes: storage_bytes(dir.path())
+            + storage_bytes(edge_dir.path())
+            + storage_bytes(core_dir.path()),
+        history_class_bytes,
         consolidated_windows,
         consolidated_window_records,
         history_window_consolidation_us,
+        tail_consolidation,
         edge_acceptance,
         edge_hydration_bytes,
         edge_hydration_rows,
@@ -766,6 +812,56 @@ fn record_db_tick(
     *consolidated_windows += stats.consolidated_windows;
     *consolidated_window_records += stats.consolidated_window_records;
     *history_window_consolidation_us += stats.history_window_consolidation_us;
+}
+
+fn consolidate_to_tail_enabled() -> bool {
+    std::env::var("JAZZ_S6_CONSOLIDATE_TO_TAIL").is_ok()
+}
+
+fn consolidate_node_history_to_tail(
+    node: &mut NodeState<RocksDbStorage>,
+) -> TailConsolidationSummary {
+    let start = Instant::now();
+    let mut total = TailConsolidationSummary::default();
+    for _ in 0..10_000 {
+        let report = node
+            .consolidate_history_windows_for_test(64)
+            .expect("node history consolidation");
+        if report.windows == 0 {
+            total.elapsed_us += start.elapsed().as_micros();
+            return total;
+        }
+        total.windows += report.windows;
+        total.records += report.records;
+    }
+    panic!("history consolidation did not reach the plain tail");
+}
+
+fn consolidate_db_history_to_tail(db: &Db<RocksDbStorage>) -> TailConsolidationSummary {
+    let start = Instant::now();
+    let mut total = TailConsolidationSummary::default();
+    for _ in 0..10_000 {
+        let stats = db.tick_stats().expect("db history consolidation tick");
+        if stats.consolidated_windows == 0 {
+            total.elapsed_us += start.elapsed().as_micros();
+            return total;
+        }
+        total.windows += stats.consolidated_windows;
+        total.records += stats.consolidated_window_records;
+    }
+    panic!("db history consolidation did not reach the plain tail");
+}
+
+fn history_class_bytes_node(node: &NodeState<RocksDbStorage>) -> u64 {
+    node.history_class_bytes_for_test()
+        .expect("node history class bytes")
+        .unwrap_or(0)
+}
+
+fn history_class_bytes_db(db: &Db<RocksDbStorage>) -> u64 {
+    db.history_class_bytes_for_test()
+        .expect("db history class bytes")
+        .unwrap_or(0)
 }
 
 fn run_live_observation(config: &Config, trace: &Trace) -> LiveSummary {
@@ -1106,6 +1202,26 @@ fn emit_replay(
         json!(summary.history_bytes as f64 / summary.edits.max(1) as f64),
     );
     fields.insert(
+        "history_class_bytes_per_edit".to_owned(),
+        json!(summary.history_class_bytes as f64 / summary.edits.max(1) as f64),
+    );
+    fields.insert(
+        "tail_consolidated_windows".to_owned(),
+        json!(summary.tail_consolidation.windows),
+    );
+    fields.insert(
+        "tail_consolidated_window_records".to_owned(),
+        json!(summary.tail_consolidation.records),
+    );
+    fields.insert(
+        "tail_consolidated_fraction".to_owned(),
+        json!(summary.tail_consolidation.records as f64 / summary.commits.max(1) as f64),
+    );
+    fields.insert(
+        "tail_consolidation_us".to_owned(),
+        json!(summary.tail_consolidation.elapsed_us),
+    );
+    fields.insert(
         "zstd_final_doc_bytes".to_owned(),
         json!(summary.zstd_final_doc_bytes),
     );
@@ -1162,6 +1278,10 @@ fn emit_db_surface_replay(
         json!(summary.history_bytes as f64 / summary.edits.max(1) as f64),
     );
     fields.insert(
+        "history_class_bytes_per_edit".to_owned(),
+        json!(summary.history_class_bytes as f64 / summary.edits.max(1) as f64),
+    );
+    fields.insert(
         "consolidated_windows".to_owned(),
         json!(summary.consolidated_windows),
     );
@@ -1179,6 +1299,22 @@ fn emit_db_surface_replay(
             summary.history_window_consolidation_us as f64
                 / summary.consolidated_windows.max(1) as f64
         ),
+    );
+    fields.insert(
+        "tail_consolidated_windows".to_owned(),
+        json!(summary.tail_consolidation.windows),
+    );
+    fields.insert(
+        "tail_consolidated_window_records".to_owned(),
+        json!(summary.tail_consolidation.records),
+    );
+    fields.insert(
+        "tail_consolidated_fraction".to_owned(),
+        json!(summary.tail_consolidation.records as f64 / summary.commits.max(1) as f64),
+    );
+    fields.insert(
+        "tail_consolidation_us".to_owned(),
+        json!(summary.tail_consolidation.elapsed_us),
     );
     fields.insert("correctness".to_owned(), json!("final_replay_matched"));
     emit_json_line("s6_text_traces", &JsonValue::Object(fields).to_string());

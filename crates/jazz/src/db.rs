@@ -2515,6 +2515,13 @@ where
     fn refresh_subscriptions(&self) -> Result<usize, Error> {
         self.node.refresh_subscriptions()
     }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only history-class byte estimate. This is intentionally the
+    /// cheap physical-class counter, not a logical table-prefix scan.
+    pub fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
+        Ok(self.node.node.borrow().history_class_bytes_for_test()?)
+    }
 }
 
 /// Counts produced while servicing non-blocking database connection work.
