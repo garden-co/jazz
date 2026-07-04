@@ -37,7 +37,7 @@ pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlanHandle,
-    RelationEdge, RelationSnapshot, RowProvenance,
+    RelationEdge, RelationSnapshot, RowProvenance, ViewUpdateParts,
 };
 use crate::peer::PeerState;
 use crate::protocol::{
@@ -3554,6 +3554,7 @@ where
                     uploaded.insert(tx_id);
                 }
                 let mut applied = false;
+                let mut pending_view_updates = Vec::<ViewUpdateParts>::new();
                 while let Some(received) = self.transport.try_recv_received() {
                     let write_state_tx_id = write_state_update_tx_id(&received.message);
                     #[cfg(feature = "sync-autopsy")]
@@ -3564,6 +3565,11 @@ where
                     ));
                     match received.message {
                         SyncMessage::RowVersionPayloads { version_bundles } => {
+                            if !pending_view_updates.is_empty() {
+                                self.node.borrow_mut().apply_view_updates_in_batch(
+                                    std::mem::take(&mut pending_view_updates),
+                                )?;
+                            }
                             let Some(repair) = pending_row_version_repairs.pop_front() else {
                                 drop_peer_request(&self.node);
                                 continue;
@@ -3585,13 +3591,32 @@ where
                                 node.missing_known_state_row_version_refs(&message)?
                             };
                             if missing.is_empty() {
-                                self.node
-                                    .borrow_mut()
-                                    .apply_sync_message_with_ingest_context_and_encoded_len(
-                                        message,
-                                        None,
-                                        received.encoded_len,
-                                    )?;
+                                let SyncMessage::ViewUpdate {
+                                    subscription,
+                                    settled_through,
+                                    reset_result_set,
+                                    version_bundles,
+                                    peer_payload_inventory,
+                                    result_member_adds,
+                                    result_member_removes,
+                                    program_fact_adds,
+                                    program_fact_removes,
+                                } = message
+                                else {
+                                    unreachable!("matched ViewUpdate above")
+                                };
+                                pending_view_updates.push(ViewUpdateParts {
+                                    subscription,
+                                    settled_through,
+                                    reset_result_set,
+                                    version_bundles,
+                                    peer_complete_tx_payload_refs: peer_payload_inventory
+                                        .complete_tx_payloads,
+                                    result_member_adds,
+                                    result_member_removes,
+                                    program_fact_adds,
+                                    program_fact_removes,
+                                });
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
                                     "upstream applied view update {}",
@@ -3616,6 +3641,11 @@ where
                             }
                         }
                         message => {
+                            if !pending_view_updates.is_empty() {
+                                self.node.borrow_mut().apply_view_updates_in_batch(
+                                    std::mem::take(&mut pending_view_updates),
+                                )?;
+                            }
                             self.node
                                 .borrow_mut()
                                 .apply_sync_message_with_ingest_context_and_encoded_len(
@@ -3629,6 +3659,11 @@ where
                         notify_write_state_waiters(&self.write_state_waiters, tx_id);
                     }
                     applied = true;
+                }
+                if !pending_view_updates.is_empty() {
+                    self.node
+                        .borrow_mut()
+                        .apply_view_updates_in_batch(pending_view_updates)?;
                 }
                 if applied {
                     stats.subscription_events +=
