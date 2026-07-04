@@ -13,7 +13,7 @@ use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::MergeableCommit;
 use jazz::protocol::{SubscriptionKey, SyncMessage};
-use jazz::query::{Query, claim, col, eq, lit};
+use jazz::query::{Query, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::wire::TransportError;
 use jazz_sim::{emit_json_line, metadata_fields};
@@ -28,8 +28,8 @@ use serde_json::{Value as JsonValue, json};
 // children do not carry that denormalized relation. The generator constrains a
 // small fixed subset of resource access edges to groups reached by the member
 // at depth 1 and depth 2 so every scale exercises the member->resource path;
-// the current member runs are still expected to fail until the pinned
-// membership-seed policy gap is fixed.
+// resource and derived-child policies both seed reachability through
+// group_access_edges.seeded_by(user_id = claim("sub"), group_id).
 
 const ORG: &str = "org";
 const GROUP: &str = "group";
@@ -37,7 +37,7 @@ const GROUP_ACCESS: &str = "group_access_edges";
 const GROUP_ENTRY: &str = "group_entry";
 const PROFILE: &str = "profile";
 const CHILD_TABLES: usize = 6;
-const MEMBER_POLICY_GAP_NOTE: &str = "known gap: resource access-edge policy currently seeds reachability from claim(\"sub\") as a group id instead of group_access_edges user->group; member rungs keep strict expected counts and may fail until that policy arc lands";
+const CHILD_POLICY_FIDELITY_NOTE: &str = "fidelity delta: child tables still use derived child access-edge tables; step 2 replaces this approximation with inherited parent-read policy composition";
 
 const RESOURCE_SPECS: [ResourceSpec; 14] = [
     ResourceSpec::new("res_a", 4, 7, Some(108)),
@@ -513,31 +513,39 @@ fn role_type(name: &str) -> ColumnType {
 }
 
 fn resource_policy(table: &str, access_table: &str) -> Option<Query> {
-    Policy::shape(Query::from(table).reachable_via_with_access_filters(
-        access_table,
-        "resource",
-        "team",
-        claim("sub"),
-        [eq(col("administrator"), lit(false))],
-        GROUP_ENTRY,
-        "member_id",
-        "target_id",
-        [eq(col("administrator"), lit(false))],
-    ))
+    Policy::shape(
+        Query::from(table)
+            .reachable_via_with_access_filters(
+                access_table,
+                "resource",
+                "team",
+                lit("relation-seeded"),
+                [eq(col("administrator"), lit(false))],
+                GROUP_ENTRY,
+                "member_id",
+                "target_id",
+                [eq(col("administrator"), lit(false))],
+            )
+            .seeded_by(GROUP_ACCESS, "user_id", "sub", "group_id"),
+    )
 }
 
 fn child_access_policy(child_table: &str, access_table: &str) -> Option<Query> {
-    Policy::shape(Query::from(child_table).reachable_via_with_access_filters(
-        access_table,
-        "child",
-        "team",
-        claim("sub"),
-        [eq(col("administrator"), lit(false))],
-        GROUP_ENTRY,
-        "member_id",
-        "target_id",
-        [eq(col("administrator"), lit(false))],
-    ))
+    Policy::shape(
+        Query::from(child_table)
+            .reachable_via_with_access_filters(
+                access_table,
+                "child",
+                "team",
+                lit("relation-seeded"),
+                [eq(col("administrator"), lit(false))],
+                GROUP_ENTRY,
+                "member_id",
+                "target_id",
+                [eq(col("administrator"), lit(false))],
+            )
+            .seeded_by(GROUP_ACCESS, "user_id", "sub", "group_id"),
+    )
 }
 
 fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
@@ -1517,12 +1525,10 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         "shape_note".to_owned(),
         json!("43 subscriptions: parent/resource/access tables plus six child subscriptions; four populated child tables include derived child-access-edge subscriptions because the public API cannot yet express inherited parent visibility directly"),
     );
-    if config.identity == BenchIdentity::Member {
-        fields.insert(
-            "known_member_policy_gap".to_owned(),
-            json!(MEMBER_POLICY_GAP_NOTE),
-        );
-    }
+    fields.insert(
+        "child_policy_fidelity_delta".to_owned(),
+        json!(CHILD_POLICY_FIDELITY_NOTE),
+    );
     fields.insert(
         "subscription_timeline".to_owned(),
         JsonValue::Array(
