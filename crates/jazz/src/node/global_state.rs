@@ -89,9 +89,9 @@ where
         let storage_tables = table_schema.global_current_storage_tables();
         let deletion_current_table = &storage_tables[1].name;
         let deletion_descriptor = storage_tables[1].record_schema();
-        for raw in self
+        if let Some(raw) = self
             .database
-            .primary_key_scan_raw(deletion_current_table, &[Value::Uuid(row_uuid.0)])
+            .primary_key_get_raw(deletion_current_table, &[Value::Uuid(row_uuid.0)])
             .ok()?
         {
             let record = BorrowedRecord::new(raw.record().raw(), &deletion_descriptor);
@@ -109,10 +109,8 @@ where
         let content_current_table = &storage_tables[0].name;
         let raw = self
             .database
-            .primary_key_scan_raw(content_current_table, &[Value::Uuid(row_uuid.0)])
-            .ok()?
-            .into_iter()
-            .next()?;
+            .primary_key_get_raw(content_current_table, &[Value::Uuid(row_uuid.0)])
+            .ok()??;
         let record = raw.record();
         let tx_time = TxTime(
             record

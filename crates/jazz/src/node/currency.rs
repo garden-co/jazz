@@ -87,8 +87,8 @@ where
         };
         let raw = self
             .database
-            .primary_key_scan_raw(&current_table, &[Value::Uuid(row_uuid.0)])?;
-        let Some(raw) = raw.first() else {
+            .primary_key_get_raw(&current_table, &[Value::Uuid(row_uuid.0)])?;
+        let Some(raw) = raw else {
             return Ok(None);
         };
         let record = raw.record();
@@ -503,7 +503,7 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         let raw = self
             .database
-            .primary_key_scan_raw(
+            .primary_key_get_raw(
                 storage_table,
                 &[
                     Value::Uuid(row_uuid.0),
@@ -511,7 +511,6 @@ where
                     Value::U64(tx_node_alias.0),
                 ],
             )?
-            .first()
             .map(|raw| raw.raw().to_vec());
         let Some(raw) = raw else {
             return Ok(None);

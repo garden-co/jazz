@@ -1135,6 +1135,59 @@ fn staged_batch_read_index_handles_large_accumulated_batches() {
 }
 
 #[test]
+fn primary_key_get_raw_observes_staged_overlay() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("stored-one".to_owned())],
+    );
+    seed.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("stored-two".to_owned())],
+    );
+    database.commit_batch(seed).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.update(
+        "albums",
+        vec![Value::U64(1), Value::String("updated-one".to_owned())],
+    );
+    batch.delete("albums", PrimaryKeyValue::U64(2));
+    batch.insert(
+        "albums",
+        vec![Value::U64(3), Value::String("inserted-three".to_owned())],
+    );
+
+    let updated = database
+        .primary_key_get_raw_in_batch(&batch, "albums", &[Value::U64(1)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.record().get("title").unwrap(),
+        Value::String("updated-one".to_owned())
+    );
+    assert!(
+        database
+            .primary_key_get_raw_in_batch(&batch, "albums", &[Value::U64(2)])
+            .unwrap()
+            .is_none()
+    );
+    let inserted = database
+        .primary_key_get_raw_in_batch(&batch, "albums", &[Value::U64(3)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        inserted.record().get("title").unwrap(),
+        Value::String("inserted-three".to_owned())
+    );
+    assert_eq!(
+        batch.read_index.borrow().indexed_operations,
+        batch.operations.len()
+    );
+}
+
+#[test]
 fn staged_batch_read_index_overlays_storage_for_prefix_scans() {
     let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
     let mut seed = database.open_batch();

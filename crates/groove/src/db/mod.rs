@@ -877,6 +877,71 @@ where
         self.primary_key_scan_raw_with_storage(&storage, table, prefix)
     }
 
+    /// Return one encoded record by its full primary key.
+    ///
+    /// This is the point-read counterpart to [`Self::primary_key_scan_raw`].
+    /// `key` must provide every primary-key column; callers that need a prefix
+    /// or range must use the scan APIs.
+    pub fn primary_key_get_raw(
+        &self,
+        table: &str,
+        key: &[Value],
+    ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.primary_key_get_raw_with_storage(&storage, table, key)
+    }
+
+    /// Return one encoded primary-key record while also observing writes
+    /// already staged in `batch`.
+    pub fn primary_key_get_raw_in_batch(
+        &self,
+        batch: &DatabaseBatch,
+        table: &str,
+        key: &[Value],
+    ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
+        self.ensure_batch_read_index(batch)?;
+        let overlay = IndexedBatchOverlay::new(&self.storage, &batch.read_index);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        self.primary_key_get_raw_with_storage(&storage, table, key)
+    }
+
+    fn primary_key_get_raw_with_storage<'a, T>(
+        &'a self,
+        storage: &T,
+        table: &str,
+        key: &[Value],
+    ) -> Result<Option<EncodedKeyValue<'a>>, Error>
+    where
+        T: OrderedKvStorage,
+    {
+        let table_schema = self.table(table)?;
+        let primary_key = table_schema
+            .primary_key
+            .as_ref()
+            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
+        if key.len() != primary_key.columns.len() {
+            return Err(Error::PrimaryKeyArity {
+                table: table.to_owned(),
+                expected: primary_key.columns.len(),
+                actual: key.len(),
+            });
+        }
+        let descriptor = self
+            .ivm_runtime
+            .table_descriptor(table)
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let mut encoded_key = Vec::new();
+        for (value, column) in key.iter().zip(&primary_key.columns) {
+            ensure_primary_key_value_type(table_schema, column, value)?;
+            encode_primary_key_part(&mut encoded_key, value);
+        }
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(storage, table, Some(key_descriptor), descriptor);
+        Ok(store
+            .get_raw(&encoded_key)?
+            .map(|value| EncodedKeyValue::new(encoded_key, value, descriptor)))
+    }
+
     fn primary_key_scan_raw_with_storage<'a, T>(
         &'a self,
         storage: &T,
