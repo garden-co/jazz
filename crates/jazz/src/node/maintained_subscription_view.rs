@@ -87,6 +87,7 @@ pub(crate) struct ResultTransitions {
     pub(crate) removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
+    pub(crate) allow_storage_witness_fallback: bool,
 }
 
 #[derive(Clone, Debug)]

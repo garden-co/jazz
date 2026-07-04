@@ -2406,6 +2406,10 @@ where
         self.groove_runtime_token
     }
 
+    pub(crate) fn invalidate_query_runtime_handles(&mut self) {
+        self.groove_runtime_token = next_groove_runtime_token();
+    }
+
     /// Return metrics for the most recent committed storage batch, if any.
     pub fn last_commit_metrics(&self) -> Option<&CommitMetrics> {
         self.database.last_commit_metrics()

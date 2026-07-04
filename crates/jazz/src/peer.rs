@@ -23,8 +23,8 @@ use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     ContentExtent, KnownStateDeclaration, LargeValueOwnerRef, ProgramFactEntry, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SubscriptionKey, SyncMessage,
-    VersionBundle, VersionRecord,
+    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe, SubscriptionKey,
+    SyncMessage, VersionBundle, VersionRecord,
 };
 use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, validate_fetch_row_versions};
 use crate::query::{Binding, ValidatedQuery};
@@ -85,6 +85,7 @@ impl PeerRole {
 #[derive(Debug, Default)]
 struct PeerSubscriptionState {
     result_member_set: BTreeSet<ResultMemberEntry>,
+    program_fact_set: BTreeSet<ProgramFactEntry>,
     member_index: BTreeMap<MemberIndexKey, MemberSlot>,
     maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
     prepared_query: Option<CachedPeerQueryPlan>,
@@ -181,6 +182,10 @@ struct MemberSlot {
 impl PeerSubscriptionState {
     fn member_result_set(&self) -> BTreeSet<ResultMemberEntry> {
         self.result_member_set.clone()
+    }
+
+    fn program_fact_set(&self) -> BTreeSet<ProgramFactEntry> {
+        self.program_fact_set.clone()
     }
 
     fn previous_tx_ids(&self) -> BTreeSet<TxId> {
@@ -292,6 +297,29 @@ impl PeerState {
         }
     }
 
+    fn ensure_query_subscription_registered<S>(
+        &self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<(), Error>
+    where
+        S: OrderedKvStorage,
+    {
+        node.register_query_subscription_for_peer(
+            shape.shape_id(),
+            ShapeAst::from_validated(shape),
+            Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: binding_values_in_param_order(shape, binding),
+                known_state: None,
+            },
+        )?;
+        Ok(())
+    }
+
     /// Builds a full current-row view update, using tx-level refs for complete
     /// transaction payloads in this peer's inventory and bundles for new or
     /// partial view payload.
@@ -310,6 +338,7 @@ impl PeerState {
             read_view: RegisterShapeOptions::default().read_view_key(),
         };
         self.clear_stale_groove_runtime_handles(node, subscription);
+        self.ensure_query_subscription_registered(node, subscription, &shape, &binding)?;
         let needs_prepare = self
             .subscriptions
             .get(&subscription)
@@ -431,6 +460,7 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         self.clear_stale_groove_runtime_handles(node, subscription);
+        self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
         let Some(state) = self.subscriptions.get(&subscription) else {
             return Ok(SyncMessage::ViewUpdate {
                 subscription,
@@ -453,9 +483,43 @@ impl PeerState {
                 None,
             );
         }
-        Err(Error::InvalidStoredValue(
-            "live query subscription is missing maintained state",
-        ))
+        let previous_member_result_set = self
+            .subscriptions
+            .get(&subscription)
+            .map(PeerSubscriptionState::member_result_set)
+            .unwrap_or_default();
+        if self
+            .subscriptions
+            .get(&subscription)
+            .and_then(|state| state.prepared_query.as_ref())
+            .is_none()
+        {
+            let (_prepared_shape, _prepared_binding, plan) = node.prepare_query_binding_for_link(
+                shape,
+                binding,
+                DurabilityTier::Global,
+                self.identity(),
+            )?;
+            let state = self.subscriptions.entry(subscription).or_default();
+            state.prepared_query = Some(CachedPeerQueryPlan {
+                tier: DurabilityTier::Global,
+                plan,
+            });
+            state.groove_runtime_token = Some(node.groove_runtime_token());
+        }
+        self.rehydrate_query_maintained_subscription_view(
+            node,
+            MaintainedRehydrateRequest {
+                shape,
+                binding,
+                subscription,
+                previous_member_result_set: &previous_member_result_set,
+                reset_result_set: false,
+                result_table_filter: None,
+                tier: DurabilityTier::Global,
+                read_view: &ReadViewSpec::default(),
+            },
+        )
     }
 
     fn query_update_maintained_subscription_view<S>(
@@ -480,6 +544,7 @@ impl PeerState {
             removes: mut result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            allow_storage_witness_fallback,
         } = transitions;
         let previous_member_result_set = self
             .subscriptions
@@ -566,6 +631,7 @@ impl PeerState {
                     identity: self.identity(),
                     tier,
                     maintained_facts: maintained,
+                    allow_storage_witness_fallback,
                 },
             )
         };
@@ -592,6 +658,11 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
+        let previous_program_fact_set = self
+            .subscriptions
+            .get(&subscription)
+            .map(PeerSubscriptionState::program_fact_set)
+            .unwrap_or_default();
         let output_tables = self
             .subscriptions
             .get(&subscription)
@@ -601,6 +672,7 @@ impl PeerState {
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut program_fact_adds = Vec::new();
         let mut program_fact_removes = Vec::new();
+        let mut allow_storage_witness_fallback = false;
         {
             let Some(maintained_subscription_view) = self
                 .subscriptions
@@ -651,6 +723,33 @@ impl PeerState {
                 }
             }
         }
+        if result_table_filter.is_none()
+            && let Some(settled) = node.settled_result_transitions_for_subscription(
+                subscription,
+                &previous_member_result_set,
+                &previous_program_fact_set,
+                result_table_filter,
+                &output_tables,
+            )?
+        {
+            allow_storage_witness_fallback |= settled.allow_storage_witness_fallback;
+            for member in settled.adds {
+                let before = previous_member_result_set.contains(&member);
+                states
+                    .entry(member)
+                    .and_modify(|(_, after)| *after = true)
+                    .or_insert((before, true));
+            }
+            for member in settled.removes {
+                let before = previous_member_result_set.contains(&member);
+                states
+                    .entry(member)
+                    .and_modify(|(_, after)| *after = false)
+                    .or_insert((before, false));
+            }
+            program_fact_adds.extend(settled.program_fact_adds);
+            program_fact_removes.extend(settled.program_fact_removes);
+        }
         let mut result_member_adds = Vec::new();
         let mut result_member_removes = Vec::new();
         for (member, (before, after)) in states {
@@ -676,6 +775,7 @@ impl PeerState {
             removes: result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            allow_storage_witness_fallback,
         })
     }
 
@@ -742,6 +842,7 @@ impl PeerState {
                 identity: self.identity(),
                 tier,
                 maintained_facts: &maintained,
+                allow_storage_witness_fallback: false,
             },
         );
         let mut update = match update {
@@ -827,6 +928,7 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         self.clear_stale_groove_runtime_handles(node, subscription);
+        self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
         let previous_member_result_set = self
             .subscriptions
             .get(&subscription)
@@ -886,6 +988,7 @@ impl PeerState {
             removes: source_removes,
             program_fact_adds: source_program_fact_adds,
             program_fact_removes: source_program_fact_removes,
+            allow_storage_witness_fallback: source_allow_storage_witness_fallback,
         } = source_transitions;
         if !source_adds.is_empty()
             || !source_removes.is_empty()
@@ -949,6 +1052,7 @@ impl PeerState {
                     identity: self.identity(),
                     tier,
                     maintained_facts: maintained,
+                    allow_storage_witness_fallback: source_allow_storage_witness_fallback,
                 },
             )
         };
@@ -1499,6 +1603,8 @@ impl PeerState {
             reset_result_set,
             result_member_adds,
             result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
             ..
         } = update
         else {
@@ -1507,11 +1613,15 @@ impl PeerState {
         let state = self.subscriptions.entry(*subscription).or_default();
         if *reset_result_set {
             state.result_member_set.clear();
+            state.program_fact_set.clear();
             state.member_index.clear();
         }
         for member in result_member_removes {
             state.result_member_set.remove(member);
             apply_contribution_remove(state, std::iter::once(member), &mut Vec::new());
+        }
+        for fact in program_fact_removes {
+            state.program_fact_set.remove(fact);
         }
         for member in result_member_adds {
             state.result_member_set.insert(member.clone());
@@ -1522,6 +1632,9 @@ impl PeerState {
                 &mut Vec::new(),
             );
         }
+        state
+            .program_fact_set
+            .extend(program_fact_adds.iter().cloned());
         // Diagnostic-only invariant check: detecting duplicate content versions
         // in the result set requires materializing and scanning it, which is
         // wasted work in release where the debug_assert compiles out. Gate the
@@ -1733,6 +1846,23 @@ fn view_update_reset_result_set(update: &mut SyncMessage) {
         return;
     };
     *reset_result_set = true;
+}
+
+fn binding_values_in_param_order(
+    shape: &ValidatedQuery,
+    binding: &Binding,
+) -> Vec<groove::records::Value> {
+    shape
+        .params()
+        .keys()
+        .map(|name| {
+            binding
+                .values()
+                .get(name)
+                .cloned()
+                .expect("validated binding contains every shape param")
+        })
+        .collect()
 }
 
 /// Deterministic counters for peer-dedup assertions and future M2 benchmarks.

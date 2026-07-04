@@ -3442,6 +3442,16 @@ where
         self.apply_known_shape_subscribe(&shape, subscribe)
     }
 
+    pub(crate) fn register_query_subscription_for_peer(
+        &mut self,
+        shape_id: ShapeId,
+        ast: ShapeAst,
+        subscribe: Subscribe,
+    ) -> Result<(), Error> {
+        self.register_shape(shape_id, ast)?;
+        self.apply_subscribe(subscribe)
+    }
+
     fn drain_parked_binding_deltas_for_shape(&mut self, shape_id: ShapeId) -> Result<(), Error> {
         let Some(deltas) = self.parking.parked_binding_deltas.remove(&shape_id) else {
             return Ok(());
@@ -3554,6 +3564,66 @@ where
         self.query
             .settled_result_sets
             .contains_key(&binding_view_key)
+    }
+
+    pub(crate) fn settled_result_transitions_for_subscription(
+        &self,
+        subscription: SubscriptionKey,
+        previous_member_result_set: &BTreeSet<ResultMemberEntry>,
+        previous_program_fact_set: &BTreeSet<ProgramFactEntry>,
+        result_table_filter: Option<&str>,
+        output_tables: &BTreeMap<String, TableSchema>,
+    ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
+        let binding_view_key = self.binding_view_key_for_subscription(subscription)?;
+        let Some(settled_members) = self.query.settled_result_sets.get(&binding_view_key) else {
+            return Ok(None);
+        };
+        let settled_facts = self
+            .query
+            .settled_program_facts
+            .get(&binding_view_key)
+            .cloned()
+            .unwrap_or_default();
+        let member_is_visible = |member: &ResultMemberEntry| {
+            let Some(table_name) = member.table_name() else {
+                return false;
+            };
+            result_table_filter.is_none_or(|table| table_name == table)
+                && (output_tables.contains_key(table_name)
+                    || matches!(member, ResultMemberEntry::Synthetic { .. }))
+        };
+        let current = settled_members
+            .iter()
+            .filter(|member| member_is_visible(member))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let previous = previous_member_result_set
+            .iter()
+            .filter(|member| member_is_visible(member))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let fact_is_visible = |fact: &ProgramFactEntry| match fact {
+            ProgramFactEntry::ResultPayload(payload) => member_is_visible(&payload.member),
+            _ => true,
+        };
+        let current_facts = settled_facts
+            .into_iter()
+            .filter(fact_is_visible)
+            .collect::<BTreeSet<_>>();
+        let previous_facts = previous_program_fact_set
+            .iter()
+            .filter(|fact| fact_is_visible(fact))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        Ok(Some(
+            super::maintained_subscription_view::ResultTransitions {
+                adds: current.difference(&previous).cloned().collect(),
+                removes: previous.difference(&current).cloned().collect(),
+                program_fact_adds: current_facts.difference(&previous_facts).cloned().collect(),
+                program_fact_removes: previous_facts.difference(&current_facts).cloned().collect(),
+                allow_storage_witness_fallback: true,
+            },
+        ))
     }
 
     pub(crate) fn settled_through_for_binding_view(

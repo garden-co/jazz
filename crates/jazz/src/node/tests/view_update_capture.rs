@@ -456,6 +456,7 @@ impl MaintainedSubscriptionViewSubscription {
                 identity,
                 tier: DurabilityTier::Global,
                 maintained_facts: &self.maintained,
+                allow_storage_witness_fallback: false,
             },
         )?;
         let SyncMessage::ViewUpdate {

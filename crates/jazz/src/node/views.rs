@@ -100,6 +100,7 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) identity: AuthorId,
     pub(crate) tier: DurabilityTier,
     pub(crate) maintained_facts: &'a MaintainedSubscriptionView,
+    pub(crate) allow_storage_witness_fallback: bool,
 }
 
 impl<S> NodeState<S>
@@ -265,6 +266,7 @@ where
             identity,
             tier,
             maintained_facts: &maintained,
+            allow_storage_witness_fallback: false,
         });
         self.unsubscribe_groove_subscription(receiver.id());
         update
@@ -287,6 +289,7 @@ where
             identity: _identity,
             tier: _tier,
             maintained_facts,
+            allow_storage_witness_fallback,
         } = inputs;
         program_fact_adds.extend(maintained_facts.payload_facts_for_members(&result_member_adds));
         let program_fact_adds = program_fact_adds
@@ -365,6 +368,7 @@ where
             let tx_versions = tx_versions_cache
                 .entry(*tx_id)
                 .or_insert_with(|| maintained_facts.versions_by_tx(*tx_id));
+            let mut needs_storage_fallback = false;
             for (entry_table, row_uuid) in wanted_rows {
                 if maintained_view_find_content_witness(tx_versions, entry_table, *row_uuid)
                     .is_none()
@@ -377,7 +381,18 @@ where
                         }
                     }
                 }
+                if maintained_view_find_content_witness(tx_versions, entry_table, *row_uuid)
+                    .is_none()
+                {
+                    needs_storage_fallback = true;
+                }
             }
+            if needs_storage_fallback && allow_storage_witness_fallback {
+                tx_versions_cache.insert(*tx_id, self.query_versions_for_tx(*tx_id)?);
+            }
+            let tx_versions = tx_versions_cache
+                .get_mut(tx_id)
+                .expect("tx versions cache entry must exist after fallback");
             if tx_versions.iter().any(|version| {
                 version.deletion().is_none()
                     && wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
