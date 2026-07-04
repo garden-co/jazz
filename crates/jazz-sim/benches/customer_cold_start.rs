@@ -19,17 +19,12 @@ use jazz::wire::TransportError;
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
-// Customer-shaped cold-start fixture. Fidelity note: the real child tables
-// inherit read through parent_ref (`allowedTo.read(parent_ref)`). The public
-// query API cannot currently express `reachable_via` through a root reference
-// column, and `join_via_row_id(parent, parent_id)` only proves parent existence
-// rather than composing the parent's read policy. The benchmark therefore uses
-// derived child access-edge tables as a sound approximation; real customer
-// children do not carry that denormalized relation. The generator constrains a
-// small fixed subset of resource access edges to groups reached by the member
-// at depth 1 and depth 2 so every scale exercises the member->resource path;
-// resource and derived-child policies both seed reachability through
-// group_access_edges.seeded_by(user_id = claim("sub"), group_id).
+// Customer-shaped cold-start fixture. Child tables use the real customer
+// semantics: child rows inherit read permission from their referenced parent
+// resource via `inherits(parent_id)`. The generator constrains a small fixed
+// subset of resource access edges to groups reached by the member at depth 1
+// and depth 2 so every scale exercises the member->resource and
+// member->child-inherits paths.
 
 const ORG: &str = "org";
 const GROUP: &str = "group";
@@ -37,7 +32,6 @@ const GROUP_ACCESS: &str = "group_access_edges";
 const GROUP_ENTRY: &str = "group_entry";
 const PROFILE: &str = "profile";
 const CHILD_TABLES: usize = 6;
-const CHILD_POLICY_FIDELITY_NOTE: &str = "fidelity delta: child tables still use derived child access-edge tables; step 2 replaces this approximation with inherited parent-read policy composition";
 
 const RESOURCE_SPECS: [ResourceSpec; 14] = [
     ResourceSpec::new("res_a", 4, 7, Some(108)),
@@ -105,10 +99,6 @@ impl ResourceSpec {
 
     fn child_table(self, index: usize) -> String {
         format!("{}_child_{}", self.table, index)
-    }
-
-    fn child_access_table(self, index: usize) -> String {
-        format!("{}_child_{}_access_edges", self.table, index)
     }
 }
 
@@ -439,12 +429,7 @@ fn schema() -> JazzSchema {
         );
         if spec.child_rows.is_some() {
             let table = spec.child_table(child_slot);
-            let child_access_table = spec.child_access_table(child_slot);
             child_slot += 1;
-            // Public queries cannot currently express reachable_via through
-            // child.parent_id. The faithful customer rule is child readable iff
-            // parent is readable; this benchmark approximates it soundly by
-            // denormalizing the parent's access edges onto child rows.
             tables.push(
                 TableSchema::new(
                     &table,
@@ -457,19 +442,9 @@ fn schema() -> JazzSchema {
                     ],
                 )
                 .with_reference("parent_id", spec.table)
-                .with_read_policy(child_access_policy(&table, &child_access_table)),
-            );
-            tables.push(
-                TableSchema::new(
-                    &child_access_table,
-                    [
-                        ColumnSchema::new("child", ColumnType::Uuid),
-                        ColumnSchema::new("team", ColumnType::Uuid),
-                        ColumnSchema::new("administrator", ColumnType::Bool),
-                    ],
-                )
-                .with_reference("child", &table)
-                .with_reference("team", GROUP),
+                .with_read_policy(Policy::shape(
+                    Query::from(table.as_str()).inherits("parent_id"),
+                )),
             );
         }
     }
@@ -518,24 +493,6 @@ fn resource_policy(table: &str, access_table: &str) -> Option<Query> {
             .reachable_via_with_access_filters(
                 access_table,
                 "resource",
-                "team",
-                lit("relation-seeded"),
-                [eq(col("administrator"), lit(false))],
-                GROUP_ENTRY,
-                "member_id",
-                "target_id",
-                [eq(col("administrator"), lit(false))],
-            )
-            .seeded_by(GROUP_ACCESS, "user_id", "sub", "group_id"),
-    )
-}
-
-fn child_access_policy(child_table: &str, access_table: &str) -> Option<Query> {
-    Policy::shape(
-        Query::from(child_table)
-            .reachable_via_with_access_filters(
-                access_table,
-                "child",
                 "team",
                 lit("relation-seeded"),
                 [eq(col("administrator"), lit(false))],
@@ -667,13 +624,10 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         );
         if let Some(children) = spec.child_rows {
             let child_table = spec.child_table(child_slot);
-            let child_access_table = spec.child_access_table(child_slot);
             let distribution = child_counts(config.scaled_count(children), resource_rows.len());
             let mut rows = Vec::new();
             let mut parents = Vec::new();
-            let mut child_access_rows = Vec::new();
             let mut idx = 0_u64;
-            let mut child_access_idx = 0_u64;
             for (parent_index, count) in distribution.into_iter().enumerate() {
                 for _ in 0..count {
                     let child = row(500_000 + (child_slot as u64 * 100_000) + idx);
@@ -686,25 +640,10 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
                     );
                     rows.push(child);
                     parents.push((child, parent));
-                    for (_resource, team) in
-                        edges.iter().filter(|(resource, _team)| *resource == parent)
-                    {
-                        let access_row =
-                            row(2_000_000 + (child_slot as u64 * 1_000_000) + child_access_idx);
-                        seed_db(
-                            &core,
-                            &child_access_table,
-                            access_row,
-                            child_access_cells(child, *team),
-                        );
-                        child_access_rows.push(access_row);
-                        child_access_idx += 1;
-                    }
                     idx += 1;
                 }
             }
             table_rows.insert(child_table.clone(), rows);
-            table_rows.insert(child_access_table, child_access_rows);
             child_parent.insert(child_table, parents);
             child_slot += 1;
         }
@@ -805,11 +744,6 @@ fn expected_visible_counts(seeded: &Seeded, identity: BenchIdentity) -> BTreeMap
                 .filter(|(_child, parent)| visible_resources.contains(parent))
                 .count();
             out.insert(child_table, visible_children);
-            let child_access_table = spec.child_access_table(child_slot);
-            out.insert(
-                child_access_table.clone(),
-                seeded.table_rows[&child_access_table].len(),
-            );
             child_slot += 1;
         }
     }
@@ -1139,7 +1073,6 @@ fn subscription_tables() -> Vec<String> {
         tables.push(spec.access_table());
         if spec.child_rows.is_some() {
             tables.push(spec.child_table(child_slot));
-            tables.push(spec.child_access_table(child_slot));
             child_slot += 1;
         }
     }
@@ -1147,7 +1080,7 @@ fn subscription_tables() -> Vec<String> {
         tables.push(format!("empty_child_{child_slot}"));
         child_slot += 1;
     }
-    assert_eq!(tables.len(), 43);
+    assert_eq!(tables.len(), 39);
     tables
 }
 
@@ -1339,14 +1272,6 @@ fn resource_access_cells(resource: RowUuid, group: RowUuid, i: usize) -> BTreeMa
     ])
 }
 
-fn child_access_cells(child: RowUuid, team: RowUuid) -> BTreeMap<String, Value> {
-    BTreeMap::from([
-        ("child".to_owned(), Value::Uuid(child.0)),
-        ("team".to_owned(), Value::Uuid(team.0)),
-        ("administrator".to_owned(), Value::Bool(false)),
-    ])
-}
-
 fn child_cells(parent: RowUuid, i: usize, slot: usize) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("parent_id".to_owned(), Value::Uuid(parent.0)),
@@ -1523,11 +1448,7 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     );
     fields.insert(
         "shape_note".to_owned(),
-        json!("43 subscriptions: parent/resource/access tables plus six child subscriptions; four populated child tables include derived child-access-edge subscriptions because the public API cannot yet express inherited parent visibility directly"),
-    );
-    fields.insert(
-        "child_policy_fidelity_delta".to_owned(),
-        json!(CHILD_POLICY_FIDELITY_NOTE),
+        json!("39 subscriptions: org/group/group_access_edges/group_entry/profile, fourteen resource tables, fourteen resource-access tables, and six child tables; child rows inherit read through parent_id"),
     );
     fields.insert(
         "subscription_timeline".to_owned(),
