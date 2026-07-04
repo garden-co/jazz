@@ -441,17 +441,21 @@ fn owner_id_public_schema() -> JazzSchema {
 }
 
 fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(Query::from("res_a").reachable_via_with_access_filters(
-        "res_a_access_edges",
-        "resource",
-        "team",
-        claim("sub"),
-        [eq(col("administrator"), lit(false))],
-        "group_entry",
-        "member_id",
-        "target_id",
-        [eq(col("administrator"), lit(false))],
-    ));
+    let resource_policy = Policy::shape(
+        Query::from("res_a")
+            .reachable_via_with_access_filters(
+                "res_a_access_edges",
+                "resource",
+                "team",
+                lit("relation-seeded"),
+                [eq(col("administrator"), lit(false))],
+                "group_entry",
+                "member_id",
+                "target_id",
+                [eq(col("administrator"), lit(false))],
+            )
+            .seeded_by("group_access_edges", "user_id", "sub", "group_id"),
+    );
 
     JazzSchema::new([
         TableSchema::new(
@@ -479,6 +483,17 @@ fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
         TableSchema::new("group", [ColumnSchema::new("name", ColumnType::String)])
             .with_read_policy(Policy::public())
             .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "group_access_edges",
+            [
+                ColumnSchema::new("group_id", ColumnType::Uuid),
+                ColumnSchema::new("user_id", ColumnType::Uuid),
+                ColumnSchema::new("role", ColumnType::String),
+            ],
+        )
+        .with_reference("group_id", "group")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
         TableSchema::new(
             "res_a_access_edges",
             [
@@ -508,17 +523,21 @@ fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
 }
 
 fn customer_resource_policy_minimal_schema() -> JazzSchema {
-    let resource_policy = Policy::shape(Query::from("res_i").reachable_via_with_access_filters(
-        "res_i_access_edges",
-        "resource",
-        "team",
-        claim("sub"),
-        [eq(col("administrator"), lit(false))],
-        "group_entry",
-        "member_id",
-        "target_id",
-        [eq(col("administrator"), lit(false))],
-    ));
+    let resource_policy = Policy::shape(
+        Query::from("res_i")
+            .reachable_via_with_access_filters(
+                "res_i_access_edges",
+                "resource",
+                "team",
+                lit("relation-seeded"),
+                [eq(col("administrator"), lit(false))],
+                "group_entry",
+                "member_id",
+                "target_id",
+                [eq(col("administrator"), lit(false))],
+            )
+            .seeded_by("group_access_edges", "user_id", "sub", "group_id"),
+    );
 
     JazzSchema::new([
         TableSchema::new("org", [ColumnSchema::new("label", ColumnType::String)])
@@ -5517,7 +5536,6 @@ fn group_access_test_cells(group: RowUuid, user: AuthorId) -> RowCells {
 }
 
 #[test]
-#[ignore = "daytime repro: customer semantics seed reachability from group_access_edges; current reachable_via policy starts from claim(\"sub\") as a group id, so the member cannot see the resource"]
 fn customer_resource_access_edge_policy_requires_group_access_seed() {
     let schema = customer_resource_policy_minimal_schema();
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
@@ -5552,11 +5570,208 @@ fn customer_resource_access_edge_policy_requires_group_access_seed() {
             resource_access_test_cells(resource, group, false),
         )
         .unwrap();
-
     assert_eq!(
         served_subscription_rows_for_author(&schema, &server, member, "res_i"),
         vec![resource]
     );
+}
+
+#[test]
+fn seeded_membership_resource_policy_allows_direct_and_transitive_groups() {
+    let schema = customer_resource_policy_minimal_schema();
+    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x12; 16]);
+    let other = AuthorId::from_bytes([0x13; 16]);
+    let (direct, transitive, hidden) =
+        seed_seeded_membership_resource_fixture(&server, member, other);
+
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "res_i"),
+        vec![direct, transitive]
+    );
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, other, "res_i"),
+        vec![hidden]
+    );
+    assert!(
+        served_subscription_rows_for_author(
+            &schema,
+            &server,
+            AuthorId::from_bytes([0x99; 16]),
+            "res_i"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn seeded_membership_grant_and_revoke_propagate_incrementally() {
+    let schema = customer_resource_policy_minimal_schema();
+    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x14; 16]);
+    let group = row(0x41);
+    let resource = row(0xd4);
+    let access = row(0xb4);
+
+    seed_customer_resource_base(&server);
+    server
+        .insert_with_id("group", group, team_cells("direct"))
+        .unwrap();
+    server
+        .insert_with_id("res_i", resource, resource_test_cells("resource"))
+        .unwrap();
+    server
+        .insert_with_id(
+            "res_i_access_edges",
+            access,
+            resource_access_test_cells(resource, group, false),
+        )
+        .unwrap();
+
+    let client = open_db(0x61, member, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, member);
+    let mut subscription =
+        prepared_subscribe(&client, &Query::from("res_i"), ReadOpts::default()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    while let Some(event) = subscription.try_next_event() {
+        match event {
+            SubscriptionEvent::Opened { current, .. }
+            | SubscriptionEvent::Reset { current, .. } => {
+                assert!(current.rows.is_empty());
+            }
+            SubscriptionEvent::Delta {
+                added,
+                updated,
+                removed,
+                ..
+            } => {
+                assert!(added.is_empty());
+                assert!(updated.is_empty());
+                assert!(removed.is_empty());
+            }
+            SubscriptionEvent::Closed => {}
+        }
+    }
+
+    server
+        .insert_with_id(
+            "group_access_edges",
+            row(0xa4),
+            group_access_test_cells(group, member),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![resource]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    server
+        .update(
+            "res_i_access_edges",
+            access,
+            BTreeMap::from([("administrator".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![resource]
+    );
+}
+
+fn seed_customer_resource_base(server: &CoreDb) {
+    server
+        .insert_with_id(
+            "org",
+            row(0x01),
+            BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
+        )
+        .unwrap();
+}
+
+fn seed_seeded_membership_resource_fixture(
+    server: &CoreDb,
+    member: AuthorId,
+    other: AuthorId,
+) -> (RowUuid, RowUuid, RowUuid) {
+    seed_customer_resource_base(server);
+    let direct_group = row(0x31);
+    let transitive_group = row(0x32);
+    let hidden_group = row(0x33);
+    let direct = row(0xd1);
+    let transitive = row(0xd2);
+    let hidden = row(0xd3);
+
+    for (group, name) in [
+        (direct_group, "direct"),
+        (transitive_group, "transitive"),
+        (hidden_group, "hidden"),
+    ] {
+        server
+            .insert_with_id("group", group, team_cells(name))
+            .unwrap();
+    }
+    server
+        .insert_with_id(
+            "group_access_edges",
+            row(0xa1),
+            group_access_test_cells(direct_group, member),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "group_access_edges",
+            row(0xa2),
+            group_access_test_cells(hidden_group, other),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "group_entry",
+            row(0xc1),
+            group_entry_test_cells(direct_group, transitive_group, false),
+        )
+        .unwrap();
+    for (resource, title) in [
+        (direct, "direct"),
+        (transitive, "transitive"),
+        (hidden, "hidden"),
+    ] {
+        server
+            .insert_with_id("res_i", resource, resource_test_cells(title))
+            .unwrap();
+    }
+    for (edge, resource, group) in [
+        (row(0xb1), direct, direct_group),
+        (row(0xb2), transitive, transitive_group),
+        (row(0xb3), hidden, hidden_group),
+    ] {
+        server
+            .insert_with_id(
+                "res_i_access_edges",
+                edge,
+                resource_access_test_cells(resource, group, false),
+            )
+            .unwrap();
+    }
+    (direct, transitive, hidden)
 }
 
 fn team_cells(name: &str) -> RowCells {
@@ -5609,6 +5824,13 @@ fn seed_recursive_reachable_read_fixture(server: &CoreDb, member: AuthorId) -> (
         .unwrap();
     server
         .insert_with_id(
+            "group_access_edges",
+            row(0xa1),
+            group_access_test_cells(member_team, member),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
             "res_a_access_edges",
             row(0xb2),
             resource_access_test_cells(inherited_doc, parent_team, false),
@@ -5649,15 +5871,36 @@ fn served_subscription_rows_for_author(
     let query = Query::from(table);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    let mut rows = BTreeSet::new();
 
-    client.tick().unwrap();
-    server.tick().unwrap();
-    client.tick().unwrap();
-
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
-    row_ids(&added)
+    for _ in 0..8 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            match event {
+                SubscriptionEvent::Opened { current, .. }
+                | SubscriptionEvent::Reset { current, .. } => {
+                    rows = current.rows.into_iter().map(|row| row.row_uuid()).collect();
+                }
+                SubscriptionEvent::Delta {
+                    added,
+                    updated,
+                    removed,
+                    ..
+                } => {
+                    for row in removed {
+                        rows.remove(&row.row_uuid);
+                    }
+                    for row in added.into_iter().chain(updated) {
+                        rows.insert(row.row_uuid());
+                    }
+                }
+                SubscriptionEvent::Closed => {}
+            }
+        }
+    }
+    rows.into_iter().collect()
 }
 
 fn served_many_subscription_rows_for_author(

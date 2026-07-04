@@ -425,15 +425,20 @@ fn parameter_domain_for_request(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    if domain.claim_params != pre_retarget_claims {
-        return Err(UnsupportedReason::Runtime(
-            "pre-retarget claim parameter domain diverged from lowered binding sources".to_owned(),
-        ));
+    for (name, claim) in &pre_retarget_claims {
+        if let Some(existing) = domain.claim_params.get(name)
+            && existing != claim
+        {
+            return Err(UnsupportedReason::Runtime(
+                "pre-retarget claim parameter domain diverged from lowered binding sources"
+                    .to_owned(),
+            ));
+        }
     }
-    for name in pre_retarget_claims.keys() {
+    for (name, claim) in pre_retarget_claims {
+        domain.claim_params.insert(name.clone(), claim);
         domain.routing_params.insert(name.clone());
     }
-    domain.claim_params = pre_retarget_claims;
     Ok(domain)
 }
 
@@ -452,11 +457,11 @@ fn collect_equality_filter_route_params(predicate: &PredicateExpr, routing: &mut
             if source_value_ref(left)
                 && let NormalizedValueRef::Param(param) = right
             {
-                routing.insert(route_param_field(param));
+                routing.insert(param_route_field(param));
             } else if source_value_ref(right)
                 && let NormalizedValueRef::Param(param) = left
             {
-                routing.insert(route_param_field(param));
+                routing.insert(param_route_field(param));
             }
         }
         PredicateExpr::True
@@ -469,6 +474,14 @@ fn collect_equality_filter_route_params(predicate: &PredicateExpr, routing: &mut
         | PredicateExpr::IsNotNull(_)
         | PredicateExpr::Or(_)
         | PredicateExpr::Not(_) => {}
+    }
+}
+
+fn param_route_field(param: &str) -> String {
+    if claim_path_from_param_field(param).is_some() {
+        param.to_owned()
+    } else {
+        route_param_field(param)
     }
 }
 
@@ -608,6 +621,7 @@ impl AnalyzedQueryPlan {
                 .seed
                 .root
                 .source()
+                .or_else(|| first_step_source(&plan.seed.steps))
                 .or_else(|| plan.step.root.source())
                 .or_else(|| first_step_source(&plan.step.steps))
                 .expect("recursive source"),
@@ -686,8 +700,16 @@ impl RecursiveRelationPlan {
         self.seed
             .root
             .source()
+            .or_else(|| first_step_source(&self.seed.steps))
             .or_else(|| self.step.root.source())
             .or_else(|| first_step_source(&self.step.steps))
+    }
+
+    fn seed_source(&self) -> Option<&SourceId> {
+        self.seed
+            .root
+            .source()
+            .or_else(|| first_step_source(&self.seed.steps))
     }
 
     fn step_source(&self) -> Option<&SourceId> {
@@ -2406,18 +2428,17 @@ fn lower_recursive_relation(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
-    let seed_root = relation.seed.root.source().and_then(|source| {
-        resolved_sources
-            .get(source)
-            .map(|resolved| resolved.graph.clone())
-    });
-    let seed_graph = root_graph
-        .or(seed_root)
+    let seed_root_source = relation
+        .seed_source()
+        .and_then(|source| resolved_sources.get(source));
+    let seed_root = seed_root_source.map(|resolved| resolved.graph.clone());
+    let seed_graph = seed_root
+        .or(root_graph)
         .unwrap_or_else(|| root_source.graph.clone());
     let seed = lower_linear_plan_steps(
         seed_graph,
         &relation.seed,
-        root_source,
+        seed_root_source.unwrap_or(root_source),
         resolved_sources,
         request,
     )?;
@@ -2507,14 +2528,17 @@ fn lower_linear_plan_steps(
                         "filters on value/frontier sources are not lowered yet".to_owned(),
                     )
                 })?;
-                let (joined, residual) = lower_equality_param_filter_joins(
-                    graph,
-                    predicate,
-                    source,
-                    root_source,
-                    request,
-                )?;
+                let (joined, residual, introduced_route_fields) =
+                    lower_equality_param_filter_joins(
+                        graph,
+                        predicate,
+                        source,
+                        root_source,
+                        request,
+                    )?;
                 graph = joined;
+                fields.extend(introduced_route_fields.iter().cloned());
+                available_route_fields.extend(introduced_route_fields);
                 if !matches!(residual, PredicateExpr::True) {
                     let predicate = lower_predicate(&residual, source, root_source, request)?;
                     graph = graph.filter(predicate);
@@ -2588,6 +2612,7 @@ fn lower_linear_plan_steps(
                             column,
                             plan,
                             root_source,
+                            &fields,
                             last_join_right.as_ref(),
                             request,
                         )?;
@@ -3246,22 +3271,29 @@ fn lower_projection_field(
     column: &RowProjection,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
+    fields: &BTreeSet<String>,
     last_join_right: Option<&(RelationInputPlan, BTreeSet<String>, BTreeSet<String>)>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionFieldPlan, UnsupportedReason> {
     let mut unwrap_before_project = BTreeSet::new();
-    let project =
-        match lower_projection_source(&column.value, plan, source, last_join_right, request)? {
-            ProjectionSource::Field { field, nullable } => {
-                if nullable && !matches!(column.output.ty.value_type(), ValueType::Nullable(_)) {
-                    unwrap_before_project.insert(field.clone());
-                }
-                ProjectField::renamed(field, column.output.name.clone())
+    let project = match lower_projection_source(
+        &column.value,
+        plan,
+        source,
+        fields,
+        last_join_right,
+        request,
+    )? {
+        ProjectionSource::Field { field, nullable } => {
+            if nullable && !matches!(column.output.ty.value_type(), ValueType::Nullable(_)) {
+                unwrap_before_project.insert(field.clone());
             }
-            ProjectionSource::Literal(value) => {
-                ProjectField::literal(column.output.name.clone(), value)
-            }
-        };
+            ProjectField::renamed(field, column.output.name.clone())
+        }
+        ProjectionSource::Literal(value) => {
+            ProjectField::literal(column.output.name.clone(), value)
+        }
+    };
     Ok(ProjectionFieldPlan {
         project,
         unwrap_before_project,
@@ -3284,6 +3316,7 @@ fn lower_projection_source(
     value: &NormalizedValueRef,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
+    fields: &BTreeSet<String>,
     last_join_right: Option<&(RelationInputPlan, BTreeSet<String>, BTreeSet<String>)>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionSource, UnsupportedReason> {
@@ -3299,6 +3332,17 @@ fn lower_projection_source(
         });
     }
 
+    if let NormalizedValueRef::Param(param) = value
+        && fields.contains(param)
+    {
+        return Ok(ProjectionSource::Field {
+            field: match last_join_right {
+                Some(_) => left_field(param),
+                None => param.clone(),
+            },
+            nullable: false,
+        });
+    }
     if let Some((right, nullable_fields, _)) = last_join_right {
         if let Some(field) = lower_relation_projection_ref(value, right, request)? {
             let nullable = nullable_fields.contains(&field);
@@ -3387,7 +3431,7 @@ fn lower_equality_param_filter_joins(
     source_id: &SourceId,
     source: &ResolvedSource,
     request: &QueryProgramRequest,
-) -> Result<(GraphBuilder, PredicateExpr), UnsupportedReason> {
+) -> Result<(GraphBuilder, PredicateExpr, BTreeSet<String>), UnsupportedReason> {
     let predicates = match predicate {
         PredicateExpr::And(predicates) => predicates.as_slice(),
         _ => std::slice::from_ref(predicate),
@@ -3403,17 +3447,26 @@ fn lower_equality_param_filter_joins(
             residual.push(predicate.clone());
             continue;
         };
-        let binding = GraphBuilder::binding_source(
-            binding_source_shape.clone(),
+        let domain = parameter_domain_for_request(request)?;
+        let is_claim_param = domain.claim_params.contains_key(&join.param);
+        let binding_descriptor = if is_claim_param {
+            binding_source_descriptor_with_user_params(request, [])?
+        } else {
             binding_source_descriptor_with_user_params(
                 request,
                 [(
                     join.param.clone(),
                     column_type_from_value_type(&join.value_type),
                 )],
-            )?,
-        );
-        let route_field = route_param_field(&join.param);
+            )?
+        };
+        let binding =
+            GraphBuilder::binding_source(binding_source_shape.clone(), binding_descriptor);
+        let route_field = if is_claim_param {
+            join.param.clone()
+        } else {
+            route_param_field(&join.param)
+        };
         let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
         projection.extend(
             retained_route_fields
@@ -3424,6 +3477,9 @@ fn lower_equality_param_filter_joins(
             right_field(&join.param),
             route_field.clone(),
         ));
+        if join.nullable {
+            graph = graph.unwrap_nullable(join.field.clone());
+        }
         graph = GraphBuilder::join(graph, binding, [join.field], [join.param])
             .project_fields(projection);
         retained_route_fields.insert(route_field);
@@ -3433,13 +3489,14 @@ fn lower_equality_param_filter_joins(
         1 => residual.pop().expect("one residual predicate"),
         _ => PredicateExpr::And(residual),
     };
-    Ok((graph, residual))
+    Ok((graph, residual, retained_route_fields))
 }
 
 struct EqualityParamJoin {
     field: String,
     param: String,
     value_type: ValueType,
+    nullable: bool,
 }
 
 fn equality_param_join(
@@ -3455,21 +3512,23 @@ fn equality_param_join(
     else {
         return Ok(None);
     };
-    if let (Some((field, value_type)), NormalizedValueRef::Param(param)) =
+    if let (Some((field, value_type, nullable)), NormalizedValueRef::Param(param)) =
         (source_join_field(left, source_id, source)?, right)
     {
         return Ok(Some(EqualityParamJoin {
             field,
             param: param.clone(),
             value_type,
+            nullable,
         }));
     }
     match (left, source_join_field(right, source_id, source)?) {
-        (NormalizedValueRef::Param(param), Some((field, value_type))) => {
+        (NormalizedValueRef::Param(param), Some((field, value_type, nullable))) => {
             Ok(Some(EqualityParamJoin {
                 field,
                 param: param.clone(),
                 value_type,
+                nullable,
             }))
         }
         _ => Ok(None),
@@ -3480,12 +3539,16 @@ fn source_join_field(
     value: &NormalizedValueRef,
     source_id: &SourceId,
     source: &ResolvedSource,
-) -> Result<Option<(String, ValueType)>, UnsupportedReason> {
+) -> Result<Option<(String, ValueType, bool)>, UnsupportedReason> {
     let field = match value {
         NormalizedValueRef::SourceField {
             source: value_source,
             field,
-        } if value_source == source_id => require_source_field(source, &user_column_field(field))?,
+        } if value_source == source_id => {
+            let resolved = require_source_field(source, &user_column_field(field))
+                .or_else(|_| require_source_field(source, field));
+            resolved?
+        }
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) if value_source == source_id => {
             require_source_field(source, &source.row_shape.row_uuid_field)?
         }
@@ -3496,10 +3559,11 @@ fn source_join_field(
             "source field {field:?} is missing from resolved descriptor"
         )));
     };
-    if matches!(value_type, ValueType::Nullable(_)) {
-        return Ok(None);
-    }
-    Ok(Some((field, value_type)))
+    let (value_type, nullable) = match value_type {
+        ValueType::Nullable(inner) => ((*inner).clone(), true),
+        value_type => (value_type, false),
+    };
+    Ok(Some((field, value_type, nullable)))
 }
 
 fn lower_literal_projection_value(

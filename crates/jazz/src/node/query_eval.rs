@@ -34,8 +34,9 @@ use super::query_engine::{
     SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest,
     SourceRequirements, SourceResolutionError, SourceResolver, SourceRole, SourceRowShape,
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
-    VersionIdentityFields, VersionedRowRefSchema, claim_param_field, left_field,
-    logical_user_column, lower_query_program, right_field, route_param_field, user_column_field,
+    VersionIdentityFields, VersionedRowRefSchema, claim_param_field, claim_path_from_param_field,
+    left_field, logical_user_column, lower_query_program, right_field, route_param_field,
+    user_column_field,
 };
 use crate::protocol::{
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewKey,
@@ -46,7 +47,7 @@ use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES}
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
-    QueryError, ShapeId, ValidatedQuery,
+    QueryError, ShapeId, ValidatedQuery, binding_id_for_values,
 };
 use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
 
@@ -2893,6 +2894,30 @@ fn normalize_reachable_seed(
             },
         );
         let mut seed_current = seed_source_node;
+        let claim_route_field = seed.user_claim.as_ref().map(|user_claim| {
+            let claim_path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+            (claim_path.clone(), claim_param_field(&claim_path))
+        });
+        if let (Some(user_column), Some((_, claim_field))) = (&seed.user_column, &claim_route_field)
+        {
+            let seed_claim_filter_node =
+                RowSetNodeId(format!("reachable:{index}:seed_claim_filter"));
+            nodes.insert(
+                seed_claim_filter_node.clone(),
+                RowSetExpr::Filter {
+                    input: seed_current,
+                    predicate: NormalizedPredicateExpr::Compare {
+                        left: NormalizedValueRef::SourceField {
+                            source: seed_source.clone(),
+                            field: user_column.clone(),
+                        },
+                        op: NormalizedComparisonOp::Eq,
+                        right: NormalizedValueRef::Param(claim_field.clone()),
+                    },
+                },
+            );
+            seed_current = seed_claim_filter_node;
+        }
         if !seed.filters.is_empty() {
             let seed_filter_node = RowSetNodeId(format!("reachable:{index}:seed_filter"));
             nodes.insert(
@@ -2905,26 +2930,33 @@ fn normalize_reachable_seed(
             seed_current = seed_filter_node;
         }
         let seed_project_node = RowSetNodeId(format!("reachable:{index}:seed_project"));
+        let mut seed_columns = vec![
+            RowProjection {
+                output: typed_output_field("team", ColumnType::Uuid),
+                value: NormalizedValueRef::SourceField {
+                    source: seed_source.clone(),
+                    field: seed.team_column.clone(),
+                },
+            },
+            RowProjection {
+                output: typed_output_field("reachable_team", ColumnType::Uuid),
+                value: NormalizedValueRef::SourceField {
+                    source: seed_source.clone(),
+                    field: seed.team_column.clone(),
+                },
+            },
+        ];
+        if let Some((_, claim_field)) = &claim_route_field {
+            seed_columns.push(RowProjection {
+                output: typed_output_field(claim_field, ColumnType::Uuid),
+                value: NormalizedValueRef::Param(claim_field.clone()),
+            });
+        }
         nodes.insert(
             seed_project_node.clone(),
             RowSetExpr::Project {
                 input: seed_current,
-                columns: vec![
-                    RowProjection {
-                        output: typed_output_field("team", ColumnType::Uuid),
-                        value: NormalizedValueRef::SourceField {
-                            source: seed_source.clone(),
-                            field: seed.team_column.clone(),
-                        },
-                    },
-                    RowProjection {
-                        output: typed_output_field("reachable_team", ColumnType::Uuid),
-                        value: NormalizedValueRef::SourceField {
-                            source: seed_source,
-                            field: seed.team_column.clone(),
-                        },
-                    },
-                ],
+                columns: seed_columns,
             },
         );
         return Ok((seed_project_node, columns));
@@ -2951,7 +2983,7 @@ fn reachable_seed_frontier_columns(
         source: source.clone(),
         field: seed.team_column.clone(),
     };
-    vec![
+    let mut columns = vec![
         ValueSourceColumn {
             name: "team".to_owned(),
             value: value.clone(),
@@ -2962,7 +2994,16 @@ fn reachable_seed_frontier_columns(
             value,
             ty: ColumnType::Uuid,
         },
-    ]
+    ];
+    if let Some(user_claim) = &seed.user_claim {
+        let path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+        columns.push(ValueSourceColumn {
+            name: claim_param_field(&path),
+            value: NormalizedValueRef::Claim(path),
+            ty: ColumnType::Uuid,
+        });
+    }
+    columns
 }
 
 fn reachable_frontier_columns(
@@ -3379,6 +3420,36 @@ where
             claim_params,
             values: binding.values().clone(),
         }
+    }
+
+    fn program_binding_for_shape_and_policy(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        source_shape: Option<String>,
+        extra_user_params: BTreeMap<String, ColumnType>,
+        claim_params: BTreeMap<String, ProgramClaimParam>,
+        policy: &PolicyContext,
+    ) -> Result<ProgramBinding, Error> {
+        let mut program_binding = self.program_binding_for_shape(
+            shape,
+            binding,
+            source_shape,
+            extra_user_params,
+            claim_params.clone(),
+        );
+        if !claim_params.is_empty() {
+            let mut values = binding.values().clone();
+            for (name, claim) in &claim_params {
+                let value = prepared_claim_value(&claim.path, policy)?;
+                values.insert(
+                    name.clone(),
+                    coerce_prepared_binding_value(value, &claim.ty),
+                );
+            }
+            program_binding.id = binding_id_for_values(&values);
+        }
+        Ok(program_binding)
     }
 
     pub(super) fn register_shape(&mut self, shape_id: ShapeId, ast: ShapeAst) -> Result<(), Error> {
@@ -4360,7 +4431,10 @@ where
     ) -> Result<QueryProgramRequest, Error> {
         let lowered_shape;
         let lowered_binding;
-        let (shape, binding) = if !self.can_use_prepared_current_query_plan(shape) {
+        let use_prepared_binding_source = self.can_use_prepared_current_query_plan(shape)
+            && settled_binding_view.is_none()
+            && !matches!(output, CurrentQueryProgramOutput::RelationSnapshot);
+        let (shape, binding) = if !use_prepared_binding_source {
             let read_schema = self
                 .catalogue
                 .catalogue_schemas
@@ -4374,17 +4448,19 @@ where
             (shape, binding)
         };
         let input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let policy = self.query_program_policy_context(identity);
+        let binding_claim_params = binding_claim_params_for_shape(&input_shape);
+        let source_shape = use_prepared_binding_source
+            .then(|| query_binding_source_shape_for_parts(shape.params(), &binding_claim_params));
         let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
+            binding: self.program_binding_for_shape_and_policy(
                 shape,
                 binding,
-                Some(query_binding_source_shape_for_parts(
-                    shape.params(),
-                    &binding_claim_params_for_shape(&input_shape),
-                )),
+                source_shape,
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape),
-            ),
+                binding_claim_params,
+                &policy,
+            )?,
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
@@ -4396,7 +4472,7 @@ where
                 read_view,
                 settled_binding_view,
             )?,
-            policy: self.query_program_policy_context(identity),
+            policy,
             input,
             output: current_query_output_request(output, shape.query()),
         })
@@ -5902,6 +5978,9 @@ where
         for reachable in &query.reachable {
             tables.insert(reachable.access_table.clone());
             tables.insert(reachable.edge_table.clone());
+            if let Some(seed) = &reachable.seed {
+                tables.insert(seed.table.clone());
+            }
         }
         self.collect_include_read_tables(
             &query.table,
@@ -6316,7 +6395,7 @@ where
         // longer part of source authorization.
         let authorized = match self.policy_authorization_row_id_graph(policy_request) {
             Ok(authorized) => authorized,
-            Err(Error::QueryCapability(_)) => PolicyAuthorizationGraph {
+            Err(Error::QueryCapability(_err)) => PolicyAuthorizationGraph {
                 graph: empty_authorized_row_id_graph(),
                 route_fields: BTreeSet::new(),
             },
@@ -7157,28 +7236,143 @@ fn binding_claim_params_for_shape(
 ) -> BTreeMap<String, ProgramClaimParam> {
     let mut params = BTreeMap::new();
     for node in shape.nodes.values() {
-        let RowSetExpr::ValueSource {
+        if let RowSetExpr::ValueSource {
             columns,
             mode: ValueSourceMode::Binding,
             ..
         } = node
-        else {
-            continue;
-        };
-        for column in columns {
-            let NormalizedValueRef::Claim(path) = &column.value else {
-                continue;
-            };
-            params.insert(
-                claim_param_field(path),
-                ProgramClaimParam {
-                    path: path.clone(),
-                    ty: column.ty.clone(),
-                },
-            );
+        {
+            for column in columns {
+                let NormalizedValueRef::Claim(path) = &column.value else {
+                    continue;
+                };
+                params.insert(
+                    claim_param_field(path),
+                    ProgramClaimParam {
+                        path: path.clone(),
+                        ty: column.ty.clone(),
+                    },
+                );
+            }
         }
+        collect_claim_field_params_from_node(node, &mut params);
     }
     params
+}
+
+fn collect_claim_field_params_from_node(
+    node: &RowSetExpr,
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) {
+    match node {
+        RowSetExpr::Filter { predicate, .. } | RowSetExpr::Join { on: predicate, .. } => {
+            collect_claim_field_params_from_predicate(predicate, params);
+        }
+        RowSetExpr::RecursiveRelation {
+            frontier_key,
+            dedupe_keys,
+            ..
+        } => {
+            collect_claim_field_param(frontier_key, ColumnType::Uuid, params);
+            for key in dedupe_keys {
+                collect_claim_field_param(key, ColumnType::Uuid, params);
+            }
+        }
+        RowSetExpr::Project { columns, .. } => {
+            for column in columns {
+                collect_claim_field_param(&column.value, column.output.ty.clone(), params);
+            }
+        }
+        RowSetExpr::Distinct { keys, .. } => {
+            for key in keys {
+                collect_claim_field_param(key, ColumnType::Uuid, params);
+            }
+        }
+        RowSetExpr::CorrelatedPathProjection { correlation, .. } => {
+            collect_claim_field_params_from_predicate(correlation, params);
+        }
+        RowSetExpr::OrderBy { keys, .. } => {
+            for key in keys {
+                collect_claim_field_param(&key.value, ColumnType::Uuid, params);
+            }
+        }
+        RowSetExpr::Slice {
+            partition_by,
+            tie_breaker,
+            ..
+        } => {
+            for value in partition_by.iter().chain(tie_breaker) {
+                collect_claim_field_param(value, ColumnType::Uuid, params);
+            }
+        }
+        RowSetExpr::Aggregate {
+            group_by, outputs, ..
+        } => {
+            for value in group_by {
+                collect_claim_field_param(value, ColumnType::Uuid, params);
+            }
+            for output in outputs {
+                if let Some(input) = &output.input {
+                    collect_claim_field_param(input, output.output.ty.clone(), params);
+                }
+            }
+        }
+        RowSetExpr::ValueSource { .. }
+        | RowSetExpr::FrontierSource { .. }
+        | RowSetExpr::Source { .. }
+        | RowSetExpr::Union { .. } => {}
+    }
+}
+
+fn collect_claim_field_params_from_predicate(
+    predicate: &NormalizedPredicateExpr,
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) {
+    match predicate {
+        NormalizedPredicateExpr::True | NormalizedPredicateExpr::False => {}
+        NormalizedPredicateExpr::Compare { left, right, .. } => {
+            collect_claim_field_param(left, ColumnType::Uuid, params);
+            collect_claim_field_param(right, ColumnType::Uuid, params);
+        }
+        NormalizedPredicateExpr::In { value, options } => {
+            collect_claim_field_param(value, ColumnType::Uuid, params);
+            for option in options {
+                collect_claim_field_param(option, ColumnType::Uuid, params);
+            }
+        }
+        NormalizedPredicateExpr::ArrayContains { value, needle }
+        | NormalizedPredicateExpr::TextContains { value, needle } => {
+            collect_claim_field_param(value, ColumnType::Uuid, params);
+            collect_claim_field_param(needle, ColumnType::Uuid, params);
+        }
+        NormalizedPredicateExpr::IsNull(value) | NormalizedPredicateExpr::IsNotNull(value) => {
+            collect_claim_field_param(value, ColumnType::Uuid, params);
+        }
+        NormalizedPredicateExpr::And(children) | NormalizedPredicateExpr::Or(children) => {
+            for child in children {
+                collect_claim_field_params_from_predicate(child, params);
+            }
+        }
+        NormalizedPredicateExpr::Not(child) => {
+            collect_claim_field_params_from_predicate(child, params);
+        }
+    }
+}
+
+fn collect_claim_field_param(
+    value: &NormalizedValueRef,
+    ty: ColumnType,
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) {
+    let NormalizedValueRef::Param(param) = value else {
+        return;
+    };
+    let Some(path) = claim_path_from_param_field(param) else {
+        return;
+    };
+    params
+        .entry(param.clone())
+        .or_insert(ProgramClaimParam { path, ty });
 }
 
 fn bind_query_predicate(
@@ -9227,6 +9421,8 @@ mod tests {
         );
         query.reachable[0].seed = Some(crate::query::ReachableSeed {
             table: "teamSeeds".to_owned(),
+            user_column: None,
+            user_claim: None,
             team_column: "team".to_owned(),
             filters: vec![eq(col("kind"), lit("sync"))],
         });
@@ -9343,6 +9539,8 @@ mod tests {
         );
         query.reachable[0].seed = Some(crate::query::ReachableSeed {
             table: "teamSeeds".to_owned(),
+            user_column: None,
+            user_claim: None,
             team_column: "team".to_owned(),
             filters: vec![eq(col("id"), lit(Value::Uuid(seed.0)))],
         });
