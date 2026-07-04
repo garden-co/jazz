@@ -27,8 +27,8 @@ use crate::schema::{
     PrimaryKeyColumn, PrimaryKeyType, TableSchema,
 };
 use crate::storage::{
-    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StorageLayout,
-    WindowConsolidation, WriteOperation, is_windowed_history_table,
+    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
+    StorageLayout, WindowConsolidation, WriteOperation, is_windowed_history_table,
 };
 use thiserror::Error;
 
@@ -143,6 +143,16 @@ where
 
     pub fn open_batch(&self) -> DatabaseBatch {
         DatabaseBatch::default()
+    }
+
+    /// Open a staged batch whose reads observe writes already added to the
+    /// batch. Committing the staged batch runs exactly one IVM tick and one
+    /// storage write, just like [`Database::commit_batch`].
+    pub fn open_staged_batch(&mut self) -> StagedDatabaseBatch<'_, S> {
+        StagedDatabaseBatch {
+            database: self,
+            batch: DatabaseBatch::default(),
+        }
     }
 
     /// Return a typed handle for a schema-declared direct record store.
@@ -815,34 +825,27 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<Record<'_>>, Error> {
-        let table_schema = self.table(table)?;
-        let primary_key = table_schema
-            .primary_key
-            .as_ref()
-            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
-        if prefix.len() > primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: prefix.len(),
-            });
-        }
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.primary_key_scan_with_storage(&storage, table, prefix)
+    }
+
+    fn primary_key_scan_with_storage<'a, T>(
+        &'a self,
+        storage: &T,
+        table: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<Record<'a>>, Error>
+    where
+        T: OrderedKvStorage,
+    {
+        let raw = self.primary_key_scan_raw_with_storage(storage, table, prefix)?;
         let descriptor = self
             .ivm_runtime
             .table_descriptor(table)
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
-        let mut key_prefix = Vec::new();
-        for (value, column) in prefix.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut key_prefix, value);
-        }
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
-        Ok(store
-            .prefix(&key_prefix)?
+        Ok(raw
             .into_iter()
-            .map(|(_, record)| descriptor.bind_owned(record))
+            .map(|entry| descriptor.bind_owned(entry.into_parts().1))
             .collect())
     }
 
@@ -856,6 +859,19 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.primary_key_scan_raw_with_storage(&storage, table, prefix)
+    }
+
+    fn primary_key_scan_raw_with_storage<'a, T>(
+        &'a self,
+        storage: &T,
+        table: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'a>>, Error>
+    where
+        T: OrderedKvStorage,
+    {
         let table_schema = self.table(table)?;
         let primary_key = table_schema
             .primary_key
@@ -877,14 +893,50 @@ where
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut key_prefix, value);
         }
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
+        let store = record_store_for_table(storage, table, Some(key_descriptor), descriptor);
         Ok(store
             .prefix(&key_prefix)?
             .into_iter()
             .map(|(key, value)| EncodedKeyValue::new(key, value, descriptor))
             .collect())
+    }
+
+    fn primary_key_last_raw_with_storage<'a, T>(
+        &'a self,
+        storage: &T,
+        table: &str,
+        prefix: &[Value],
+    ) -> Result<Option<EncodedKeyValue<'a>>, Error>
+    where
+        T: OrderedKvStorage,
+    {
+        let table_schema = self.table(table)?;
+        let primary_key = table_schema
+            .primary_key
+            .as_ref()
+            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
+        if prefix.len() > primary_key.columns.len() {
+            return Err(Error::PrimaryKeyArity {
+                table: table.to_owned(),
+                expected: primary_key.columns.len(),
+                actual: prefix.len(),
+            });
+        }
+        let descriptor = self
+            .ivm_runtime
+            .table_descriptor(table)
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let mut key_prefix = Vec::new();
+        for (value, column) in prefix.iter().zip(&primary_key.columns) {
+            ensure_primary_key_value_type(table_schema, column, value)?;
+            encode_primary_key_part(&mut key_prefix, value);
+        }
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(storage, table, Some(key_descriptor), descriptor);
+        Ok(store
+            .last_with_prefix(&key_prefix)?
+            .map(|(key, value)| EncodedKeyValue::new(key, value, descriptor)))
     }
 
     /// Return encoded records for an explicit primary-key logical range.
@@ -950,33 +1002,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        let table_schema = self.table(table)?;
-        let primary_key = table_schema
-            .primary_key
-            .as_ref()
-            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
-        if prefix.len() > primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: prefix.len(),
-            });
-        }
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
-        let mut key_prefix = Vec::new();
-        for (value, column) in prefix.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut key_prefix, value);
-        }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
-        Ok(store
-            .last_with_prefix(&key_prefix)?
-            .map(|(key, value)| EncodedKeyValue::new(key, value, descriptor)))
+        self.primary_key_last_raw_with_storage(&storage, table, prefix)
     }
 
     /// Return the last encoded record whose primary key starts with `prefix`
@@ -1370,58 +1397,7 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
-        let mut pending_writes = Vec::with_capacity(batch.operations.len());
-
-        for operation in batch.operations {
-            match operation {
-                BatchOperation::Insert { table, values } => {
-                    let table_schema = self.table(&table)?;
-                    let record = encode_record(table_schema, &values)?;
-                    let key = primary_key_bytes(table_schema, &record)?;
-                    pending_writes.push(PendingTableWrite::Set {
-                        mode: WriteMode::Insert,
-                        table,
-                        key,
-                        record,
-                    });
-                }
-                BatchOperation::InsertRaw { table, key, record } => {
-                    self.table(&table)?;
-                    pending_writes.push(PendingTableWrite::Set {
-                        mode: WriteMode::Insert,
-                        table,
-                        key: key.into_bytes(),
-                        record,
-                    });
-                }
-                BatchOperation::Update { table, values } => {
-                    let table_schema = self.table(&table)?;
-                    let record = encode_record(table_schema, &values)?;
-                    let key = primary_key_bytes(table_schema, &record)?;
-                    pending_writes.push(PendingTableWrite::Set {
-                        mode: WriteMode::Update,
-                        table,
-                        key,
-                        record,
-                    });
-                }
-                BatchOperation::UpdateRaw { table, key, record } => {
-                    self.table(&table)?;
-                    pending_writes.push(PendingTableWrite::Set {
-                        mode: WriteMode::Update,
-                        table,
-                        key: key.into_bytes(),
-                        record,
-                    });
-                }
-                BatchOperation::Delete { table, key } => {
-                    self.table(&table)?;
-                    let key = key.into_bytes();
-                    pending_writes.push(PendingTableWrite::Delete { table, key });
-                }
-            }
-        }
-
+        let pending_writes = self.pending_writes_from_batch(batch)?;
         self.commit_pending_writes(pending_writes)
     }
 
@@ -1505,6 +1481,67 @@ where
             tick,
         });
         Ok(())
+    }
+
+    fn pending_writes_from_batch(
+        &self,
+        batch: DatabaseBatch,
+    ) -> Result<Vec<PendingTableWrite>, Error> {
+        let mut pending_writes = Vec::with_capacity(batch.operations.len());
+
+        for operation in batch.operations {
+            match operation {
+                BatchOperation::Insert { table, values } => {
+                    let table_schema = self.table(&table)?;
+                    let record = encode_record(table_schema, &values)?;
+                    let key = primary_key_bytes(table_schema, &record)?;
+                    pending_writes.push(PendingTableWrite::Set {
+                        mode: WriteMode::Insert,
+                        table,
+                        key,
+                        record,
+                    });
+                }
+                BatchOperation::InsertRaw { table, key, record } => {
+                    self.table(&table)?;
+                    pending_writes.push(PendingTableWrite::Set {
+                        mode: WriteMode::Insert,
+                        table,
+                        key: key.into_bytes(),
+                        record,
+                    });
+                }
+                BatchOperation::Update { table, values } => {
+                    let table_schema = self.table(&table)?;
+                    let record = encode_record(table_schema, &values)?;
+                    let key = primary_key_bytes(table_schema, &record)?;
+                    pending_writes.push(PendingTableWrite::Set {
+                        mode: WriteMode::Update,
+                        table,
+                        key,
+                        record,
+                    });
+                }
+                BatchOperation::UpdateRaw { table, key, record } => {
+                    self.table(&table)?;
+                    pending_writes.push(PendingTableWrite::Set {
+                        mode: WriteMode::Update,
+                        table,
+                        key: key.into_bytes(),
+                        record,
+                    });
+                }
+                BatchOperation::Delete { table, key } => {
+                    self.table(&table)?;
+                    pending_writes.push(PendingTableWrite::Delete {
+                        table,
+                        key: key.into_bytes(),
+                    });
+                }
+            }
+        }
+
+        Ok(pending_writes)
     }
 
     fn table(&self, table: &str) -> Result<&TableSchema, Error> {
@@ -2436,6 +2473,134 @@ fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
             })
         })
         .collect()
+}
+
+/// Mutable staged table writes whose reads observe writes already added to the
+/// stage. Commit runs one normal database batch commit, so current callers of
+/// [`Database::commit_batch`] and staged callers share the final tick/write path.
+pub struct StagedDatabaseBatch<'a, S>
+where
+    S: OrderedKvStorage,
+{
+    database: &'a mut Database<S>,
+    batch: DatabaseBatch,
+}
+
+impl<S> StagedDatabaseBatch<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    pub fn reserve(&mut self, additional: usize) {
+        self.batch.reserve(additional);
+    }
+
+    pub fn insert(&mut self, table: impl Into<String>, values: Vec<Value>) {
+        self.batch.insert(table, values);
+    }
+
+    pub fn insert_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
+        self.batch.insert_raw(table, key, record);
+    }
+
+    pub fn update(&mut self, table: impl Into<String>, values: Vec<Value>) {
+        self.batch.update(table, values);
+    }
+
+    pub fn update_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
+        self.batch.update_raw(table, key, record);
+    }
+
+    pub fn delete(&mut self, table: impl Into<String>, key: PrimaryKeyValue) {
+        self.batch.delete(table, key);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.batch.is_empty()
+    }
+
+    pub fn primary_key_scan(
+        &self,
+        table: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<Record<'_>>, Error> {
+        let staged = self.staged_operations()?;
+        let staged = RefCell::new(staged);
+        let overlay = StagedWriteOverlay::new(&self.database.storage, &staged);
+        let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
+        self.database
+            .primary_key_scan_with_storage(&storage, table, prefix)
+    }
+
+    pub fn primary_key_scan_raw(
+        &self,
+        table: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        let staged = self.staged_operations()?;
+        let staged = RefCell::new(staged);
+        let overlay = StagedWriteOverlay::new(&self.database.storage, &staged);
+        let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
+        self.database
+            .primary_key_scan_raw_with_storage(&storage, table, prefix)
+    }
+
+    pub fn primary_key_last_raw(
+        &self,
+        table: &str,
+        prefix: &[Value],
+    ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
+        let staged = self.staged_operations()?;
+        let staged = RefCell::new(staged);
+        let overlay = StagedWriteOverlay::new(&self.database.storage, &staged);
+        let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
+        self.database
+            .primary_key_last_raw_with_storage(&storage, table, prefix)
+    }
+
+    pub fn commit(self) -> Result<(), Error> {
+        self.database.commit_batch(self.batch)
+    }
+
+    fn staged_operations(&self) -> Result<Vec<OwnedWriteOperation>, Error> {
+        let pending = self
+            .database
+            .pending_writes_from_batch(self.batch.clone())?;
+        let descriptors = pending
+            .iter()
+            .map(|write| {
+                self.database
+                    .table(write.table())
+                    .map(|table| table.record_schema())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let stores = pending
+            .iter()
+            .zip(&descriptors)
+            .map(|(write, descriptor)| {
+                let key_descriptor = self
+                    .database
+                    .table(write.table())
+                    .ok()
+                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
+                record_store_for_table(
+                    &self.database.storage,
+                    write.table(),
+                    key_descriptor,
+                    descriptor,
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(pending
+            .iter()
+            .zip(&stores)
+            .map(|(write, store)| match write {
+                PendingTableWrite::Set { key, record, .. } => {
+                    owned_write_operation(&store.set(key, record))
+                }
+                PendingTableWrite::Delete { key, .. } => owned_write_operation(&store.delete(key)),
+            })
+            .collect())
+    }
 }
 
 /// Mutable collection of table writes committed atomically at storage level.
