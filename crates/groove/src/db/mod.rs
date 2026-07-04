@@ -10,7 +10,7 @@
 //! and how subscriptions are exposed above the engine.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str;
 
 use web_time::{Duration, Instant};
@@ -27,7 +27,7 @@ use crate::schema::{
     PrimaryKeyColumn, PrimaryKeyType, TableSchema,
 };
 use crate::storage::{
-    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
+    Key, KeyValue, LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore,
     StorageLayout, WindowConsolidation, WriteOperation, is_windowed_history_table,
 };
 use thiserror::Error;
@@ -871,9 +871,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        let staged = self.staged_operations_from_batch(batch)?;
-        let staged = RefCell::new(staged);
-        let overlay = StagedWriteOverlay::new(&self.storage, &staged);
+        self.ensure_batch_read_index(batch)?;
+        let overlay = IndexedBatchOverlay::new(&self.storage, &batch.read_index);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.primary_key_scan_raw_with_storage(&storage, table, prefix)
     }
@@ -1029,9 +1028,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        let staged = self.staged_operations_from_batch(batch)?;
-        let staged = RefCell::new(staged);
-        let overlay = StagedWriteOverlay::new(&self.storage, &staged);
+        self.ensure_batch_read_index(batch)?;
+        let overlay = IndexedBatchOverlay::new(&self.storage, &batch.read_index);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.primary_key_last_raw_with_storage(&storage, table, prefix)
     }
@@ -1230,9 +1228,8 @@ where
         index_name: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        let staged = self.staged_operations_from_batch(batch)?;
-        let staged = RefCell::new(staged);
-        let overlay = StagedWriteOverlay::new(&self.storage, &staged);
+        self.ensure_batch_read_index(batch)?;
+        let overlay = IndexedBatchOverlay::new(&self.storage, &batch.read_index);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.index_scan_raw_with_storage(&storage, table, index_name, prefix)
     }
@@ -1559,95 +1556,76 @@ where
         let mut pending_writes = Vec::with_capacity(operations.len());
 
         for operation in operations {
-            match operation {
-                BatchOperation::Insert { table, values } => {
-                    let table_schema = self.table(table)?;
-                    let record = encode_record(table_schema, values)?;
-                    let key = primary_key_bytes(table_schema, &record)?;
-                    pending_writes.push(PendingTableWrite::Set {
-                        mode: WriteMode::Insert,
-                        table: table.clone(),
-                        key,
-                        record,
-                    });
-                }
-                BatchOperation::InsertRaw { table, key, record } => {
-                    self.table(table)?;
-                    pending_writes.push(PendingTableWrite::Set {
-                        mode: WriteMode::Insert,
-                        table: table.clone(),
-                        key: key.clone().into_bytes(),
-                        record: record.clone(),
-                    });
-                }
-                BatchOperation::Update { table, values } => {
-                    let table_schema = self.table(table)?;
-                    let record = encode_record(table_schema, values)?;
-                    let key = primary_key_bytes(table_schema, &record)?;
-                    pending_writes.push(PendingTableWrite::Set {
-                        mode: WriteMode::Update,
-                        table: table.clone(),
-                        key,
-                        record,
-                    });
-                }
-                BatchOperation::UpdateRaw { table, key, record } => {
-                    self.table(table)?;
-                    pending_writes.push(PendingTableWrite::Set {
-                        mode: WriteMode::Update,
-                        table: table.clone(),
-                        key: key.clone().into_bytes(),
-                        record: record.clone(),
-                    });
-                }
-                BatchOperation::Delete { table, key } => {
-                    self.table(table)?;
-                    pending_writes.push(PendingTableWrite::Delete {
-                        table: table.clone(),
-                        key: key.clone().into_bytes(),
-                    });
-                }
-            }
+            pending_writes.push(self.pending_write_from_operation(operation)?);
         }
 
         Ok(pending_writes)
     }
 
-    fn staged_operations_from_batch(
-        &self,
-        batch: &DatabaseBatch,
-    ) -> Result<Vec<OwnedWriteOperation>, Error> {
-        if let Some(staged_operations) = batch.staged_operations_cache.borrow().as_ref() {
-            return Ok(staged_operations.clone());
+    fn ensure_batch_read_index(&self, batch: &DatabaseBatch) -> Result<(), Error> {
+        let mut read_index = batch.read_index.borrow_mut();
+        while read_index.indexed_operations < batch.operations.len() {
+            let operation = &batch.operations[read_index.indexed_operations];
+            let pending = self.pending_write_from_operation(operation)?;
+            read_index.apply_pending(pending);
+            read_index.indexed_operations += 1;
         }
-        let pending = self.pending_writes_from_operations(&batch.operations)?;
-        let descriptors = pending
-            .iter()
-            .map(|write| self.table(write.table()).map(|table| table.record_schema()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let stores = pending
-            .iter()
-            .zip(&descriptors)
-            .map(|(write, descriptor)| {
-                let key_descriptor = self
-                    .table(write.table())
-                    .ok()
-                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
-                record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
-            })
-            .collect::<Vec<_>>();
-        let staged_operations = pending
-            .iter()
-            .zip(&stores)
-            .map(|(write, store)| match write {
-                PendingTableWrite::Set { key, record, .. } => {
-                    owned_write_operation(&store.set(key, record))
-                }
-                PendingTableWrite::Delete { key, .. } => owned_write_operation(&store.delete(key)),
-            })
-            .collect::<Vec<_>>();
-        *batch.staged_operations_cache.borrow_mut() = Some(staged_operations.clone());
-        Ok(staged_operations)
+        Ok(())
+    }
+
+    fn pending_write_from_operation(
+        &self,
+        operation: &BatchOperation,
+    ) -> Result<PendingTableWrite, Error> {
+        match operation {
+            BatchOperation::Insert { table, values } => {
+                let table_schema = self.table(table)?;
+                let record = encode_record(table_schema, values)?;
+                let key = primary_key_bytes(table_schema, &record)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Insert,
+                    table: table.clone(),
+                    key,
+                    record,
+                })
+            }
+            BatchOperation::InsertRaw { table, key, record } => {
+                self.table(table)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Insert,
+                    table: table.clone(),
+                    key: key.clone().into_bytes(),
+                    record: record.clone(),
+                })
+            }
+            BatchOperation::Update { table, values } => {
+                let table_schema = self.table(table)?;
+                let record = encode_record(table_schema, values)?;
+                let key = primary_key_bytes(table_schema, &record)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Update,
+                    table: table.clone(),
+                    key,
+                    record,
+                })
+            }
+            BatchOperation::UpdateRaw { table, key, record } => {
+                self.table(table)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Update,
+                    table: table.clone(),
+                    key: key.clone().into_bytes(),
+                    record: record.clone(),
+                })
+            }
+            BatchOperation::Delete { table, key } => {
+                self.table(table)?;
+                Ok(PendingTableWrite::Delete {
+                    table: table.clone(),
+                    key: key.clone().into_bytes(),
+                })
+            }
+        }
     }
 
     fn table(&self, table: &str) -> Result<&TableSchema, Error> {
@@ -2256,6 +2234,204 @@ impl<'a> EncodedKeyValue<'a> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StagedReadOutcome {
+    Upsert(Vec<u8>),
+    Tombstone,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct BatchReadIndex {
+    indexed_operations: usize,
+    entries: BTreeMap<(String, Vec<u8>), StagedReadOutcome>,
+}
+
+impl BatchReadIndex {
+    fn apply_pending(&mut self, write: PendingTableWrite) {
+        match write {
+            PendingTableWrite::Set {
+                table, key, record, ..
+            } => {
+                self.entries
+                    .insert((table, key), StagedReadOutcome::Upsert(record));
+            }
+            PendingTableWrite::Delete { table, key } => {
+                self.entries
+                    .insert((table, key), StagedReadOutcome::Tombstone);
+            }
+        }
+    }
+}
+
+struct IndexedBatchOverlay<'a, S> {
+    base: &'a S,
+    index: &'a RefCell<BatchReadIndex>,
+}
+
+impl<'a, S> IndexedBatchOverlay<'a, S> {
+    fn new(base: &'a S, index: &'a RefCell<BatchReadIndex>) -> Self {
+        Self { base, index }
+    }
+
+    fn overlay_prefix_values(
+        values: &mut Vec<KeyValue>,
+        cf: &str,
+        prefix: &[u8],
+        index: &RefCell<BatchReadIndex>,
+    ) {
+        let mut merged = values.drain(..).collect::<BTreeMap<_, _>>();
+        let index = index.borrow();
+        let start = (cf.to_owned(), prefix.to_vec());
+        for ((entry_cf, key), outcome) in index.entries.range(start..) {
+            if entry_cf != cf || !key.starts_with(prefix) {
+                break;
+            }
+            match outcome {
+                StagedReadOutcome::Upsert(record) => {
+                    merged.insert(key.clone(), record.clone());
+                }
+                StagedReadOutcome::Tombstone => {
+                    merged.remove(key);
+                }
+            }
+        }
+        *values = merged.into_iter().collect();
+    }
+
+    fn overlay_range_values(
+        values: &mut Vec<KeyValue>,
+        cf: &str,
+        start_key: &[u8],
+        end_key: &[u8],
+        index: &RefCell<BatchReadIndex>,
+    ) {
+        let mut merged = values.drain(..).collect::<BTreeMap<_, _>>();
+        let index = index.borrow();
+        let start = (cf.to_owned(), start_key.to_vec());
+        for ((entry_cf, key), outcome) in index.entries.range(start..) {
+            if entry_cf != cf || key.as_slice() >= end_key {
+                break;
+            }
+            match outcome {
+                StagedReadOutcome::Upsert(record) => {
+                    merged.insert(key.clone(), record.clone());
+                }
+                StagedReadOutcome::Tombstone => {
+                    merged.remove(key);
+                }
+            }
+        }
+        *values = merged.into_iter().collect();
+    }
+}
+
+impl<S> OrderedKvStorage for IndexedBatchOverlay<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        key: &Key,
+    ) -> Result<Option<Vec<u8>>, crate::storage::Error> {
+        match self
+            .index
+            .borrow()
+            .entries
+            .get(&(cf.to_owned(), key.to_vec()))
+        {
+            Some(StagedReadOutcome::Upsert(record)) => Ok(Some(record.clone())),
+            Some(StagedReadOutcome::Tombstone) => Ok(None),
+            None => self.base.get(cf, key),
+        }
+    }
+
+    fn set(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        key: &Key,
+        value: &[u8],
+    ) -> Result<(), crate::storage::Error> {
+        self.base.set(cf, key, value)
+    }
+
+    fn delete(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        key: &Key,
+    ) -> Result<(), crate::storage::Error> {
+        self.base.delete(cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut crate::storage::ScanVisitor<'_>,
+    ) -> Result<(), crate::storage::Error> {
+        let mut values = self.base.range(cf, start, end)?;
+        Self::overlay_range_values(&mut values, cf, start, end, self.index);
+        for (key, value) in values {
+            visit(&key, &value)?;
+        }
+        Ok(())
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut crate::storage::ScanVisitor<'_>,
+    ) -> Result<(), crate::storage::Error> {
+        let mut values = self.base.prefix(cf, prefix)?;
+        Self::overlay_prefix_values(&mut values, cf, prefix, self.index);
+        for (key, value) in values {
+            visit(&key, &value)?;
+        }
+        Ok(())
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut crate::storage::ScanVisitor<'_>,
+    ) -> Result<(), crate::storage::Error> {
+        let mut values = self.base.prefix(cf, prefix)?;
+        Self::overlay_prefix_values(&mut values, cf, prefix, self.index);
+        for (key, value) in values.into_iter().rev() {
+            visit(&key, &value)?;
+        }
+        Ok(())
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<KeyValue>, crate::storage::Error> {
+        let mut values = self.base.prefix(cf, prefix)?;
+        Self::overlay_prefix_values(&mut values, cf, prefix, self.index);
+        Ok(values.into_iter().last())
+    }
+
+    fn approximate_class_bytes(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+    ) -> Result<Option<u64>, crate::storage::Error> {
+        self.base.approximate_class_bytes(cf)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), crate::storage::Error> {
+        self.base.write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.base.column_family_names()
+    }
+}
+
 fn write_operation_bytes(operation: &crate::storage::WriteOperation<'_>) -> usize {
     match operation {
         crate::storage::WriteOperation::Set { key, value, .. } => key.len() + value.len(),
@@ -2629,9 +2805,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<Record<'_>>, Error> {
-        let staged = self.staged_operations()?;
-        let staged = RefCell::new(staged);
-        let overlay = StagedWriteOverlay::new(&self.database.storage, &staged);
+        self.database.ensure_batch_read_index(&self.batch)?;
+        let overlay = IndexedBatchOverlay::new(&self.database.storage, &self.batch.read_index);
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_scan_with_storage(&storage, table, prefix)
@@ -2642,9 +2817,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        let staged = self.staged_operations()?;
-        let staged = RefCell::new(staged);
-        let overlay = StagedWriteOverlay::new(&self.database.storage, &staged);
+        self.database.ensure_batch_read_index(&self.batch)?;
+        let overlay = IndexedBatchOverlay::new(&self.database.storage, &self.batch.read_index);
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_scan_raw_with_storage(&storage, table, prefix)
@@ -2655,9 +2829,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        let staged = self.staged_operations()?;
-        let staged = RefCell::new(staged);
-        let overlay = StagedWriteOverlay::new(&self.database.storage, &staged);
+        self.database.ensure_batch_read_index(&self.batch)?;
+        let overlay = IndexedBatchOverlay::new(&self.database.storage, &self.batch.read_index);
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_last_raw_with_storage(&storage, table, prefix)
@@ -2666,17 +2839,13 @@ where
     pub fn commit(self) -> Result<(), Error> {
         self.database.commit_batch(self.batch)
     }
-
-    fn staged_operations(&self) -> Result<Vec<OwnedWriteOperation>, Error> {
-        self.database.staged_operations_from_batch(&self.batch)
-    }
 }
 
 /// Mutable collection of table writes committed atomically at storage level.
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseBatch {
     operations: Vec<BatchOperation>,
-    staged_operations_cache: RefCell<Option<Vec<OwnedWriteOperation>>>,
+    read_index: RefCell<BatchReadIndex>,
 }
 
 impl PartialEq for DatabaseBatch {
@@ -2732,7 +2901,6 @@ impl DatabaseBatch {
     }
 
     fn push_operation(&mut self, operation: BatchOperation) {
-        *self.staged_operations_cache.borrow_mut() = None;
         self.operations.push(operation);
     }
 }
