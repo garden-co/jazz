@@ -1273,47 +1273,48 @@ where
         self.ingest_transaction_and_versions(tx, versions, fate, global_seq, durability)
     }
 
-    pub(super) fn ingest_cold_view_bundles_if_empty(
+    pub(super) fn ingest_reset_view_bundles_in_bulk(
         &mut self,
         bundles: &[VersionBundle],
-    ) -> Result<bool, Error> {
-        if bundles.is_empty() || self.clock.applied_global_watermark != GlobalSeq(0) {
-            return Ok(false);
-        }
-        if !self
-            .database
-            .primary_key_scan_raw("jazz_transactions", &[])?
-            .is_empty()
-        {
-            return Ok(false);
-        }
+    ) -> Result<BTreeSet<TxId>, Error> {
+        let mut eligible = Vec::new();
+        let mut loaded_tx_ids = BTreeSet::new();
         for bundle in bundles {
             if bundle.fate != Fate::Accepted || bundle.global_seq.is_none() {
-                return Ok(false);
+                continue;
             }
             if bundle.tx.kind != TxKind::Mergeable && bundle.tx.kind != TxKind::Exclusive {
-                return Ok(false);
+                continue;
             }
             if bundle.tx.kind == TxKind::Exclusive
                 && usize::try_from(bundle.tx.n_total_writes).ok() != Some(bundle.versions.len())
             {
-                return Ok(false);
+                continue;
             }
+            if self.query_transaction(bundle.tx.tx_id)?.is_some() {
+                continue;
+            }
+            if loaded_tx_ids.insert(bundle.tx.tx_id) {
+                eligible.push(bundle);
+            }
+        }
+        if eligible.is_empty() {
+            return Ok(loaded_tx_ids);
         }
 
         let mut batch = self.database.open_batch();
-        let version_count = bundles
+        let version_count = eligible
             .iter()
             .map(|bundle| bundle.versions.len())
             .sum::<usize>();
-        batch.reserve(bundles.len() + version_count.saturating_mul(2));
+        batch.reserve(eligible.len() + version_count.saturating_mul(2));
         let mut current_updates =
             BTreeMap::<(String, RowUuid, VersionLayer), (VersionRow, GlobalSeq)>::new();
         #[cfg(test)]
         let mut content_rows = BTreeSet::<(String, RowUuid)>::new();
-        let mut applied_global_seqs = Vec::with_capacity(bundles.len());
+        let mut applied_global_seqs = Vec::with_capacity(eligible.len());
 
-        for bundle in bundles {
+        for bundle in eligible {
             let tx = &bundle.tx;
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
             let global_seq = bundle.global_seq.expect("checked above");
@@ -1441,12 +1442,15 @@ where
             self.assert_global_current_updates_match_history_for_test(&current_update_versions)?;
         }
         for bundle in bundles {
+            if !loaded_tx_ids.contains(&bundle.tx.tx_id) {
+                continue;
+            }
             self.invalidate_tx_version_tables_cache(bundle.tx.tx_id);
         }
         for global_seq in applied_global_seqs {
             self.record_applied_global_seq(global_seq);
         }
-        Ok(true)
+        Ok(loaded_tx_ids)
     }
 
     /// Apply an upstream fate update.
