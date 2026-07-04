@@ -3111,14 +3111,14 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeSet<TxId>>, Error> {
-        let rows = self.database.primary_key_scan_raw(
+        let row = self.database.primary_key_get_raw(
             MERGE_HEADS_TABLE,
             &[
                 Value::Bytes(table.as_bytes().to_vec()),
                 Value::Uuid(row_uuid.0),
             ],
         )?;
-        let Some(row) = rows.first() else {
+        let Some(row) = row else {
             return Ok(None);
         };
         let heads = row.record().get_bytes(2)?;
@@ -3131,7 +3131,7 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeSet<TxId>>, Error> {
-        let rows = self.database.primary_key_scan_raw_in_batch(
+        let row = self.database.primary_key_get_raw_in_batch(
             batch,
             MERGE_HEADS_TABLE,
             &[
@@ -3139,7 +3139,7 @@ where
                 Value::Uuid(row_uuid.0),
             ],
         )?;
-        let Some(row) = rows.first() else {
+        let Some(row) = row else {
             return Ok(None);
         };
         let heads = row.record().get_bytes(2)?;
@@ -3303,12 +3303,12 @@ where
                 base_for_current_names,
             ),
         };
-        let raw = self.database.primary_key_scan_raw_in_batch(
+        let raw = self.database.primary_key_get_raw_in_batch(
             batch,
             &current_table,
             &[Value::Uuid(row_uuid.0)],
         )?;
-        let Some(raw) = raw.first() else {
+        let Some(raw) = raw else {
             return Ok(None);
         };
         let record = raw.record();
@@ -3328,19 +3328,16 @@ where
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
         for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
-            let raw = self
-                .database
-                .primary_key_scan_raw_in_batch(
-                    batch,
-                    &storage_table,
-                    &[
-                        Value::Uuid(row_uuid.0),
-                        Value::U64(tx_time.0),
-                        Value::U64(tx_node_alias.0),
-                    ],
-                )?
-                .first()
-                .map(|raw| raw.raw().to_vec());
+            let raw = self.database.primary_key_get_raw_in_batch(
+                batch,
+                &storage_table,
+                &[
+                    Value::Uuid(row_uuid.0),
+                    Value::U64(tx_time.0),
+                    Value::U64(tx_node_alias.0),
+                ],
+            )?;
+            let raw = raw.map(|raw| raw.raw().to_vec());
             let Some(raw) = raw else {
                 continue;
             };
@@ -3468,22 +3465,27 @@ where
         row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
         let mut versions = Vec::new();
+        let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
+            return Ok(versions);
+        };
         for (storage_table, descriptor) in
             self.version_storage_sources_for_layer(table, VersionLayer::Content)?
         {
-            let raws = self
-                .database
-                .primary_key_scan_raw_in_batch(batch, &storage_table, &[Value::Uuid(row_uuid.0)])?
-                .into_iter()
-                .map(|raw| raw.raw().to_vec())
-                .collect::<Vec<_>>();
-            for raw in raws {
-                let version =
-                    self.decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))?;
-                if self.version_tx_id(&version)? == tx_id {
-                    versions.push(version);
-                }
-            }
+            let Some(raw) = self.database.primary_key_get_raw_in_batch(
+                batch,
+                &storage_table,
+                &[
+                    Value::Uuid(row_uuid.0),
+                    Value::U64(tx_id.time.0),
+                    Value::U64(tx_node_alias.0),
+                ],
+            )?
+            else {
+                continue;
+            };
+            let raw = raw.raw().to_vec();
+            versions
+                .push(self.decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))?);
         }
         Ok(versions)
     }
@@ -4247,7 +4249,7 @@ where
                 target_schema,
                 self.catalogue.current_schema_version_id,
             );
-            let existing = self.database.primary_key_scan_raw_in_batch(
+            let existing = self.database.primary_key_get_raw_in_batch(
                 batch,
                 &history_table,
                 &[
@@ -4256,7 +4258,7 @@ where
                     Value::U64(stored.tx_node_alias().0),
                 ],
             )?;
-            if let Some(existing) = existing.first() {
+            if let Some(existing) = existing {
                 if existing.record().raw() != stored.record.raw() {
                     return Err(Error::ConflictingCommitUnit(tx.tx_id));
                 }
