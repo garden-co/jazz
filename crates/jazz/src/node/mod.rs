@@ -2382,6 +2382,26 @@ where
         Ok(report)
     }
 
+    #[cfg(feature = "testing")]
+    /// Test/bench-only hook for receipt runs that need to drive bounded
+    /// post-tick maintenance to a fixed point without changing production tick
+    /// cadence.
+    pub fn consolidate_history_windows_for_test(
+        &mut self,
+        max_windows: usize,
+    ) -> Result<WindowConsolidation, Error> {
+        self.post_tick_consolidate_history_windows(max_windows)
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only history-class byte estimate. The underlying contract is
+    /// cheap whole-class sizing, not logical-prefix accounting.
+    pub fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
+        self.database
+            .approximate_class_bytes("__groove_class_history")
+            .map_err(Error::Groove)
+    }
+
     pub(crate) fn groove_runtime_token(&self) -> u64 {
         self.groove_runtime_token
     }

@@ -310,7 +310,29 @@ JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s9_durable_execution
 {"driver":"synchronous","git_dirty":true,"hydration_bytes":9420,"hydration_floor_bytes":9420,"hydration_rows":8,"knobs":{"JAZZ_SMOKE":"1"},"phase":"edge_permission_scope_hydration","profile":"s9-smoke","scenario":"s9_durable_execution","scope":"workflow_table_surface","seed":1493172225}
 ```
 
----
+## Focused Receipt: S6 Tail Consolidation (`20260704T001551Z`)
+
+- status: `pass`
+- scope: medium `s6_text_traces`, `automerge-paper`, explicit `JAZZ_S6_CONSOLIDATE_TO_TAIL=1`
+- artifact: `dev/benchmarks/results/20260704T001551Z/s6_text_traces_tail_consolidation.jsonl`
+- invocation:
+
+```sh
+JAZZ_BENCH_PROFILE=profile \
+JAZZ_S6_CONSOLIDATE_TO_TAIL=1 \
+JAZZ_S6_TRACES=automerge-paper \
+JAZZ_S6_BATCHES=1,256 \
+cargo bench -p jazz-sim --bench s6_text_traces -- --nocapture
+```
+
+| route                   | batch | edits | commits | history-class B/edit | total metadata B/edit | windows | records | consolidated fraction | consolidation us |
+| ----------------------- | ----: | ----: | ------: | -------------------: | --------------------: | ------: | ------: | --------------------: | ---------------: |
+| trace_replay            |     1 |   500 |     500 |             2101.248 |              3465.958 |       1 |     256 |                 0.512 |             1292 |
+| db_surface_trace_replay |     1 |   500 |     500 |             2109.440 |              2795.350 |       1 |     256 |                 0.512 |             2018 |
+| trace_replay            |   256 |   500 |       2 |                4.096 |               357.896 |       0 |       0 |                 0.000 |                2 |
+| db_surface_trace_replay |   256 |   500 |       2 |               12.288 |              1057.948 |       0 |       0 |                 0.000 |                9 |
+
+Comparison: pre-codec baselines were `2739 B/edit` for batch=1 and `149 B/edit` for batch=256. The zstd op-log information floor remains approximately `2.9 B/edit`. At medium size, batch=256 creates only two history records, below the 256-record codec window target, so no full window can form; this is expected, not a consolidation failure.
 
 ## Run 2026-07-02T00:31:44Z - step7-jsonl-smoke
 
