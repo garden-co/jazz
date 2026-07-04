@@ -739,13 +739,38 @@ fn expected_visible_counts(seeded: &Seeded, identity: BenchIdentity) -> BTreeMap
             seeded.table_rows[&spec.access_table()].len(),
         );
     }
-    for (child, parents) in &seeded.child_parent {
-        let visible = match identity {
-            BenchIdentity::Member => parents.len(),
-            BenchIdentity::Spy => 0,
-            BenchIdentity::Admin => parents.len(),
-        };
-        out.insert(child.clone(), visible);
+    let mut child_slot = 0;
+    for spec in RESOURCE_SPECS {
+        if spec.child_rows.is_some() {
+            let child_table = spec.child_table(child_slot);
+            let visible_resources = match identity {
+                BenchIdentity::Member => seeded
+                    .access
+                    .get(spec.table)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(resource, group)| {
+                        seeded.visible_groups.contains(group).then_some(*resource)
+                    })
+                    .collect::<BTreeSet<_>>(),
+                BenchIdentity::Spy => BTreeSet::new(),
+                BenchIdentity::Admin => seeded.table_rows[spec.table].iter().copied().collect(),
+            };
+            let visible_children = seeded
+                .child_parent
+                .get(&child_table)
+                .into_iter()
+                .flatten()
+                .filter(|(_child, parent)| visible_resources.contains(parent))
+                .count();
+            out.insert(child_table, visible_children);
+            let child_access_table = spec.child_access_table(child_slot);
+            out.insert(
+                child_access_table.clone(),
+                seeded.table_rows[&child_access_table].len(),
+            );
+            child_slot += 1;
+        }
     }
     for slot in 0..CHILD_TABLES {
         out.entry(format!("empty_child_{slot}")).or_insert(0);
@@ -1049,6 +1074,7 @@ fn subscription_tables() -> Vec<String> {
         tables.push(spec.access_table());
         if spec.child_rows.is_some() {
             tables.push(spec.child_table(child_slot));
+            tables.push(spec.child_access_table(child_slot));
             child_slot += 1;
         }
     }
@@ -1056,7 +1082,7 @@ fn subscription_tables() -> Vec<String> {
         tables.push(format!("empty_child_{child_slot}"));
         child_slot += 1;
     }
-    assert_eq!(tables.len(), 39);
+    assert_eq!(tables.len(), 43);
     tables
 }
 
@@ -1388,7 +1414,7 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     );
     fields.insert(
         "shape_note".to_owned(),
-        json!("39 subscriptions requires six child subscriptions; four populated, two empty"),
+        json!("43 subscriptions: parent/resource/access tables plus six child subscriptions; four populated child tables include derived child-access-edge subscriptions because the public API cannot yet express inherited parent visibility directly"),
     );
     fields.insert(
         "subscription_timeline".to_owned(),
