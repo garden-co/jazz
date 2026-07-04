@@ -1545,13 +1545,8 @@ where
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if stored
-            .global_seq
-            .is_some_and(|global_seq| advanced_global_seqs.contains(&global_seq))
-        {
-            for version in self.query_versions_for_tx(tx_id)? {
-                self.write_ahead_current_delete(&mut batch, &version)?;
-            }
+        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
+            self.cleanup_fated_ahead_current_for_tx(&mut batch, tx_id)?;
         }
         for global_seq in advanced_global_seqs
             .iter()
@@ -3659,6 +3654,57 @@ where
         Ok(())
     }
 
+    /// Once a transaction is rejected or globally settled, it must not remain
+    /// in the ahead-current overlay: accepted global effects live in current
+    /// tables, and rejected effects are no longer visible. Edge-accepted
+    /// no-global transactions intentionally stay ahead-visible at Edge tier.
+    /// Outbox/redelivery may keep the commit unit until fate arrives, so
+    /// callers invoke this strictly after the cleanup-triggering fate is durable.
+    pub(super) fn cleanup_fated_ahead_current_for_tx(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        tx_id: TxId,
+    ) -> Result<(), Error> {
+        for version in self.query_versions_for_tx(tx_id)? {
+            self.write_ahead_current_delete(batch, &version)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn cleanup_settled_ahead_current_leftovers(&mut self) -> Result<(), Error> {
+        let mut tx_ids = Vec::new();
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_transactions", &[])?
+        {
+            let record = raw.record();
+            let fate = fate_from_encoded_fields(record)?;
+            let global_seq = record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
+            if !matches!(fate, Fate::Rejected(_)) && global_seq.is_none() {
+                continue;
+            }
+            let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+            let node = self
+                .node_for_alias(node_alias)
+                .ok_or(Error::InvalidStoredValue(
+                    "transaction node alias must exist",
+                ))?;
+            tx_ids.push(TxId::new(
+                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                node,
+            ));
+        }
+        if tx_ids.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.database.open_batch();
+        for tx_id in tx_ids {
+            self.cleanup_fated_ahead_current_for_tx(&mut batch, tx_id)?;
+        }
+        self.database.commit_batch(batch)?;
+        Ok(())
+    }
+
     fn prune_ahead_current_for_global_seq(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -3954,21 +4000,17 @@ where
         };
         if let Some(global_seq) = accepted_global_seq {
             let advanced_global_seqs = self.record_applied_global_seq(global_seq);
+            let mut batch = self.database.open_batch();
+            self.cleanup_fated_ahead_current_for_tx(&mut batch, tx.tx_id)?;
             if !advanced_global_seqs.is_empty() {
-                let mut batch = self.database.open_batch();
-                if advanced_global_seqs.contains(&global_seq) {
-                    for version in self.query_versions_for_tx(tx.tx_id)? {
-                        self.write_ahead_current_delete(&mut batch, &version)?;
-                    }
-                }
                 for advanced in advanced_global_seqs
                     .into_iter()
                     .filter(|advanced| *advanced != global_seq)
                 {
                     self.prune_ahead_current_for_global_seq(&mut batch, advanced)?;
                 }
-                self.database.commit_batch(batch)?;
             }
+            self.database.commit_batch(batch)?;
         }
         Ok(())
     }

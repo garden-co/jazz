@@ -43,6 +43,56 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
         .unwrap();
     assert_eq!(next_tx.time, TxTime::from(11));
 }
+
+#[test]
+fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id;
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(12), 10).cells(title_cells("crash window")),
+            )
+            .unwrap();
+        assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
+
+        let mut stored = node.query_transaction(tx_id).unwrap().unwrap();
+        stored.fate = Fate::Accepted;
+        stored.global_seq = Some(GlobalSeq(1));
+        stored.durability = DurabilityTier::Global;
+        let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+        let mut batch = node.database.open_batch();
+        batch.update(
+            "jazz_transactions",
+            transaction_values(
+                stored.node_alias,
+                &stored.tx,
+                stored.fate.clone(),
+                stored.global_seq,
+                stored.durability,
+            ),
+        );
+        node.write_global_current_update(&mut batch, &version, GlobalSeq(1))
+            .unwrap();
+        node.database.commit_batch(batch).unwrap();
+        assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
+    }
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(12), title_cells("crash window"))])
+    );
+}
+
 #[test]
 fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
     let schema = schema();
