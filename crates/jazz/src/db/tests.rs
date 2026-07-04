@@ -3062,6 +3062,7 @@ impl CoreDb {
                 .cells(cells),
         )?;
         node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        self.server.mark_subscriber_connections_dirty();
         Ok(WriteHandle {
             node: Rc::downgrade(&node),
             row_uuid: row,
@@ -3085,6 +3086,7 @@ impl CoreDb {
                 .cells(cells),
         )?;
         node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        self.server.mark_subscriber_connections_dirty();
         Ok(WriteHandle {
             node: Rc::downgrade(&node),
             row_uuid: row,
@@ -3141,6 +3143,7 @@ impl CoreDb {
         }
         let tx_id = node.borrow_mut().commit_mergeable(commit)?;
         node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        self.server.mark_subscriber_connections_dirty();
         Ok(WriteHandle {
             node: Rc::downgrade(&node),
             row_uuid: row,
@@ -3292,6 +3295,7 @@ impl CoreExclusiveTx<'_> {
         if let Fate::Rejected(reason) = fate {
             return Err(write_rejected(reason));
         }
+        self.core.server.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
 }
