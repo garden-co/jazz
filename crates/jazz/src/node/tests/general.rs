@@ -185,6 +185,7 @@ fn edge_current_rows_include_edge_accepted_ahead_versions() {
     node.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
         .unwrap();
 
+    assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
     assert_eq!(
         node.current_rows("todos", DurabilityTier::Edge)
             .unwrap()
@@ -197,6 +198,36 @@ fn edge_current_rows_include_edge_accepted_ahead_versions() {
         node.current_rows("todos", DurabilityTier::Global)
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn global_fate_cleans_ahead_current_overlay() {
+    let (_temp_dir, mut node) = open_node();
+    let row = row(0xe3);
+    let tx_id = node
+        .commit_mergeable(
+            MergeableCommit::new("todos", row, 10).cells(title_cells("globally accepted")),
+        )
+        .unwrap();
+    assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
+
+    node.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    assert_eq!(ahead_current_row_count(&mut node, "todos"), 0);
+    assert_eq!(
+        node.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row, title_cells("globally accepted"))])
     );
 }
 

@@ -206,6 +206,7 @@ where
                 .rejected_transactions
                 .insert(tx_id, RejectedTransaction::new(tx_id, record, versions));
         }
+        self.cleanup_settled_ahead_current_leftovers()?;
         Ok(())
     }
 

@@ -2566,6 +2566,7 @@ where
     write_state_waiters: WriteStateWaiters,
     next_write_state_waiter_id: Cell<u64>,
     next_subscription_nonce: Cell<u64>,
+    subscriber_dirty_epoch: Rc<Cell<u64>>,
     edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
 }
 
@@ -2586,6 +2587,7 @@ where
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
+            subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
         }
     }
@@ -2602,10 +2604,13 @@ where
     }
 
     fn mark_subscriber_connections_dirty(&self) {
+        let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
+        self.subscriber_dirty_epoch.set(next);
         for connection in self.connections.borrow().iter() {
             let mut connection = connection.borrow_mut();
             if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut connection.link {
                 *serve_dirty = true;
+                connection.observed_subscriber_dirty_epoch.set(next);
             }
         }
     }
@@ -2743,6 +2748,8 @@ where
             subscriptions: Rc::clone(&self.subscriptions),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
+            subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
+            observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             next_now_ms: Cell::new(1),
             link: ConnectionLink::Upstream {
                 pending,
@@ -2868,6 +2875,8 @@ where
             subscriptions: Rc::clone(&self.subscriptions),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
+            subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
+            observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             next_now_ms: Cell::new(1),
             link: ConnectionLink::Subscriber {
                 peer,
@@ -3325,6 +3334,8 @@ where
     subscriptions: SubscriptionList,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
+    subscriber_dirty_epoch: Rc<Cell<u64>>,
+    observed_subscriber_dirty_epoch: Cell<u64>,
     next_now_ms: Cell<u64>,
     link: ConnectionLink,
     last_resume_bytes: Option<usize>,
@@ -3440,6 +3451,7 @@ where
     pub fn tick(&mut self) -> Result<DbTickStats, Error> {
         let mut stats = DbTickStats::default();
         let tick_now_ms = self.next_now_ms();
+        self.observe_shared_subscriber_dirty_epoch();
         match &mut self.link {
             ConnectionLink::Upstream {
                 pending,
@@ -4043,6 +4055,9 @@ where
                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                 }
                 if applied_inbound {
+                    let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
+                    self.subscriber_dirty_epoch.set(next);
+                    self.observed_subscriber_dirty_epoch.set(next);
                     *serve_dirty = true;
                 }
                 if *serve_dirty {
@@ -4121,9 +4136,22 @@ where
     fn mark_subscriber_dirty(&mut self) -> bool {
         if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut self.link {
             *serve_dirty = true;
+            self.observed_subscriber_dirty_epoch
+                .set(self.subscriber_dirty_epoch.get());
             true
         } else {
             false
+        }
+    }
+
+    fn observe_shared_subscriber_dirty_epoch(&mut self) {
+        let epoch = self.subscriber_dirty_epoch.get();
+        if self.observed_subscriber_dirty_epoch.get() == epoch {
+            return;
+        }
+        self.observed_subscriber_dirty_epoch.set(epoch);
+        if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut self.link {
+            *serve_dirty = true;
         }
     }
 

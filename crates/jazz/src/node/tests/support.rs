@@ -102,6 +102,20 @@ where
         .unwrap()?;
     Some(node.version_tx_id(&winner).unwrap())
 }
+fn ahead_current_row_count<S>(node: &mut NodeState<S>, table: &str) -> usize
+where
+    S: OrderedKvStorage,
+{
+    node.database
+        .primary_key_scan_raw(&ahead_current_table_name(table), &[])
+        .unwrap()
+        .len()
+        + node
+            .database
+            .primary_key_scan_raw(&register_ahead_current_table_name(table), &[])
+            .unwrap()
+            .len()
+}
 fn owner_policy_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
