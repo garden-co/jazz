@@ -863,6 +863,164 @@ fn commits_insert_update_and_delete_batches() {
 }
 
 #[test]
+fn staged_batch_reads_observe_uncommitted_writes() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+
+    let mut staged = database.open_staged_batch();
+    staged.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    assert_eq!(
+        staged
+            .primary_key_scan("albums", &[Value::U64(7)])
+            .unwrap()
+            .into_iter()
+            .map(|record| record.get("title").unwrap())
+            .collect::<Vec<_>>(),
+        vec![Value::String("Blue Train".to_owned())]
+    );
+    staged.update(
+        "albums",
+        vec![Value::U64(7), Value::String("Giant Steps".to_owned())],
+    );
+    assert_eq!(
+        staged
+            .primary_key_scan("albums", &[Value::U64(7)])
+            .unwrap()
+            .into_iter()
+            .map(|record| record.get("title").unwrap())
+            .collect::<Vec<_>>(),
+        vec![Value::String("Giant Steps".to_owned())]
+    );
+    staged.delete("albums", PrimaryKeyValue::U64(7));
+    assert!(
+        staged
+            .primary_key_scan("albums", &[Value::U64(7)])
+            .unwrap()
+            .is_empty()
+    );
+    staged.commit().unwrap();
+
+    assert!(
+        database
+            .primary_key_scan("albums", &[Value::U64(7)])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        database
+            .last_commit_metrics()
+            .unwrap()
+            .tick
+            .table_delta_records,
+        0
+    );
+}
+
+#[test]
+fn staged_batch_commit_ticks_once_for_multiple_writes() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut staged = database.open_staged_batch();
+    staged.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("A Love Supreme".to_owned())],
+    );
+    staged.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Blue Train".to_owned())],
+    );
+    staged.commit().unwrap();
+
+    let metrics = database.last_commit_metrics().unwrap();
+    assert_eq!(metrics.tick.table_delta_records, 2);
+    assert_eq!(metrics.tick.notifications_sent, 1);
+    assert_eq!(metrics.tick.notification_records, 2);
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        vec![
+            (
+                vec![Value::U64(1), Value::String("A Love Supreme".to_owned())],
+                1
+            ),
+            (
+                vec![Value::U64(2), Value::String("Blue Train".to_owned())],
+                1
+            ),
+        ]
+    );
+    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn staged_batch_commit_matches_one_shot_wrapper() {
+    let mut staged_db = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+    let mut wrapper_db = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
+
+    let mut staged = staged_db.open_staged_batch();
+    staged.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("A Love Supreme".to_owned())],
+    );
+    staged.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Blue Train".to_owned())],
+    );
+    staged.delete("albums", PrimaryKeyValue::U64(1));
+    staged.commit().unwrap();
+
+    let mut wrapper = wrapper_db.open_batch();
+    wrapper.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("A Love Supreme".to_owned())],
+    );
+    wrapper.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Blue Train".to_owned())],
+    );
+    wrapper.delete("albums", PrimaryKeyValue::U64(1));
+    wrapper_db.commit_batch(wrapper).unwrap();
+
+    assert_eq!(
+        staged_db
+            .primary_key_scan("albums", &[])
+            .unwrap()
+            .into_iter()
+            .map(|record| record.to_values())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        wrapper_db
+            .primary_key_scan("albums", &[])
+            .unwrap()
+            .into_iter()
+            .map(|record| record.to_values())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    );
+    assert_eq!(
+        staged_db
+            .last_commit_metrics()
+            .unwrap()
+            .tick
+            .table_delta_records,
+        wrapper_db
+            .last_commit_metrics()
+            .unwrap()
+            .tick
+            .table_delta_records
+    );
+    assert_eq!(
+        staged_db.last_commit_metrics().unwrap().storage_writes,
+        wrapper_db.last_commit_metrics().unwrap().storage_writes
+    );
+}
+
+#[test]
 fn direct_record_store_stores_ordered_records_independent_of_tables() {
     let temp_dir = tempfile::tempdir().unwrap();
     let schema = albums_schema().with_direct_record_store(DirectRecordStoreSchema::new(
