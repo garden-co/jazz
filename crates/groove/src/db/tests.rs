@@ -749,6 +749,54 @@ fn sort_pairs_by_value(values: &mut [(Vec<Value>, i64)]) {
     });
 }
 
+fn prepared_reachability_oracle(
+    seed: u64,
+    edges: &[(u64, u64)],
+) -> std::collections::BTreeSet<u64> {
+    let mut reachable = std::collections::BTreeSet::from([seed]);
+    loop {
+        let before = reachable.len();
+        for (src, dst) in edges {
+            if reachable.contains(src) {
+                reachable.insert(*dst);
+            }
+        }
+        if reachable.len() == before {
+            return reachable;
+        }
+    }
+}
+
+fn seeded_positive_edge_insertions() -> Vec<(u64, u64)> {
+    let mut edges = vec![
+        (1, 2),
+        (2, 3),
+        (1, 3),
+        (3, 4),
+        (4, 2),
+        (2, 5),
+        (5, 6),
+        (3, 6),
+        (6, 6),
+        (6, 7),
+        (7, 3),
+        (8, 9),
+        (7, 8),
+        (8, 1),
+        (5, 7),
+        (1, 2),
+    ];
+    let mut state = 0x5eed_cafe_u64;
+    for _ in 0..48 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let src = 1 + ((state >> 32) % 9);
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let dst = 1 + ((state >> 32) % 9);
+        edges.push((src, dst));
+    }
+    edges
+}
+
 #[test]
 fn commits_insert_update_and_delete_batches() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -5489,13 +5537,17 @@ fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     database.commit_batch(batch).unwrap();
+    // Sanctioned by ARC 2 step-delta recursion instruction: the insert half
+    // used to pin a recompute mechanism, not semantics. Positive step-table
+    // inserts now run semi-naive incrementally; retractions below still
+    // recompute.
     assert_eq!(
         database
             .last_commit_metrics()
             .unwrap()
             .tick
             .recursive_recomputes,
-        1
+        0
     );
     assert_eq!(
         expect_recv_vals(&subscription),
@@ -5517,6 +5569,62 @@ fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
         expect_recv_vals(&subscription),
         [(vec![Value::U64(1), Value::U64(2)], -1)]
     );
+}
+
+#[test]
+fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompute() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
+    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let shape = prepared_reachability_shape(&mut database);
+    let subscription = database
+        .bind_shape_one_sink(shape.id(), &[Value::U64(1)])
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(1), Value::U64(1)], 1)]
+    );
+
+    let mut edges = Vec::<(u64, u64)>::new();
+    let mut previous = prepared_reachability_oracle(1, &edges);
+    let inserts = seeded_positive_edge_insertions();
+    for (idx, (src, dst)) in inserts.into_iter().enumerate() {
+        let mut batch = database.open_batch();
+        insert_edge(&mut batch, idx as u64 + 1, src, dst);
+        database.commit_batch(batch).unwrap();
+        assert_eq!(
+            database
+                .last_commit_metrics()
+                .unwrap()
+                .tick
+                .recursive_recomputes,
+            0,
+            "positive prepared recursive step insert should not recompute at index {idx}: {src}->{dst}"
+        );
+
+        edges.push((src, dst));
+        let next = prepared_reachability_oracle(1, &edges);
+        let mut expected = next
+            .difference(&previous)
+            .map(|dst| (vec![Value::U64(1), Value::U64(*dst)], 1))
+            .collect::<Vec<_>>();
+        sort_pairs_by_value(&mut expected);
+
+        if expected.is_empty() {
+            assert!(
+                subscription.try_recv().is_err(),
+                "already-known/re-derived edge {src}->{dst} should emit no recursive delta"
+            );
+        } else {
+            let mut actual = expect_recv_vals(&subscription);
+            sort_pairs_by_value(&mut actual);
+            assert_eq!(
+                actual, expected,
+                "positive recursive step insert {src}->{dst} must match recompute diff"
+            );
+        }
+        previous = next;
+    }
 }
 
 #[test]
