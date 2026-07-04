@@ -239,7 +239,7 @@ where
             .collect()
     }
 
-    fn version_storage_sources(
+    pub(super) fn version_storage_sources(
         &self,
         table: &str,
     ) -> Result<Vec<(String, records::RecordDescriptor)>, Error> {
@@ -249,7 +249,7 @@ where
         Ok(sources)
     }
 
-    fn version_storage_sources_for_layer(
+    pub(super) fn version_storage_sources_for_layer(
         &self,
         table: &str,
         layer: VersionLayer,

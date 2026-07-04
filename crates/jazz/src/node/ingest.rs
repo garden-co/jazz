@@ -1273,6 +1273,39 @@ where
         self.ingest_transaction_and_versions(tx, versions, fate, global_seq, durability)
     }
 
+    pub(super) fn stage_known_transaction(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_seq: Option<GlobalSeq>,
+        durability: DurabilityTier,
+        staged_global_seqs: &mut Vec<GlobalSeq>,
+    ) -> Result<(), Error> {
+        self.merge_tx_time(tx.tx_id.time);
+        let versions = canonical_versions(versions);
+        if self.query_transaction(tx.tx_id)?.is_some() {
+            return self.ingest_known_transaction(tx, versions, fate, global_seq, durability);
+        }
+        self.stage_transaction_and_versions_with_current_indexes(
+            batch,
+            tx.clone(),
+            versions,
+            fate.clone(),
+            global_seq,
+            durability,
+            true,
+        )?;
+        self.finalize_staged_transaction_ingest(
+            batch,
+            tx.tx_id,
+            fate,
+            global_seq,
+            staged_global_seqs,
+        )
+    }
+
     pub(super) fn ingest_reset_view_bundles_in_bulk(
         &mut self,
         bundles: &[VersionBundle],
@@ -1301,6 +1334,8 @@ where
         if eligible.is_empty() {
             return Ok(loaded_tx_ids);
         }
+        self.sync_metrics.receiver_bulk_ingest_commits += 1;
+        self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
 
         let mut batch = self.database.open_batch();
         let version_count = eligible
@@ -1310,6 +1345,7 @@ where
         batch.reserve(eligible.len() + version_count.saturating_mul(2));
         let mut current_updates =
             BTreeMap::<(String, RowUuid, VersionLayer), (VersionRow, GlobalSeq)>::new();
+        let mut content_versions = Vec::new();
         #[cfg(test)]
         let mut content_rows = BTreeSet::<(String, RowUuid)>::new();
         let mut applied_global_seqs = Vec::with_capacity(eligible.len());
@@ -1405,9 +1441,9 @@ where
                     history_primary_key(&stored),
                     stored.record.raw().to_vec(),
                 );
-                self.update_merge_heads_for_content_version(&mut batch, &stored)?;
-                #[cfg(test)]
                 if stored.layer() == VersionLayer::Content {
+                    content_versions.push(stored.clone());
+                    #[cfg(test)]
                     content_rows.insert((stored.table().to_owned(), stored.row_uuid()));
                 }
 
@@ -1429,6 +1465,7 @@ where
         for (stored, global_seq) in current_updates.values() {
             self.write_global_current_update(&mut batch, stored, *global_seq)?;
         }
+        self.write_merge_heads_for_bulk_content_versions(&mut batch, &content_versions)?;
 
         #[cfg(test)]
         let current_update_versions = current_updates
@@ -3088,6 +3125,27 @@ where
         Self::decode_merge_heads(heads).map(Some)
     }
 
+    fn read_merge_heads_in_batch(
+        &mut self,
+        batch: &DatabaseBatch,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeSet<TxId>>, Error> {
+        let rows = self.database.primary_key_scan_raw_in_batch(
+            batch,
+            MERGE_HEADS_TABLE,
+            &[
+                Value::Bytes(table.as_bytes().to_vec()),
+                Value::Uuid(row_uuid.0),
+            ],
+        )?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let heads = row.record().get_bytes(2)?;
+        Self::decode_merge_heads(heads).map(Some)
+    }
+
     fn require_merge_heads(
         &mut self,
         table: &str,
@@ -3150,6 +3208,58 @@ where
             .iter()
             .copied()
             .map(|head| {
+                self.content_version_reaches_tx_in_batch(
+                    batch,
+                    version.table(),
+                    version.row_uuid(),
+                    head,
+                    new_tx,
+                )
+            })
+            .collect::<Result<Vec<_>, Error>>()?
+            .into_iter()
+            .any(|reaches| reaches);
+        if !dominated_by_existing_head {
+            heads.insert(new_tx);
+        }
+        Self::write_merge_heads(batch, version.table(), version.row_uuid(), &heads)
+    }
+
+    fn update_merge_heads_for_content_version_in_batch(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        version: &VersionRow,
+    ) -> Result<(), Error> {
+        if version.layer() != VersionLayer::Content {
+            return Ok(());
+        }
+        let new_tx = self.version_tx_id(version)?;
+        let mut heads =
+            match self.read_merge_heads_in_batch(batch, version.table(), version.row_uuid())? {
+                Some(existing) => existing,
+                None => {
+                    if let Some(previous) = self.query_local_layer_winner(
+                        version.table(),
+                        version.row_uuid(),
+                        VersionLayer::Content,
+                    )? {
+                        let previous_tx = self.version_tx_id(&previous)?;
+                        if previous_tx != new_tx {
+                            return Err(Error::InvalidStoredValue(
+                                "merge head set missing for existing content row",
+                            ));
+                        }
+                    }
+                    BTreeSet::new()
+                }
+            };
+        for parent in version.parents() {
+            heads.remove(&parent);
+        }
+        let dominated_by_existing_head = heads
+            .iter()
+            .copied()
+            .map(|head| {
                 self.content_version_reaches_tx(version.table(), version.row_uuid(), head, new_tx)
             })
             .collect::<Result<Vec<_>, Error>>()?
@@ -3159,6 +3269,139 @@ where
             heads.insert(new_tx);
         }
         Self::write_merge_heads(batch, version.table(), version.row_uuid(), &heads)
+    }
+
+    fn query_global_layer_winner_in_batch(
+        &mut self,
+        batch: &DatabaseBatch,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<VersionRow>, Error> {
+        let (schema_version, base_for_current_names) = if self
+            .table_in_schema(table, self.catalogue.current_schema_version_id)
+            .is_ok()
+        {
+            (
+                self.catalogue.current_schema_version_id,
+                self.catalogue.current_schema_version_id,
+            )
+        } else {
+            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
+            (
+                self.catalogue.current_write_schema.schema,
+                self.catalogue.current_write_schema.schema,
+            )
+        };
+        let current_table = match layer {
+            VersionLayer::Content => {
+                global_current_table_name_for_schema(table, schema_version, base_for_current_names)
+            }
+            VersionLayer::Deletion => register_global_current_table_name_for_schema(
+                table,
+                schema_version,
+                base_for_current_names,
+            ),
+        };
+        let raw = self.database.primary_key_scan_raw_in_batch(
+            batch,
+            &current_table,
+            &[Value::Uuid(row_uuid.0)],
+        )?;
+        let Some(raw) = raw.first() else {
+            return Ok(None);
+        };
+        let record = raw.record();
+        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+        let tx_node_alias =
+            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        self.query_version_by_alias_in_batch(batch, table, row_uuid, layer, tx_time, tx_node_alias)
+    }
+
+    fn query_version_by_alias_in_batch(
+        &mut self,
+        batch: &DatabaseBatch,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Option<VersionRow>, Error> {
+        for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
+            let raw = self
+                .database
+                .primary_key_scan_raw_in_batch(
+                    batch,
+                    &storage_table,
+                    &[
+                        Value::Uuid(row_uuid.0),
+                        Value::U64(tx_time.0),
+                        Value::U64(tx_node_alias.0),
+                    ],
+                )?
+                .first()
+                .map(|raw| raw.raw().to_vec());
+            let Some(raw) = raw else {
+                continue;
+            };
+            return self
+                .decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))
+                .map(Some);
+        }
+        Ok(None)
+    }
+
+    fn write_merge_heads_for_bulk_content_versions(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        versions: &[VersionRow],
+    ) -> Result<(), Error> {
+        let mut by_row = BTreeMap::<(String, RowUuid), Vec<&VersionRow>>::new();
+        for version in versions {
+            if version.layer() == VersionLayer::Content {
+                by_row
+                    .entry((version.table().to_owned(), version.row_uuid()))
+                    .or_default()
+                    .push(version);
+            }
+        }
+        for ((table, row_uuid), mut row_versions) in by_row {
+            row_versions.sort_by_key(|version| {
+                let tx_id = self
+                    .version_tx_id(version)
+                    .expect("bulk content version must have node alias");
+                tx_id.time.sort_key(tx_id.node)
+            });
+            let mut heads = self.read_merge_heads(&table, row_uuid)?.unwrap_or_default();
+            let mut staged_parents = BTreeMap::<TxId, Vec<TxId>>::new();
+            for version in &row_versions {
+                staged_parents.insert(self.version_tx_id(version)?, version.parents());
+            }
+            for version in row_versions {
+                let new_tx = self.version_tx_id(version)?;
+                for parent in version.parents() {
+                    heads.remove(&parent);
+                }
+                let dominated_by_existing_head = heads
+                    .iter()
+                    .copied()
+                    .map(|head| {
+                        content_version_reaches_tx_in_staged_parents(head, new_tx, &staged_parents)
+                            .map_or_else(
+                                || self.content_version_reaches_tx(&table, row_uuid, head, new_tx),
+                                Ok,
+                            )
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?
+                    .into_iter()
+                    .any(|reaches| reaches);
+                if !dominated_by_existing_head {
+                    heads.insert(new_tx);
+                }
+            }
+            Self::write_merge_heads(batch, &table, row_uuid, &heads)?;
+        }
+        Ok(())
     }
 
     fn content_version_reaches_tx(
@@ -3187,6 +3430,62 @@ where
             }
         }
         Ok(false)
+    }
+
+    fn content_version_reaches_tx_in_batch(
+        &mut self,
+        batch: &DatabaseBatch,
+        table: &str,
+        row_uuid: RowUuid,
+        start: TxId,
+        target: TxId,
+    ) -> Result<bool, Error> {
+        let mut stack = vec![start];
+        let mut seen = BTreeSet::new();
+        while let Some(tx_id) = stack.pop() {
+            if tx_id == target {
+                return Ok(true);
+            }
+            if !seen.insert(tx_id) {
+                continue;
+            }
+            for version in
+                self.query_versions_for_tx_in_batch_for_row(batch, tx_id, table, row_uuid)?
+            {
+                if version.row_uuid() == row_uuid && version.layer() == VersionLayer::Content {
+                    stack.extend(version.parents());
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn query_versions_for_tx_in_batch_for_row(
+        &mut self,
+        batch: &DatabaseBatch,
+        tx_id: TxId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let mut versions = Vec::new();
+        for (storage_table, descriptor) in
+            self.version_storage_sources_for_layer(table, VersionLayer::Content)?
+        {
+            let raws = self
+                .database
+                .primary_key_scan_raw_in_batch(batch, &storage_table, &[Value::Uuid(row_uuid.0)])?
+                .into_iter()
+                .map(|raw| raw.raw().to_vec())
+                .collect::<Vec<_>>();
+            for raw in raws {
+                let version =
+                    self.decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))?;
+                if self.version_tx_id(&version)? == tx_id {
+                    versions.push(version);
+                }
+            }
+        }
+        Ok(versions)
     }
 
     fn rewrite_merge_heads_excluding_tx(
@@ -3770,10 +4069,46 @@ where
         durability: DurabilityTier,
         update_current_indexes: bool,
     ) -> Result<(), Error> {
+        let tx_id = tx.tx_id;
+        let mut batch = self.database.open_batch();
+        self.stage_transaction_and_versions_with_current_indexes(
+            &mut batch,
+            tx,
+            versions,
+            fate.clone(),
+            global_seq,
+            durability,
+            update_current_indexes,
+        )?;
+        self.database.commit_batch(batch)?;
+        let mut staged_global_seqs = Vec::new();
+        let mut cleanup_batch = self.database.open_batch();
+        self.finalize_staged_transaction_ingest(
+            &mut cleanup_batch,
+            tx_id,
+            fate,
+            global_seq,
+            &mut staged_global_seqs,
+        )?;
+        if !cleanup_batch.is_empty() {
+            self.database.commit_batch(cleanup_batch)?;
+        }
+        Ok(())
+    }
+
+    fn stage_transaction_and_versions_with_current_indexes(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_seq: Option<GlobalSeq>,
+        durability: DurabilityTier,
+        update_current_indexes: bool,
+    ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
         let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
-        let mut batch = self.database.open_batch();
         let tx_values =
             transaction_values(tx_node_alias, &tx, fate.clone(), global_seq, durability);
         if tx_already_known {
@@ -3876,18 +4211,15 @@ where
             }
             if update_current_indexes && matches!(fate, Fate::Accepted) {
                 if global_seq.is_some() {
-                    let previous_global_current = self.query_global_layer_winner(
+                    let previous_global_current = self.query_global_layer_winner_in_batch(
+                        batch,
                         &table_schema.name,
                         stored.row_uuid(),
                         stored.layer(),
                     )?;
                     let previous_global_winner =
                         if let Some(previous) = previous_global_current.as_ref() {
-                            Some((
-                                previous,
-                                self.version_tx_id(previous)?,
-                                self.version_made_at(previous)?,
-                            ))
+                            Some((previous, self.version_tx_id(previous)?, previous.tx_time()))
                         } else {
                             None
                         };
@@ -3915,7 +4247,8 @@ where
                 target_schema,
                 self.catalogue.current_schema_version_id,
             );
-            let existing = self.database.primary_key_scan_raw(
+            let existing = self.database.primary_key_scan_raw_in_batch(
+                batch,
                 &history_table,
                 &[
                     Value::Uuid(stored.row_uuid().0),
@@ -3936,36 +4269,21 @@ where
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_seq.is_none()
             {
-                self.write_ahead_current_insert(&mut batch, &stored)?;
+                self.write_ahead_current_insert(batch, &stored)?;
             }
         }
         if !matches!(fate, Fate::Rejected(_)) {
             for stored in &content_versions {
-                self.update_merge_heads_for_content_version(&mut batch, stored)?;
+                self.update_merge_heads_for_content_version_in_batch(batch, stored)?;
             }
         }
         if update_current_indexes && matches!(fate, Fate::Accepted) {
             if let Some(global_seq) = global_seq {
                 for stored in pending_global_updates.values() {
-                    self.write_global_current_update(&mut batch, stored, global_seq)?;
+                    self.write_global_current_update(batch, stored, global_seq)?;
                 }
             }
         }
-        #[cfg(test)]
-        let pending_global_update_versions =
-            if update_current_indexes && matches!(fate, Fate::Accepted) {
-                global_seq
-                    .map(|global_seq| {
-                        pending_global_updates
-                            .values()
-                            .cloned()
-                            .map(|version| (version, global_seq))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
         for (parent, parent_alias) in &pending_edge_rows {
             let values = pending_edge_values(tx_node_alias, tx.tx_id, *parent_alias, *parent);
             if tx_already_known {
@@ -3974,43 +4292,38 @@ where
                 batch.insert("jazz_pending_edges", values);
             }
         }
-        self.database.commit_batch(batch)?;
-        #[cfg(test)]
-        {
-            let rows = content_versions
-                .iter()
-                .map(|version| (version.table().to_owned(), version.row_uuid()))
-                .collect::<BTreeSet<_>>();
-            self.assert_merge_head_rows_match_history_for_test(&rows)?;
-            self.assert_global_current_updates_match_history_for_test(
-                &pending_global_update_versions,
-            )?;
-        }
-        self.invalidate_tx_version_tables_cache(tx.tx_id);
         if matches!(fate, Fate::Accepted) {
             self.rejections.child_txs_by_parent.remove(&tx.tx_id);
             self.prune_child_edges(tx.tx_id);
         } else if matches!(fate, Fate::Pending) {
             self.record_child_edges(tx.tx_id, parent_edges);
         }
-        let accepted_global_seq = if matches!(fate, Fate::Accepted) {
-            global_seq
-        } else {
-            None
-        };
-        if let Some(global_seq) = accepted_global_seq {
+        Ok(())
+    }
+
+    fn finalize_staged_transaction_ingest(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        tx_id: TxId,
+        fate: Fate,
+        global_seq: Option<GlobalSeq>,
+        staged_global_seqs: &mut Vec<GlobalSeq>,
+    ) -> Result<(), Error> {
+        self.invalidate_tx_version_tables_cache(tx_id);
+        if matches!(fate, Fate::Accepted)
+            && let Some(global_seq) = global_seq
+        {
+            staged_global_seqs.push(global_seq);
             let advanced_global_seqs = self.record_applied_global_seq(global_seq);
-            let mut batch = self.database.open_batch();
-            self.cleanup_fated_ahead_current_for_tx(&mut batch, tx.tx_id)?;
+            self.cleanup_fated_ahead_current_for_tx(batch, tx_id)?;
             if !advanced_global_seqs.is_empty() {
                 for advanced in advanced_global_seqs
                     .into_iter()
                     .filter(|advanced| *advanced != global_seq)
                 {
-                    self.prune_ahead_current_for_global_seq(&mut batch, advanced)?;
+                    self.prune_ahead_current_for_global_seq(batch, advanced)?;
                 }
             }
-            self.database.commit_batch(batch)?;
         }
         Ok(())
     }
@@ -4171,6 +4484,31 @@ fn view_version_key_for_ingest(version: &VersionRecord) -> (String, RowUuid, Ver
         version.row_uuid(),
         VersionLayer::for_record(version),
     )
+}
+
+fn content_version_reaches_tx_in_staged_parents(
+    start: TxId,
+    target: TxId,
+    parents_by_tx: &BTreeMap<TxId, Vec<TxId>>,
+) -> Option<bool> {
+    if !parents_by_tx.contains_key(&start) {
+        return None;
+    }
+    let mut stack = vec![start];
+    let mut seen = BTreeSet::new();
+    while let Some(tx_id) = stack.pop() {
+        if tx_id == target {
+            return Some(true);
+        }
+        if !seen.insert(tx_id) {
+            continue;
+        }
+        let Some(parents) = parents_by_tx.get(&tx_id) else {
+            continue;
+        };
+        stack.extend(parents.iter().copied());
+    }
+    Some(false)
 }
 
 fn merge_rows_for_versions(records: &[VersionRecord]) -> Vec<(String, RowUuid)> {

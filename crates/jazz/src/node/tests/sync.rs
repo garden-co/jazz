@@ -438,6 +438,163 @@ fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     assert_currency_tables_match_storage(&mut bulk_reader, "todos");
     assert_currency_tables_match_storage(&mut incremental_reader, "todos");
 }
+
+#[test]
+fn receiver_batch_ingests_non_reset_complete_bundles_once() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(2));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("one")),
+    );
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(2), 11).cells(title_cells("two")),
+    );
+
+    let update = core.view_update_for_current_rows("todos").unwrap();
+    let SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        mut version_bundles,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    assert_eq!(version_bundles.len(), 2);
+    version_bundles.reverse();
+
+    reader
+        .apply_view_updates_in_batch(vec![ViewUpdateParts {
+            subscription,
+            settled_through,
+            reset_result_set: false,
+            version_bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        }])
+        .unwrap();
+
+    assert_eq!(
+        reader.current_rows("todos", DurabilityTier::Global).unwrap(),
+        vec![(row(1), title_cells("one")), (row(2), title_cells("two"))]
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 2);
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+}
+
+#[test]
+fn receiver_batch_resolves_current_winner_across_bundles() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(2));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(1);
+
+    let (_old_tx, old_unit) = writer
+        .commit_mergeable_unit(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("old")))
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        tx: old,
+        versions: old_versions,
+    } = old_unit
+    else {
+        panic!("expected commit unit");
+    };
+    let [old_fate]: [SyncMessage; 1] = core
+        .ingest_commit_unit(old.clone(), old_versions.clone(), 0)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        global_seq: Some(old_seq),
+        durability: Some(old_durability),
+        ..
+    } = old_fate
+    else {
+        panic!("expected accepted old fate");
+    };
+
+    let (new_tx, new_unit) = writer
+        .commit_mergeable_unit(MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("new")))
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        tx: new,
+        versions: new_versions,
+    } = new_unit
+    else {
+        panic!("expected commit unit");
+    };
+    let [new_fate]: [SyncMessage; 1] = core
+        .ingest_commit_unit(new.clone(), new_versions.clone(), 1)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        global_seq: Some(new_seq),
+        durability: Some(new_durability),
+        ..
+    } = new_fate
+    else {
+        panic!("expected accepted new fate");
+    };
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+
+    reader
+        .apply_view_updates_in_batch(vec![ViewUpdateParts {
+            subscription,
+            settled_through: new_seq,
+            reset_result_set: false,
+            version_bundles: vec![
+                VersionBundle {
+                    tx: new,
+                    versions: new_versions,
+                    fate: Fate::Accepted,
+                    global_seq: Some(new_seq),
+                    durability: new_durability,
+                },
+                VersionBundle {
+                    tx: old,
+                    versions: old_versions,
+                    fate: Fate::Accepted,
+                    global_seq: Some(old_seq),
+                    durability: old_durability,
+                },
+            ],
+            peer_complete_tx_payload_refs: Vec::new(),
+            result_member_adds: vec![ResultMemberEntry::row((
+                "todos".to_owned().into(),
+                row_uuid,
+                new_tx,
+            ))],
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        }])
+        .unwrap();
+
+    assert_eq!(
+        reader.current_rows("todos", DurabilityTier::Global).unwrap(),
+        vec![(row_uuid, title_cells("new"))]
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 2);
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+}
+
 #[test]
 fn receiver_tracks_partial_mergeable_payload_coverage() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));

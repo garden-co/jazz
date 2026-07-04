@@ -84,6 +84,9 @@ fn main() {
     let db_surface =
         profiling::maybe_profile_phase("s3_permissions", "db_surface", || run_db_surface(&config));
     emit_db_surface_summary(&config, &db_surface);
+    if env_bool("JAZZ_S3_PERMISSIONS_ONLY") {
+        return;
+    }
 
     let block_summary = profiling::maybe_profile_phase("s3_permissions", "block_tree", || {
         run_block_tree_variant(&config, profile.clone())
@@ -2722,6 +2725,7 @@ fn seed_db(core: &CoreDb, table: &str, row: RowUuid, cells: BTreeMap<String, Val
     node.borrow_mut()
         .finalize_local_mergeable_commit(tx_id)
         .unwrap();
+    core.server.mark_subscriber_connections_dirty_for_test();
 }
 
 fn delete_db(core: &CoreDb, table: &str, row: RowUuid) {
@@ -2737,6 +2741,7 @@ fn delete_db(core: &CoreDb, table: &str, row: RowUuid) {
     node.borrow_mut()
         .finalize_local_mergeable_commit(tx_id)
         .unwrap();
+    core.server.mark_subscriber_connections_dirty_for_test();
 }
 
 #[derive(Clone, Debug)]

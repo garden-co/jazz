@@ -548,34 +548,74 @@ where
             return Ok(());
         }
         let mut bulk_candidates = Vec::new();
+        let mut initial_hydration_binding_views =
+            self.query.initial_hydration_binding_views.clone();
         for update in &updates {
             let Ok(binding_view_key) = self.binding_view_key_for_subscription(update.subscription)
             else {
                 continue;
             };
             if update.reset_result_set {
-                self.query
-                    .initial_hydration_binding_views
-                    .insert(binding_view_key);
+                initial_hydration_binding_views.insert(binding_view_key);
             }
-            let in_initial_hydration = self
-                .query
-                .initial_hydration_binding_views
-                .contains(&binding_view_key);
-            if (update.reset_result_set || in_initial_hydration)
+            let in_initial_hydration = initial_hydration_binding_views.contains(&binding_view_key);
+            if update.reset_result_set
                 && update.peer_complete_tx_payload_refs.is_empty()
                 && update.result_member_removes.is_empty()
             {
                 bulk_candidates.extend(update.version_bundles.iter().cloned());
             }
+            if in_initial_hydration
+                && update.version_bundles.is_empty()
+                && (!update.reset_result_set || update.peer_complete_tx_payload_refs.is_empty())
+            {
+                initial_hydration_binding_views.remove(&binding_view_key);
+            }
         }
         let bulk_loaded_tx_ids = self.ingest_reset_view_bundles_in_bulk(&bulk_candidates)?;
+        let mut receiver_batch = self.database.open_batch();
+        let mut receiver_batch_tx_ids = BTreeSet::new();
+        let mut receiver_batch_global_seqs = Vec::new();
+        let mut receiver_batch_bundle_count = 0u64;
+        for update in &updates {
+            if !update.peer_complete_tx_payload_refs.is_empty()
+                || !update.result_member_removes.is_empty()
+            {
+                continue;
+            }
+            for bundle in &update.version_bundles {
+                if !bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
+                    let staged = self.stage_view_bundle(
+                        &mut receiver_batch,
+                        bundle,
+                        &mut receiver_batch_tx_ids,
+                        &mut receiver_batch_global_seqs,
+                    )?;
+                    if staged {
+                        receiver_batch_bundle_count += 1;
+                    }
+                }
+            }
+        }
+        if !receiver_batch.is_empty() {
+            self.sync_metrics.receiver_bulk_ingest_commits += 1;
+            self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
+            self.database.commit_batch(receiver_batch)?;
+            for tx_id in &receiver_batch_tx_ids {
+                self.invalidate_tx_version_tables_cache(*tx_id);
+            }
+            for global_seq in receiver_batch_global_seqs {
+                self.record_applied_global_seq(global_seq);
+            }
+        }
+        let mut preloaded_tx_ids = bulk_loaded_tx_ids;
+        preloaded_tx_ids.extend(receiver_batch_tx_ids);
         // Cross-subscription ordering within one receiver tick carries no
         // protocol semantics beyond per-link FIFO. Table writes are coalesced
         // above; per-subscription settled-state mutations still apply in
         // arrival order below.
         for update in updates {
-            self.apply_view_update_inner(update, Some(&bulk_loaded_tx_ids))?;
+            self.apply_view_update_inner(update, Some(&preloaded_tx_ids))?;
         }
         Ok(())
     }
@@ -617,13 +657,9 @@ where
                 .initial_hydration_binding_views
                 .insert(binding_view_key);
         }
-        let in_initial_hydration = self
-            .query
-            .initial_hydration_binding_views
-            .contains(&binding_view_key);
         let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
             preloaded.clone()
-        } else if (reset_result_set || in_initial_hydration)
+        } else if reset_result_set
             && peer_complete_tx_payload_refs.is_empty()
             && result_member_removes.is_empty()
         {
@@ -632,11 +668,6 @@ where
             // Empty reset stamps stay orthogonal below: with no bundles there
             // is no payload to bulk ingest and the stamp must not clear shared
             // state that is already more settled.
-            // Some initial hydrations arrive as an empty reset followed by one
-            // or more non-reset payload updates. Keep the receiver in the
-            // initial-hydration bulk path until the sender emits a settled
-            // stamp with no payload below; complete bundles can be bulk-loaded
-            // safely, and non-eligible bundles still fall back to normal ingest.
             self.ingest_reset_view_bundles_in_bulk(&version_bundles)?
         } else {
             BTreeSet::new()
@@ -651,6 +682,7 @@ where
                 if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
                     continue;
                 }
+                self.sync_metrics.receiver_per_bundle_ingests += 1;
                 self.ingest_view_bundle(bundle)?;
             }
         }
@@ -658,6 +690,9 @@ where
             .iter()
             .chain(row_result_adds.iter().map(|(_, _, tx_id)| tx_id))
         {
+            if bulk_loaded_tx_ids.contains(tx_id) {
+                continue;
+            }
             if self.query_transaction(*tx_id)?.is_none() {
                 self.sync_metrics.parked_orphans += 1;
                 // M2 keeps peer state and receiver storage in memory only, and
@@ -867,6 +902,39 @@ where
             bundle.global_seq,
             bundle.durability,
         )
+    }
+
+    fn stage_view_bundle(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        bundle: &VersionBundle,
+        staged_tx_ids: &mut BTreeSet<TxId>,
+        staged_global_seqs: &mut Vec<GlobalSeq>,
+    ) -> Result<bool, Error> {
+        if bundle.tx.kind == TxKind::Exclusive {
+            let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
+                Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
+            })?;
+            if bundle.versions.len() != complete_len {
+                return Ok(false);
+            }
+            if self.query_transaction(bundle.tx.tx_id)?.is_some() {
+                return Ok(false);
+            }
+        }
+        if !staged_tx_ids.insert(bundle.tx.tx_id) {
+            return Ok(true);
+        }
+        self.stage_known_transaction(
+            batch,
+            bundle.tx.clone(),
+            bundle.versions.clone(),
+            bundle.fate.clone(),
+            bundle.global_seq,
+            bundle.durability,
+            staged_global_seqs,
+        )?;
+        Ok(true)
     }
 
     pub(crate) fn whole_table_subscription_key(

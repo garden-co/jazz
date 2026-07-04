@@ -196,6 +196,12 @@ struct RunSummary {
     relay_to_core_messages: u64,
     known_state_declared: u64,
     relay_known_state_declared: u64,
+    relay_receiver_bulk_bundle_ingests: u64,
+    relay_receiver_per_bundle_ingests: u64,
+    relay_receiver_bulk_ingest_commits: u64,
+    client_receiver_bulk_bundle_ingests: u64,
+    client_receiver_per_bundle_ingests: u64,
+    client_receiver_bulk_ingest_commits: u64,
     peak_rss_bytes: u64,
     slowest_subscription: String,
     slowest_subscription_ms: u128,
@@ -981,6 +987,8 @@ fn run_connect_and_subscribe(
         .iter()
         .max_by_key(|timeline| timeline.materialized_ms)
         .unwrap();
+    let relay_sync_metrics = relay.db.sync_metrics_for_test();
+    let client_sync_metrics = client.db.sync_metrics_for_test();
     RunSummary {
         wall_ms: start.elapsed().as_millis(),
         connect_ms,
@@ -998,6 +1006,12 @@ fn run_connect_and_subscribe(
         relay_to_core_messages: relay_core.left_to_right.messages.get(),
         known_state_declared: client_relay.left_to_right.known_state_subscribes.get(),
         relay_known_state_declared: relay_core.left_to_right.known_state_subscribes.get(),
+        relay_receiver_bulk_bundle_ingests: relay_sync_metrics.receiver_bulk_bundle_ingests,
+        relay_receiver_per_bundle_ingests: relay_sync_metrics.receiver_per_bundle_ingests,
+        relay_receiver_bulk_ingest_commits: relay_sync_metrics.receiver_bulk_ingest_commits,
+        client_receiver_bulk_bundle_ingests: client_sync_metrics.receiver_bulk_bundle_ingests,
+        client_receiver_per_bundle_ingests: client_sync_metrics.receiver_per_bundle_ingests,
+        client_receiver_bulk_ingest_commits: client_sync_metrics.receiver_bulk_ingest_commits,
         peak_rss_bytes: peak_rss_bytes(),
         slowest_subscription: slowest.name.clone(),
         slowest_subscription_ms: slowest.materialized_ms,
@@ -1394,6 +1408,30 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     fields.insert(
         "relay_known_state_declared".to_owned(),
         json!(summary.relay_known_state_declared),
+    );
+    fields.insert(
+        "relay_receiver_bulk_bundle_ingests".to_owned(),
+        json!(summary.relay_receiver_bulk_bundle_ingests),
+    );
+    fields.insert(
+        "relay_receiver_per_bundle_ingests".to_owned(),
+        json!(summary.relay_receiver_per_bundle_ingests),
+    );
+    fields.insert(
+        "relay_receiver_bulk_ingest_commits".to_owned(),
+        json!(summary.relay_receiver_bulk_ingest_commits),
+    );
+    fields.insert(
+        "client_receiver_bulk_bundle_ingests".to_owned(),
+        json!(summary.client_receiver_bulk_bundle_ingests),
+    );
+    fields.insert(
+        "client_receiver_per_bundle_ingests".to_owned(),
+        json!(summary.client_receiver_per_bundle_ingests),
+    );
+    fields.insert(
+        "client_receiver_bulk_ingest_commits".to_owned(),
+        json!(summary.client_receiver_bulk_ingest_commits),
     );
     fields.insert("peak_rss_bytes".to_owned(), json!(summary.peak_rss_bytes));
     fields.insert(

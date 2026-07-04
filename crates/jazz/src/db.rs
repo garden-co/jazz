@@ -2534,6 +2534,12 @@ where
     pub fn flush_for_test(&self) -> Result<(), Error> {
         Ok(self.node.node.borrow_mut().flush_query_runtime()?)
     }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only snapshot of sync-path counters.
+    pub fn sync_metrics_for_test(&self) -> crate::node::SyncMetrics {
+        self.node.node.borrow().sync_metrics().clone()
+    }
 }
 
 /// Counts produced while servicing non-blocking database connection work.
@@ -2613,6 +2619,14 @@ where
                 connection.observed_subscriber_dirty_epoch.set(next);
             }
         }
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench harnesses that mutate the served [`NodeState`] directly must
+    /// mark subscriber links dirty. Production writes go through `Db`/sync
+    /// boundaries that call this as a boundary effect.
+    pub fn mark_subscriber_connections_dirty_for_test(&self) {
+        self.mark_subscriber_connections_dirty();
     }
 
     fn next_subscription_key(
@@ -3725,6 +3739,8 @@ where
                     stats.subscription_events +=
                         refresh_subscriptions_in(&self.node, &self.subscriptions)?;
                     stats.remote_sync_applied += 1;
+                    let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
+                    self.subscriber_dirty_epoch.set(next);
                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                 }
             }

@@ -3494,6 +3494,12 @@ pub struct SyncMetrics {
     pub dropped_peer_request_messages: u64,
     /// Transport sends retried after local backpressure instead of killing the sync driver.
     pub transport_backpressure_retries: u64,
+    /// View-update bundles ingested through a receiver-level shared storage batch.
+    pub receiver_bulk_bundle_ingests: u64,
+    /// View-update bundles that still required the per-bundle ingest path.
+    pub receiver_per_bundle_ingests: u64,
+    /// Receiver-level shared ingest batches committed.
+    pub receiver_bulk_ingest_commits: u64,
     /// Rung-3 text strategies that degraded to the builtin char-walk merge.
     pub rung3_text_merge_fallbacks: u64,
 }
