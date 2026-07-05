@@ -2006,15 +2006,23 @@ fn validate_reachable(
     if let Some(seed) = &reachable.seed {
         let seed_table = table(schema, &seed.table)?;
         planner_column_type(&seed_table, &seed.team_column)?;
-        match seed_table.references.get(&seed.team_column) {
-            Some(target) if target == team_table => {}
-            _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: seed.table.clone(),
-                    column: seed.team_column.clone(),
-                    target_table: team_table.clone(),
-                });
-            }
+        if let Some(user_column) = &seed.user_column {
+            planner_column_type(&seed_table, user_column)?;
+        }
+        let seed_projects_team = if seed.team_column == "id" {
+            seed_table.name == *team_table
+        } else {
+            matches!(
+                seed_table.references.get(&seed.team_column),
+                Some(target) if target == team_table
+            )
+        };
+        if !seed_projects_team {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: seed.table.clone(),
+                column: seed.team_column.clone(),
+                target_table: team_table.clone(),
+            });
         }
         for predicate in &seed.filters {
             validate_predicate(&seed_table, predicate, params)?;
