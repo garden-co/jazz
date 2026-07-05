@@ -165,6 +165,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        self.flush_pending_binding_retractions(storage)?;
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
         }
@@ -195,6 +196,7 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage,
     {
+        self.flush_pending_binding_retractions(storage)?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
@@ -236,6 +238,21 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         self.tick_with_params(table_deltas, Vec::new(), storage)
+    }
+
+    fn flush_pending_binding_retractions<S>(&mut self, storage: &S) -> Result<(), IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        if !self.pending_binding_retractions.is_empty() {
+            // Unsubscribe may queue routed binding retractions for the next
+            // runtime tick. Snapshot hydration also needs a binding snapshot,
+            // so it must first bring queued retractions into arranged state;
+            // otherwise the snapshot could observe a binding as live while
+            // its retraction is already committed to the lifecycle queue.
+            self.tick_with_params(Vec::new(), Vec::new(), storage)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn tick_staged<S>(
@@ -534,6 +551,7 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage,
     {
+        self.flush_pending_binding_retractions(storage)?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
@@ -606,9 +624,7 @@ impl IvmRuntime {
         I: IntoIterator<Item = RoutedMultisinkTerminal>,
         S: OrderedKvStorage,
     {
-        if !self.pending_binding_retractions.is_empty() {
-            self.tick_with_params(Vec::new(), Vec::new(), storage)?;
-        }
+        self.flush_pending_binding_retractions(storage)?;
         let terminals = terminals.into_iter().collect::<Vec<_>>();
         if terminals.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
@@ -701,9 +717,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        if !self.pending_binding_retractions.is_empty() {
-            self.tick_with_params(Vec::new(), Vec::new(), storage)?;
-        }
+        self.flush_pending_binding_retractions(storage)?;
         let shape = self
             .prepared_shapes
             .get(&shape_id)
