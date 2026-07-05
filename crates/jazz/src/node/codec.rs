@@ -1981,7 +1981,7 @@ where
         layer: VersionLayer,
         schema_version: SchemaVersionId,
         base_schema_version: SchemaVersionId,
-    ) -> Arc<str> {
+    ) -> groove::Intern<String> {
         self.cached_physical_table_name(
             table,
             PhysicalTableClass::VersionStorage(layer),
@@ -2004,7 +2004,7 @@ where
         layer: VersionLayer,
         schema_version: SchemaVersionId,
         base_schema_version: SchemaVersionId,
-    ) -> Arc<str> {
+    ) -> groove::Intern<String> {
         self.cached_physical_table_name(
             table,
             PhysicalTableClass::GlobalCurrent(layer),
@@ -2029,7 +2029,7 @@ where
         layer: VersionLayer,
         schema_version: SchemaVersionId,
         base_schema_version: SchemaVersionId,
-    ) -> Arc<str> {
+    ) -> groove::Intern<String> {
         self.cached_physical_table_name(
             table,
             PhysicalTableClass::AheadCurrent(layer),
@@ -2055,7 +2055,7 @@ where
         schema_version: SchemaVersionId,
         base_schema_version: SchemaVersionId,
         build: impl FnOnce(&str) -> String,
-    ) -> Arc<str> {
+    ) -> groove::Intern<String> {
         let key = PhysicalTableNameKey {
             table: table.to_owned(),
             class,
@@ -2063,12 +2063,10 @@ where
             base_schema_version,
         };
         if let Some(name) = self.query.physical_table_name_cache.get(&key) {
-            return Arc::clone(name);
+            return *name;
         }
-        let name = Arc::<str>::from(build(table));
-        self.query
-            .physical_table_name_cache
-            .insert(key, Arc::clone(&name));
+        let name = groove::Intern::new(build(table));
+        self.query.physical_table_name_cache.insert(key, name);
         name
     }
 }

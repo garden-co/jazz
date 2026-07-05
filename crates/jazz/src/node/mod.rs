@@ -293,10 +293,9 @@ struct QueryServing {
         BTreeMap<(String, VersionLayer), Vec<(String, records::RecordDescriptor)>>,
     /// Interned physical table names for hot ingest/current-row paths.
     ///
-    /// Keyed by logical table, physical class, and schema-version context. The
-    /// cache is invalidated with schema/catalogue layout caches; callers clone
-    /// an `Arc<str>` so storage calls do not borrow the node.
-    physical_table_name_cache: BTreeMap<PhysicalTableNameKey, Arc<str>>,
+    /// Keyed by logical table, physical class, and schema-version context. This
+    /// is pure memoization: the mapping key fully determines the name.
+    physical_table_name_cache: BTreeMap<PhysicalTableNameKey, groove::Intern<String>>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
@@ -657,7 +656,6 @@ where
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
-        self.query.physical_table_name_cache.clear();
         self.query.settled_result_sets.clear();
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
@@ -2554,7 +2552,6 @@ where
             return Ok(false);
         }
         self.query.version_storage_sources_cache.clear();
-        self.query.physical_table_name_cache.clear();
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_partitions",
