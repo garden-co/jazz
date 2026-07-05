@@ -235,6 +235,32 @@ patterns (same author, chain parents, monotone times) fall into these
 encodings because the schema types them and the key design clusters them;
 the codec imports no higher-layer semantics.
 
+**No second formats.** The canonical record encoding remains the format.
+Runtime code may share, slice, copy, project, or reorder encoded records, but it
+must not create a parallel decoded representation and keep that representation
+alive as if it were the data model. Decoding is a boundary operation or a
+fallback for genuinely computed expressions, not the normal internal
+representation for maintained arrangements. The review question is: _is there a
+format here that is not the record encoding?_ If yes, it needs a specific reason
+and a bounded lifetime.
+
+The standing canaries are memory amplification (peak RSS divided by encoded
+storage bytes) and allocations per materialized row in the customer cold-start
+benchmark. Current July 2026 baselines after the C-lane representation work:
+member 100% cold is about 6,000 allocations per row, 7.3s settle, and about 20x
+memory amplification; member 100% warm previously exposed about 46x memory
+amplification and remains a design-session target.
+
+The implemented delta representation follows the same rule: `RecordDelta`
+carries `bytes::Bytes` handles to encoded records; pass-through operators clone
+handles, not record byte vectors; transform operators build a batch of output
+records into `BytesMut`, freeze once, and emit `Bytes` slices for individual
+records; consolidation uses in-place sort plus adjacent weight folding; and
+join-key construction uses inline small buffers for common keys. This is an
+ownership and buffering change only. The record bytes are still the canonical
+encoding, and storage-read boundaries wrap owned storage bytes into shared
+handles rather than introducing a second payload format.
+
 **Windows are physical, not semantic.** There is no run-sealing judgment: a
 window closes when full (bounded to a CPU-cache-sized decode, on the order of
 a few hundred records / few KB). A window of mixed traffic degrades gracefully
