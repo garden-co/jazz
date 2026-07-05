@@ -22,6 +22,70 @@ use jazz::wire::TransportError;
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
+#[cfg(feature = "bench-alloc-metrics")]
+mod alloc_metrics {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    pub struct CountingAllocator;
+
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+    static ALLOCS: AtomicU64 = AtomicU64::new(0);
+    static BYTES: AtomicU64 = AtomicU64::new(0);
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if ACTIVE.load(Ordering::Relaxed) {
+                ALLOCS.fetch_add(1, Ordering::Relaxed);
+                BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+            }
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: CountingAllocator = CountingAllocator;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Snapshot {
+        pub allocs: u64,
+        pub bytes: u64,
+    }
+
+    pub fn reset_and_start() {
+        ALLOCS.store(0, Ordering::Relaxed);
+        BYTES.store(0, Ordering::Relaxed);
+        ACTIVE.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stop() -> Snapshot {
+        ACTIVE.store(false, Ordering::Relaxed);
+        Snapshot {
+            allocs: ALLOCS.load(Ordering::Relaxed),
+            bytes: BYTES.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[cfg(not(feature = "bench-alloc-metrics"))]
+mod alloc_metrics {
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Snapshot {
+        pub allocs: u64,
+        pub bytes: u64,
+    }
+
+    pub fn reset_and_start() {}
+
+    pub fn stop() -> Snapshot {
+        Snapshot::default()
+    }
+}
+
 // Customer-shaped cold-start fixture. Child tables use the real customer
 // semantics: child rows inherit read permission from their referenced parent
 // resource via `inherits(parent_id)`. The generator constrains a small fixed
@@ -225,6 +289,10 @@ struct RunSummary {
     client_encoded_storage_bytes: u64,
     encoded_storage_bytes: u64,
     memory_amplification: f64,
+    allocs: u64,
+    alloc_bytes: u64,
+    allocs_per_row: f64,
+    alloc_bytes_per_row: f64,
     seed_cache_hit: bool,
     seed_ms: u128,
     slowest_subscription: String,
@@ -943,6 +1011,7 @@ fn run_connect_and_subscribe(
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
+    alloc_metrics::reset_and_start();
     let start = Instant::now();
     let relay_core = duplex_counted();
     let client_relay = duplex_counted();
@@ -1088,10 +1157,21 @@ fn run_connect_and_subscribe(
     let encoded_storage_bytes =
         core_encoded_storage_bytes + relay_encoded_storage_bytes + client_encoded_storage_bytes;
     let peak_rss_bytes = peak_rss_bytes();
+    let alloc_snapshot = alloc_metrics::stop();
     let memory_amplification = if encoded_storage_bytes == 0 {
         0.0
     } else {
         peak_rss_bytes as f64 / encoded_storage_bytes as f64
+    };
+    let allocs_per_row = if rows_materialized == 0 {
+        0.0
+    } else {
+        alloc_snapshot.allocs as f64 / rows_materialized as f64
+    };
+    let alloc_bytes_per_row = if rows_materialized == 0 {
+        0.0
+    } else {
+        alloc_snapshot.bytes as f64 / rows_materialized as f64
     };
     RunSummary {
         wall_ms: start.elapsed().as_millis(),
@@ -1122,6 +1202,10 @@ fn run_connect_and_subscribe(
         client_encoded_storage_bytes,
         encoded_storage_bytes,
         memory_amplification,
+        allocs: alloc_snapshot.allocs,
+        alloc_bytes: alloc_snapshot.bytes,
+        allocs_per_row,
+        alloc_bytes_per_row,
         seed_cache_hit: seeded.seed_cache_hit,
         seed_ms: seeded.seed_ms,
         slowest_subscription: slowest.name.clone(),
@@ -1548,6 +1632,13 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     fields.insert(
         "memory_amplification".to_owned(),
         json!(summary.memory_amplification),
+    );
+    fields.insert("allocs".to_owned(), json!(summary.allocs));
+    fields.insert("alloc_bytes".to_owned(), json!(summary.alloc_bytes));
+    fields.insert("allocs_per_row".to_owned(), json!(summary.allocs_per_row));
+    fields.insert(
+        "alloc_bytes_per_row".to_owned(),
+        json!(summary.alloc_bytes_per_row),
     );
     fields.insert("seed_cache_hit".to_owned(), json!(summary.seed_cache_hit));
     fields.insert("seed_ms".to_owned(), json!(summary.seed_ms));

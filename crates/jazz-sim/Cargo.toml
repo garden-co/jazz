@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 default = []
+bench-alloc-metrics = []
 profiling = ["dep:pprof"]
 
 [dependencies]
