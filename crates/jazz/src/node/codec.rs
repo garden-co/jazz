@@ -804,6 +804,13 @@ pub(super) fn owned_record_from_storage_values(
     values: Vec<Value>,
 ) -> Result<OwnedRecord, Error> {
     let descriptor = storage_table.record_schema();
+    owned_record_from_storage_values_with_descriptor(descriptor, values)
+}
+
+pub(super) fn owned_record_from_storage_values_with_descriptor(
+    descriptor: groove::records::RecordDescriptor,
+    values: Vec<Value>,
+) -> Result<OwnedRecord, Error> {
     let raw = descriptor.create(&values)?;
     Ok(OwnedRecord::new(raw, descriptor))
 }

@@ -1045,20 +1045,21 @@ impl IvmRuntime {
     fn infer_builder_output_cached(
         &self,
         graph: &GraphBuilder,
-        output_memo: &mut HashMap<GraphBuilder, RecordDescriptor>,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
-        if let Some(output) = output_memo.get(graph) {
+        let memo_key = graph as *const GraphBuilder as usize;
+        if let Some(output) = output_memo.get(&memo_key) {
             return Ok(*output);
         }
         let output = self.infer_builder_output_uncached(graph, output_memo)?;
-        output_memo.insert(graph.clone(), output);
+        output_memo.insert(memo_key, output);
         Ok(output)
     }
 
     fn infer_builder_output_uncached(
         &self,
         graph: &GraphBuilder,
-        output_memo: &mut HashMap<GraphBuilder, RecordDescriptor>,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
         match graph {
             GraphBuilder::Table { table, .. } => self
@@ -1429,76 +1430,70 @@ impl IvmRuntime {
     }
 
     fn prune_unreferenced_arrangements(&mut self) {
-        let referenced = self
-            .graph
-            .nodes()
-            .values()
-            .flat_map(|node| {
-                let mut keys = Vec::new();
-                match &node.descriptor.operator {
-                    OpType::Join(join) | OpType::AntiJoin(join) => {
-                        if let [left, right] = node.descriptor.inputs.as_slice() {
-                            keys.push(ArrangementKey {
-                                scope: ScopeId::root(),
-                                input: *left,
-                                fields: Arc::from(plan_expr_names(&join.left_key)),
-                                descriptor: join.left_descriptor,
-                            });
-                            keys.push(ArrangementKey {
-                                scope: ScopeId::root(),
-                                input: *right,
-                                fields: Arc::from(plan_expr_names(&join.right_key)),
-                                descriptor: join.right_descriptor,
-                            });
-                        }
+        let mut referenced = HashSet::new();
+        for node in self.graph.nodes().values() {
+            match &node.descriptor.operator {
+                OpType::Join(join) | OpType::AntiJoin(join) => {
+                    if let [left, right] = node.descriptor.inputs.as_slice() {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *left,
+                            fields: Arc::from(plan_expr_names(&join.left_key)),
+                            descriptor: join.left_descriptor,
+                        });
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *right,
+                            fields: Arc::from(plan_expr_names(&join.right_key)),
+                            descriptor: join.right_descriptor,
+                        });
                     }
-                    OpType::ArgMaxBy(arg_by) => {
-                        if let [input] = node.descriptor.inputs.as_slice() {
-                            keys.push(ArrangementKey {
-                                scope: ScopeId::root(),
-                                input: *input,
-                                fields: Arc::from(arg_by.group_fields.clone()),
-                                descriptor: node.descriptor.output,
-                            });
-                        }
-                    }
-                    OpType::ArgMinBy(arg_by) => {
-                        if let [input] = node.descriptor.inputs.as_slice() {
-                            keys.push(ArrangementKey {
-                                scope: ScopeId::root(),
-                                input: *input,
-                                fields: Arc::from(arg_by.group_fields.clone()),
-                                descriptor: node.descriptor.output,
-                            });
-                        }
-                    }
-                    OpType::TopBy(top_by) => {
-                        if let [input] = node.descriptor.inputs.as_slice() {
-                            keys.push(ArrangementKey {
-                                scope: ScopeId::root(),
-                                input: *input,
-                                fields: Arc::from(top_by.group_fields.clone()),
-                                descriptor: node.descriptor.output,
-                            });
-                        }
-                    }
-                    OpType::Aggregate(aggregate) => {
-                        if let [input] = node.descriptor.inputs.as_slice()
-                            && let Some(input_node) = self.graph.node(*input)
-                        {
-                            keys.push(ArrangementKey {
-                                scope: ScopeId::root(),
-                                input: *input,
-                                fields: Arc::from(plan_expr_names(&aggregate.group_key)),
-                                descriptor: input_node.descriptor.output,
-                            });
-                        }
-                    }
-                    _ => {}
                 }
-                keys
-            })
-            .collect::<HashSet<_>>();
+                OpType::ArgMaxBy(arg_by) => {
+                    if let [input] = node.descriptor.inputs.as_slice() {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(arg_by.group_fields.clone()),
+                            descriptor: node.descriptor.output,
+                        });
+                    }
+                }
+                OpType::ArgMinBy(arg_by) => {
+                    if let [input] = node.descriptor.inputs.as_slice() {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(arg_by.group_fields.clone()),
+                            descriptor: node.descriptor.output,
+                        });
+                    }
+                }
+                OpType::TopBy(top_by) => {
+                    if let [input] = node.descriptor.inputs.as_slice() {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(top_by.group_fields.clone()),
+                            descriptor: node.descriptor.output,
+                        });
+                    }
+                }
+                OpType::Aggregate(aggregate) => {
+                    if let [input] = node.descriptor.inputs.as_slice()
+                        && let Some(input_node) = self.graph.node(*input)
+                    {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(plan_expr_names(&aggregate.group_key)),
+                            descriptor: input_node.descriptor.output,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
         self.arrangement_states.retain(|key, _| {
             referenced.iter().any(|referenced| {
                 referenced.input == key.input
@@ -1545,7 +1540,7 @@ impl IvmRuntime {
     fn add_dedup_graph_cached(
         &mut self,
         graph: &GraphBuilder,
-        output_memo: &mut HashMap<GraphBuilder, RecordDescriptor>,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<CompiledNode, IvmRuntimeError> {
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         match graph {

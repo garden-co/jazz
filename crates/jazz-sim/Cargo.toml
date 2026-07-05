@@ -6,10 +6,12 @@ edition = "2024"
 [features]
 default = []
 bench-alloc-metrics = []
+bench-alloc-sites = ["dep:backtrace"]
 profiling = ["dep:pprof"]
 
 [dependencies]
 automerge = "0.10.0"
+backtrace = { version = "0.3", optional = true }
 diamond-types = "1.0.0"
 futures-core = "0.3.32"
 hdrhistogram = "7.5.4"

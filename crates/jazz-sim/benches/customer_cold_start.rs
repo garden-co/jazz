@@ -22,7 +22,7 @@ use jazz::wire::TransportError;
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
-#[cfg(feature = "bench-alloc-metrics")]
+#[cfg(all(feature = "bench-alloc-metrics", not(feature = "bench-alloc-sites")))]
 mod alloc_metrics {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -71,7 +71,173 @@ mod alloc_metrics {
     }
 }
 
-#[cfg(not(feature = "bench-alloc-metrics"))]
+#[cfg(feature = "bench-alloc-sites")]
+mod alloc_metrics {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    const MAX_FRAMES: usize = 24;
+    const DEFAULT_SAMPLE_RATE: u64 = 4096;
+    const DEFAULT_MAX_SAMPLES: usize = 50_000;
+
+    pub struct SiteAllocator;
+
+    #[derive(Clone, Copy)]
+    struct StackSample {
+        frames: [usize; MAX_FRAMES],
+        len: usize,
+    }
+
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+    static IN_SAMPLE: AtomicBool = AtomicBool::new(false);
+    static ALLOCS: AtomicU64 = AtomicU64::new(0);
+    static BYTES: AtomicU64 = AtomicU64::new(0);
+    static SAMPLE_RATE: AtomicU64 = AtomicU64::new(DEFAULT_SAMPLE_RATE);
+    static MAX_SAMPLES: AtomicU64 = AtomicU64::new(DEFAULT_MAX_SAMPLES as u64);
+    static SAMPLES: Mutex<Vec<StackSample>> = Mutex::new(Vec::new());
+
+    unsafe impl GlobalAlloc for SiteAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if ACTIVE.load(Ordering::Relaxed) {
+                let alloc_index = ALLOCS.fetch_add(1, Ordering::Relaxed) + 1;
+                BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+                let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed).max(1);
+                if alloc_index % sample_rate == 0 && !IN_SAMPLE.swap(true, Ordering::Relaxed) {
+                    sample_stack();
+                    IN_SAMPLE.store(false, Ordering::Relaxed);
+                }
+            }
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: SiteAllocator = SiteAllocator;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Snapshot {
+        pub allocs: u64,
+        pub bytes: u64,
+    }
+
+    pub fn reset_and_start() {
+        let sample_rate = std::env::var("JAZZ_ALLOC_SITE_SAMPLE_RATE")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SAMPLE_RATE)
+            .max(1);
+        let max_samples = std::env::var("JAZZ_ALLOC_SITE_MAX_SAMPLES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_SAMPLES);
+        SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
+        MAX_SAMPLES.store(max_samples as u64, Ordering::Relaxed);
+        {
+            let mut samples = SAMPLES.lock().expect("allocation samples lock poisoned");
+            samples.clear();
+            let additional = max_samples.saturating_sub(samples.capacity());
+            if additional > 0 {
+                samples.reserve_exact(additional);
+            }
+        }
+        ALLOCS.store(0, Ordering::Relaxed);
+        BYTES.store(0, Ordering::Relaxed);
+        ACTIVE.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stop() -> Snapshot {
+        ACTIVE.store(false, Ordering::Relaxed);
+        let snapshot = Snapshot {
+            allocs: ALLOCS.load(Ordering::Relaxed),
+            bytes: BYTES.load(Ordering::Relaxed),
+        };
+        report_sites();
+        snapshot
+    }
+
+    fn sample_stack() {
+        let max_samples = MAX_SAMPLES.load(Ordering::Relaxed) as usize;
+        let mut sample = StackSample {
+            frames: [0; MAX_FRAMES],
+            len: 0,
+        };
+        unsafe {
+            backtrace::trace_unsynchronized(|frame| {
+                if sample.len >= MAX_FRAMES {
+                    return false;
+                }
+                sample.frames[sample.len] = frame.ip() as usize;
+                sample.len += 1;
+                true
+            });
+        }
+        if let Ok(mut samples) = SAMPLES.try_lock()
+            && samples.len() < max_samples
+        {
+            samples.push(sample);
+        }
+    }
+
+    fn report_sites() {
+        let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed);
+        let samples = SAMPLES
+            .lock()
+            .expect("allocation samples lock poisoned")
+            .clone();
+        let mut counts: HashMap<Vec<usize>, u64> = HashMap::new();
+        for sample in samples {
+            *counts
+                .entry(sample.frames[..sample.len].to_vec())
+                .or_default() += 1;
+        }
+        let mut ranked: Vec<_> = counts.into_iter().collect();
+        ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        eprintln!(
+            "ALLOC_SITE_SUMMARY sample_rate={} sampled_stacks={} total_allocs={} total_bytes={}",
+            sample_rate,
+            ranked.iter().map(|(_, count)| *count).sum::<u64>(),
+            ALLOCS.load(Ordering::Relaxed),
+            BYTES.load(Ordering::Relaxed)
+        );
+        for (rank, (frames, samples)) in ranked.into_iter().take(25).enumerate() {
+            eprintln!(
+                "ALLOC_SITE rank={} samples={} estimated_allocs={}",
+                rank + 1,
+                samples,
+                samples * sample_rate
+            );
+            for (index, ip) in frames.iter().copied().enumerate().take(16) {
+                let mut printed = false;
+                backtrace::resolve(ip as *mut _, |symbol| {
+                    let name = symbol
+                        .name()
+                        .map(|name| name.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_owned());
+                    if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
+                        eprintln!("  #{index:<2} {name} {}:{line}", file.display());
+                    } else {
+                        eprintln!("  #{index:<2} {name}");
+                    }
+                    printed = true;
+                });
+                if !printed {
+                    eprintln!("  #{index:<2} 0x{ip:x}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(any(all(
+    not(feature = "bench-alloc-metrics"),
+    not(feature = "bench-alloc-sites")
+)))]
 mod alloc_metrics {
     #[derive(Clone, Copy, Debug, Default)]
     pub struct Snapshot {
