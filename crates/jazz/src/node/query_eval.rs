@@ -56,6 +56,7 @@ const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 
 pub(crate) struct LocalMaintainedViewSubscription {
     subscription: MultisinkSubscription,
+    _retained_prepared_plan: Option<PreparedQueryPlanHandle>,
     maintained: MaintainedSubscriptionView,
     terminal_schemas: MaintainedTerminalSchemas,
     tables: BTreeMap<String, TableSchema>,
@@ -5578,11 +5579,13 @@ where
         identity: AuthorId,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
+        retained_prepared_plan: Option<PreparedQueryPlanHandle>,
     ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
         let (subscription, maintained, terminal_schemas, transitions, tables) = self
             .open_seeded_maintained_subscription_view(shape, binding, identity, tier, read_view)?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
+            _retained_prepared_plan: retained_prepared_plan,
             maintained,
             terminal_schemas,
             tables,
@@ -5811,6 +5814,43 @@ where
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
         let (shape, binding) = self.query_binding_for_link(shape, binding)?;
         let plan = self.prepared_query_plan(&shape, &binding, tier, identity)?;
+        Ok((shape, binding, plan))
+    }
+
+    pub(crate) fn prepare_query_binding_for_link_with_shared_claim_fragments(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
+        let (shape, binding) = self.query_binding_for_link(shape, binding)?;
+        let program = self.compile_current_query_program(
+            &shape,
+            &binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::AppRows,
+        )?;
+        let has_claim_binding = !program.lowered.parameters.claim_params.is_empty();
+        let plan = if has_claim_binding {
+            let key = (
+                shape.shape_id(),
+                tier,
+                query_binding_value_signature(&binding),
+            );
+            if let Some(plan) = self.query.query_shape_cache.get(&key) {
+                plan.clone()
+            } else {
+                let plan = std::sync::Arc::new(
+                    self.prepared_query_plan_from_program(&program, &shape, &binding)?,
+                );
+                self.query.query_shape_cache.insert(key, plan.clone());
+                plan
+            }
+        } else {
+            std::sync::Arc::new(self.prepared_query_plan_from_program(&program, &shape, &binding)?)
+        };
         Ok((shape, binding, plan))
     }
 

@@ -674,13 +674,14 @@ where
                 author,
             )
         } else {
-            node.query_rows_for_link_with_prepared_plan(
-                &prepared.shape,
-                &prepared.binding,
-                tier,
-                author,
-                prepared.plan_for_tier(tier),
-            )
+            let (shape, binding, _plan) = node
+                .prepare_query_binding_for_link_with_shared_claim_fragments(
+                    &prepared.shape,
+                    &prepared.binding,
+                    tier,
+                    author,
+                )?;
+            node.query_rows_for_link_with_prepared_plan(&shape, &binding, tier, author, None)
         }
         .map_err(Into::into)
     }
@@ -935,30 +936,46 @@ where
         if opts.propagation == Propagation::Full {
             ensure_supported_propagated_subscription_tier(read_tier)?;
         }
+        let (local_shape, local_binding, _local_plan) = self
+            .node
+            .node
+            .borrow_mut()
+            .prepare_query_binding_for_link_with_shared_claim_fragments(
+                &prepared.shape,
+                &prepared.binding,
+                read_tier,
+                author,
+            )?;
         let (subscription, snapshot) = self
             .node
             .node
             .borrow_mut()
             .open_local_maintained_view_subscription(
-                &prepared.shape,
-                &prepared.binding,
+                &local_shape,
+                &local_binding,
                 author,
                 read_tier,
                 &opts.read_view,
+                Some(_local_plan),
             )?;
         let maintained_subscription = Some(subscription);
-        let mut state_shape = prepared.shape.clone();
-        let mut state_binding = prepared.binding.clone();
+        let mut state_shape = local_shape;
+        let mut state_binding = local_binding;
         let mut remote_read_tier = None;
         let mut cleanup = None;
         if opts.propagation == Propagation::Full {
             let upstream_opts =
                 upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
-            let (shape, binding) = self
+            let (shape, binding, _) = self
                 .node
                 .node
-                .borrow()
-                .query_binding_for_link(&prepared.shape, &prepared.binding)?;
+                .borrow_mut()
+                .prepare_query_binding_for_link_with_shared_claim_fragments(
+                    &prepared.shape,
+                    &prepared.binding,
+                    upstream_opts.tier,
+                    author,
+                )?;
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
