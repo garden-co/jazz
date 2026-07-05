@@ -11,9 +11,11 @@
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, RecvError, Sender, TryRecvError};
+
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, BindingSourceOp,
@@ -43,6 +45,10 @@ use recursion::{
 };
 
 const DEFAULT_SINK: &str = "__default";
+
+// These maps are keyed by local runtime/schema/graph metadata produced after
+// validation. Wire-facing or otherwise adversarial-input maps must keep the
+// standard hasher; this alias is intentionally scoped to the IVM runtime.
 
 /// Stateful executor for deduplicated IVM graphs and subscriptions.
 #[derive(Clone, Debug)]
@@ -89,20 +95,20 @@ impl IvmRuntime {
             schema,
             table_descriptors,
             graph: IvmGraph::new(),
-            multisink_subscriptions: HashMap::new(),
-            operator_states: HashMap::new(),
-            arrangement_states: HashMap::new(),
-            eval_memo: HashMap::new(),
-            node_meta: HashMap::new(),
+            multisink_subscriptions: HashMap::default(),
+            operator_states: HashMap::default(),
+            arrangement_states: HashMap::default(),
+            eval_memo: HashMap::default(),
+            node_meta: HashMap::default(),
             current_tick: 0,
             next_subscription_id: 1,
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
             collect_tick_runtime_stats: false,
-            prepared_shapes: HashMap::new(),
-            auto_direct_families: HashMap::new(),
-            binding_sources: HashMap::new(),
+            prepared_shapes: HashMap::default(),
+            auto_direct_families: HashMap::default(),
+            binding_sources: HashMap::default(),
             pending_binding_retractions: Vec::new(),
         };
         runtime.add_dedup_schema_indices()?;
@@ -354,7 +360,7 @@ impl IvmRuntime {
     {
         let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
-        let mut eval_memo = HashMap::new();
+        let mut eval_memo = HashMap::default();
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
@@ -402,7 +408,7 @@ impl IvmRuntime {
     {
         let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
-        let mut eval_memo = HashMap::new();
+        let mut eval_memo = HashMap::default();
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
@@ -418,7 +424,7 @@ impl IvmRuntime {
             context: EvalContext {
                 scope: ScopePath::root(),
                 sub_tick: 0,
-                bindings: HashMap::new(),
+                bindings: HashMap::default(),
                 arrangement_update_mode: ArrangementUpdateMode::Replace,
                 eval_mode: EvalMode::Tick,
             },
@@ -634,7 +640,7 @@ impl IvmRuntime {
             std::collections::hash_map::Entry::Vacant(vacant) => {
                 vacant.insert(BindingSourceState {
                     descriptor: binding_descriptor,
-                    refcounts: HashMap::new(),
+                    refcounts: HashMap::default(),
                 });
             }
         }
@@ -1022,7 +1028,7 @@ impl IvmRuntime {
         &self,
         graph: &GraphBuilder,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
-        let mut output_memo = HashMap::new();
+        let mut output_memo = HashMap::default();
         self.infer_builder_output_cached(graph, &mut output_memo)
     }
 
@@ -1522,7 +1528,7 @@ impl IvmRuntime {
     }
 
     fn add_dedup_graph(&mut self, graph: &GraphBuilder) -> Result<CompiledNode, IvmRuntimeError> {
-        let mut output_memo = HashMap::new();
+        let mut output_memo = HashMap::default();
         self.add_dedup_graph_cached(graph, &mut output_memo)
     }
 
@@ -2484,7 +2490,7 @@ impl EvalContext {
         Self {
             scope: ScopePath::root(),
             sub_tick: 0,
-            bindings: HashMap::new(),
+            bindings: HashMap::default(),
             arrangement_update_mode: ArrangementUpdateMode::Accumulate,
             eval_mode: EvalMode::Tick,
         }
@@ -2494,7 +2500,7 @@ impl EvalContext {
         Self {
             scope: ScopePath::root(),
             sub_tick: 0,
-            bindings: HashMap::new(),
+            bindings: HashMap::default(),
             arrangement_update_mode: ArrangementUpdateMode::Replace,
             eval_mode: EvalMode::Hydrate,
         }
@@ -2506,10 +2512,12 @@ impl EvalContext {
         binding: FrontierName,
         deltas: RecordDeltas,
     ) -> Self {
+        let mut bindings = HashMap::default();
+        bindings.insert(binding, deltas);
         Self {
             scope,
             sub_tick,
-            bindings: HashMap::from([(binding, deltas)]),
+            bindings,
             arrangement_update_mode: ArrangementUpdateMode::Accumulate,
             eval_mode: EvalMode::Tick,
         }
@@ -2522,10 +2530,12 @@ impl EvalContext {
         deltas: RecordDeltas,
         arrangement_update_mode: ArrangementUpdateMode,
     ) -> Self {
+        let mut bindings = HashMap::default();
+        bindings.insert(binding, deltas);
         Self {
             scope,
             sub_tick,
-            bindings: HashMap::from([(binding, deltas)]),
+            bindings,
             arrangement_update_mode,
             eval_mode: EvalMode::Tick,
         }
@@ -4294,7 +4304,7 @@ where
         deltas: RecordDeltas,
         node: NodeId,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let mut isolated_memo = HashMap::new();
+        let mut isolated_memo = HashMap::default();
         let mut evaluator = TickEvaluator {
             schema: self.schema,
             graph: self.graph,
@@ -4338,7 +4348,7 @@ where
             context: EvalContext {
                 scope: self.scope.clone(),
                 sub_tick: 0,
-                bindings: HashMap::new(),
+                bindings: HashMap::default(),
                 arrangement_update_mode: ArrangementUpdateMode::Accumulate,
                 eval_mode: EvalMode::Tick,
             },
@@ -6029,7 +6039,7 @@ pub(super) fn project_binding_source_deltas(
 }
 
 fn consolidate_deltas(deltas: Vec<RecordDelta>) -> Vec<RecordDelta> {
-    let mut consolidated = HashMap::<Vec<u8>, i64>::new();
+    let mut consolidated = HashMap::<Vec<u8>, i64>::default();
     for delta in deltas {
         *consolidated.entry(delta.record).or_default() += delta.weight;
     }
