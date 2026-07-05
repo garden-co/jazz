@@ -154,6 +154,41 @@ source/read-frontier coverage, policy decisions/witnesses, predicate output
 sets, and large-value extents. Subscription-scoped exclusive completeness is a
 visibility rule for a particular view, not a reusable tx-level reference.
 
+Receiver apply is single-mode at the semantic boundary. For each receiver apply
+boundary, the runtime drains repair-clean inbound view updates, stages all bundle
+effects in one storage batch, commits once, and therefore runs one IVM tick for
+that receiver boundary. Per-link FIFO order is preserved while staging bundle
+effects; cross-subscription ordering inside the same receiver tick carries no
+protocol meaning beyond that FIFO stream.
+
+The staged batch provides read-your-own-write behavior while the receiver
+boundary is being built. That matters for same-tick transaction+fate delivery,
+multiple transactions in one boundary competing for a row's current winner, and
+ahead-overlay cleanup retractions following fate application.
+
+Reset view updates keep their wire form, but the receiver internalizes them as
+deltas: retract the previous result set for that subscription, then apply the
+reset's adds and coverage/settlement state. A reset is not a separate storage
+mode. Serve-dirty marking is also a receiver-boundary effect: if applying the
+staged batch can change what any downstream subscriber would be served, the
+subscriber connections are marked dirty at the same boundary as cache
+invalidation and applied-global-sequence bookkeeping.
+
+The current receiver direction is no separate bulk/non-bulk correctness mode, no
+eligibility list that decides whether bundles bypass deltas, and no hidden
+preloaded-transaction suppression that can starve maintained views. Bulk
+shortcuts may return only as optimizations on top of the same staged-delta
+semantics. The July 2026 receiver-batch receipts were the forcing function:
+client per-bundle ingest collapsed to one commit/tick per receiver burst, and
+admin 10% cold improved from the 60.7s baseline to about 5.0s once
+staged-overlay point and prefix reads were indexed.
+
+Planned consolidation: delete the remaining reset-specific bulk bypass, delete
+initial-hydration eligibility state that only exists to select a bypass, delete
+preloaded-transaction suppression once all reset snapshots use explicit
+retractions, and move the receiver boundary onto an `OrderedKvStorage`
+transaction once that storage transaction exists.
+
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
 `INV-SYNC-20` — incremental view updates are observationally equivalent to a full
@@ -383,6 +418,10 @@ receiver's current local store when needed.
 
 ## Open questions
 
+- 🔶 **Receiver storage transaction surface.** The receiver boundary currently
+  uses the core staged-batch seam. The end state is an `OrderedKvStorage`
+  transaction surface with the same staged read-through and single-commit
+  semantics, so receiver apply does not need a Jazz-side accumulator.
 - 🔶 **Cross-language wire envelope completion.** `WireFrame`/`WireEnvelope`
   now establish a postcard-first binary frame carrying protocol version, feature
   bits, optional enforced session metadata, structured errors, and an encoded

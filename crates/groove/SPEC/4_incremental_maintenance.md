@@ -42,6 +42,14 @@ single-threaded**, and every tick runs the same fixed sequence:
 Every tick advances `current_tick` exactly once, and every durable (`Persist`)
 node is evaluated before any subscription is notified (`INV-TICK-1`).
 
+No state that feeds a maintained view may change without the maintained view
+observing it. A producer must either emit ordinary deltas through the runtime or
+explicitly rebuild the affected maintained view from authoritative base state
+(`INV-MV-1`). This applies at the same boundary as staged commit/tick semantics:
+base writes, durable `Persist` writes, and any higher-layer state that feeds
+maintained views must be visible to the tick or rebuilt before observers rely on
+it.
+
 **Tick kinds.** The same discipline applies to different maintenance events. A
 _commit tick_ carries table deltas. A _binding tick_ carries only binding
 deltas, with no table deltas, to register and hydrate a new prepared binding

@@ -120,6 +120,25 @@ attribution contexts, or authorization subplans before lowering. This is why the
 prepared-plan cache key includes the binding-param signature as well as the
 shape and durability tier.
 
+Seeded reachability lowers the seed set as an ordinary relation input to the
+closure node. The prepared fragment identity includes the seed table, seed
+columns, descriptor, and claim paths, but not the subscribing shape id. This is
+the same sharing doctrine as prepared binding sources: two resource kinds using
+the same membership closure and claim paths share one maintained fragment while
+their outputs still route per subscriber binding.
+
+`inherits(parent_col)` lowering splices the parent's composed policy fragment
+into the child policy with correlation rebound to the joined parent row. The
+child fragment identity unions the parent's claim paths into its own sharing
+identity.
+
+The TypeScript `policy.gather({ start, step, maxDepth })` / `hopTo` surface
+lowers to the seeded closure path only for exactly matching patterns: a
+claim-keyed start lookup, compatible hop direction, and no extra step filters
+whose semantics are not represented by seeded reachability. Other gather shapes
+stay on the legacy lowering path and must fail closed if they cannot be
+represented safely.
+
 The current implementation split is explicit. Read policy now lowers through the
 `node/query_engine` path described above. Write-time acceptance still evaluates
 policy predicates directly in `node/policy.rs`: the ingest/dry-run path enters

@@ -126,6 +126,33 @@ Policy joins may carry additional source-row equality correlations beyond their
 primary join key; these are part of the same join and must be enforced in direct
 evaluation, one-shot reads, and maintained subscription views.
 
+Read and write policies are compiled as small boolean programs over policy
+atoms. The current atoms include plain column predicates, `reachable_via`, and
+`inherits(parent_col)`. Atoms compose with `AND` and `OR`; the composition is
+part of the policy program rather than a post-filter outside the query graph.
+
+`reachable_via` supports two seed forms:
+
+- a literal claim value, the degenerate seed used by earlier policies
+- a set-valued keyed lookup, written as `seededBy(seed_table, user_col =
+claim(path), group_col)`
+
+The set-valued form includes same-table seeds. For example, a team table can
+seed reachability by projecting its own `id` column from rows where
+`identity_key = claim(sub)`. The seed relation is an ordinary closure input. A
+grant, revoke, or seed-column update flows through normal IVM deltas and updates
+maintained subscriptions without rehydrating the whole view.
+
+`inherits(parent_col)` is also an atom. A child row is readable when the parent
+row referenced by `parent_col` is readable under the parent's composed read
+policy. Missing or invisible parents fail closed. Parent-policy changes
+propagate to children through ordinary maintained-view deltas.
+
+Child insert authorization through `inherits(parent_col)` uses parent
+updateability evaluated against whereOld only. The parent row is not changed by
+inserting the child, so parent whereNew/update-check clauses are not evaluated
+for that child insert decision.
+
 `allowedTo.<op>Referencing(sourcePolicy, viaColumn)` is reverse operation
 inheritance. It grants access to a target row only when there exists at least one
 row in the source table whose `viaColumn` references the target row and that
@@ -183,6 +210,9 @@ cuts (`INV-RLS-13`, ch. 5, ch. 11).
   upstream permission-scope subscriptions (ch. 9). The current contract is
   sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
   future policy for cache lifetime, not a source of permission truth here.
+- 🔶 **String claim validation.** String claim type mismatches in seeded lookups
+  should become loud validation errors instead of depending on runtime
+  empty-result behavior.
 - ✅ **Permission introspection is a dry-run API, not magic columns.** `$can*`
   columns cannot express _can-insert_ or richer probes; a dry-run is policy
   evaluation _without ingest_ — the write-validation machinery applied
