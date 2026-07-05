@@ -247,6 +247,7 @@ where
             .catalogue_schemas
             .insert(schema.id, schema.clone());
         self.query.version_storage_sources_cache.clear();
+        self.query.physical_table_name_cache.clear();
         if schema.id == self.catalogue.current_schema_version_id {
             self.catalogue.schema = schema.schema.clone();
             self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
@@ -336,6 +337,7 @@ where
             self.catalogue.current_write_schema = pointer;
             self.persist_catalogue_pointer(pointer)?;
             self.query.version_storage_sources_cache.clear();
+            self.query.physical_table_name_cache.clear();
             let active_schema = self
                 .catalogue
                 .catalogue_schemas
@@ -1432,14 +1434,14 @@ where
                     )?;
                     (source_table_schema, author_schema, stored)
                 };
-                let history_table = version_storage_table_name_for_schema(
+                let history_table = self.cached_version_storage_table_name_for_schema(
                     &table_schema.name,
                     stored.layer(),
                     target_schema,
                     self.catalogue.current_schema_version_id,
                 );
                 batch.insert_raw(
-                    history_table,
+                    history_table.as_ref(),
                     history_primary_key(&stored),
                     stored.record.raw().to_vec(),
                 );
@@ -3295,19 +3297,15 @@ where
                 self.catalogue.current_write_schema.schema,
             )
         };
-        let current_table = match layer {
-            VersionLayer::Content => {
-                global_current_table_name_for_schema(table, schema_version, base_for_current_names)
-            }
-            VersionLayer::Deletion => register_global_current_table_name_for_schema(
-                table,
-                schema_version,
-                base_for_current_names,
-            ),
-        };
+        let current_table = self.cached_global_current_table_name_for_schema(
+            table,
+            layer,
+            schema_version,
+            base_for_current_names,
+        );
         let raw = self.database.primary_key_get_raw_in_batch(
             batch,
-            &current_table,
+            current_table.as_ref(),
             &[Value::Uuid(row_uuid.0)],
         )?;
         let Some(raw) = raw else {
@@ -3698,8 +3696,9 @@ where
         let storage_tables = table.global_current_storage_tables();
         let (current_table, current_schema, expected_values) = match version.layer() {
             VersionLayer::Content => (
-                global_current_table_name_for_schema(
+                self.cached_global_current_table_name_for_schema(
                     version.table(),
+                    VersionLayer::Content,
                     schema_version,
                     base_for_current_names,
                 ),
@@ -3707,8 +3706,9 @@ where
                 global_current_values(&table, version, Some(global_seq))?,
             ),
             VersionLayer::Deletion => (
-                register_global_current_table_name_for_schema(
+                self.cached_global_current_table_name_for_schema(
                     version.table(),
+                    VersionLayer::Deletion,
                     schema_version,
                     base_for_current_names,
                 ),
@@ -3718,7 +3718,7 @@ where
         };
         let rows = self
             .database
-            .primary_key_scan_raw(&current_table, &[Value::Uuid(version.row_uuid().0)])?;
+            .primary_key_scan_raw(current_table.as_ref(), &[Value::Uuid(version.row_uuid().0)])?;
         let actual = rows.first().map(|row| row.record().raw().to_vec());
         let expected = owned_record_from_storage_values(current_schema, expected_values)?
             .raw()
@@ -3874,11 +3874,13 @@ where
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
                 batch.insert_raw(
-                    ahead_current_table_name_for_schema(
+                    self.cached_ahead_current_table_name_for_schema(
                         version.table(),
+                        VersionLayer::Content,
                         schema_version,
                         base_for_current_names,
-                    ),
+                    )
+                    .as_ref(),
                     history_primary_key(version),
                     owned_record_from_storage_values(
                         &table.ahead_current_storage_tables()[0],
@@ -3891,11 +3893,13 @@ where
                 );
             }
             VersionLayer::Deletion => batch.insert_raw(
-                register_ahead_current_table_name_for_schema(
+                self.cached_ahead_current_table_name_for_schema(
                     version.table(),
+                    VersionLayer::Deletion,
                     schema_version,
                     base_for_current_names,
-                ),
+                )
+                .as_ref(),
                 history_primary_key(version),
                 owned_record_from_storage_values(
                     &self
@@ -3934,19 +3938,13 @@ where
         } else {
             schema_version
         };
-        let table = match version.layer() {
-            VersionLayer::Content => ahead_current_table_name_for_schema(
-                version.table(),
-                schema_version,
-                base_for_current_names,
-            ),
-            VersionLayer::Deletion => register_ahead_current_table_name_for_schema(
-                version.table(),
-                schema_version,
-                base_for_current_names,
-            ),
-        };
-        batch.delete(table, history_primary_key(version));
+        let table = self.cached_ahead_current_table_name_for_schema(
+            version.table(),
+            version.layer(),
+            schema_version,
+            base_for_current_names,
+        );
+        batch.delete(table.as_ref(), history_primary_key(version));
         self.remove_ahead_current_key(
             version.table(),
             version.layer(),
@@ -4245,7 +4243,7 @@ where
                     }
                 }
             }
-            let history_table = version_storage_table_name_for_schema(
+            let history_table = self.cached_version_storage_table_name_for_schema(
                 &table_schema.name,
                 stored.layer(),
                 target_schema,
@@ -4253,7 +4251,7 @@ where
             );
             let existing = self.database.primary_key_get_raw_in_batch(
                 batch,
-                &history_table,
+                history_table.as_ref(),
                 &[
                     Value::Uuid(stored.row_uuid().0),
                     Value::U64(stored.tx_time().0),
@@ -4266,7 +4264,7 @@ where
                 }
             } else {
                 batch.insert_raw(
-                    history_table,
+                    history_table.as_ref(),
                     history_primary_key(&stored),
                     stored.record.raw().to_vec(),
                 );

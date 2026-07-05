@@ -1971,6 +1971,108 @@ pub(super) fn version_storage_table_name_for_schema(
     }
 }
 
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    pub(super) fn cached_version_storage_table_name_for_schema(
+        &mut self,
+        table: &str,
+        layer: VersionLayer,
+        schema_version: SchemaVersionId,
+        base_schema_version: SchemaVersionId,
+    ) -> Arc<str> {
+        self.cached_physical_table_name(
+            table,
+            PhysicalTableClass::VersionStorage(layer),
+            schema_version,
+            base_schema_version,
+            |table| {
+                version_storage_table_name_for_schema(
+                    table,
+                    layer,
+                    schema_version,
+                    base_schema_version,
+                )
+            },
+        )
+    }
+
+    pub(super) fn cached_global_current_table_name_for_schema(
+        &mut self,
+        table: &str,
+        layer: VersionLayer,
+        schema_version: SchemaVersionId,
+        base_schema_version: SchemaVersionId,
+    ) -> Arc<str> {
+        self.cached_physical_table_name(
+            table,
+            PhysicalTableClass::GlobalCurrent(layer),
+            schema_version,
+            base_schema_version,
+            |table| match layer {
+                VersionLayer::Content => {
+                    global_current_table_name_for_schema(table, schema_version, base_schema_version)
+                }
+                VersionLayer::Deletion => register_global_current_table_name_for_schema(
+                    table,
+                    schema_version,
+                    base_schema_version,
+                ),
+            },
+        )
+    }
+
+    pub(super) fn cached_ahead_current_table_name_for_schema(
+        &mut self,
+        table: &str,
+        layer: VersionLayer,
+        schema_version: SchemaVersionId,
+        base_schema_version: SchemaVersionId,
+    ) -> Arc<str> {
+        self.cached_physical_table_name(
+            table,
+            PhysicalTableClass::AheadCurrent(layer),
+            schema_version,
+            base_schema_version,
+            |table| match layer {
+                VersionLayer::Content => {
+                    ahead_current_table_name_for_schema(table, schema_version, base_schema_version)
+                }
+                VersionLayer::Deletion => register_ahead_current_table_name_for_schema(
+                    table,
+                    schema_version,
+                    base_schema_version,
+                ),
+            },
+        )
+    }
+
+    fn cached_physical_table_name(
+        &mut self,
+        table: &str,
+        class: PhysicalTableClass,
+        schema_version: SchemaVersionId,
+        base_schema_version: SchemaVersionId,
+        build: impl FnOnce(&str) -> String,
+    ) -> Arc<str> {
+        let key = PhysicalTableNameKey {
+            table: table.to_owned(),
+            class,
+            schema_version,
+            base_schema_version,
+        };
+        if let Some(name) = self.query.physical_table_name_cache.get(&key) {
+            return Arc::clone(name);
+        }
+        let name = Arc::<str>::from(build(table));
+        self.query
+            .physical_table_name_cache
+            .insert(key, Arc::clone(&name));
+        name
+    }
+}
+
 pub(super) fn branch_version_storage_table_name(
     table: &str,
     layer: VersionLayer,
