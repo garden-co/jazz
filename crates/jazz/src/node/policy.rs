@@ -708,7 +708,7 @@ where
             }
             // Child insert inherits parent updateability from whereOld only:
             // parent state is unchanged, so parent update_check/whereNew is
-            // intentionally not evaluated here. Pending BoreDM confirmation.
+            // intentionally not evaluated here.
         }
         Ok(true)
     }
