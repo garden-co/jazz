@@ -240,7 +240,7 @@ where
     }
 
     pub(super) fn version_storage_sources(
-        &self,
+        &mut self,
         table: &str,
     ) -> Result<Vec<(String, records::RecordDescriptor)>, Error> {
         let mut sources = Vec::new();
@@ -250,10 +250,14 @@ where
     }
 
     pub(super) fn version_storage_sources_for_layer(
-        &self,
+        &mut self,
         table: &str,
         layer: VersionLayer,
     ) -> Result<Vec<(String, records::RecordDescriptor)>, Error> {
+        let cache_key = (table.to_owned(), layer);
+        if let Some(sources) = self.query.version_storage_sources_cache.get(&cache_key) {
+            return Ok(sources.clone());
+        }
         let mut sources = Vec::new();
         if let Ok(base_table) =
             self.table_in_schema(table, self.catalogue.current_schema_version_id)
@@ -273,11 +277,14 @@ where
         if sources.is_empty() {
             return Err(Error::TableNotFound(table.to_owned()));
         }
+        self.query
+            .version_storage_sources_cache
+            .insert(cache_key, sources.clone());
         Ok(sources)
     }
 
     fn partition_storage_sources_for_layer(
-        &self,
+        &mut self,
         table: &str,
         layer: VersionLayer,
     ) -> Result<Vec<(String, records::RecordDescriptor)>, Error> {

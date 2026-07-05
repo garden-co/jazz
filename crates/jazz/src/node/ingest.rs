@@ -246,6 +246,7 @@ where
         self.catalogue
             .catalogue_schemas
             .insert(schema.id, schema.clone());
+        self.query.version_storage_sources_cache.clear();
         if schema.id == self.catalogue.current_schema_version_id {
             self.catalogue.schema = schema.schema.clone();
             self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
@@ -334,6 +335,7 @@ where
         if applied {
             self.catalogue.current_write_schema = pointer;
             self.persist_catalogue_pointer(pointer)?;
+            self.query.version_storage_sources_cache.clear();
             let active_schema = self
                 .catalogue
                 .catalogue_schemas

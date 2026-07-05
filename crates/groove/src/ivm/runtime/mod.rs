@@ -1022,6 +1022,28 @@ impl IvmRuntime {
         &self,
         graph: &GraphBuilder,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        let mut output_memo = HashMap::new();
+        self.infer_builder_output_cached(graph, &mut output_memo)
+    }
+
+    fn infer_builder_output_cached(
+        &self,
+        graph: &GraphBuilder,
+        output_memo: &mut HashMap<GraphBuilder, RecordDescriptor>,
+    ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        if let Some(output) = output_memo.get(graph) {
+            return Ok(*output);
+        }
+        let output = self.infer_builder_output_uncached(graph, output_memo)?;
+        output_memo.insert(graph.clone(), output);
+        Ok(output)
+    }
+
+    fn infer_builder_output_uncached(
+        &self,
+        graph: &GraphBuilder,
+        output_memo: &mut HashMap<GraphBuilder, RecordDescriptor>,
+    ) -> Result<RecordDescriptor, IvmRuntimeError> {
         match graph {
             GraphBuilder::Table { table, .. } => self
                 .schema
@@ -1035,17 +1057,19 @@ impl IvmRuntime {
             GraphBuilder::Filter { input, .. }
             | GraphBuilder::ArgMaxBy { input, .. }
             | GraphBuilder::ArgMinBy { input, .. }
-            | GraphBuilder::TopBy { input, .. } => self.infer_builder_output(input),
+            | GraphBuilder::TopBy { input, .. } => {
+                self.infer_builder_output_cached(input, output_memo)
+            }
             GraphBuilder::Aggregate {
                 input,
                 group_cols,
                 aggregates,
             } => {
-                let input = self.infer_builder_output(input)?;
+                let input = self.infer_builder_output_cached(input, output_memo)?;
                 aggregate_descriptor(&input, group_cols, aggregates)
             }
             GraphBuilder::UnwrapNullable { input, field } => {
-                let input = self.infer_builder_output(input)?;
+                let input = self.infer_builder_output_cached(input, output_memo)?;
                 let field_idx = resolve_field_ref(&input, field)?;
                 unwrap_nullable_descriptor(&input, field_idx)
             }
@@ -1054,18 +1078,18 @@ impl IvmRuntime {
                 array_field,
                 element_field,
             } => {
-                let input = self.infer_builder_output(input)?;
+                let input = self.infer_builder_output_cached(input, output_memo)?;
                 let field_idx = resolve_field_ref(&input, array_field)?;
                 unnest_descriptor(&input, field_idx, element_field)
             }
             GraphBuilder::Project { input, fields } => {
-                let input = self.infer_builder_output(input)?;
+                let input = self.infer_builder_output_cached(input, output_memo)?;
                 project_descriptor(&input, fields)
             }
             GraphBuilder::Union { inputs } => {
                 let mut output = None;
                 for input in inputs {
-                    let next = self.infer_builder_output(input)?;
+                    let next = self.infer_builder_output_cached(input, output_memo)?;
                     if let Some(output) = output {
                         if output != next {
                             return Err(IvmRuntimeError::GraphOutputMismatch);
@@ -1077,14 +1101,16 @@ impl IvmRuntime {
                 Ok(output.unwrap_or_default())
             }
             GraphBuilder::Join { left, right, .. } => {
-                let left = self.infer_builder_output(left)?;
-                let right = self.infer_builder_output(right)?;
+                let left = self.infer_builder_output_cached(left, output_memo)?;
+                let right = self.infer_builder_output_cached(right, output_memo)?;
                 Ok(join_descriptor(&left, &right))
             }
-            GraphBuilder::AntiJoin { left, .. } => self.infer_builder_output(left),
+            GraphBuilder::AntiJoin { left, .. } => {
+                self.infer_builder_output_cached(left, output_memo)
+            }
             GraphBuilder::Recursive { seed, step, .. } => {
-                let seed = self.infer_builder_output(seed)?;
-                let step = self.infer_builder_output(step)?;
+                let seed = self.infer_builder_output_cached(seed, output_memo)?;
+                let step = self.infer_builder_output_cached(step, output_memo)?;
                 if seed != step {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
@@ -1496,7 +1522,16 @@ impl IvmRuntime {
     }
 
     fn add_dedup_graph(&mut self, graph: &GraphBuilder) -> Result<CompiledNode, IvmRuntimeError> {
-        let inferred_output = self.infer_builder_output(graph)?;
+        let mut output_memo = HashMap::new();
+        self.add_dedup_graph_cached(graph, &mut output_memo)
+    }
+
+    fn add_dedup_graph_cached(
+        &mut self,
+        graph: &GraphBuilder,
+        output_memo: &mut HashMap<GraphBuilder, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         match graph {
             GraphBuilder::Table { table, scan } => {
                 let output = inferred_output;
@@ -1598,8 +1633,8 @@ impl IvmRuntime {
                 if builder_contains_recursive(seed) || builder_contains_recursive(step) {
                     return Err(IvmRuntimeError::UnsupportedNestedRecursion);
                 }
-                let compiled_seed = self.add_dedup_graph(seed)?;
-                let compiled_step = self.add_dedup_graph(step)?;
+                let compiled_seed = self.add_dedup_graph_cached(seed, output_memo)?;
+                let compiled_step = self.add_dedup_graph_cached(step, output_memo)?;
                 if compiled_seed.output != compiled_step.output
                     || compiled_seed.output != inferred_output
                 {
@@ -1630,7 +1665,7 @@ impl IvmRuntime {
                 group_cols,
                 order_cols,
             } => {
-                let compiled_input = self.add_dedup_graph(input)?;
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let output = inferred_output;
                 let group_field_indices = group_cols
                     .iter()
@@ -1704,7 +1739,7 @@ impl IvmRuntime {
                 group_cols,
                 order_cols,
             } => {
-                let compiled_input = self.add_dedup_graph(input)?;
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let output = inferred_output;
                 let group_field_indices = group_cols
                     .iter()
@@ -1784,7 +1819,7 @@ impl IvmRuntime {
                 if *limit == 0 {
                     return Err(IvmRuntimeError::UnsupportedOperator);
                 }
-                let compiled_input = self.add_dedup_graph(input)?;
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let output = inferred_output;
                 let group_field_indices = group_cols
                     .iter()
@@ -1854,7 +1889,7 @@ impl IvmRuntime {
                 group_cols,
                 aggregates,
             } => {
-                let compiled_input = self.add_dedup_graph(input)?;
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let output = inferred_output;
@@ -1886,7 +1921,7 @@ impl IvmRuntime {
                 Ok(CompiledNode { output, node })
             }
             GraphBuilder::Filter { input, predicate } => {
-                let compiled_input = self.add_dedup_graph(input)?;
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let input_node = compiled_input.node;
                 let output = inferred_output;
                 let node = self.graph.dedup_node(
@@ -1903,7 +1938,7 @@ impl IvmRuntime {
                 Ok(CompiledNode { output, node })
             }
             GraphBuilder::Project { input, fields } => {
-                let compiled_input = self.add_dedup_graph(input)?;
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let output = inferred_output;
@@ -1940,7 +1975,7 @@ impl IvmRuntime {
                 Ok(CompiledNode { output, node })
             }
             GraphBuilder::UnwrapNullable { input, field } => {
-                let compiled_input = self.add_dedup_graph(input)?;
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let field_idx = resolve_field_ref(&input_output, field)?;
@@ -1964,7 +1999,7 @@ impl IvmRuntime {
                 array_field,
                 element_field,
             } => {
-                let compiled_input = self.add_dedup_graph(input)?;
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let array_field_idx = resolve_field_ref(&input_output, array_field)?;
@@ -1987,7 +2022,7 @@ impl IvmRuntime {
             GraphBuilder::Union { inputs } => {
                 let mut input_nodes = Vec::with_capacity(inputs.len());
                 for input in inputs {
-                    let compiled_input = self.add_dedup_graph(input)?;
+                    let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                     let input_node = compiled_input.node;
                     let input_output = compiled_input.output;
                     if inferred_output != input_output {
@@ -2009,8 +2044,8 @@ impl IvmRuntime {
                 left_on,
                 right_on,
             } => {
-                let compiled_left = self.add_dedup_graph(left)?;
-                let compiled_right = self.add_dedup_graph(right)?;
+                let compiled_left = self.add_dedup_graph_cached(left, output_memo)?;
+                let compiled_right = self.add_dedup_graph_cached(right, output_memo)?;
                 let output = inferred_output;
                 let left_descriptor = compiled_left.output;
                 let right_descriptor = compiled_right.output;
@@ -2046,8 +2081,8 @@ impl IvmRuntime {
                 left_on,
                 right_on,
             } => {
-                let compiled_left = self.add_dedup_graph(left)?;
-                let compiled_right = self.add_dedup_graph(right)?;
+                let compiled_left = self.add_dedup_graph_cached(left, output_memo)?;
+                let compiled_right = self.add_dedup_graph_cached(right, output_memo)?;
                 let output = inferred_output;
                 let left_descriptor = compiled_left.output;
                 let right_descriptor = compiled_right.output;
@@ -4326,8 +4361,7 @@ where
         let graph_node = self
             .graph
             .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?
-            .clone();
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
 
         let output_desc = graph_node.descriptor.output;
         if self.context.sub_tick > 1 && !self.depends_on_context(node, &mut HashSet::new())? {
@@ -4369,23 +4403,23 @@ where
                 self.frontier_source(frontier_source, &graph_node.descriptor.output)
             }
             OpType::Filter(filter) => {
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 NodeState::update_filter(filter, output_desc, input)
             }
             OpType::MapProject(project) => {
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 NodeState::update_map_project(project, output_desc, input)
             }
             OpType::UnwrapNullable(unwrap) => {
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 NodeState::update_unwrap_nullable(unwrap, output_desc, input)
             }
             OpType::Unnest(unnest) => {
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 NodeState::update_unnest(unnest, output_desc, input)
             }
             OpType::ArgMaxBy(arg_max_by) => {
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 self.update_arg_by(
                     node,
                     ArgBySpec {
@@ -4399,7 +4433,7 @@ where
                 )
             }
             OpType::ArgMinBy(arg_min_by) => {
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 self.update_arg_by(
                     node,
                     ArgBySpec {
@@ -4413,15 +4447,15 @@ where
                 )
             }
             OpType::TopBy(top_by) => {
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 self.update_top_by(node, top_by, output_desc, input)
             }
             OpType::Aggregate(aggregate) => {
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 self.update_aggregate(node, aggregate, output_desc, input)
             }
             OpType::IndexBy(index_by) => {
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 NodeState::update_index_by(index_by, output_desc, input)
             }
             OpType::Union => {
@@ -4473,7 +4507,7 @@ where
             }
             OpType::Persist(persist) => {
                 let storage = self.storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
-                let input = self.update_unary_input(&graph_node, node)?;
+                let input = self.update_unary_input(graph_node, node)?;
                 NodeState::update_persist(persist, output_desc, input, storage)
             }
             _ => Err(IvmRuntimeError::UnsupportedOperator),
@@ -5450,7 +5484,10 @@ fn non_nullable_type(value_type: &ValueType) -> &ValueType {
 }
 
 fn index_record_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([("key", ValueType::Bytes), ("value", ValueType::Bytes)])
+    static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([("key", ValueType::Bytes), ("value", ValueType::Bytes)])
+    })
 }
 
 fn apply_index_by(

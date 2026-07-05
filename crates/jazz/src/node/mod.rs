@@ -285,6 +285,12 @@ struct QueryServing {
     tx_version_tables_cache_order: VecDeque<TxId>,
     /// Live membership for `tx_version_tables_cache_order`.
     tx_version_tables_cache_order_set: BTreeSet<TxId>,
+    /// Version storage source descriptors keyed by logical table and layer.
+    ///
+    /// These descriptors are static catalogue metadata. They are invalidated
+    /// whenever schema partitions or catalogue schemas change.
+    version_storage_sources_cache:
+        BTreeMap<(String, VersionLayer), Vec<(String, records::RecordDescriptor)>>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
@@ -499,6 +505,7 @@ where
                 tx_version_tables_cache: BTreeMap::new(),
                 tx_version_tables_cache_order: VecDeque::new(),
                 tx_version_tables_cache_order_set: BTreeSet::new(),
+                version_storage_sources_cache: BTreeMap::new(),
                 registered_shapes: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
@@ -627,6 +634,7 @@ where
         self.query.tx_version_tables_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
+        self.query.version_storage_sources_cache.clear();
         self.query.settled_result_sets.clear();
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
@@ -2522,6 +2530,7 @@ where
         {
             return Ok(false);
         }
+        self.query.version_storage_sources_cache.clear();
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_partitions",

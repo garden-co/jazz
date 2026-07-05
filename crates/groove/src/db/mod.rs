@@ -1546,7 +1546,7 @@ where
     ) -> Result<(), Error> {
         let descriptors = pending_writes
             .iter()
-            .map(|write| self.table(write.table()).map(|table| table.record_schema()))
+            .map(|write| self.table_descriptor(write.table()))
             .collect::<Result<Vec<_>, _>>()?;
         let stores = pending_writes
             .iter()
@@ -1645,8 +1645,9 @@ where
         match operation {
             BatchOperation::Insert { table, values } => {
                 let table_schema = self.table(table)?;
-                let record = encode_record(table_schema, values)?;
-                let key = primary_key_bytes(table_schema, &record)?;
+                let descriptor = self.table_descriptor(table)?;
+                let record = encode_record(table_schema, descriptor, values)?;
+                let key = primary_key_bytes(table_schema, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
@@ -1665,8 +1666,9 @@ where
             }
             BatchOperation::Update { table, values } => {
                 let table_schema = self.table(table)?;
-                let record = encode_record(table_schema, values)?;
-                let key = primary_key_bytes(table_schema, &record)?;
+                let descriptor = self.table_descriptor(table)?;
+                let record = encode_record(table_schema, descriptor, values)?;
+                let key = primary_key_bytes(table_schema, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
@@ -1697,6 +1699,14 @@ where
         self.ensure_not_poisoned()?;
         self.ivm_runtime
             .table(table)
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))
+    }
+
+    fn table_descriptor(&self, table: &str) -> Result<RecordDescriptor, Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .table_descriptor(table)
+            .copied()
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))
     }
 
@@ -3031,7 +3041,11 @@ impl PrimaryKeyValue {
     }
 }
 
-fn encode_record(table: &TableSchema, values: &[Value]) -> Result<Vec<u8>, Error> {
+fn encode_record(
+    table: &TableSchema,
+    descriptor: RecordDescriptor,
+    values: &[Value],
+) -> Result<Vec<u8>, Error> {
     if table.columns.len() != values.len() {
         return Err(records::Error::ArityMismatch {
             expected: table.columns.len(),
@@ -3039,7 +3053,6 @@ fn encode_record(table: &TableSchema, values: &[Value]) -> Result<Vec<u8>, Error
         }
         .into());
     }
-    let descriptor = table.record_schema();
     // Callers provide values in SQL declaration order. RecordDescriptor stores
     // fixed-width fields first, so we reorder here before positional encoding.
     let values_by_descriptor_order = descriptor
@@ -3067,12 +3080,15 @@ fn encode_record(table: &TableSchema, values: &[Value]) -> Result<Vec<u8>, Error
     Ok(descriptor.create(&values_by_descriptor_order)?)
 }
 
-fn primary_key_bytes(table: &TableSchema, record: &[u8]) -> Result<Vec<u8>, Error> {
+fn primary_key_bytes(
+    table: &TableSchema,
+    record_schema: RecordDescriptor,
+    record: &[u8],
+) -> Result<Vec<u8>, Error> {
     let primary_key = table
         .primary_key
         .as_ref()
         .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
-    let record_schema = table.record_schema();
 
     let mut bytes = Vec::new();
     for column in &primary_key.columns {
@@ -3570,10 +3586,13 @@ fn decode_ordered_bytes(bytes: &mut &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 fn index_record_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([
-        ("key", records::ValueType::Bytes),
-        ("value", records::ValueType::Bytes),
-    ])
+    static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("key", records::ValueType::Bytes),
+            ("value", records::ValueType::Bytes),
+        ])
+    })
 }
 
 fn encode_index_prefix_part(
