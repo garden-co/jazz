@@ -592,6 +592,66 @@ fn customer_resource_policy_minimal_schema() -> JazzSchema {
     ])
 }
 
+fn same_table_seeded_resource_policy_schema() -> JazzSchema {
+    let resource_policy = Policy::shape(
+        Query::from("resources")
+            .reachable_via_with_access_filters(
+                "resource_access",
+                "resource",
+                "team",
+                lit("relation-seeded"),
+                [eq(col("administrator"), lit(false))],
+                "team_entries",
+                "member_id",
+                "target_id",
+                [eq(col("administrator"), lit(false))],
+            )
+            .seeded_by("teams", "identity_key", "sub", "id"),
+    );
+
+    JazzSchema::new([
+        TableSchema::new(
+            "teams",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("identity_key", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "team_entries",
+            [
+                ColumnSchema::new("member_id", ColumnType::Uuid),
+                ColumnSchema::new("target_id", ColumnType::Uuid),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+            ],
+        )
+        .with_reference("member_id", "teams")
+        .with_reference("target_id", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "resources",
+            [ColumnSchema::new("label", ColumnType::String)],
+        )
+        .with_read_policy(resource_policy)
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "resource_access",
+            [
+                ColumnSchema::new("resource", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+            ],
+        )
+        .with_reference("resource", "resources")
+        .with_reference("team", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
+}
+
 fn customer_inherited_child_policy_schema() -> JazzSchema {
     let resource_policy = Query::from("res_i")
         .reachable_via_with_access_filters(
@@ -5827,6 +5887,135 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
 }
 
 #[test]
+fn same_table_seeded_membership_allows_direct_and_transitive_groups() {
+    let schema = same_table_seeded_resource_policy_schema();
+    let server = open_core(0x66, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x21; 16]);
+    let other = AuthorId::from_bytes([0x22; 16]);
+    let (direct, transitive, hidden) =
+        seed_same_table_seeded_resource_fixture(&server, member, other);
+
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "resources"),
+        vec![direct, transitive]
+    );
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, other, "resources"),
+        vec![hidden]
+    );
+    assert!(
+        served_subscription_rows_for_author(
+            &schema,
+            &server,
+            AuthorId::from_bytes([0x99; 16]),
+            "resources"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
+    let schema = same_table_seeded_resource_policy_schema();
+    let server = open_core(0x67, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x23; 16]);
+    let other = AuthorId::from_bytes([0x24; 16]);
+    let direct_group = row(0x71);
+    let transitive_group = row(0x72);
+    let resource = row(0xe7);
+
+    for (group, identity, label) in [
+        (direct_group, other, "direct"),
+        (transitive_group, other, "transitive"),
+    ] {
+        server
+            .insert_with_id("teams", group, same_table_team_cells(label, identity))
+            .unwrap();
+    }
+    server
+        .insert_with_id(
+            "team_entries",
+            row(0xc7),
+            same_table_team_entry_cells(direct_group, transitive_group, false),
+        )
+        .unwrap();
+    server
+        .insert_with_id("resources", resource, same_table_resource_cells("resource"))
+        .unwrap();
+    server
+        .insert_with_id(
+            "resource_access",
+            row(0xb7),
+            same_table_resource_access_cells(resource, transitive_group, false),
+        )
+        .unwrap();
+
+    let client = open_db(0x68, member, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, member);
+    let mut subscription =
+        prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    while let Some(event) = subscription.try_next_event() {
+        let (added, updated, removed) = match event {
+            SubscriptionEvent::Opened { current, .. }
+            | SubscriptionEvent::Reset { current, .. } => (current.rows, Vec::new(), Vec::new()),
+            SubscriptionEvent::Delta {
+                added,
+                updated,
+                removed,
+                ..
+            } => (added, updated, removed),
+            SubscriptionEvent::Closed => (Vec::new(), Vec::new(), Vec::new()),
+        };
+        assert!(added.is_empty());
+        assert!(updated.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    server
+        .update(
+            "teams",
+            direct_group,
+            BTreeMap::from([("identity_key".to_owned(), Value::Uuid(member.0))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![resource]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    server
+        .update(
+            "teams",
+            direct_group,
+            BTreeMap::from([("identity_key".to_owned(), Value::Uuid(other.0))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![resource]
+    );
+}
+
+#[test]
 fn inherited_child_policy_allows_two_and_three_level_chains_per_identity() {
     let schema = customer_inherited_child_policy_schema();
     let server = open_core(0x62, AuthorId::SYSTEM, &schema);
@@ -6050,6 +6239,63 @@ fn seed_seeded_membership_resource_fixture(
     (direct, transitive, hidden)
 }
 
+fn seed_same_table_seeded_resource_fixture(
+    server: &CoreDb,
+    member: AuthorId,
+    other: AuthorId,
+) -> (RowUuid, RowUuid, RowUuid) {
+    let direct_group = row(0x61);
+    let transitive_group = row(0x62);
+    let hidden_group = row(0x63);
+    let direct = row(0xf1);
+    let transitive = row(0xf2);
+    let hidden = row(0xf3);
+
+    for (group, identity, label) in [
+        (direct_group, member, "direct"),
+        (
+            transitive_group,
+            AuthorId::from_bytes([0x88; 16]),
+            "transitive",
+        ),
+        (hidden_group, other, "hidden"),
+    ] {
+        server
+            .insert_with_id("teams", group, same_table_team_cells(label, identity))
+            .unwrap();
+    }
+    server
+        .insert_with_id(
+            "team_entries",
+            row(0xc6),
+            same_table_team_entry_cells(direct_group, transitive_group, false),
+        )
+        .unwrap();
+    for (resource, label) in [
+        (direct, "direct"),
+        (transitive, "transitive"),
+        (hidden, "hidden"),
+    ] {
+        server
+            .insert_with_id("resources", resource, same_table_resource_cells(label))
+            .unwrap();
+    }
+    for (edge, resource, group) in [
+        (row(0xb6), direct, direct_group),
+        (row(0xb7), transitive, transitive_group),
+        (row(0xb8), hidden, hidden_group),
+    ] {
+        server
+            .insert_with_id(
+                "resource_access",
+                edge,
+                same_table_resource_access_cells(resource, group, false),
+            )
+            .unwrap();
+    }
+    (direct, transitive, hidden)
+}
+
 fn seed_inherited_child_fixture(
     server: &CoreDb,
     member: AuthorId,
@@ -6150,12 +6396,43 @@ fn team_cells(name: &str) -> RowCells {
     BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))])
 }
 
+fn same_table_team_cells(name: &str, identity: AuthorId) -> RowCells {
+    BTreeMap::from([
+        ("name".to_owned(), Value::String(name.to_owned())),
+        ("identity_key".to_owned(), Value::Uuid(identity.0)),
+    ])
+}
+
 fn group_entry_test_cells(member: RowUuid, target: RowUuid, administrator: bool) -> RowCells {
     BTreeMap::from([
         ("member_id".to_owned(), Value::Uuid(member.0)),
         ("target_id".to_owned(), Value::Uuid(target.0)),
         ("administrator".to_owned(), Value::Bool(administrator)),
         ("date_added".to_owned(), Value::U64(1)),
+    ])
+}
+
+fn same_table_team_entry_cells(member: RowUuid, target: RowUuid, administrator: bool) -> RowCells {
+    BTreeMap::from([
+        ("member_id".to_owned(), Value::Uuid(member.0)),
+        ("target_id".to_owned(), Value::Uuid(target.0)),
+        ("administrator".to_owned(), Value::Bool(administrator)),
+    ])
+}
+
+fn same_table_resource_cells(label: &str) -> RowCells {
+    BTreeMap::from([("label".to_owned(), Value::String(label.to_owned()))])
+}
+
+fn same_table_resource_access_cells(
+    resource: RowUuid,
+    group: RowUuid,
+    administrator: bool,
+) -> RowCells {
+    BTreeMap::from([
+        ("resource".to_owned(), Value::Uuid(resource.0)),
+        ("team".to_owned(), Value::Uuid(group.0)),
+        ("administrator".to_owned(), Value::Bool(administrator)),
     ])
 }
 
