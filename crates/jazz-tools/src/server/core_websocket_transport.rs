@@ -6,8 +6,8 @@ use std::time::Duration;
 use futures::{SinkExt as _, StreamExt as _};
 use jazz::ids::AuthorId;
 use jazz::wire::{
-    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
-    WireError, WireFrame, WireHello, WirePeerRole, WireTransport, decode_frame, encode_frame,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireError, WireFrame,
+    WireHello, WirePeerRole, WireTransport, current_wire_features, decode_frame, encode_frame,
     negotiate_wire,
 };
 use tokio::sync::mpsc;
@@ -17,7 +17,6 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::AppId;
 use crate::websocket_prelude_auth::AuthConfig;
 
-const WS_CLIENT_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
 const WS_CLIENT_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -112,7 +111,7 @@ impl WebSocketTransport {
 
         let hello = WireFrame::Hello(WireHello::current(
             WirePeerRole::Client,
-            WS_CLIENT_SUPPORTED_FEATURES,
+            current_wire_features(),
         ));
         let encoded_hello = encode_frame(&hello).map_err(WebSocketClientError::EncodeHello)?;
         let batch = postcard::to_allocvec(&vec![encoded_hello])
@@ -126,7 +125,7 @@ impl WebSocketTransport {
             &server_hello,
             WIRE_PROTOCOL_VERSION,
             WIRE_PROTOCOL_VERSION,
-            WS_CLIENT_SUPPORTED_FEATURES,
+            current_wire_features(),
         )
         .map_err(WebSocketClientError::Negotiation)?;
         if negotiated.features & WS_CLIENT_REQUIRED_FEATURES != WS_CLIENT_REQUIRED_FEATURES {
