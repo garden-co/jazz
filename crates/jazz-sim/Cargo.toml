@@ -8,6 +8,8 @@ default = []
 bench-alloc-metrics = []
 bench-alloc-sites = ["dep:backtrace"]
 profiling = ["dep:pprof"]
+transport-compression-lz4 = ["jazz/transport-compression-lz4"]
+transport-compression-zstd = ["jazz/transport-compression-zstd"]
 
 [dependencies]
 automerge = "0.10.0"

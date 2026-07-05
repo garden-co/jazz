@@ -21,6 +21,7 @@ use crate::query::{
     in_list, is_null, lit, lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema, WritePolicies};
+use crate::wire::{FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -3105,6 +3106,48 @@ fn wire_transport_adapter_preserves_message_order() {
             ..
         })
     ));
+}
+
+#[cfg(feature = "transport-compression-lz4")]
+#[test]
+fn wire_transport_adapter_lz4_compresses_payload_when_negotiated() {
+    let (left, right) = byte_duplex_raw();
+    let mut sender = WireTransportAdapter::new(
+        left,
+        WIRE_PROTOCOL_VERSION,
+        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4,
+        None,
+    );
+    let mut receiver = WireTransportAdapter::new(
+        right,
+        WIRE_PROTOCOL_VERSION,
+        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4,
+        None,
+    );
+    let message = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
+        revision: Some(7),
+        schema: None,
+        lens: None,
+        applied: true,
+    });
+
+    sender.send(message.clone()).unwrap();
+    let raw = sender
+        .into_inner()
+        .outbound
+        .borrow()
+        .front()
+        .cloned()
+        .unwrap();
+    let WireFrame::Message(envelope) = decode_frame(&raw).unwrap() else {
+        panic!("expected message frame");
+    };
+    assert_eq!(
+        envelope.features & crate::wire::FEATURE_PAYLOAD_LZ4,
+        crate::wire::FEATURE_PAYLOAD_LZ4
+    );
+    assert_ne!(envelope.payload, encode_sync_message(&message).unwrap());
+    assert_eq!(receiver.try_recv(), Some(message));
 }
 
 fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {

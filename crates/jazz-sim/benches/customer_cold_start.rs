@@ -18,7 +18,7 @@ use jazz::node::MergeableCommit;
 use jazz::protocol::{SubscriptionKey, SyncMessage};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
-use jazz::wire::TransportError;
+use jazz::wire::{TransportError, compress_sync_payload, current_wire_features};
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
@@ -452,6 +452,8 @@ struct RunSummary {
     server_to_client_messages: u64,
     server_to_client_view_updates: u64,
     server_to_client_bytes: u64,
+    server_to_client_compress_encode_us: u64,
+    server_to_client_compress_decode_us: u64,
     client_to_relay_messages: u64,
     relay_to_core_messages: u64,
     known_state_declared: u64,
@@ -523,6 +525,8 @@ struct TransportMetrics {
     messages: Cell<u64>,
     view_updates: Cell<u64>,
     bytes: Cell<u64>,
+    compress_encode_ns: Cell<u64>,
+    compress_decode_ns: Cell<u64>,
     known_state_subscribes: Cell<u64>,
     view_updates_by_subscription: RefCell<BTreeMap<SubscriptionKey, ViewUpdateSummary>>,
 }
@@ -580,9 +584,16 @@ impl Transport for DuplexTransport {
                     .set(self.metrics.known_state_subscribes.get() + 1);
             }
         }
+        let measurement = encoded_message_measurement(&message);
         self.metrics
             .bytes
-            .set(self.metrics.bytes.get() + encoded_message_len(&message));
+            .set(self.metrics.bytes.get() + measurement.bytes);
+        self.metrics
+            .compress_encode_ns
+            .set(self.metrics.compress_encode_ns.get() + measurement.compress_encode_ns);
+        self.metrics
+            .compress_decode_ns
+            .set(self.metrics.compress_decode_ns.get() + measurement.compress_decode_ns);
         self.outbound.borrow_mut().push_back(message);
         Ok(())
     }
@@ -1365,6 +1376,10 @@ fn run_connect_and_subscribe(
         server_to_client_messages: client_relay.right_to_left.messages.get(),
         server_to_client_view_updates: client_relay.right_to_left.view_updates.get(),
         server_to_client_bytes: client_relay.right_to_left.bytes.get(),
+        server_to_client_compress_encode_us: client_relay.right_to_left.compress_encode_ns.get()
+            / 1_000,
+        server_to_client_compress_decode_us: client_relay.right_to_left.compress_decode_ns.get()
+            / 1_000,
         client_to_relay_messages: client_relay.left_to_right.messages.get(),
         relay_to_core_messages: relay_core.left_to_right.messages.get(),
         known_state_declared: client_relay.left_to_right.known_state_subscribes.get(),
@@ -1752,6 +1767,14 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         json!(summary.server_to_client_bytes),
     );
     fields.insert(
+        "server_to_client_compress_encode_us".to_owned(),
+        json!(summary.server_to_client_compress_encode_us),
+    );
+    fields.insert(
+        "server_to_client_compress_decode_us".to_owned(),
+        json!(summary.server_to_client_compress_decode_us),
+    );
+    fields.insert(
         "client_to_relay_messages".to_owned(),
         json!(summary.client_to_relay_messages),
     );
@@ -1885,10 +1908,41 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     );
 }
 
-fn encoded_message_len(message: &SyncMessage) -> u64 {
-    postcard::to_allocvec(message)
-        .map(|bytes| bytes.len() as u64)
-        .unwrap_or_default()
+struct EncodedMessageMeasurement {
+    bytes: u64,
+    compress_encode_ns: u64,
+    compress_decode_ns: u64,
+}
+
+fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasurement {
+    let Ok(bytes) = postcard::to_allocvec(message) else {
+        return EncodedMessageMeasurement {
+            bytes: 0,
+            compress_encode_ns: 0,
+            compress_decode_ns: 0,
+        };
+    };
+    let features = current_wire_features();
+    let encode_start = Instant::now();
+    let compressed = compress_sync_payload(bytes, features);
+    let encode_ns = encode_start.elapsed().as_nanos() as u64;
+    match compressed {
+        Ok((compressed, active)) => {
+            let decode_start = Instant::now();
+            let _ = jazz::wire::decompress_sync_payload(&compressed, active);
+            let decode_ns = decode_start.elapsed().as_nanos() as u64;
+            EncodedMessageMeasurement {
+                bytes: compressed.len() as u64,
+                compress_encode_ns: encode_ns,
+                compress_decode_ns: decode_ns,
+            }
+        }
+        Err(_) => EncodedMessageMeasurement {
+            bytes: 0,
+            compress_encode_ns: encode_ns,
+            compress_decode_ns: 0,
+        },
+    }
 }
 
 fn sized_string(prefix: &str, len: usize) -> String {
