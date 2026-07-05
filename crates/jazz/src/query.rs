@@ -1521,6 +1521,20 @@ pub enum QueryError {
     /// Operand types do not match.
     #[error("operand type mismatch")]
     OperandTypeMismatch,
+    /// Claim and column operand types do not match.
+    #[error(
+        "claim {claim_path} has type {claim_type:?}, but column {column} has type {column_type:?}"
+    )]
+    ClaimTypeMismatch {
+        /// Claim path.
+        claim_path: String,
+        /// Column name.
+        column: String,
+        /// Claim type.
+        claim_type: String,
+        /// Column type.
+        column_type: String,
+    },
     /// Parameter was inferred with incompatible types.
     #[error("parameter {param} inferred with incompatible type")]
     ParamTypeConflict {
@@ -2143,6 +2157,12 @@ fn validate_comparable_operands(
         (Some(left_type), Some(right_type))
             if !column_types_comparable(&left_type, &right_type) =>
         {
+            if let Some(error) = claim_type_mismatch_error(left, &left_type, right, &right_type) {
+                return Err(error);
+            }
+            if let Some(error) = claim_type_mismatch_error(right, &right_type, left, &left_type) {
+                return Err(error);
+            }
             Err(QueryError::OperandTypeMismatch)
         }
         (Some(left_type), None) => {
@@ -2229,11 +2249,34 @@ fn operand_type(
 fn claim_type(name: &str) -> Result<Option<ColumnType>, QueryError> {
     match name {
         "sub" => Ok(Some(ColumnType::Uuid)),
-        "user_id" => Ok(None),
         "team" => Ok(Some(ColumnType::Uuid)),
         "isAdmin" => Ok(Some(ColumnType::Bool)),
         _ => Ok(None),
     }
+}
+
+fn claim_type_mismatch_error(
+    claim: &Operand,
+    claim_type: &ColumnType,
+    other: &Operand,
+    other_type: &ColumnType,
+) -> Option<QueryError> {
+    let Operand::Claim(claim_path) = claim else {
+        return None;
+    };
+    let Operand::Column(column) = other else {
+        return None;
+    };
+    Some(QueryError::ClaimTypeMismatch {
+        claim_path: claim_path.clone(),
+        column: column.clone(),
+        claim_type: column_type_name(claim_type),
+        column_type: column_type_name(other_type),
+    })
+}
+
+fn column_type_name(column_type: &ColumnType) -> String {
+    format!("{column_type:?}")
 }
 
 fn infer_param(
@@ -3347,6 +3390,37 @@ mod tests {
             )]))
             .unwrap_err();
         assert!(matches!(err, QueryError::ParamTypeMismatch { .. }));
+    }
+
+    #[test]
+    fn claim_column_type_mismatch_errors_loudly() {
+        let err = Query::from("issues")
+            .filter(eq(col("state"), claim("sub")))
+            .validate(&schema())
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            QueryError::ClaimTypeMismatch {
+                claim_path: "sub".to_owned(),
+                column: "state".to_owned(),
+                claim_type: "Uuid".to_owned(),
+                column_type: "String".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn claim_column_matched_types_still_validate() {
+        Query::from("issues")
+            .filter(eq(col("assignee"), claim("sub")))
+            .validate(&schema())
+            .unwrap();
+
+        Query::from("issues")
+            .filter(eq(col("state"), claim("user_id")))
+            .validate(&schema())
+            .unwrap();
     }
 
     #[test]
