@@ -990,7 +990,8 @@ impl PeerState {
             let open_reads = open_reads.expect("trace reads captured");
             let bundle_reads = bundle_reads.expect("trace reads captured");
             eprintln!(
-                "CUSTOMER_REHYDRATE stage=rehydrate subscription={subscription:?} reset={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} bundle_reads={} bundle_ranges={}",
+                "CUSTOMER_REHYDRATE stage=rehydrate table={} subscription={subscription:?} reset={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} bundle_reads={} bundle_ranges={}",
+                shape.query().table,
                 reset_result_set,
                 open_elapsed.as_millis(),
                 filter_elapsed.as_millis(),
