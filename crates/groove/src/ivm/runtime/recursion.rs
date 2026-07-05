@@ -14,8 +14,8 @@ use crate::storage::OrderedKvStorage;
 
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
-    RecordDelta, RecordDeltas, ScopePath, StaticScanBounds, SubTick, TableDelta,
-    consolidate_deltas, plan_expr_names, project_binding_source_deltas, scan_bounds,
+    RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, consolidate_deltas,
+    plan_expr_names, project_binding_source_deltas, scan_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -162,7 +162,7 @@ where
             runtime.storage,
             runtime.binding_snapshots,
             runtime.current_tick,
-            runtime.scope.clone(),
+            runtime.scope,
         )?;
         let accumulated = RecordDeltas {
             descriptor: output_desc,
@@ -526,7 +526,7 @@ pub(super) fn recompute_recursive(
     storage: &impl OrderedKvStorage,
     binding_snapshots: &HashMap<String, RecordDeltas>,
     _current_tick: u64,
-    scope: ScopePath,
+    scope: ScopeId,
 ) -> Result<HashMap<Vec<u8>, i64>, IvmRuntimeError> {
     let recursive_node = graph
         .node(node)
@@ -557,12 +557,8 @@ pub(super) fn recompute_recursive(
                 max_iters: recursive.max_iters,
             });
         }
-        let context = EvalContext::with_binding(
-            scope.clone(),
-            sub_tick as u64,
-            recursive.frontier.clone(),
-            frontier,
-        );
+        let context =
+            EvalContext::with_binding(scope, sub_tick as u64, recursive.frontier.clone(), frontier);
         let mut snapshot = HydrationEvaluator {
             schema,
             graph,
@@ -671,19 +667,19 @@ where
             }
             OpType::Filter(filter) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                NodeState::update_filter(filter, output_desc, input)
+                NodeState::update_filter(filter, output_desc, &input)
             }
             OpType::MapProject(project) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                NodeState::update_map_project(project, output_desc, input)
+                NodeState::update_map_project(project, output_desc, &input)
             }
             OpType::UnwrapNullable(unwrap) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                NodeState::update_unwrap_nullable(unwrap, output_desc, input)
+                NodeState::update_unwrap_nullable(unwrap, output_desc, &input)
             }
             OpType::Unnest(unnest) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                NodeState::update_unnest(unnest, output_desc, input)
+                NodeState::update_unnest(unnest, output_desc, &input)
             }
             OpType::ArgMaxBy(arg_max_by) => {
                 let input = self.eval_unary_input(graph_node, node)?;
@@ -750,11 +746,14 @@ where
                     .iter()
                     .map(|input| self.eval_node(*input))
                     .collect::<Result<Vec<_>, _>>()?;
-                NodeState::update_union(output_desc, inputs)
+                NodeState::update_union(
+                    output_desc,
+                    inputs.into_iter().map(std::sync::Arc::new).collect(),
+                )
             }
             OpType::IndexBy(index_by) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                NodeState::update_index_by(index_by, output_desc, input)
+                NodeState::update_index_by(index_by, output_desc, &input)
             }
             OpType::Join(join) => {
                 let [left, right] = graph_node.descriptor.inputs.as_slice() else {

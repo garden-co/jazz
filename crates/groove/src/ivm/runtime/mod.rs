@@ -75,7 +75,7 @@ pub struct IvmRuntime {
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     /// Per-tick/subtick memoization. Cleared after each durable/subscription
     /// pass; it must not own join or recursive state.
-    eval_memo: HashMap<EvalMemoKey, RecordDeltas>,
+    eval_memo: HashMap<EvalMemoKey, Arc<RecordDeltas>>,
     /// Retainers and GC age live outside operator state so stateless leaf nodes
     /// can be retained without allocating fake operator state.
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
@@ -317,7 +317,7 @@ impl IvmRuntime {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 if !records.is_empty() {
-                    sinks.insert(sink.clone(), records);
+                    sinks.insert(sink.clone(), records.as_ref().clone());
                 }
             }
             let records = MultisinkDeltas { sinks };
@@ -339,7 +339,7 @@ impl IvmRuntime {
         }
         drop(evaluator);
         self.operator_states
-            .retain(|key, _| key.scope == ScopePath::root());
+            .retain(|key, _| key.scope == ScopeId::root());
 
         for subscription_id in dropped_subscriptions {
             self.unsubscribe(subscription_id);
@@ -381,7 +381,9 @@ impl IvmRuntime {
             context: EvalContext::root_snapshot(),
             metrics: &mut metrics,
         };
-        evaluator.update_node(output_node)
+        evaluator
+            .update_node(output_node)
+            .map(|records| records.as_ref().clone())
     }
 
     fn hydration_snapshots<S>(
@@ -428,7 +430,7 @@ impl IvmRuntime {
             node_meta: &mut self.node_meta,
             storage: Some(storage),
             context: EvalContext {
-                scope: ScopePath::root(),
+                scope: ScopeId::root(),
                 sub_tick: 0,
                 bindings: HashMap::default(),
                 arrangement_update_mode: ArrangementUpdateMode::Replace,
@@ -1436,13 +1438,13 @@ impl IvmRuntime {
                     OpType::Join(join) | OpType::AntiJoin(join) => {
                         if let [left, right] = node.descriptor.inputs.as_slice() {
                             keys.push(ArrangementKey {
-                                scope: ScopePath::root(),
+                                scope: ScopeId::root(),
                                 input: *left,
                                 fields: Arc::from(plan_expr_names(&join.left_key)),
                                 descriptor: join.left_descriptor,
                             });
                             keys.push(ArrangementKey {
-                                scope: ScopePath::root(),
+                                scope: ScopeId::root(),
                                 input: *right,
                                 fields: Arc::from(plan_expr_names(&join.right_key)),
                                 descriptor: join.right_descriptor,
@@ -1452,7 +1454,7 @@ impl IvmRuntime {
                     OpType::ArgMaxBy(arg_by) => {
                         if let [input] = node.descriptor.inputs.as_slice() {
                             keys.push(ArrangementKey {
-                                scope: ScopePath::root(),
+                                scope: ScopeId::root(),
                                 input: *input,
                                 fields: Arc::from(arg_by.group_fields.clone()),
                                 descriptor: node.descriptor.output,
@@ -1462,7 +1464,7 @@ impl IvmRuntime {
                     OpType::ArgMinBy(arg_by) => {
                         if let [input] = node.descriptor.inputs.as_slice() {
                             keys.push(ArrangementKey {
-                                scope: ScopePath::root(),
+                                scope: ScopeId::root(),
                                 input: *input,
                                 fields: Arc::from(arg_by.group_fields.clone()),
                                 descriptor: node.descriptor.output,
@@ -1472,7 +1474,7 @@ impl IvmRuntime {
                     OpType::TopBy(top_by) => {
                         if let [input] = node.descriptor.inputs.as_slice() {
                             keys.push(ArrangementKey {
-                                scope: ScopePath::root(),
+                                scope: ScopeId::root(),
                                 input: *input,
                                 fields: Arc::from(top_by.group_fields.clone()),
                                 descriptor: node.descriptor.output,
@@ -1484,7 +1486,7 @@ impl IvmRuntime {
                             && let Some(input_node) = self.graph.node(*input)
                         {
                             keys.push(ArrangementKey {
-                                scope: ScopePath::root(),
+                                scope: ScopeId::root(),
                                 input: *input,
                                 fields: Arc::from(plan_expr_names(&aggregate.group_key)),
                                 descriptor: input_node.descriptor.output,
@@ -1527,7 +1529,7 @@ impl IvmRuntime {
         if !matches!(operator_state, OperatorState::Stateless) {
             self.operator_states
                 .entry(OperatorStateKey {
-                    scope: ScopePath::root(),
+                    scope: ScopeId::root(),
                     node,
                 })
                 .or_insert(operator_state);
@@ -2342,11 +2344,26 @@ impl ScopePath {
     fn root() -> Self {
         Self(Vec::new())
     }
+}
 
-    pub(super) fn child(&self, recursive_node: NodeId) -> Self {
-        let mut scope = self.0.clone();
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct ScopeId(crate::Intern<ScopePath>);
+
+impl ScopeId {
+    fn root() -> Self {
+        Self(crate::Intern::new(ScopePath::root()))
+    }
+
+    pub(super) fn child(self, recursive_node: NodeId) -> Self {
+        let mut scope = self.0.0.clone();
         scope.push(recursive_node);
-        Self(scope)
+        Self(crate::Intern::new(ScopePath(scope)))
+    }
+}
+
+impl Default for ScopeId {
+    fn default() -> Self {
+        Self::root()
     }
 }
 
@@ -2355,7 +2372,7 @@ impl ScopePath {
 struct OperatorStateKey {
     /// Empty for normal query execution; nested recursive scopes append their
     /// recursive node ids here.
-    scope: ScopePath,
+    scope: ScopeId,
     node: NodeId,
 }
 
@@ -2364,7 +2381,7 @@ struct OperatorStateKey {
 struct ArrangementKey {
     /// Context-independent inputs use the root scope and can be shared across
     /// unrelated subscriptions.
-    scope: ScopePath,
+    scope: ScopeId,
     /// The graph fragment whose records are arranged.
     input: NodeId,
     fields: Arc<[String]>,
@@ -2470,7 +2487,7 @@ pub(super) enum EvalMode {
 /// Key for one cached node evaluation within a logical tick.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct EvalMemoKey {
-    scope: ScopePath,
+    scope: ScopeId,
     node: NodeId,
     tick: u64,
     /// Recursive sub-ticks intentionally affect memoization, not operator
@@ -2482,7 +2499,7 @@ struct EvalMemoKey {
 #[derive(Clone, Debug, Default)]
 struct EvalContext {
     /// Current operator-state namespace.
-    scope: ScopePath,
+    scope: ScopeId,
     /// Logical time within a recursive fixed-point evaluation.
     sub_tick: u64,
     /// FrontierSource bindings, currently used for recursive frontiers.
@@ -2495,7 +2512,7 @@ struct EvalContext {
 impl EvalContext {
     fn root() -> Self {
         Self {
-            scope: ScopePath::root(),
+            scope: ScopeId::root(),
             sub_tick: 0,
             bindings: HashMap::default(),
             arrangement_update_mode: ArrangementUpdateMode::Accumulate,
@@ -2505,7 +2522,7 @@ impl EvalContext {
 
     fn root_snapshot() -> Self {
         Self {
-            scope: ScopePath::root(),
+            scope: ScopeId::root(),
             sub_tick: 0,
             bindings: HashMap::default(),
             arrangement_update_mode: ArrangementUpdateMode::Replace,
@@ -2514,7 +2531,7 @@ impl EvalContext {
     }
 
     pub(super) fn with_binding(
-        scope: ScopePath,
+        scope: ScopeId,
         sub_tick: u64,
         binding: FrontierName,
         deltas: RecordDeltas,
@@ -2531,7 +2548,7 @@ impl EvalContext {
     }
 
     pub(super) fn with_binding_and_arrangement_mode(
-        scope: ScopePath,
+        scope: ScopeId,
         sub_tick: u64,
         binding: FrontierName,
         deltas: RecordDeltas,
@@ -3974,13 +3991,13 @@ impl NodeState {
     fn update_filter(
         filter: &FilterOp,
         output_desc: RecordDescriptor,
-        input: RecordDeltas,
+        input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let predicate = &filter.predicate;
         let mut deltas = Vec::new();
-        for delta in input.deltas {
+        for delta in &input.deltas {
             if predicate.matches(delta.borrowed(&input.descriptor))? {
-                deltas.push(delta);
+                deltas.push(delta.clone());
             }
         }
         Ok(RecordDeltas {
@@ -3992,7 +4009,7 @@ impl NodeState {
     fn update_map_project(
         project: &MapProjectOp,
         output_desc: RecordDescriptor,
-        input: RecordDeltas,
+        input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let deltas = input
             .deltas
@@ -4020,10 +4037,10 @@ impl NodeState {
     fn update_unwrap_nullable(
         unwrap: &UnwrapNullableOp,
         output_desc: RecordDescriptor,
-        input: RecordDeltas,
+        input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut deltas = Vec::new();
-        for delta in input.deltas {
+        for delta in &input.deltas {
             let values = delta
                 .borrowed(&input.descriptor)
                 .to_values()
@@ -4058,10 +4075,10 @@ impl NodeState {
     fn update_unnest(
         unnest: &UnnestOp,
         output_desc: RecordDescriptor,
-        input: RecordDeltas,
+        input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut deltas = Vec::new();
-        for delta in input.deltas {
+        for delta in &input.deltas {
             let values = delta
                 .borrowed(&input.descriptor)
                 .to_values()
@@ -4091,7 +4108,7 @@ impl NodeState {
 
     fn update_union(
         output_desc: RecordDescriptor,
-        inputs: Vec<RecordDeltas>,
+        inputs: Vec<Arc<RecordDeltas>>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut deltas = Vec::new();
         for input in inputs {
@@ -4101,7 +4118,7 @@ impl NodeState {
             if output_desc != input.descriptor {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
-            deltas.extend(input.deltas);
+            deltas.extend(input.deltas.iter().cloned());
         }
         Ok(RecordDeltas {
             descriptor: output_desc,
@@ -4112,7 +4129,7 @@ impl NodeState {
     fn update_index_by(
         index_by: &IndexByOp,
         output_desc: RecordDescriptor,
-        input: RecordDeltas,
+        input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let deltas = apply_index_by(index_by, &input.descriptor, &input.deltas)?;
         Ok(RecordDeltas {
@@ -4124,7 +4141,7 @@ impl NodeState {
     fn update_persist(
         persist: &PersistOp,
         output_desc: RecordDescriptor,
-        input: RecordDeltas,
+        input: &RecordDeltas,
         storage: &impl OrderedKvStorage,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         apply_persist_delta(
@@ -4132,11 +4149,11 @@ impl NodeState {
             &persist.storage,
             &persist.key_fields,
             persist.unique,
-            &input,
+            input,
         )?;
         Ok(RecordDeltas {
             descriptor: output_desc,
-            deltas: input.deltas,
+            deltas: input.deltas.clone(),
         })
     }
 }
@@ -4225,7 +4242,7 @@ struct TickEvaluator<'a, S> {
     current_tick: u64,
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
-    eval_memo: &'a mut HashMap<EvalMemoKey, RecordDeltas>,
+    eval_memo: &'a mut HashMap<EvalMemoKey, Arc<RecordDeltas>>,
     node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     storage: Option<&'a S>,
     context: EvalContext,
@@ -4243,10 +4260,10 @@ pub(super) struct GraphRuntimeView<'a, S> {
     pub(super) current_tick: u64,
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
-    eval_memo: &'a mut HashMap<EvalMemoKey, RecordDeltas>,
+    eval_memo: &'a mut HashMap<EvalMemoKey, Arc<RecordDeltas>>,
     node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     pub(super) storage: &'a S,
-    pub(super) scope: ScopePath,
+    pub(super) scope: ScopeId,
     pub(super) metrics: &'a mut TickMetrics,
 }
 
@@ -4260,10 +4277,10 @@ fn graph_runtime_view<'a, S>(
     current_tick: u64,
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
-    eval_memo: &'a mut HashMap<EvalMemoKey, RecordDeltas>,
+    eval_memo: &'a mut HashMap<EvalMemoKey, Arc<RecordDeltas>>,
     node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     storage: &'a S,
-    scope: ScopePath,
+    scope: ScopeId,
     metrics: &'a mut TickMetrics,
 ) -> GraphRuntimeView<'a, S> {
     GraphRuntimeView {
@@ -4306,10 +4323,12 @@ where
             eval_memo: self.eval_memo,
             node_meta: self.node_meta,
             storage: Some(self.storage),
-            context: EvalContext::with_binding(self.scope.clone(), sub_tick, binding, deltas),
+            context: EvalContext::with_binding(self.scope, sub_tick, binding, deltas),
             metrics: self.metrics,
         };
-        evaluator.update_node(node)
+        evaluator
+            .update_node(node)
+            .map(|records| records.as_ref().clone())
     }
 
     pub(super) fn eval_with_binding_and_table_deltas(
@@ -4334,7 +4353,7 @@ where
             node_meta: self.node_meta,
             storage: Some(self.storage),
             context: EvalContext::with_binding_and_arrangement_mode(
-                self.scope.clone(),
+                self.scope,
                 sub_tick,
                 binding,
                 deltas,
@@ -4342,7 +4361,9 @@ where
             ),
             metrics: self.metrics,
         };
-        evaluator.update_node(node)
+        evaluator
+            .update_node(node)
+            .map(|records| records.as_ref().clone())
     }
 
     pub(super) fn clear_operator_state_for_scope(&mut self) {
@@ -4364,7 +4385,7 @@ where
             node_meta: self.node_meta,
             storage: Some(self.storage),
             context: EvalContext {
-                scope: self.scope.clone(),
+                scope: self.scope,
                 sub_tick: 0,
                 bindings: HashMap::default(),
                 arrangement_update_mode: ArrangementUpdateMode::Accumulate,
@@ -4372,7 +4393,9 @@ where
             },
             metrics: self.metrics,
         };
-        evaluator.update_node(node)
+        evaluator
+            .update_node(node)
+            .map(|records| records.as_ref().clone())
     }
 }
 
@@ -4380,10 +4403,10 @@ impl<S> TickEvaluator<'_, S>
 where
     S: OrderedKvStorage,
 {
-    fn update_node(&mut self, node: NodeId) -> Result<RecordDeltas, IvmRuntimeError> {
+    fn update_node(&mut self, node: NodeId) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
         let memo_key = self.memo_key(node)?;
         if let Some(records) = self.eval_memo.get(&memo_key) {
-            return Ok(records.clone());
+            return Ok(Arc::clone(records));
         }
 
         let graph_node = self
@@ -4393,8 +4416,8 @@ where
 
         let output_desc = graph_node.descriptor.output;
         if self.context.sub_tick > 1 && !self.depends_on_context(node)? {
-            let result = RecordDeltas::empty(output_desc);
-            self.eval_memo.insert(memo_key, result.clone());
+            let result = Arc::new(RecordDeltas::empty(output_desc));
+            self.eval_memo.insert(memo_key, Arc::clone(&result));
             return Ok(result);
         }
         let result = match &graph_node.descriptor.operator {
@@ -4432,19 +4455,19 @@ where
             }
             OpType::Filter(filter) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_filter(filter, output_desc, input)
+                NodeState::update_filter(filter, output_desc, &input)
             }
             OpType::MapProject(project) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_map_project(project, output_desc, input)
+                NodeState::update_map_project(project, output_desc, &input)
             }
             OpType::UnwrapNullable(unwrap) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_unwrap_nullable(unwrap, output_desc, input)
+                NodeState::update_unwrap_nullable(unwrap, output_desc, &input)
             }
             OpType::Unnest(unnest) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_unnest(unnest, output_desc, input)
+                NodeState::update_unnest(unnest, output_desc, &input)
             }
             OpType::ArgMaxBy(arg_max_by) => {
                 let input = self.update_unary_input(graph_node, node)?;
@@ -4457,7 +4480,7 @@ where
                         direction: ArgByDirection::Max,
                     },
                     output_desc,
-                    input,
+                    &input,
                 )
             }
             OpType::ArgMinBy(arg_min_by) => {
@@ -4471,20 +4494,20 @@ where
                         direction: ArgByDirection::Min,
                     },
                     output_desc,
-                    input,
+                    &input,
                 )
             }
             OpType::TopBy(top_by) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                self.update_top_by(node, top_by, output_desc, input)
+                self.update_top_by(node, top_by, output_desc, &input)
             }
             OpType::Aggregate(aggregate) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                self.update_aggregate(node, aggregate, output_desc, input)
+                self.update_aggregate(node, aggregate, output_desc, &input)
             }
             OpType::IndexBy(index_by) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_index_by(index_by, output_desc, input)
+                NodeState::update_index_by(index_by, output_desc, &input)
             }
             OpType::Union => {
                 let inputs = graph_node
@@ -4536,21 +4559,22 @@ where
             OpType::Persist(persist) => {
                 let storage = self.storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
                 let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_persist(persist, output_desc, input, storage)
+                NodeState::update_persist(persist, output_desc, &input, storage)
             }
             _ => Err(IvmRuntimeError::UnsupportedOperator),
         }?;
         self.metrics.records_processed += result.deltas.len();
-        self.eval_memo.insert(memo_key, result.clone());
+        let result = Arc::new(result);
+        self.eval_memo.insert(memo_key, Arc::clone(&result));
         Ok(result)
     }
 
     fn memo_key(&mut self, node: NodeId) -> Result<EvalMemoKey, IvmRuntimeError> {
         Ok(EvalMemoKey {
-            scope: if self.context.scope == ScopePath::root() {
+            scope: if self.context.scope == ScopeId::root() {
                 self.operator_scope(node)?
             } else {
-                self.context.scope.clone()
+                self.context.scope
             },
             node,
             tick: self.current_tick,
@@ -4565,7 +4589,7 @@ where
         })
     }
 
-    fn operator_scope(&mut self, node: NodeId) -> Result<ScopePath, IvmRuntimeError> {
+    fn operator_scope(&mut self, node: NodeId) -> Result<ScopeId, IvmRuntimeError> {
         // Recursive step evaluation must be isolated per recursive node even
         // for context-independent table/index inputs. Sibling recursive nodes
         // can evaluate the same base-table delta in one outer tick; sharing
@@ -4573,15 +4597,15 @@ where
         // the table side and make later siblings miss the same positive edge.
         // Scoped child operator state is tick-local and is cleared before the
         // public tick exits.
-        if self.context.scope != ScopePath::root() {
-            return Ok(self.context.scope.clone());
+        if self.context.scope != ScopeId::root() {
+            return Ok(self.context.scope);
         }
         // Only fragments downstream of FrontierSource are scoped. Base table
         // arrangements stay global and can be reused by unrelated queries.
         if self.depends_on_context(node)? {
-            Ok(self.context.scope.clone())
+            Ok(self.context.scope)
         } else {
-            Ok(ScopePath::root())
+            Ok(ScopeId::root())
         }
     }
 
@@ -4772,7 +4796,7 @@ where
         node: NodeId,
         spec: ArgBySpec<'_>,
         output_desc: RecordDescriptor,
-        input: RecordDeltas,
+        input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if input.deltas.is_empty() {
             return Ok(RecordDeltas::empty(output_desc));
@@ -4829,10 +4853,13 @@ where
             }
         }
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
-        for delta in input.deltas {
+        for delta in &input.deltas {
             let group_key =
                 encoded_record_key_part(output_desc, delta.raw(), spec.group_field_indices)?;
-            touched_groups.entry(group_key).or_default().push(delta);
+            touched_groups
+                .entry(group_key)
+                .or_default()
+                .push(delta.clone());
         }
 
         let mut output = Vec::new();
@@ -4874,7 +4901,7 @@ where
         node: NodeId,
         top_by: &TopByOp,
         output_desc: RecordDescriptor,
-        input: RecordDeltas,
+        input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if input.deltas.is_empty() {
             return Ok(RecordDeltas::empty(output_desc));
@@ -4932,10 +4959,13 @@ where
         }
 
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
-        for delta in input.deltas {
+        for delta in &input.deltas {
             let group_key =
                 encoded_record_key_part(output_desc, delta.raw(), &top_by.group_field_indices)?;
-            touched_groups.entry(group_key).or_default().push(delta);
+            touched_groups
+                .entry(group_key)
+                .or_default()
+                .push(delta.clone());
         }
 
         let mut output = Vec::new();
@@ -4959,7 +4989,7 @@ where
         node: NodeId,
         aggregate: &AggregateOp,
         output_desc: RecordDescriptor,
-        input: RecordDeltas,
+        input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if input.deltas.is_empty() {
             return Ok(RecordDeltas::empty(output_desc));
@@ -4978,7 +5008,7 @@ where
         let group_fields = self.aggregate_group_fields(node, aggregate);
         if self.context.eval_mode == EvalMode::Hydrate {
             let mut groups = BTreeMap::<Vec<u8>, Vec<(Vec<u8>, i64)>>::new();
-            for delta in input.deltas {
+            for delta in &input.deltas {
                 let group_key = encoded_record_key_part(
                     input_desc,
                     delta.raw(),
@@ -4987,7 +5017,7 @@ where
                 groups
                     .entry(group_key)
                     .or_default()
-                    .push((delta.record, delta.weight));
+                    .push((delta.record.clone(), delta.weight));
             }
             let mut output = Vec::new();
             for records in groups.values() {
@@ -5140,7 +5170,7 @@ where
             // Root-scope arrangements represent table time, not recursive
             // evaluator time. A recursive step at sub_tick 1 and a sibling
             // non-recursive join must therefore share the same root SubTick.
-            sub_tick: if key.scope == ScopePath::root() {
+            sub_tick: if key.scope == ScopeId::root() {
                 0
             } else {
                 self.context.sub_tick
@@ -5191,7 +5221,7 @@ where
                 storage,
                 self.binding_snapshots,
                 self.current_tick,
-                scope.clone(),
+                scope,
             )?;
             recursive_as_of.value_mut().replace_with(next);
             let accumulated = RecordDeltas {
@@ -5256,7 +5286,7 @@ where
         &mut self,
         graph_node: &crate::ivm::GraphNode,
         node: NodeId,
-    ) -> Result<RecordDeltas, IvmRuntimeError> {
+    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
         let input = *graph_node
             .descriptor
             .inputs
@@ -7719,7 +7749,7 @@ mod tests {
             .arrangement_states
             .keys()
             .filter(|key| {
-                key.scope == ScopePath::root()
+                key.scope == ScopeId::root()
                     && key.descriptor == artists
                     && key.fields.as_ref() == ["id"]
             })
@@ -7777,7 +7807,7 @@ mod tests {
             runtime
                 .operator_states
                 .keys()
-                .all(|key| key.scope == ScopePath::root()),
+                .all(|key| key.scope == ScopeId::root()),
             "recursive recomputation should not leave per-context child state in runtime"
         );
     }
