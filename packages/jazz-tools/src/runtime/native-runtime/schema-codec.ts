@@ -57,6 +57,8 @@ type PolicyReachable = {
 
 type PolicyReachableSeed = {
   table: string;
+  userColumn?: string;
+  userClaim?: string;
   teamColumn: string;
   filters: PolicyExpr[];
 };
@@ -391,26 +393,38 @@ function writePolicyBranch(writer: PostcardWriter, branch: PolicyQueryShape): vo
 }
 
 function writePolicyReachable(writer: PostcardWriter, reachable: PolicyReachable): void {
+  const accessFilters = uniquePolicyFilters(reachable.accessFilters);
+  const edgeFilters = uniquePolicyFilters(reachable.edgeFilters);
   writer.string(reachable.accessTable);
   writer.string(reachable.accessRowColumn);
   writer.string(reachable.accessTeamColumn);
   writer.u64(reachable.accessTeamTarget === "Column" ? 0 : 1);
   writePolicyOperand(writer, reachable.from);
   writer.vec(
-    (filter, index) => writePolicyPredicate(filter, reachable.accessFilters[index]!),
-    reachable.accessFilters.length,
+    (filter, index) => writePolicyPredicate(filter, accessFilters[index]!),
+    accessFilters.length,
   );
   writer.string(reachable.edgeTable);
   writer.string(reachable.edgeMemberColumn);
   writer.string(reachable.edgeParentColumn);
   writer.vec(
-    (filter, index) => writePolicyPredicate(filter, reachable.edgeFilters[index]!),
-    reachable.edgeFilters.length,
+    (filter, index) => writePolicyPredicate(filter, edgeFilters[index]!),
+    edgeFilters.length,
   );
   writer.u64(reachable.maxDepth);
   if (reachable.seed) {
     writer.some((seed) => {
       seed.string(reachable.seed!.table);
+      if (reachable.seed!.userColumn == null) {
+        seed.none();
+      } else {
+        seed.some((userColumn) => userColumn.string(reachable.seed!.userColumn!));
+      }
+      if (reachable.seed!.userClaim == null) {
+        seed.none();
+      } else {
+        seed.some((userClaim) => userClaim.string(reachable.seed!.userClaim!));
+      }
       seed.string(reachable.seed!.teamColumn);
       seed.vec(
         (filter, index) => writePolicyPredicate(filter, reachable.seed!.filters[index]!),
@@ -599,6 +613,7 @@ function policyExistsRelLoweredToJoin(
   for (const reachable of lowered.reachable) {
     if (reachable.accessRowColumn === "__pending_outer_row") {
       reachable.accessRowColumn = correlation.column;
+      reachable.accessFilters = uniquePolicyFilters([...reachable.accessFilters, ...filters]);
     }
   }
   if (lowered.pendingReachable) {
@@ -612,6 +627,9 @@ function policyExistsRelLoweredToJoin(
     });
   }
   if (lowered.reachable.length > 0) {
+    for (const reachable of lowered.reachable) {
+      reachable.accessFilters.push(...filters);
+    }
     return undefined;
   }
 
@@ -824,7 +842,28 @@ function lowerGatherSeed(seed: unknown): {
   const join =
     isRecord(filtered.input) && isRecord(filtered.input.Join) ? filtered.input.Join : undefined;
   if (!join) {
-    throw new Error("Core runtime schema Gather policies require projected hop relation seeds.");
+    const table = tableScanName(filtered.input);
+    if (!table) {
+      throw new Error(
+        "Core runtime schema Gather policies require table or projected hop relation seeds.",
+      );
+    }
+    const seedFilter = findClaimSeedFilter(filtered.filters);
+    if (!seedFilter) {
+      throw new Error(
+        "Core runtime schema Gather same-table seeds require one claim-keyed equality filter.",
+      );
+    }
+    return {
+      from: policyOperandValue(seedFilter.filter.value),
+      seed: {
+        table,
+        userColumn: seedFilter.filter.column,
+        userClaim: seedFilter.claim,
+        teamColumn: "id",
+        filters: withoutFilterAt(filtered.filters, seedFilter.index),
+      },
+    };
   }
   const on = Array.isArray(join.on) ? join.on[0] : undefined;
   if (!isRecord(on) || !isColumnRef(on.left) || !isColumnRef(on.right)) {
@@ -836,15 +875,11 @@ function lowerGatherSeed(seed: unknown): {
   const rightTable = tableScanName(right.input);
   const leftFilters = [...filtersForScope(filtered.filters, on.left.scope), ...left.filters];
   const rightFilters = [...filtersForScope(filtered.filters, on.right.scope), ...right.filters];
-  const leftSeedFilter = leftFilters.find(
-    (filter) => filter.type === "Cmp" && filter.op === "Eq" && filter.column !== "id",
-  );
-  const rightSeedFilter = rightFilters.find(
-    (filter) => filter.type === "Cmp" && filter.op === "Eq" && filter.column !== "id",
-  );
+  const leftSeedFilter = findClaimSeedFilter(leftFilters);
+  const rightSeedFilter = findClaimSeedFilter(rightFilters);
   const seedIsRightSide = rightSeedFilter != null && rightTable != null;
   const seedFilter = seedIsRightSide ? rightSeedFilter : leftSeedFilter;
-  if (!seedFilter || seedFilter.type !== "Cmp") {
+  if (!seedFilter) {
     throw new Error("Core runtime schema Gather policies could not identify the seed edge.");
   }
   const table = seedIsRightSide ? rightTable : leftTable;
@@ -854,13 +889,62 @@ function lowerGatherSeed(seed: unknown): {
     throw new Error("Core runtime schema Gather policies could not identify the seed edge.");
   }
   return {
-    from: policyOperandValue(seedFilter.value),
+    from: policyOperandValue(seedFilter.filter.value),
     seed: {
       table,
+      userColumn: seedFilter.filter.column,
+      userClaim: seedFilter.claim,
       teamColumn,
-      filters,
+      filters: withoutFilterAt(filters, seedFilter.index),
     },
   };
+}
+
+function findClaimSeedFilter(
+  filters: LoweredPolicyExpr[],
+):
+  | { filter: Extract<LoweredPolicyExpr, { type: "Cmp" }>; index: number; claim: string }
+  | undefined {
+  for (const [index, filter] of filters.entries()) {
+    if (filter.type !== "Cmp" || filter.op !== "Eq" || filter.column === "id") {
+      continue;
+    }
+    const value = policyOperandValue(filter.value);
+    if (value.type !== "SessionRef") {
+      continue;
+    }
+    return { filter, index, claim: sessionRefClaimName(value.path) };
+  }
+  return undefined;
+}
+
+function withoutFilterAt<T>(filters: T[], index: number): T[] {
+  return filters.filter((_, candidate) => candidate !== index);
+}
+
+function uniquePolicyFilters<T extends PolicyExpr>(filters: T[]): T[] {
+  const seen = new Set<string>();
+  return filters.filter((filter) => {
+    const key = policyFilterKey(filter);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function policyFilterKey(filter: PolicyExpr): string {
+  if (filter.type === "Cmp") {
+    return JSON.stringify({
+      type: filter.type,
+      column: filter.column,
+      op: filter.op,
+      value: policyOperandValue(filter.value),
+    });
+  }
+  const { scope: _scope, ...encodedFilter } = filter as PolicyExpr & { scope?: string };
+  return JSON.stringify(encodedFilter);
 }
 
 function lowerGatherStep(step: unknown): {
