@@ -1431,6 +1431,7 @@ dependencies = [
 name = "groove"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "hdrhistogram",
  "internment",
  "opfs-btree",
@@ -1440,6 +1441,7 @@ dependencies = [
  "rust-rocksdb",
  "rustc-hash",
  "serde",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.18",
  "uuid",

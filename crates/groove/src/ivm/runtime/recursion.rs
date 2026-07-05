@@ -6,6 +6,7 @@
 //! than defining separate operators. Join arrangements live in [`super::join`];
 //! public ticks, subscriptions, and graph retention live in [`super`].
 
+use bytes::Bytes;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
@@ -24,7 +25,7 @@ pub(super) struct RecursiveState {
     /// For now recursive outputs are set-style: each reachable record is kept
     /// at weight 1. Bag recursion can diverge on cycles, and non-monotone
     /// recursion needs a DRed/DBSP design before we accept negative frontiers.
-    accumulated: HashMap<Vec<u8>, i64>,
+    accumulated: HashMap<Bytes, i64>,
     /// Positive incremental ticks rely on step-side arrangements already
     /// containing the full base/accumulated state after a recompute.
     step_arrangements_hydrated: bool,
@@ -47,7 +48,7 @@ impl RecursiveState {
     }
 
     pub(super) fn accumulated_encoded_bytes(&self) -> usize {
-        self.accumulated.keys().map(Vec::len).sum()
+        self.accumulated.keys().map(|record| record.len()).sum()
     }
 
     pub(super) fn mark_step_arrangements_hydrated(&mut self) {
@@ -91,7 +92,7 @@ impl RecursiveState {
         Ok(consolidate_deltas(accepted))
     }
 
-    pub(super) fn replace_with(&mut self, next: HashMap<Vec<u8>, i64>) -> Vec<RecordDelta> {
+    pub(super) fn replace_with(&mut self, next: HashMap<Bytes, i64>) -> Vec<RecordDelta> {
         let mut deltas = Vec::new();
         for (record, old_weight) in &self.accumulated {
             let next_weight = next.get(record).copied().unwrap_or_default();
@@ -385,7 +386,7 @@ pub(super) fn snapshot_table_deltas(
             let mut deltas = Vec::new();
             let mut visit = |_: &[u8], record: &[u8]| {
                 deltas.push(RecordDelta {
-                    record: record.to_vec(),
+                    record: Bytes::copy_from_slice(record),
                     weight: 1,
                 });
                 Ok(())
@@ -527,7 +528,7 @@ pub(super) fn recompute_recursive(
     binding_snapshots: &HashMap<String, RecordDeltas>,
     _current_tick: u64,
     scope: ScopeId,
-) -> Result<HashMap<Vec<u8>, i64>, IvmRuntimeError> {
+) -> Result<HashMap<Bytes, i64>, IvmRuntimeError> {
     let recursive_node = graph
         .node(node)
         .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
@@ -542,7 +543,7 @@ pub(super) fn recompute_recursive(
         binding_snapshots,
         context: EvalContext::root(),
     };
-    let mut accumulated = HashMap::<Vec<u8>, i64>::default();
+    let mut accumulated = HashMap::<Bytes, i64>::default();
     let mut frontier = snapshot.eval_node(*seed)?;
     if frontier.descriptor != output_desc {
         return Err(IvmRuntimeError::GraphOutputMismatch);
@@ -578,7 +579,7 @@ pub(super) fn recompute_recursive(
 }
 
 fn accept_positive_into_set(
-    multiset: &mut HashMap<Vec<u8>, i64>,
+    multiset: &mut HashMap<Bytes, i64>,
     deltas: Vec<RecordDelta>,
 ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
     // Recompute must match the incremental regime above: recursive SELECTs are
@@ -642,7 +643,10 @@ where
                     .records
                     .iter()
                     .cloned()
-                    .map(|record| RecordDelta { record, weight: 1 })
+                    .map(|record| RecordDelta {
+                        record: record.into(),
+                        weight: 1,
+                    })
                     .collect(),
             }),
             OpType::FrontierSource(frontier_source) => {
@@ -683,7 +687,7 @@ where
             }
             OpType::ArgMaxBy(arg_max_by) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Vec<u8>)>::new();
+                let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
                 for delta in input.deltas {
                     let group_key = super::encoded_record_key_part(
                         output_desc,
@@ -712,7 +716,7 @@ where
             }
             OpType::ArgMinBy(arg_min_by) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Vec<u8>)>::new();
+                let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
                 for delta in input.deltas {
                     let group_key = super::encoded_record_key_part(
                         output_desc,
@@ -764,7 +768,7 @@ where
                 let left_on = plan_expr_names(&join.left_key);
                 let right_on = plan_expr_names(&join.right_key);
                 let mut right_by_key =
-                    std::collections::BTreeMap::<Vec<u8>, Vec<&RecordDelta>>::new();
+                    std::collections::BTreeMap::<super::join::JoinKey, Vec<&RecordDelta>>::new();
                 for right_delta in &right.deltas {
                     for key in super::join::join_keys(
                         &join.right_descriptor,
@@ -790,7 +794,8 @@ where
                                     &join.right_descriptor,
                                     right_delta.raw(),
                                     &output_desc,
-                                )?,
+                                )?
+                                .into(),
                                 weight: left_delta.weight * right_delta.weight,
                             });
                         }
@@ -882,7 +887,7 @@ where
         let mut deltas = Vec::new();
         store.scan_prefix(b"", &mut |_, record| {
             deltas.push(RecordDelta {
-                record: record.to_vec(),
+                record: Bytes::copy_from_slice(record),
                 weight: 1,
             });
             Ok(())
@@ -913,7 +918,7 @@ mod tests {
 
     fn delta(record: &[u8], weight: i64) -> RecordDelta {
         RecordDelta {
-            record: record.to_vec(),
+            record: record.to_vec().into(),
             weight,
         }
     }
