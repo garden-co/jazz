@@ -5838,6 +5838,118 @@ fn seeded_membership_resource_policy_allows_direct_and_transitive_groups() {
 }
 
 #[test]
+fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leaking() {
+    let schema = customer_resource_policy_minimal_schema();
+    let db = open_db(0x69, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x12; 16]);
+    let other = AuthorId::from_bytes([0x13; 16]);
+    let spy = AuthorId::from_bytes([0x99; 16]);
+    db.insert_with_id(
+        "org",
+        row(0x01),
+        BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
+    )
+    .unwrap();
+    let direct_group = row(0x31);
+    let transitive_group = row(0x32);
+    let hidden_group = row(0x33);
+    let direct = row(0xd1);
+    let transitive = row(0xd2);
+    let hidden = row(0xd3);
+    for (group, name) in [
+        (direct_group, "direct"),
+        (transitive_group, "transitive"),
+        (hidden_group, "hidden"),
+    ] {
+        db.insert_with_id("group", group, team_cells(name)).unwrap();
+    }
+    db.insert_with_id(
+        "group_access_edges",
+        row(0xa1),
+        group_access_test_cells(direct_group, member),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "group_access_edges",
+        row(0xa2),
+        group_access_test_cells(hidden_group, other),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "group_entry",
+        row(0xc1),
+        group_entry_test_cells(direct_group, transitive_group, false),
+    )
+    .unwrap();
+    for (resource, title) in [
+        (direct, "direct"),
+        (transitive, "transitive"),
+        (hidden, "hidden"),
+    ] {
+        db.insert_with_id("res_i", resource, resource_test_cells(title))
+            .unwrap();
+    }
+    for (edge, resource, group) in [
+        (row(0xb1), direct, direct_group),
+        (row(0xb2), transitive, transitive_group),
+        (row(0xb3), hidden, hidden_group),
+    ] {
+        db.insert_with_id(
+            "res_i_access_edges",
+            edge,
+            resource_access_test_cells(resource, group, false),
+        )
+        .unwrap();
+    }
+    let prepared = db.prepare_query(&Query::from("res_i")).unwrap();
+    let opts = ReadOpts::default();
+
+    db.node.node.borrow().reset_storage_read_metrics();
+    let mut member_subscription =
+        block_on(db.subscribe_for_identity(&prepared, opts.clone(), member)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(
+            block_on(member_subscription.next_event()).unwrap()
+        )),
+        vec![direct, transitive]
+    );
+    let member_reads = db.node.node.borrow().take_storage_read_metrics();
+    assert!(
+        member_reads.total.reads > 0,
+        "first identity should hydrate the shared seeded fragments"
+    );
+
+    db.node.node.borrow().reset_storage_read_metrics();
+    let mut other_subscription =
+        block_on(db.subscribe_for_identity(&prepared, opts.clone(), other)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(
+            block_on(other_subscription.next_event()).unwrap()
+        )),
+        vec![hidden]
+    );
+    let other_reads = db.node.node.borrow().take_storage_read_metrics();
+
+    db.node.node.borrow().reset_storage_read_metrics();
+    let mut spy_subscription = block_on(db.subscribe_for_identity(&prepared, opts, spy)).unwrap();
+    assert!(opened_rows(block_on(spy_subscription.next_event()).unwrap()).is_empty());
+    let spy_reads = db.node.node.borrow().take_storage_read_metrics();
+
+    assert!(
+        other_reads.total.reads < member_reads.total.reads,
+        "second identity should probe shared hydrated fragments, not rescan them: first={:?}, second={:?}",
+        member_reads,
+        other_reads
+    );
+    assert!(
+        spy_reads.total.reads < member_reads.total.reads,
+        "zero-grant identity should also reuse shared canonical fragments without seeing rows: first={:?}, spy={:?}",
+        member_reads,
+        spy_reads
+    );
+}
+
+#[test]
 fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     let schema = customer_resource_policy_minimal_schema();
     let server = open_core(0x60, AuthorId::SYSTEM, &schema);
