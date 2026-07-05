@@ -173,6 +173,53 @@ Instead it tracks:
 
 The actual relational work stays inside `QueryManager`. That separation is what lets sync remain a state machine rather than a parallel SQL implementation.
 
+## Receiver Apply Boundary
+
+Inbound sync is applied in receiver-sized batches.
+
+For each receiver apply boundary, the runtime drains repair-clean inbound view updates, stages all
+bundle effects in one storage batch, commits once, and therefore runs one IVM tick for that
+receiver boundary. Per-link FIFO order is preserved while staging bundle effects; cross-subscription
+ordering inside the same receiver tick has no protocol meaning beyond that FIFO stream.
+
+The staged batch provides read-your-own-write behavior while the receiver boundary is being built.
+That matters for same-tick cases such as:
+
+- a transaction and its fate arriving in the same apply boundary
+- two transactions in the same boundary competing for the current winner of one row
+- ahead-overlay cleanup retractions following fate application
+
+Reset view updates keep their wire form, but the receiver internalizes them as deltas: retract the
+previous result set for that subscription, then apply the reset's adds and coverage/settlement
+state. A reset is not a separate storage mode.
+
+Serve-dirty marking is a receiver-boundary effect. If applying the staged batch can change what any
+downstream subscriber would be served, the subscriber connections are marked dirty at the same
+boundary as cache invalidation and applied-global-sequence bookkeeping.
+
+The current direction is single-mode receiver ingest: no separate bulk/non-bulk correctness mode,
+no eligibility list that decides whether bundles bypass deltas, and no hidden preloaded-transaction
+suppression that can starve maintained views. Bulk shortcuts may return only as optimizations on
+top of the same staged-delta semantics.
+
+The July 2026 receiver-batch receipts were the forcing function: client per-bundle ingest collapsed
+to one commit/tick per receiver burst, and admin 10% cold improved from the 60.7s baseline to about
+5.0s once staged-overlay point and prefix reads were indexed.
+
+Planned consolidation:
+
+- delete the remaining reset-specific bulk bypass
+- delete initial-hydration eligibility state that only exists to select a bypass
+- delete preloaded-transaction suppression once all reset snapshots use explicit retractions
+- move the receiver boundary onto an `OrderedKvStorage` transaction once that storage transaction
+  exists, instead of using the current Jazz-side staged accumulator
+
+🔶 Open questions:
+
+- Storage transaction timing: the receiver boundary currently uses the core staged-batch seam. The
+  end state is an `OrderedKvStorage` transaction surface with the same staged read-through and
+  single-commit semantics.
+
 ## QuerySettled
 
 `QuerySettled` is the runtime's read-delivery signal.
