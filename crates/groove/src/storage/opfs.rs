@@ -138,7 +138,7 @@ impl OrderedKvStorage for OpfsStorage {
         let mut tree = self.tree.borrow_mut();
         for (key, value) in encoded_operations {
             if let Some(value) = value {
-                tree.put(&key, value)?;
+                tree.put(&key, &value)?;
             } else {
                 tree.delete(&key)?;
             }

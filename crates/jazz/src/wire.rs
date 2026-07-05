@@ -24,6 +24,12 @@ pub const FEATURE_SYNC_MESSAGE_PAYLOAD: WireFeatures = 1 << 0;
 pub const FEATURE_SESSION_FRAME: WireFeatures = 1 << 1;
 /// Peers understand structured [`WireError`] frames.
 pub const FEATURE_STRUCTURED_ERRORS: WireFeatures = 1 << 2;
+/// Message frame payloads may be LZ4-compressed at the transport frame seam.
+pub const FEATURE_PAYLOAD_LZ4: WireFeatures = 1 << 3;
+/// Message frame payloads may be Zstandard-compressed at the transport frame seam.
+pub const FEATURE_PAYLOAD_ZSTD: WireFeatures = 1 << 4;
+
+const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -85,6 +91,41 @@ pub struct WireNegotiated {
     pub protocol_version: u16,
     /// Intersection of both peers' optional features.
     pub features: WireFeatures,
+}
+
+/// Frame-level payload compression codec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireCompression {
+    /// No transport compression.
+    None,
+    /// LZ4 frame payload compression.
+    Lz4,
+    /// Zstandard frame payload compression.
+    Zstd,
+}
+
+impl WireCompression {
+    /// Select the active codec from negotiated feature bits.
+    ///
+    /// LZ4 wins ties intentionally: it is the default low-CPU transport codec.
+    pub fn from_features(features: WireFeatures) -> Self {
+        if features & FEATURE_PAYLOAD_LZ4 != 0 {
+            Self::Lz4
+        } else if features & FEATURE_PAYLOAD_ZSTD != 0 {
+            Self::Zstd
+        } else {
+            Self::None
+        }
+    }
+
+    /// Feature bit carried on frames using this codec.
+    pub fn feature(self) -> WireFeatures {
+        match self {
+            Self::None => FEATURE_NONE,
+            Self::Lz4 => FEATURE_PAYLOAD_LZ4,
+            Self::Zstd => FEATURE_PAYLOAD_ZSTD,
+        }
+    }
 }
 
 /// Session metadata carried by message frames after handshake/admission.
@@ -207,6 +248,122 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
     from_bytes(bytes)
+}
+
+/// Optional transport compression features enabled for this process.
+pub fn runtime_transport_compression_features() -> WireFeatures {
+    let Ok(value) = std::env::var("JAZZ_TRANSPORT_COMPRESSION") else {
+        return FEATURE_NONE;
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "lz4" => cfg_lz4_feature(),
+        "zstd" | "zstd-3" => cfg_zstd_feature(),
+        "1" | "true" | "on" | "auto" => cfg_lz4_feature() | cfg_zstd_feature(),
+        _ => FEATURE_NONE,
+    }
+}
+
+/// Base sync frame features plus any runtime-enabled transport compression.
+pub fn current_wire_features() -> WireFeatures {
+    FEATURE_SYNC_MESSAGE_PAYLOAD
+        | FEATURE_STRUCTURED_ERRORS
+        | runtime_transport_compression_features()
+}
+
+fn cfg_lz4_feature() -> WireFeatures {
+    #[cfg(feature = "transport-compression-lz4")]
+    {
+        FEATURE_PAYLOAD_LZ4
+    }
+    #[cfg(not(feature = "transport-compression-lz4"))]
+    {
+        FEATURE_NONE
+    }
+}
+
+fn cfg_zstd_feature() -> WireFeatures {
+    #[cfg(feature = "transport-compression-zstd")]
+    {
+        FEATURE_PAYLOAD_ZSTD
+    }
+    #[cfg(not(feature = "transport-compression-zstd"))]
+    {
+        FEATURE_NONE
+    }
+}
+
+/// Compress a sync payload for one message envelope.
+pub fn compress_sync_payload(
+    payload: Vec<u8>,
+    negotiated_features: WireFeatures,
+) -> Result<(Vec<u8>, WireFeatures), String> {
+    let codec = WireCompression::from_features(negotiated_features);
+    let active_feature = codec.feature();
+    let payload = match codec {
+        WireCompression::None => payload,
+        WireCompression::Lz4 => compress_lz4(&payload)?,
+        WireCompression::Zstd => compress_zstd(&payload)?,
+    };
+    Ok((payload, active_feature))
+}
+
+/// Decompress a sync payload according to the envelope's active feature bit.
+pub fn decompress_sync_payload(
+    payload: &[u8],
+    envelope_features: WireFeatures,
+) -> Result<Vec<u8>, String> {
+    let active = envelope_features & FEATURE_PAYLOAD_COMPRESSION_MASK;
+    if active.count_ones() > 1 {
+        return Err("wire frame declares more than one payload compression codec".to_owned());
+    }
+    match WireCompression::from_features(active) {
+        WireCompression::None => Ok(payload.to_vec()),
+        WireCompression::Lz4 => decompress_lz4(payload),
+        WireCompression::Zstd => decompress_zstd(payload),
+    }
+}
+
+#[cfg(feature = "transport-compression-lz4")]
+fn compress_lz4(payload: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(lz4_flex::compress_prepend_size(payload))
+}
+
+#[cfg(not(feature = "transport-compression-lz4"))]
+fn compress_lz4(_payload: &[u8]) -> Result<Vec<u8>, String> {
+    Err("lz4 transport compression feature is not compiled in".to_owned())
+}
+
+#[cfg(feature = "transport-compression-lz4")]
+fn decompress_lz4(payload: &[u8]) -> Result<Vec<u8>, String> {
+    lz4_flex::decompress_size_prepended(payload)
+        .map_err(|error| format!("failed to decompress lz4 payload: {error}"))
+}
+
+#[cfg(not(feature = "transport-compression-lz4"))]
+fn decompress_lz4(_payload: &[u8]) -> Result<Vec<u8>, String> {
+    Err("lz4 transport compression feature is not compiled in".to_owned())
+}
+
+#[cfg(feature = "transport-compression-zstd")]
+fn compress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
+    zstd::bulk::compress(payload, 3)
+        .map_err(|error| format!("failed to compress zstd payload: {error}"))
+}
+
+#[cfg(not(feature = "transport-compression-zstd"))]
+fn compress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
+    Err("zstd transport compression feature is not compiled in".to_owned())
+}
+
+#[cfg(feature = "transport-compression-zstd")]
+fn decompress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
+    zstd::bulk::decompress(payload, crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES)
+        .map_err(|error| format!("failed to decompress zstd payload: {error}"))
+}
+
+#[cfg(not(feature = "transport-compression-zstd"))]
+fn decompress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
+    Err("zstd transport compression feature is not compiled in".to_owned())
 }
 
 /// Binding-supplied byte transport for one wire-framed peer link.

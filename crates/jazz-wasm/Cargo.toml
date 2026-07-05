@@ -44,6 +44,9 @@ web-sys = { version = "0.3", features = [
 
 [features]
 default = ["console_error_panic_hook"]
+transport-compression-lz4 = ["jazz/transport-compression-lz4"]
+transport-compression-zstd = ["jazz/transport-compression-zstd"]
+transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
 
 # `wasm-opt` here REPLACES wasm-pack's defaults, so we must include `-O` ourselves
 # or optimization is silently disabled. `-g` preserves debug info for profiling builds.

@@ -54,9 +54,9 @@ use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
 use crate::wire::{
-    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
-    WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireRetry, WireSession,
-    WireTransport, decode_frame, decode_sync_message, encode_frame, encode_sync_message,
+    TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError, WireErrorCode, WireFeatures,
+    WireFrame, WireRetry, WireSession, WireTransport, compress_sync_payload, current_wire_features,
+    decode_frame, decode_sync_message, decompress_sync_payload, encode_frame, encode_sync_message,
 };
 
 /// How urgently a runtime should service pending peer-connection work.
@@ -3141,12 +3141,7 @@ where
 {
     /// Wrap a byte transport with the current Jazz wire defaults.
     pub fn current(inner: T) -> Self {
-        Self::new(
-            inner,
-            WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-            None,
-        )
+        Self::new(inner, WIRE_PROTOCOL_VERSION, current_wire_features(), None)
     }
 
     /// Wrap a byte transport with explicit negotiated frame metadata.
@@ -3237,7 +3232,14 @@ where
         if let Err(message) = validate_sync_message_len(payload.len()) {
             return Err(TransportError::Failed(message));
         }
-        let mut envelope = WireEnvelope::new(self.protocol_version, self.features, payload);
+        let (payload, active_compression) = match compress_sync_payload(payload, self.features) {
+            Ok(payload) => payload,
+            Err(message) => return Err(TransportError::Failed(message)),
+        };
+        let active_features = (self.features
+            & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD))
+            | active_compression;
+        let mut envelope = WireEnvelope::new(self.protocol_version, active_features, payload);
         if let Some(session) = self.session.clone() {
             envelope = envelope.with_session(session);
         }
@@ -3290,7 +3292,19 @@ where
                         self.send_wire_error(error);
                         continue;
                     }
-                    if let Err(message) = validate_sync_message_len(envelope.payload.len()) {
+                    let payload =
+                        match decompress_sync_payload(&envelope.payload, envelope.features) {
+                            Ok(payload) => payload,
+                            Err(message) => {
+                                self.send_wire_error(WireError::new(
+                                    WireErrorCode::MalformedFrame,
+                                    WireRetry::Never,
+                                    message,
+                                ));
+                                continue;
+                            }
+                        };
+                    if let Err(message) = validate_sync_message_len(payload.len()) {
                         self.send_wire_error(WireError::new(
                             WireErrorCode::MalformedFrame,
                             WireRetry::Never,
@@ -3298,8 +3312,8 @@ where
                         ));
                         continue;
                     }
-                    let payload_len = envelope.payload.len();
-                    match decode_sync_message(&envelope.payload) {
+                    let payload_len = payload.len();
+                    match decode_sync_message(&payload) {
                         Ok(message) => {
                             return Some(ReceivedSyncMessage::with_encoded_len(
                                 message,
@@ -3312,9 +3326,9 @@ where
                             format!(
                                 "failed to decode sync message payload: {err}; frame_bytes={}; payload_bytes={}; frame_hex={}; payload_hex={}",
                                 bytes.len(),
-                                envelope.payload.len(),
+                                payload.len(),
                                 hex_diagnostic(&bytes),
-                                hex_diagnostic(&envelope.payload),
+                                hex_diagnostic(&payload),
                             ),
                         )),
                     }

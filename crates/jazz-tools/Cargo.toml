@@ -37,6 +37,9 @@ server = [
 ]
 cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc"]
 sync-autopsy = ["jazz/sync-autopsy"]
+transport-compression-lz4 = ["jazz/transport-compression-lz4"]
+transport-compression-zstd = ["jazz/transport-compression-zstd"]
+transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
 test-utils = ["server", "client", "sqlite", "sync-autopsy"]
 test = ["test-utils", "cli"]
 otel-core = [

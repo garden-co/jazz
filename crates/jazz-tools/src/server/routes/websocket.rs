@@ -20,8 +20,8 @@ use jazz::db::CommitUnitTrust;
 use jazz::groove::records::Value as CoreValue;
 use jazz::ids::AuthorId;
 use jazz::wire::{
-    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError,
-    WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, encode_frame, negotiate_wire,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFrame,
+    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
 };
 use tokio::sync::mpsc;
 
@@ -29,7 +29,6 @@ use crate::public_schema::AuthMode;
 use crate::server::ServerState;
 
 const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
-const WS_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
 const WS_MAX_FRAME_BYTES: usize = 1 << 20;
@@ -515,7 +514,7 @@ async fn handle_ws_connection(
         &remote_hello,
         WIRE_PROTOCOL_VERSION,
         WIRE_PROTOCOL_VERSION,
-        WS_SUPPORTED_FEATURES,
+        current_wire_features(),
     ) {
         Ok(negotiated) if negotiated.features & WS_REQUIRED_FEATURES != 0 => negotiated,
         Ok(_) => {
@@ -809,7 +808,7 @@ mod tests {
     fn ws_frame_batch_round_trips_wire_frames() {
         let frames = vec![WireFrame::Hello(WireHello::current(
             WirePeerRole::Client,
-            WS_SUPPORTED_FEATURES,
+            current_wire_features(),
         ))];
         let encoded = frames
             .iter()
