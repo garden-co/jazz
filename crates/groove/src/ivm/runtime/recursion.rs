@@ -6,7 +6,7 @@
 //! than defining separate operators. Join arrangements live in [`super::join`];
 //! public ticks, subscriptions, and graph retention live in [`super`].
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
 use crate::records::RecordDescriptor;
@@ -291,10 +291,10 @@ fn has_recompute_table_delta_for_recursion<S>(
 where
     S: OrderedKvStorage,
 {
-    let mut tables = HashMap::<String, RecordDescriptor>::new();
+    let mut tables = HashMap::<String, RecordDescriptor>::default();
     collect_table_source_names(runtime.graph, seed, &mut tables)?;
     collect_table_source_names(runtime.graph, step, &mut tables)?;
-    let mut anti_join_right_tables = HashMap::<String, RecordDescriptor>::new();
+    let mut anti_join_right_tables = HashMap::<String, RecordDescriptor>::default();
     collect_anti_join_right_table_sources(runtime.graph, seed, &mut anti_join_right_tables)?;
     collect_anti_join_right_table_sources(runtime.graph, step, &mut anti_join_right_tables)?;
     Ok(runtime
@@ -315,7 +315,7 @@ fn has_recompute_binding_delta_for_recursion<S>(
 where
     S: OrderedKvStorage,
 {
-    let mut shapes = HashMap::<String, RecordDescriptor>::new();
+    let mut shapes = HashMap::<String, RecordDescriptor>::default();
     collect_binding_sources(runtime.graph, seed, &mut shapes)?;
     collect_binding_sources(runtime.graph, step, &mut shapes)?;
     Ok(runtime
@@ -373,7 +373,7 @@ pub(super) fn snapshot_table_deltas(
     storage: &impl OrderedKvStorage,
     root: NodeId,
 ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
-    let mut tables = HashMap::<TableSnapshotSource, RecordDescriptor>::new();
+    let mut tables = HashMap::<TableSnapshotSource, RecordDescriptor>::default();
     collect_table_sources(graph, root, &mut tables)?;
     tables
         .into_iter()
@@ -443,7 +443,7 @@ pub(super) fn recursive_read_tables(
     seed: NodeId,
     step: NodeId,
 ) -> Result<Vec<String>, IvmRuntimeError> {
-    let mut tables = HashMap::<String, RecordDescriptor>::new();
+    let mut tables = HashMap::<String, RecordDescriptor>::default();
     collect_table_source_names(graph, seed, &mut tables)?;
     collect_table_source_names(graph, step, &mut tables)?;
     let mut tables = tables.into_keys().collect::<Vec<_>>();
@@ -542,7 +542,7 @@ pub(super) fn recompute_recursive(
         binding_snapshots,
         context: EvalContext::root(),
     };
-    let mut accumulated = HashMap::<Vec<u8>, i64>::new();
+    let mut accumulated = HashMap::<Vec<u8>, i64>::default();
     let mut frontier = snapshot.eval_node(*seed)?;
     if frontier.descriptor != output_desc {
         return Err(IvmRuntimeError::GraphOutputMismatch);
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn accept_positive_into_set_rejects_raw_non_positive_frontier_deltas_before_consolidation() {
-        let mut accumulated = HashMap::new();
+        let mut accumulated = HashMap::default();
 
         assert!(matches!(
             accept_positive_into_set(&mut accumulated, vec![delta(b"zero", 0)]),
