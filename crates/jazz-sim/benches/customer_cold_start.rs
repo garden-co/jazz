@@ -257,7 +257,12 @@ mod alloc_metrics {
 // resource via `inherits(parent_id)`. The generator constrains a small fixed
 // subset of resource access edges to groups reached by the member at depth 1
 // and depth 2 so every scale exercises the member->resource and
-// member->child-inherits paths.
+// member->child-inherits paths. For scale > 1.0 it extrapolates the observed
+// profile by scaling resource parents, access edges, and child totals
+// proportionally; child fanout preserves the same generated curve by
+// redistributing the scaled total over the scaled parent set. For scale <= 1.0,
+// child-bearing parent counts intentionally stay at the observed baseline so
+// existing benchmark receipts remain comparable.
 
 const ORG: &str = "org";
 const GROUP: &str = "group";
@@ -265,7 +270,7 @@ const GROUP_ACCESS: &str = "group_access_edges";
 const GROUP_ENTRY: &str = "group_entry";
 const PROFILE: &str = "profile";
 const CHILD_TABLES: usize = 6;
-const SEED_CACHE_VERSION: &str = "customer-cold-start-seed-v3";
+const SEED_CACHE_VERSION: &str = "customer-cold-start-seed-v4";
 const SEED_CACHE_READY: &str = ".jazz_customer_seed_ready";
 
 const RESOURCE_SPECS: [ResourceSpec; 14] = [
@@ -388,7 +393,15 @@ impl Config {
     }
 
     fn scaled_count(&self, count: usize) -> usize {
-        ((count as f64 * self.scale).round() as usize).clamp(1, count.max(1))
+        ((count as f64 * self.scale).round() as usize).max(1)
+    }
+
+    fn child_parent_count(&self, count: usize) -> usize {
+        if self.scale <= 1.0 {
+            count
+        } else {
+            self.scaled_count(count)
+        }
     }
 }
 
@@ -894,7 +907,7 @@ fn build_seed_plan(config: &Config) -> SeedPlan {
     let mut access_base = 100_000_u64;
     for (kind, spec) in RESOURCE_SPECS.iter().copied().enumerate() {
         let resource_count = if spec.child_rows.is_some() {
-            spec.rows
+            config.child_parent_count(spec.rows)
         } else {
             config.scaled_count(spec.rows)
         };
@@ -1818,7 +1831,7 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     );
     fields.insert(
         "assumption_child_skew".to_owned(),
-        json!("uniform fanout over 30 parents; env JAZZ_CUSTOMER_SCALE scales children per parent"),
+        json!("uniform generated fanout; scale <=1 preserves observed child-bearing parent counts, scale >1 scales parents and child totals proportionally"),
     );
     fields.insert(
         "assumption_group_graph".to_owned(),
