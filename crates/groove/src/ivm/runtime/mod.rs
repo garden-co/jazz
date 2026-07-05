@@ -9,6 +9,7 @@
 //! lowering lives in [`crate::ivm::planner`], graph identity in
 //! [`crate::ivm::graph`], and storage mechanics in [`crate::storage`].
 
+use bytes::{Bytes, BytesMut};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashSet};
@@ -1171,7 +1172,7 @@ impl IvmRuntime {
             descriptor: source.descriptor,
             deltas: if *count == 1 {
                 vec![RecordDelta {
-                    record: binding.0,
+                    record: binding.0.into(),
                     weight: 1,
                 }]
             } else {
@@ -1209,7 +1210,7 @@ impl IvmRuntime {
             shape: shape.to_owned(),
             descriptor: source.descriptor,
             deltas: vec![RecordDelta {
-                record: binding.0.clone(),
+                record: binding.0.clone().into(),
                 weight: -1,
             }],
         })
@@ -1241,7 +1242,7 @@ impl IvmRuntime {
                             .refcounts
                             .keys()
                             .map(|binding| RecordDelta {
-                                record: binding.0.clone(),
+                                record: binding.0.clone().into(),
                                 weight: 1,
                             })
                             .collect(),
@@ -2755,7 +2756,7 @@ pub struct TableDelta {
 /// Weighted change to one encoded record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordDelta {
-    pub record: Vec<u8>,
+    pub record: Bytes,
     pub weight: i64,
 }
 
@@ -3848,6 +3849,7 @@ struct NodeRuntimeMeta {
     depends_on_context: Option<bool>,
     join_left_fields: Option<Arc<[String]>>,
     join_right_fields: Option<Arc<[String]>>,
+    join_output_mapping: Option<Arc<[(usize, usize)]>>,
     aggregate_group_fields: Option<Arc<[String]>>,
 }
 
@@ -3906,7 +3908,7 @@ impl NodeState {
             let mut deltas = Vec::new();
             let mut visit = |_: &[u8], record: &[u8]| {
                 deltas.push(RecordDelta {
-                    record: record.to_vec(),
+                    record: Bytes::copy_from_slice(record),
                     weight: 1,
                 });
                 Ok(())
@@ -4011,10 +4013,32 @@ impl NodeState {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let deltas = input
+        let estimated_output_bytes = input
             .deltas
             .iter()
-            .map(|delta| {
+            .map(|delta| delta.record.len())
+            .sum::<usize>();
+        let mut output = BytesMut::with_capacity(estimated_output_bytes);
+        let mut spans = Vec::with_capacity(input.deltas.len());
+        let mut variable_scratch = Vec::new();
+        let can_raw_copy = project.expressions.len() == project.mapping.len()
+            && project
+                .expressions
+                .iter()
+                .all(|expr| matches!(expr.expression, PlanExpr::Field(_)));
+        for delta in &input.deltas {
+            let span = if can_raw_copy {
+                output_desc
+                    .project_record_raw_into(
+                        &[input.descriptor],
+                        &[delta.raw()],
+                        &project.mapping,
+                        &mut output,
+                        &mut variable_scratch,
+                    )
+                    .map_err(IvmRuntimeError::RecordEncoding)?
+            } else {
+                let start = output.len();
                 let record = project_record(
                     &project.expressions,
                     &project.mapping,
@@ -4022,12 +4046,19 @@ impl NodeState {
                     &input.descriptor,
                     delta.raw(),
                 )?;
-                Ok(RecordDelta {
-                    record,
-                    weight: delta.weight,
-                })
+                output.extend_from_slice(&record);
+                start..output.len()
+            };
+            spans.push((span, delta.weight));
+        }
+        let output = output.freeze();
+        let deltas = spans
+            .into_iter()
+            .map(|(span, weight)| RecordDelta {
+                record: output.slice(span),
+                weight,
             })
-            .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+            .collect();
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,
@@ -4062,7 +4093,7 @@ impl NodeState {
             let mut output_values = values;
             output_values[unwrap.field_idx] = unwrapped;
             deltas.push(RecordDelta {
-                record: output_desc.create(&output_values)?,
+                record: output_desc.create(&output_values)?.into(),
                 weight: delta.weight,
             });
         }
@@ -4095,7 +4126,7 @@ impl NodeState {
                 let mut output_values = values.clone();
                 output_values.push(element.clone());
                 deltas.push(RecordDelta {
-                    record: output_desc.create(&output_values)?,
+                    record: output_desc.create(&output_values)?.into(),
                     weight: delta.weight,
                 });
             }
@@ -4438,7 +4469,10 @@ where
                         .records
                         .iter()
                         .cloned()
-                        .map(|record| RecordDelta { record, weight: 1 })
+                        .map(|record| RecordDelta {
+                            record: record.into(),
+                            weight: 1,
+                        })
                         .collect(),
                 })
             }
@@ -4690,6 +4724,12 @@ where
         };
         let join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
+        let output_mapping = self.join_output_mapping(
+            node,
+            join.left_descriptor,
+            join.right_descriptor,
+            output_desc,
+        )?;
         let left_key = self.arrangement_key(left_input, join.left_descriptor, left_on)?;
         let right_key = self.arrangement_key(right_input, join.right_descriptor, right_on)?;
         let mut left_arrangement = self
@@ -4711,6 +4751,7 @@ where
             &join.left_descriptor,
             &join.right_descriptor,
             &output_desc,
+            &output_mapping,
             &left_key.fields,
             &right_key.fields,
             left_delta,
@@ -5007,7 +5048,7 @@ where
         let input_desc = input.descriptor;
         let group_fields = self.aggregate_group_fields(node, aggregate);
         if self.context.eval_mode == EvalMode::Hydrate {
-            let mut groups = BTreeMap::<Vec<u8>, Vec<(Vec<u8>, i64)>>::new();
+            let mut groups = BTreeMap::<Vec<u8>, Vec<(Bytes, i64)>>::new();
             for delta in &input.deltas {
                 let group_key = encoded_record_key_part(
                     input_desc,
@@ -5153,6 +5194,44 @@ where
             .get_or_insert_with(|| Arc::from(plan_expr_names(&join.right_key)))
             .clone();
         (left, right)
+    }
+
+    fn join_output_mapping(
+        &mut self,
+        node: NodeId,
+        left_descriptor: RecordDescriptor,
+        right_descriptor: RecordDescriptor,
+        output_descriptor: RecordDescriptor,
+    ) -> Result<Arc<[(usize, usize)]>, IvmRuntimeError> {
+        if let Some(mapping) = &self.node_meta.entry(node).or_default().join_output_mapping {
+            return Ok(mapping.clone());
+        }
+        let mapping = output_descriptor
+            .fields()
+            .iter()
+            .map(|field| {
+                let name = field
+                    .name
+                    .as_deref()
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+                if let Some(name) = name.strip_prefix("left.") {
+                    let field_idx = left_descriptor
+                        .field_index(name)
+                        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
+                    Ok((0, field_idx))
+                } else if let Some(name) = name.strip_prefix("right.") {
+                    let field_idx = right_descriptor
+                        .field_index(name)
+                        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
+                    Ok((1, field_idx))
+                } else {
+                    Err(IvmRuntimeError::GraphFieldNotFound(name.to_owned()))
+                }
+            })
+            .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+        let mapping = Arc::<[(usize, usize)]>::from(mapping);
+        self.node_meta.entry(node).or_default().join_output_mapping = Some(mapping.clone());
+        Ok(mapping)
     }
 
     fn aggregate_group_fields(&mut self, node: NodeId, aggregate: &AggregateOp) -> Arc<[String]> {
@@ -5611,7 +5690,8 @@ fn apply_index_by(
             }
             deltas.push(RecordDelta {
                 record: index_record_descriptor()
-                    .create(&[Value::Bytes(key), Value::Bytes(value.clone())])?,
+                    .create(&[Value::Bytes(key), Value::Bytes(value.clone())])?
+                    .into(),
                 weight: delta.weight,
             });
         }
@@ -6113,11 +6193,13 @@ pub(super) fn project_binding_source_deltas(
         .iter()
         .map(|delta| {
             Ok(RecordDelta {
-                record: output_desc.project_record_raw(
-                    std::slice::from_ref(&input.descriptor),
-                    &[delta.raw()],
-                    &mapping,
-                )?,
+                record: output_desc
+                    .project_record_raw(
+                        std::slice::from_ref(&input.descriptor),
+                        &[delta.raw()],
+                        &mapping,
+                    )?
+                    .into(),
                 weight: delta.weight,
             })
         })
@@ -6132,13 +6214,21 @@ fn consolidate_deltas(deltas: Vec<RecordDelta>) -> Vec<RecordDelta> {
     if deltas.len() <= 1 {
         return deltas;
     }
-    let mut consolidated = HashMap::<Vec<u8>, i64>::default();
+    let mut deltas = deltas;
+    deltas.sort_unstable_by(|left, right| left.record.cmp(&right.record));
+    let mut consolidated = Vec::<RecordDelta>::with_capacity(deltas.len());
     for delta in deltas {
-        *consolidated.entry(delta.record).or_default() += delta.weight;
+        if let Some(last) = consolidated.last_mut()
+            && last.record == delta.record
+        {
+            last.weight += delta.weight;
+            continue;
+        }
+        consolidated.push(delta);
     }
     consolidated
         .into_iter()
-        .filter_map(|(record, weight)| (weight != 0).then_some(RecordDelta { record, weight }))
+        .filter(|delta| delta.weight != 0)
         .collect()
 }
 
@@ -6172,10 +6262,10 @@ fn resolve_field_name(input: &RecordDescriptor, field: &str) -> Result<String, I
 }
 
 fn records_before_from_deltas(
-    after_records: Vec<(Vec<u8>, i64)>,
+    after_records: Vec<(Bytes, i64)>,
     deltas: Vec<RecordDelta>,
-) -> Vec<(Vec<u8>, i64)> {
-    let mut records = BTreeMap::<Vec<u8>, (Vec<u8>, i64)>::new();
+) -> Vec<(Bytes, i64)> {
+    let mut records = BTreeMap::<Bytes, (Bytes, i64)>::new();
     for (record, weight) in after_records {
         records.insert(record.clone(), (record, weight));
     }
@@ -6195,8 +6285,8 @@ fn aggregate_row_from_records(
     input_desc: RecordDescriptor,
     output_desc: RecordDescriptor,
     aggregate: &AggregateOp,
-    records: &[(Vec<u8>, i64)],
-) -> Result<Option<Vec<u8>>, IvmRuntimeError> {
+    records: &[(Bytes, i64)],
+) -> Result<Option<Bytes>, IvmRuntimeError> {
     let mut positive = Vec::new();
     let mut total_weight = 0_i64;
     for (record, weight) in records {
@@ -6205,7 +6295,7 @@ fn aggregate_row_from_records(
         }
         if *weight > 0 {
             total_weight += *weight;
-            positive.push((record.as_slice(), *weight));
+            positive.push((record.as_ref(), *weight));
         }
     }
     if total_weight == 0 {
@@ -6222,12 +6312,13 @@ fn aggregate_row_from_records(
     }
     output_desc
         .create(&values)
+        .map(Bytes::from)
         .map(Some)
         .map_err(IvmRuntimeError::RecordEncoding)
 }
 
 fn evaluate_aggregate(
-    records: &[(Vec<u8>, i64)],
+    records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
 ) -> Result<Value, IvmRuntimeError> {
@@ -6265,7 +6356,7 @@ fn evaluate_aggregate(
 }
 
 fn aggregate_sum(
-    records: &[(Vec<u8>, i64)],
+    records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
 ) -> Result<Value, IvmRuntimeError> {
@@ -6324,7 +6415,7 @@ fn aggregate_sum(
 }
 
 fn aggregate_avg(
-    records: &[(Vec<u8>, i64)],
+    records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
 ) -> Result<Value, IvmRuntimeError> {
@@ -6352,14 +6443,14 @@ fn aggregate_avg(
 }
 
 fn aggregate_extremum(
-    records: &[(Vec<u8>, i64)],
+    records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
 ) -> Result<Value, IvmRuntimeError> {
     let Some(expr) = &aggregate.expression else {
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
-    let mut best: Option<(Vec<u8>, Vec<u8>, Value)> = None;
+    let mut best: Option<(Vec<u8>, Bytes, Value)> = None;
     for (record, weight) in records {
         if *weight <= 0 {
             continue;
@@ -6439,8 +6530,8 @@ fn evaluate_aggregate_expr(
     }
 }
 
-type SourceRecord = (Vec<u8>, Vec<u8>);
-type RankedRecord = (Vec<TopBySortPart>, Vec<u8>);
+type SourceRecord = (Vec<u8>, Bytes);
+type RankedRecord = (Vec<TopBySortPart>, Bytes);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TopBySortPart {
@@ -6479,7 +6570,7 @@ struct ArgBySpec<'a> {
 fn arg_by_winner_from_records(
     descriptor: RecordDescriptor,
     primary_key_field_indices: &[usize],
-    records: Vec<(Vec<u8>, i64)>,
+    records: Vec<(Bytes, i64)>,
     direction: ArgByDirection,
 ) -> Result<Option<SourceRecord>, IvmRuntimeError> {
     let mut winner = None;
@@ -6505,11 +6596,11 @@ fn arg_by_winner_from_records(
 fn arg_by_winner_before_from_deltas(
     descriptor: RecordDescriptor,
     primary_key_field_indices: &[usize],
-    after_records: Vec<(Vec<u8>, i64)>,
+    after_records: Vec<(Bytes, i64)>,
     deltas: Vec<RecordDelta>,
     direction: ArgByDirection,
 ) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Vec<u8>, i64)>::new();
+    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
     for (record, weight) in after_records {
         let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
         records.insert(key, (record, weight));
@@ -6532,7 +6623,7 @@ fn arg_by_winner_before_from_deltas(
 
 fn top_by_window_from_records(
     descriptor: RecordDescriptor,
-    records: Vec<(Vec<u8>, i64)>,
+    records: Vec<(Bytes, i64)>,
     top_by: &TopByOp,
 ) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
     let mut ranked = Vec::new();
@@ -6551,11 +6642,11 @@ fn top_by_window_from_records(
 
 fn top_by_window_before_from_deltas(
     descriptor: RecordDescriptor,
-    after_records: Vec<(Vec<u8>, i64)>,
+    after_records: Vec<(Bytes, i64)>,
     deltas: Vec<RecordDelta>,
     top_by: &TopByOp,
 ) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Vec<u8>, i64)>::new();
+    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
     for (record, weight) in after_records {
         let key = encoded_record_key_part(descriptor, &record, &top_by.sort_field_indices)?;
         records.insert(key, (record, weight));
@@ -6596,7 +6687,7 @@ fn top_by_sort_key(
 }
 
 fn diff_record_windows(before: Vec<RankedRecord>, after: Vec<RankedRecord>) -> Vec<RecordDelta> {
-    let mut weights = BTreeMap::<Vec<u8>, i64>::new();
+    let mut weights = BTreeMap::<Bytes, i64>::new();
     for (_, record) in before {
         *weights.entry(record).or_default() -= 1;
     }
@@ -7028,13 +7119,15 @@ mod tests {
                         RecordDelta {
                             record: albums
                                 .create(&[Value::U64(1), Value::String("one".to_owned())])
-                                .unwrap(),
+                                .unwrap()
+                                .into(),
                             weight: 1,
                         },
                         RecordDelta {
                             record: albums
                                 .create(&[Value::U64(2), Value::String("two".to_owned())])
-                                .unwrap(),
+                                .unwrap()
+                                .into(),
                             weight: 1,
                         },
                     ],
@@ -7099,13 +7192,15 @@ mod tests {
                         RecordDelta {
                             record: albums
                                 .create(&[Value::U64(1), Value::String("one".to_owned())])
-                                .unwrap(),
+                                .unwrap()
+                                .into(),
                             weight: 2,
                         },
                         RecordDelta {
                             record: albums
                                 .create(&[Value::U64(2), Value::String("two".to_owned())])
-                                .unwrap(),
+                                .unwrap()
+                                .into(),
                             weight: -3,
                         },
                     ],
@@ -7267,13 +7362,15 @@ mod tests {
                         RecordDelta {
                             record: descriptor
                                 .create(&[Value::U64(1), Value::String("visible-one".to_owned())])
-                                .unwrap(),
+                                .unwrap()
+                                .into(),
                             weight: 1,
                         },
                         RecordDelta {
                             record: descriptor
                                 .create(&[Value::U64(2), Value::String("visible-two".to_owned())])
-                                .unwrap(),
+                                .unwrap()
+                                .into(),
                             weight: 1,
                         },
                     ],
@@ -7359,7 +7456,8 @@ mod tests {
                 deltas: vec![RecordDelta {
                     record: artists
                         .create(&[Value::U64(7), Value::String("Alice".to_owned())])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 }],
             },
@@ -7373,7 +7471,8 @@ mod tests {
                             Value::U64(7),
                             Value::String("Impulse".to_owned()),
                         ])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 }],
             },
@@ -7387,7 +7486,8 @@ mod tests {
                             Value::U64(7),
                             Value::String("Journey".to_owned()),
                         ])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 }],
             },
@@ -7414,19 +7514,22 @@ mod tests {
                 RecordDelta {
                     record: edges
                         .create(&[Value::U64(1), Value::U64(1), Value::U64(2)])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 },
                 RecordDelta {
                     record: edges
                         .create(&[Value::U64(2), Value::U64(2), Value::U64(3)])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 },
                 RecordDelta {
                     record: edges
                         .create(&[Value::U64(3), Value::U64(9), Value::U64(10)])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 },
             ],
@@ -7471,19 +7574,22 @@ mod tests {
                 RecordDelta {
                     record: scores
                         .create(&[Value::U64(1), Value::U64(1), Value::U64(10)])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 },
                 RecordDelta {
                     record: scores
                         .create(&[Value::U64(2), Value::U64(1), Value::U64(20)])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 },
                 RecordDelta {
                     record: scores
                         .create(&[Value::U64(3), Value::U64(2), Value::U64(15)])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 },
             ],
@@ -7723,7 +7829,8 @@ mod tests {
                                     Value::U64(11),
                                     Value::String("Blue Train".to_owned()),
                                 ])
-                                .unwrap(),
+                                .unwrap()
+                                .into(),
                             weight: 1,
                         }],
                     },
@@ -7736,7 +7843,8 @@ mod tests {
                                     Value::U64(11),
                                     Value::String("John Coltrane".to_owned()),
                                 ])
-                                .unwrap(),
+                                .unwrap()
+                                .into(),
                             weight: 1,
                         }],
                     },
@@ -7790,13 +7898,15 @@ mod tests {
                 RecordDelta {
                     record: edges
                         .create(&[Value::U64(1), Value::U64(1), Value::U64(2)])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 },
                 RecordDelta {
                     record: edges
                         .create(&[Value::U64(2), Value::U64(2), Value::U64(3)])
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     weight: 1,
                 },
             ],

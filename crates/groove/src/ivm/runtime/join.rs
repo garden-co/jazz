@@ -7,7 +7,10 @@
 //! descriptors live in [`crate::ivm::op_types`], and tick scheduling lives in
 //! [`super`].
 
+use bytes::{Bytes, BytesMut};
+use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use crate::records::RecordDescriptor;
 
@@ -16,8 +19,9 @@ use super::{
     encode_key_part,
 };
 
-type JoinBucket = HashMap<Vec<u8>, i64>;
-type JoinIndex = HashMap<Vec<u8>, JoinBucket>;
+pub(super) type JoinKey = SmallVec<[u8; 64]>;
+type JoinBucket = HashMap<Bytes, i64>;
+type JoinIndex = HashMap<JoinKey, JoinBucket>;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct JoinState;
@@ -41,6 +45,7 @@ impl JoinState {
         left_descriptor: &RecordDescriptor,
         right_descriptor: &RecordDescriptor,
         output_descriptor: &RecordDescriptor,
+        output_mapping: &[(usize, usize)],
         left_on: &[String],
         right_on: &[String],
         left_delta: &[RecordDelta],
@@ -58,11 +63,21 @@ impl JoinState {
 
         let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta)?;
         let keyed_right_delta = keyed_join_deltas(right_descriptor, right_on, right_delta)?;
-        let mut deltas = Vec::new();
+        let estimated_output_bytes = left_delta
+            .iter()
+            .chain(right_delta)
+            .map(|delta| delta.record.len())
+            .sum::<usize>();
+        let mut output = JoinOutputBuffer {
+            bytes: BytesMut::with_capacity(estimated_output_bytes),
+            deltas: Vec::new(),
+            variable_scratch: Vec::new(),
+        };
         let context = JoinChangeContext {
             left_descriptor,
             right_descriptor,
             output_descriptor,
+            output_mapping,
         };
 
         advance_arrangement(
@@ -79,7 +94,7 @@ impl JoinState {
         )?;
 
         append_join_deltas(
-            &mut deltas,
+            &mut output,
             &context,
             &keyed_left_delta,
             &right_arrangement.value().index,
@@ -87,7 +102,7 @@ impl JoinState {
             1,
         )?;
         append_join_deltas(
-            &mut deltas,
+            &mut output,
             &context,
             &keyed_right_delta,
             &left_arrangement.value().index,
@@ -99,7 +114,7 @@ impl JoinState {
         // same-tick left/right pairs. Remove one copy of that cross term.
         let left_delta_index = build_join_delta_index(&keyed_left_delta);
         append_join_deltas(
-            &mut deltas,
+            &mut output,
             &context,
             &keyed_right_delta,
             &left_delta_index,
@@ -107,7 +122,17 @@ impl JoinState {
             -1,
         )?;
 
-        Ok(consolidate_deltas(deltas))
+        let output_buffer = output.bytes.freeze();
+        Ok(consolidate_deltas(
+            output
+                .deltas
+                .into_iter()
+                .map(|(record, weight)| RecordDelta {
+                    record: output_buffer.slice(record),
+                    weight,
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -137,9 +162,9 @@ impl AntiJoinState {
 
         let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta)?;
         let keyed_right_delta = keyed_join_deltas(right_descriptor, right_on, right_delta)?;
-        let mut affected_keys = HashSet::<Vec<u8>>::new();
-        let mut old_right_counts = HashMap::<Vec<u8>, i64>::new();
-        let mut old_left_buckets = HashMap::<Vec<u8>, JoinBucket>::new();
+        let mut affected_keys = HashSet::<JoinKey>::new();
+        let mut old_right_counts = HashMap::<JoinKey, i64>::new();
+        let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::new();
         if update_mode == ArrangementUpdateMode::Accumulate {
             for delta in &keyed_left_delta {
                 let key = &delta.key;
@@ -203,7 +228,7 @@ impl AntiJoinState {
                 }
             }
             ArrangementUpdateMode::Replace => {
-                let mut left_keys = HashSet::<Vec<u8>>::new();
+                let mut left_keys = HashSet::<JoinKey>::new();
                 for delta in &keyed_left_delta {
                     let key = &delta.key;
                     if left_keys.insert(key.clone())
@@ -230,7 +255,9 @@ impl ArrangementState {
     pub(super) fn encoded_bytes(&self) -> usize {
         self.index
             .iter()
-            .map(|(key, bucket)| key.len() + bucket.keys().map(Vec::len).sum::<usize>())
+            .map(|(key, bucket)| {
+                key.len() + bucket.keys().map(|record| record.len()).sum::<usize>()
+            })
             .sum()
     }
 
@@ -272,7 +299,7 @@ impl ArrangementState {
         Ok(())
     }
 
-    pub(super) fn records_for_key(&self, key: &[u8]) -> Vec<(Vec<u8>, i64)> {
+    pub(super) fn records_for_key(&self, key: &[u8]) -> Vec<(Bytes, i64)> {
         self.index
             .get(key)
             .into_iter()
@@ -321,11 +348,18 @@ struct JoinChangeContext<'a> {
     left_descriptor: &'a RecordDescriptor,
     right_descriptor: &'a RecordDescriptor,
     output_descriptor: &'a RecordDescriptor,
+    output_mapping: &'a [(usize, usize)],
+}
+
+struct JoinOutputBuffer {
+    bytes: BytesMut,
+    deltas: Vec<(Range<usize>, i64)>,
+    variable_scratch: Vec<(usize, Range<usize>)>,
 }
 
 struct KeyedRecordDelta<'a> {
     delta: &'a RecordDelta,
-    key: Vec<u8>,
+    key: JoinKey,
 }
 
 enum JoinProbeSide {
@@ -334,7 +368,7 @@ enum JoinProbeSide {
 }
 
 fn append_join_deltas(
-    deltas: &mut Vec<RecordDelta>,
+    output: &mut JoinOutputBuffer,
     context: &JoinChangeContext<'_>,
     delta_records: &[KeyedRecordDelta<'_>],
     stored: &JoinIndex,
@@ -358,19 +392,17 @@ fn append_join_deltas(
                 continue;
             }
             let (left_record, right_record) = match side {
-                JoinProbeSide::LeftDelta => (delta.delta.raw(), stored_record.as_slice()),
-                JoinProbeSide::RightDelta => (stored_record.as_slice(), delta.delta.raw()),
+                JoinProbeSide::LeftDelta => (delta.delta.raw(), stored_record.as_ref()),
+                JoinProbeSide::RightDelta => (stored_record.as_ref(), delta.delta.raw()),
             };
-            deltas.push(RecordDelta {
-                record: create_join_record(
-                    context.left_descriptor,
-                    left_record,
-                    context.right_descriptor,
-                    right_record,
-                    context.output_descriptor,
-                )?,
-                weight,
-            });
+            let record = create_join_record_into(
+                left_record,
+                right_record,
+                context,
+                &mut output.bytes,
+                &mut output.variable_scratch,
+            )?;
+            output.deltas.push((record, weight));
         }
     }
 
@@ -446,7 +478,7 @@ pub(super) fn join_keys(
     descriptor: &RecordDescriptor,
     record: &[u8],
     fields: &[String],
-) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
+) -> Result<Vec<JoinKey>, IvmRuntimeError> {
     if fields.len() == 1 {
         let values = descriptor.get(record, &fields[0])?;
         let parts = join_key_parts(values);
@@ -456,7 +488,7 @@ pub(super) fn join_keys(
         if parts.len() == 1 {
             let mut key = Vec::new();
             encode_key_part(&mut key, &parts[0])?;
-            return Ok(vec![key]);
+            return Ok(vec![JoinKey::from_vec(key)]);
         }
         let mut keys = Vec::with_capacity(parts.len());
         let mut seen = HashSet::new();
@@ -465,7 +497,7 @@ pub(super) fn join_keys(
             encode_key_part(&mut key, value)?;
             if !seen.contains(&key) {
                 seen.insert(key.clone());
-                keys.push(key);
+                keys.push(JoinKey::from_vec(key));
             }
         }
         return Ok(keys);
@@ -497,7 +529,7 @@ pub(super) fn join_keys(
         seen.clear();
     }
 
-    Ok(keys)
+    Ok(keys.into_iter().map(JoinKey::from_vec).collect())
 }
 
 fn join_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {
@@ -521,7 +553,39 @@ pub(super) fn create_join_record(
     right_record: &[u8],
     output_descriptor: &RecordDescriptor,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
-    let mapping = output_descriptor
+    let mapping = join_output_mapping(left_descriptor, right_descriptor, output_descriptor)?;
+    Ok(output_descriptor.project_record_raw(
+        &[*left_descriptor, *right_descriptor],
+        &[left_record, right_record],
+        &mapping,
+    )?)
+}
+
+fn create_join_record_into(
+    left_record: &[u8],
+    right_record: &[u8],
+    context: &JoinChangeContext<'_>,
+    output: &mut BytesMut,
+    variable_scratch: &mut Vec<(usize, Range<usize>)>,
+) -> Result<Range<usize>, IvmRuntimeError> {
+    context
+        .output_descriptor
+        .project_record_raw_into(
+            &[*context.left_descriptor, *context.right_descriptor],
+            &[left_record, right_record],
+            context.output_mapping,
+            output,
+            variable_scratch,
+        )
+        .map_err(IvmRuntimeError::RecordEncoding)
+}
+
+pub(super) fn join_output_mapping(
+    left_descriptor: &RecordDescriptor,
+    right_descriptor: &RecordDescriptor,
+    output_descriptor: &RecordDescriptor,
+) -> Result<Vec<(usize, usize)>, IvmRuntimeError> {
+    output_descriptor
         .fields()
         .iter()
         .map(|field| {
@@ -543,10 +607,5 @@ pub(super) fn create_join_record(
                 Err(IvmRuntimeError::GraphFieldNotFound(name.to_owned()))
             }
         })
-        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-    Ok(output_descriptor.project_record_raw(
-        &[*left_descriptor, *right_descriptor],
-        &[left_record, right_record],
-        &mapping,
-    )?)
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()
 }

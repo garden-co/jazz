@@ -84,6 +84,7 @@ mod values;
 use std::ops::Deref;
 use std::str;
 
+use bytes::BytesMut;
 use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -276,6 +277,92 @@ impl RecordDescriptor {
         }
 
         Ok(record)
+    }
+
+    pub(crate) fn project_record_raw_into(
+        &self,
+        source_descriptors: &[RecordDescriptor],
+        source_records: &[&[u8]],
+        mapping: &[(usize, usize)],
+        output: &mut BytesMut,
+        variable_scratch: &mut Vec<(usize, std::ops::Range<usize>)>,
+    ) -> Result<std::ops::Range<usize>, Error> {
+        if self.fields.len() != mapping.len() {
+            return Err(Error::ArityMismatch {
+                expected: self.fields.len(),
+                actual: mapping.len(),
+            });
+        }
+        if source_descriptors.len() != source_records.len() {
+            return Err(Error::ArityMismatch {
+                expected: source_descriptors.len(),
+                actual: source_records.len(),
+            });
+        }
+
+        variable_scratch.clear();
+        let start = output.len();
+        let fixed_size = self.fixed_size();
+        let variable_count = self.variable_count();
+        let offset_table_size = variable_count.saturating_sub(1) * 4;
+        output.reserve(fixed_size + offset_table_size);
+
+        for logical_idx in &self.layout.logical_by_physical {
+            let (source_descriptor_idx, source_field_idx) = mapping[*logical_idx];
+            let source_descriptor = source_descriptors.get(source_descriptor_idx).ok_or(
+                Error::FieldIndexOutOfBounds {
+                    index: source_descriptor_idx,
+                    len: source_descriptors.len(),
+                },
+            )?;
+            let source_record =
+                source_records
+                    .get(source_descriptor_idx)
+                    .ok_or(Error::FieldIndexOutOfBounds {
+                        index: source_descriptor_idx,
+                        len: source_records.len(),
+                    })?;
+            let source_field = source_descriptor.fields.get(source_field_idx).ok_or(
+                Error::FieldIndexOutOfBounds {
+                    index: source_field_idx,
+                    len: source_descriptor.fields.len(),
+                },
+            )?;
+            let output_field = &self.fields[*logical_idx];
+            if source_field.value_type != output_field.value_type {
+                return Err(Error::TypeMismatch {
+                    expected: output_field.value_type.clone(),
+                });
+            }
+            let span = source_descriptor.field_span(source_record, source_field_idx)?;
+            let encoded = &source_record[span.clone()];
+            match self.layout.fields[*logical_idx] {
+                FieldLayout::Static { width, .. } => {
+                    if encoded.len() != width {
+                        return Err(Error::InvalidOffset);
+                    }
+                    output.extend_from_slice(encoded);
+                }
+                FieldLayout::Variable { .. } => {
+                    variable_scratch.push((source_descriptor_idx, span));
+                }
+            }
+        }
+
+        let variable_start = fixed_size + offset_table_size;
+        let mut next_offset = variable_start;
+        for (_, span) in variable_scratch
+            .iter()
+            .take(variable_scratch.len().saturating_sub(1))
+        {
+            next_offset = checked_add(next_offset, span.end - span.start)?;
+            output.extend_from_slice(&usize_to_u32(next_offset)?.to_le_bytes());
+        }
+        for (source_record_idx, span) in variable_scratch {
+            output.extend_from_slice(&source_records[*source_record_idx][span.clone()]);
+        }
+
+        Ok(start..output.len())
     }
 
     pub fn bind<'a>(&'a self, raw: &'a [u8]) -> BorrowedRecord<'a> {

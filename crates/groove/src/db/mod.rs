@@ -2711,17 +2711,23 @@ impl PendingTableWrite {
             Self::Set { record, .. } => {
                 let mut deltas = current
                     .into_iter()
-                    .map(|record| RecordDelta { record, weight: -1 })
+                    .map(|record| RecordDelta {
+                        record: record.into(),
+                        weight: -1,
+                    })
                     .collect::<Vec<_>>();
                 deltas.push(RecordDelta {
-                    record: record.clone(),
+                    record: record.clone().into(),
                     weight: 1,
                 });
                 deltas
             }
             Self::Delete { .. } => current
                 .into_iter()
-                .map(|record| RecordDelta { record, weight: -1 })
+                .map(|record| RecordDelta {
+                    record: record.into(),
+                    weight: -1,
+                })
                 .collect(),
         };
 
@@ -2805,7 +2811,7 @@ fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
 }
 
 fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
-    let mut by_table = HashMap::<String, (RecordDescriptor, HashMap<Vec<u8>, i64>)>::new();
+    let mut by_table = HashMap::<String, (RecordDescriptor, HashMap<bytes::Bytes, i64>)>::new();
     for table_delta in table_deltas {
         let (_, records) = by_table
             .entry(table_delta.table)
