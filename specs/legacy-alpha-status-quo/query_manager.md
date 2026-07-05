@@ -92,6 +92,40 @@ Both APIs use the same graph engine.
 
 This shared machinery is why one-shot reads and live reads stay behaviorally aligned.
 
+## Maintained-View Observation Invariant
+
+`INV-MV-1`: no state that feeds a maintained view may change without the maintained view observing
+that change.
+
+There are two valid ways to satisfy the invariant:
+
+- mutate the state through the runtime delta path, so the maintained graph sees ordinary positive
+  and negative deltas in the same tick
+- explicitly rebuild the affected maintained view from its authoritative base state
+
+Storage-level shortcuts are allowed only when no live maintained state can observe the changed
+rows, or during recovery before maintained state has been rebuilt. A raw write behind the graph's
+back is a correctness bug even if a fresh one-shot query would see the right answer.
+
+The producer inventory is:
+
+- upstream sync apply, including receiver-side bundle ingestion and fates
+- local commit finalize
+- fate application, including merge-back and ahead-overlay cleanup
+- subscription registration, unregistration, and settled-cache replay
+- repair/refetch apply
+- recovery rebuild and recovery sweeps
+
+The invariant was made explicit after five July 2026 incident classes exposed the same underlying
+failure mode: fallback misclassification, bulk-load suppression, serve-dirty gating/epoch misses,
+delta-path fated cleanup that removed ahead rows without retractions, and subscriber dirty
+propagation dropped at a receiver-batch boundary.
+
+The practical review question is:
+
+> If this code changes rows, membership facts, settled sets, payload facts, fates, or coverage
+> state, which maintained view observes the change, and through which delta or rebuild?
+
 ## Branches, Schemas, and Lenses
 
 The Query Manager never assumes a single universal table image.
@@ -143,6 +177,47 @@ In `Enforcing`, missing explicit clauses deny by default:
   context cannot be resolved
 - dynamic servers that have learned schema but not yet learned a permissions
   head stay closed instead of temporarily behaving like local permissive runtimes
+
+## Seeded Reachability and Compositional Policy Atoms
+
+Read and write policies are compiled as small boolean programs over policy atoms. The current
+status-quo atoms include plain column predicates, `reachable_via`, and `inherits(parent_col)`.
+Atoms compose with `AND` and `OR`; the composition is part of the policy program rather than a
+post-filter outside the query graph.
+
+`reachable_via` supports two seed forms:
+
+- a literal claim value, the degenerate seed used by earlier policies
+- a set-valued keyed lookup, written as `seededBy(seed_table, user_col = claim(path), group_col)`
+
+The set-valued form includes same-table seeds. For example, a team table can seed reachability by
+projecting its own `id` column from rows where `identity_key = claim(sub)`.
+
+The seed relation is an ordinary closure input. A grant, revoke, or seed-column update flows
+through normal IVM deltas and updates maintained subscriptions without rehydrating the whole view.
+Prepared fragment identity includes the seed table, seed columns, descriptor, and claim paths, but
+not the subscribing shape id. That lets resource kinds sharing the same membership closure share
+one maintained fragment while still routing outputs per subscriber identity.
+
+`inherits(parent_col)` is also an atom. A child row is readable when the parent row referenced by
+`parent_col` is readable under the parent's composed read policy. Lowering splices the parent policy
+fragment into the child policy with correlation rebound to the joined parent row, and the child's
+fragment identity includes the parent fragment's claim paths.
+
+Child insert authorization uses parent updateability evaluated against whereOld only. The parent
+row is not changed by inserting the child, so parent whereNew/update-check clauses are not evaluated
+for that child insert decision.
+
+The TypeScript `policy.gather({ start, step, maxDepth })` / `hopTo` surface lowers to the seeded
+closure path only for exactly matching patterns: a claim-keyed start lookup, compatible hop
+direction, and no extra step filters whose semantics are not represented by seeded reachability.
+Other gather shapes stay on the legacy lowering path and must fail closed if they cannot be
+represented safely.
+
+🔶 Open questions:
+
+- String claim type mismatches in seeded lookups should become loud validation errors instead of
+  depending on runtime empty-result behavior.
 
 ## Key Files
 

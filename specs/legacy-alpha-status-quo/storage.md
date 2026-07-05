@@ -181,6 +181,47 @@ historical catalogue schemas.
 The full meaning of those row raw tables and their local keys is documented in
 [Batches](batches.md).
 
+## Representation and Allocation Guidance
+
+The current performance rule is "no second formats."
+
+The canonical record encoding is the format. Runtime code may share, slice, copy, project, or
+reorder encoded records, but it should not create a parallel decoded representation and then keep
+that representation alive as if it were the data model. Decoding is a boundary operation or a
+fallback for genuinely computed expressions, not the normal internal representation for maintained
+arrangements.
+
+The review question is:
+
+> Is there a format here that is not the record encoding?
+
+If the answer is yes, the code needs a specific reason and a bounded lifetime.
+
+The standing canaries are:
+
+- memory amplification: peak RSS divided by encoded storage bytes
+- allocations per materialized row in the customer cold-start benchmark
+
+Current July 2026 baselines after the C-lane representation work:
+
+- member 100% cold: about 6,000 allocations per row, 7.3s settle, and about 20x memory
+  amplification
+- member 100% warm had previously exposed higher amplification, around 46x, which remains a
+  design-session target
+
+The implemented delta representation follows the same rule:
+
+- `RecordDelta` carries `bytes::Bytes` handles to encoded records
+- pass-through operators clone handles, not record byte vectors
+- transform operators build a batch of output records into `BytesMut`, freeze once, and emit
+  `Bytes` slices for individual records
+- consolidation uses in-place sort plus adjacent weight folding instead of per-call hash maps
+- join-key construction uses inline small buffers for common keys
+
+This is an ownership and buffering change only. The record bytes are still the same canonical
+encoding, and storage-read boundaries wrap owned storage bytes into shared handles rather than
+introducing a second payload format.
+
 ## Durable Backends
 
 ### MemoryStorage
