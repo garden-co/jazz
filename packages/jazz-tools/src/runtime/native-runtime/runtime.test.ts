@@ -3044,6 +3044,200 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("serializes same-table gather seeds as seeded reachable policies", () => {
+    const reachables = readSchemaSelectPolicyReachables(
+      encodeSchema({
+        resources: {
+          columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+          policies: {
+            select: {
+              using: {
+                type: "ExistsRel",
+                rel: {
+                  Filter: {
+                    input: {
+                      Join: {
+                        left: {
+                          Gather: {
+                            seed: {
+                              Filter: {
+                                input: { TableScan: { table: "teams" } },
+                                predicate: {
+                                  Cmp: {
+                                    left: { scope: "teams", column: "identity_key" },
+                                    op: "Eq",
+                                    right: { SessionRef: ["userId"] },
+                                  },
+                                },
+                              },
+                            },
+                            step: {
+                              Project: {
+                                input: {
+                                  Join: {
+                                    left: {
+                                      Filter: {
+                                        input: { TableScan: { table: "team_entries" } },
+                                        predicate: {
+                                          And: [
+                                            {
+                                              Cmp: {
+                                                left: {
+                                                  scope: "team_entries",
+                                                  column: "member_id",
+                                                },
+                                                op: "Eq",
+                                                right: { RowId: "Frontier" },
+                                              },
+                                            },
+                                            {
+                                              Cmp: {
+                                                left: {
+                                                  scope: "team_entries",
+                                                  column: "administrator",
+                                                },
+                                                op: "Eq",
+                                                right: {
+                                                  Literal: { type: "Boolean", value: false },
+                                                },
+                                              },
+                                            },
+                                          ],
+                                        },
+                                      },
+                                    },
+                                    right: {
+                                      TableScan: {
+                                        table: "teams",
+                                        alias: "__recursive_hop_0",
+                                      },
+                                    },
+                                    on: [
+                                      {
+                                        left: { scope: "team_entries", column: "target_id" },
+                                        right: { scope: "__recursive_hop_0", column: "id" },
+                                      },
+                                    ],
+                                    join_kind: "Inner",
+                                  },
+                                },
+                                columns: [],
+                              },
+                            },
+                            frontier_key: { RowId: "Current" },
+                            bound: { MaxDepth: 8 },
+                            dedupe_key: [{ RowId: "Current" }],
+                          },
+                        },
+                        right: { TableScan: { table: "resource_access", alias: "access" } },
+                        on: [
+                          {
+                            left: { column: "id" },
+                            right: { scope: "access", column: "team" },
+                          },
+                        ],
+                        join_kind: "Inner",
+                      },
+                    },
+                    predicate: {
+                      And: [
+                        {
+                          Cmp: {
+                            left: { scope: "access", column: "resource" },
+                            op: "Eq",
+                            right: { RowId: "Outer" },
+                          },
+                        },
+                        {
+                          Cmp: {
+                            left: { scope: "access", column: "administrator" },
+                            op: "Eq",
+                            right: { Literal: { type: "Boolean", value: false } },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        teams: {
+          columns: [{ name: "identity_key", column_type: { type: "Uuid" }, nullable: false }],
+        },
+        team_entries: {
+          columns: [
+            {
+              name: "member_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+            {
+              name: "target_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+            { name: "administrator", column_type: { type: "Boolean" }, nullable: false },
+          ],
+        },
+        resource_access: {
+          columns: [
+            {
+              name: "resource",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "resources",
+            },
+            {
+              name: "team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+            { name: "administrator", column_type: { type: "Boolean" }, nullable: false },
+          ],
+        },
+      }),
+      "resources",
+    );
+
+    expect(reachables).toHaveLength(1);
+    expect(reachables[0]).toMatchObject({
+      accessTable: "resource_access",
+      accessRowColumn: "resource",
+      accessTeamColumn: "team",
+      accessTeamTargetTag: 0,
+      edgeTable: "team_entries",
+      edgeMemberColumn: "member_id",
+      edgeParentColumn: "target_id",
+      maxDepth: 8,
+      seed: {
+        table: "teams",
+        userColumn: "identity_key",
+        userClaim: "user_id",
+        teamColumn: "id",
+        filters: [],
+      },
+    });
+    expect(reachables[0]!.accessFilters).toEqual([
+      {
+        tag: 3,
+        column: "administrator",
+        operand: { tag: 3, literalTag: 5, value: false },
+      },
+    ]);
+    expect(reachables[0]!.edgeFilters).toEqual([
+      {
+        tag: 3,
+        column: "administrator",
+        operand: { tag: 3, literalTag: 5, value: false },
+      },
+    ]);
+  });
+
   it("rejects ExistsRel Gather policies without a concrete MaxDepth bound", () => {
     expect(() =>
       encodeSchema({
@@ -3760,6 +3954,59 @@ function readPolicyQueryForTest(reader: PostcardReader): {
   return { table, filters, joins, branches };
 }
 
+function readSchemaSelectPolicyReachables(
+  schemaBytes: Uint8Array,
+  tableName: string,
+): TestPolicyReachable[] {
+  const reader = new PostcardReader(schemaBytes);
+  const tables = reader.readVec((tableReader) => {
+    const table = tableReader.string();
+    tableReader.readVec((columnReader) => {
+      columnReader.string();
+      skipSchemaValueType(columnReader);
+      columnReader.option(() => undefined);
+    });
+    const referenceCount = tableReader.u64();
+    for (let index = 0; index < referenceCount; index += 1) {
+      tableReader.string();
+      tableReader.string();
+    }
+    const select = tableReader.option(readPolicyQueryWithReachablesForTest);
+    tableReader.option(readPolicyQueryWithReachablesForTest);
+    tableReader.option(readPolicyQueryWithReachablesForTest);
+    tableReader.option(readPolicyQueryWithReachablesForTest);
+    tableReader.option(readPolicyQueryWithReachablesForTest);
+    tableReader.u64();
+    const indexCount = tableReader.u64();
+    for (let index = 0; index < indexCount; index += 1) {
+      tableReader.string();
+      tableReader.readVec((indexReader) => indexReader.string());
+    }
+    return { table, select };
+  });
+  reader.option(() => undefined);
+  reader.option(() => undefined);
+  return tables.find((table) => table.table === tableName)?.select?.reachables ?? [];
+}
+
+function readPolicyQueryWithReachablesForTest(reader: PostcardReader): {
+  reachables: TestPolicyReachable[];
+} {
+  reader.string();
+  reader.readVec(readPolicyPredicateForTest);
+  reader.readVec(readPolicyJoinForTest);
+  reader.readVec(readPolicyBranchForTest);
+  const reachables = reader.readVec(readPolicyReachableForTest);
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  reader.option(() => undefined);
+  reader.u64();
+  return { reachables };
+}
+
 function readPolicyBranchForTest(reader: PostcardReader): TestPolicyBranch {
   const filters = reader.readVec(readPolicyPredicateForTest);
   const joins = reader.readVec(readPolicyJoinForTest);
@@ -3787,22 +4034,41 @@ function readPolicyJoinForTest(reader: PostcardReader): TestPolicyJoin {
 }
 
 function skipPolicyReachableForTest(reader: PostcardReader): void {
-  reader.string();
-  reader.string();
-  reader.string();
-  reader.u64();
+  readPolicyReachableForTest(reader);
+}
+
+function readPolicyReachableForTest(reader: PostcardReader): TestPolicyReachable {
+  const accessTable = reader.string();
+  const accessRowColumn = reader.string();
+  const accessTeamColumn = reader.string();
+  const accessTeamTargetTag = reader.u64();
   readPolicyOperandForTest(reader);
-  reader.readVec(readPolicyPredicateForTest);
-  reader.string();
-  reader.string();
-  reader.string();
-  reader.readVec(readPolicyPredicateForTest);
-  reader.u64();
-  reader.option((seedReader) => {
-    seedReader.string();
-    seedReader.string();
-    seedReader.readVec(readPolicyPredicateForTest);
-  });
+  const accessFilters = reader.readVec(readPolicyPredicateForTest);
+  const edgeTable = reader.string();
+  const edgeMemberColumn = reader.string();
+  const edgeParentColumn = reader.string();
+  const edgeFilters = reader.readVec(readPolicyPredicateForTest);
+  const maxDepth = reader.u64();
+  const seed = reader.option((seedReader) => ({
+    table: seedReader.string(),
+    userColumn: seedReader.option((userColumnReader) => userColumnReader.string()),
+    userClaim: seedReader.option((userClaimReader) => userClaimReader.string()),
+    teamColumn: seedReader.string(),
+    filters: seedReader.readVec(readPolicyPredicateForTest),
+  }));
+  return {
+    accessTable,
+    accessRowColumn,
+    accessTeamColumn,
+    accessTeamTargetTag,
+    accessFilters,
+    edgeTable,
+    edgeMemberColumn,
+    edgeParentColumn,
+    edgeFilters,
+    maxDepth,
+    seed,
+  };
 }
 
 function readPolicyPredicateForTest(reader: PostcardReader): TestPolicyPredicate {
@@ -3827,6 +4093,9 @@ function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
   if (tag === 2) return { tag, claim: reader.string() };
   if (tag === 3) {
     const literalTag = reader.u64();
+    if (literalTag === 5) {
+      return { tag, literalTag, value: reader.bool() };
+    }
     expect(literalTag).toBe(6);
     return { tag, literalTag, value: reader.string() };
   }
@@ -3853,6 +4122,28 @@ type TestPolicyJoin = {
   nestedJoins: TestPolicyJoin[];
 };
 
+type TestPolicyReachable = {
+  accessTable: string;
+  accessRowColumn: string;
+  accessTeamColumn: string;
+  accessTeamTargetTag: number;
+  accessFilters: TestPolicyPredicate[];
+  edgeTable: string;
+  edgeMemberColumn: string;
+  edgeParentColumn: string;
+  edgeFilters: TestPolicyPredicate[];
+  maxDepth: number;
+  seed:
+    | {
+        table: string;
+        userColumn: string | undefined;
+        userClaim: string | undefined;
+        teamColumn: string;
+        filters: TestPolicyPredicate[];
+      }
+    | undefined;
+};
+
 type TestPolicyPredicate =
   | { tag: number; children: TestPolicyPredicate[] }
   | { tag: number; child: TestPolicyPredicate }
@@ -3861,7 +4152,7 @@ type TestPolicyPredicate =
 type TestPolicyOperand =
   | { tag: number; column: string }
   | { tag: number; claim: string }
-  | { tag: number; literalTag: number; value: string };
+  | { tag: number; literalTag: number; value: string | boolean };
 
 function unsupportedJoinRelationIr(): unknown {
   return {
