@@ -714,7 +714,9 @@ fn m3_seeded_sync_interleavings_converge_against_oracle() {
     let seeds = if let Ok(seed) = std::env::var("JAZZ_SEED") {
         vec![seed.parse::<u64>().expect("JAZZ_SEED must be a u64")]
     } else {
-        const FIXED_SEEDS: [u64; 8] = [11, 29, 47, 83, 32676, 40595, 2234158, 3715011];
+        const FIXED_SEEDS: [u64; 9] = [
+            11, 29, 47, 83, 32676, 40595, 2234158, 3715011, 4372288,
+        ];
         let extra = std::env::var("JAZZ_SEED_COUNT")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
