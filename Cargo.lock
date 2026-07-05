@@ -2018,6 +2018,7 @@ name = "jazz-sim"
 version = "0.1.0"
 dependencies = [
  "automerge",
+ "backtrace",
  "diamond-types",
  "futures-core",
  "hdrhistogram",

@@ -4,8 +4,9 @@ use groove::ivm::{MultisinkDeltas, RecordDeltas};
 use groove::records::{BorrowedRecord, RecordDescriptor, Value};
 
 use super::codec::{
-    VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value, nullable_value,
-    tx_ids_from_value, version_tx_id_from_aliases,
+    VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
+    history_values_from_parts, nullable_value, owned_record_from_storage_values_with_descriptor,
+    register_values_from_parts, tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, OutputTerminalSchema, ProgramFactKey, ProgramFactSchema,
@@ -22,6 +23,7 @@ use crate::time::{GlobalSeq, TxTime};
 use crate::tx::TxId;
 
 type TableSchemas = BTreeMap<String, TableSchema>;
+type VersionDescriptorCache = BTreeMap<(String, VersionLayer), RecordDescriptor>;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MaintainedSubscriptionView {
@@ -163,11 +165,18 @@ impl MaintainedSubscriptionView {
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
+        let mut descriptor_cache = VersionDescriptorCache::new();
         let decoded = deltas
             .iter()
             .map(|(record, weight)| {
-                decode_typed_terminal_record(record, kind, tables, node_aliases)
-                    .map(|event| (event, weight))
+                decode_typed_terminal_record(
+                    record,
+                    kind,
+                    tables,
+                    node_aliases,
+                    &mut descriptor_cache,
+                )
+                .map(|event| (event, weight))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut transitions = self.apply_decoded_deltas(decoded, node_aliases)?;
@@ -511,6 +520,7 @@ fn decode_typed_terminal_record(
     kind: &MaintainedTerminalKind,
     tables: &TableSchemas,
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    descriptor_cache: &mut VersionDescriptorCache,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
         MaintainedTerminalKind::ResultCurrent(schema) => {
@@ -605,22 +615,22 @@ fn decode_typed_terminal_record(
         }
         MaintainedTerminalKind::VersionContent(schema) => {
             validate_witness_event_kind(record, "version_content")?;
-            decode_typed_version_witness(record, schema, tables)
+            decode_typed_version_witness(record, schema, tables, descriptor_cache)
                 .map(DecodedMaintainedEvent::VersionContent)
         }
         MaintainedTerminalKind::VersionDeletion(schema) => {
             validate_witness_event_kind(record, "version_deletion")?;
-            decode_typed_version_witness(record, schema, tables)
+            decode_typed_version_witness(record, schema, tables, descriptor_cache)
                 .map(DecodedMaintainedEvent::VersionDeletion)
         }
         MaintainedTerminalKind::ReplacementContent(schema) => {
             validate_witness_event_kind(record, "replacement_content")?;
-            decode_typed_version_witness(record, schema, tables)
+            decode_typed_version_witness(record, schema, tables, descriptor_cache)
                 .map(DecodedMaintainedEvent::ReplacementContent)
         }
         MaintainedTerminalKind::ReplacementDeletion(schema) => {
             validate_witness_event_kind(record, "replacement_deletion")?;
-            decode_typed_version_witness(record, schema, tables)
+            decode_typed_version_witness(record, schema, tables, descriptor_cache)
                 .map(DecodedMaintainedEvent::ReplacementDeletion)
         }
         MaintainedTerminalKind::RelationEdge(schema) => {
@@ -730,6 +740,7 @@ fn decode_typed_version_witness(
     record: BorrowedRecord<'_>,
     schema: &VersionWitnessSchema,
     tables: &TableSchemas,
+    descriptor_cache: &mut VersionDescriptorCache,
 ) -> Result<VersionRow, super::Error> {
     let table_name = match record.get_idx(field_idx(record, &schema.identity.table_field)?)? {
         Value::String(value) => value,
@@ -759,27 +770,46 @@ fn decode_typed_version_witness(
         }
     }
     let tx_time = TxTime(record_u64(record, &schema.identity.tx_time_field)?);
-    VersionRow::from_parts_with_schema_version(
-        table,
-        VersionRowParts {
-            table: table.name.clone(),
-            row_uuid: RowUuid(record.get_uuid(field_idx(record, &schema.identity.row_field)?)?),
-            tx_node_alias: NodeAlias(record_u64(record, &schema.identity.tx_node_field)?),
-            schema_version_alias: crate::ids::SchemaVersionAlias(record_u64(
-                record,
-                &schema.identity.schema_field,
-            )?),
-            tx_time,
-            parents: tx_ids_from_value(record.get_idx(field_idx(record, &schema.parents_field)?)?)?,
-            created_by: AuthorId(record.get_uuid(field_idx(record, &schema.created_by_field)?)?),
-            created_at: TxTime(record_u64(record, &schema.created_at_field)?),
-            updated_by: AuthorId(record.get_uuid(field_idx(record, &schema.updated_by_field)?)?),
-            updated_at: TxTime(record_u64(record, &schema.updated_at_field)?),
-            cells,
-            deletion,
-        },
-        None,
-    )
+    let layer = if deletion.is_some() {
+        VersionLayer::Deletion
+    } else {
+        VersionLayer::Content
+    };
+    let parts = VersionRowParts {
+        table: table.name.clone(),
+        row_uuid: RowUuid(record.get_uuid(field_idx(record, &schema.identity.row_field)?)?),
+        tx_node_alias: NodeAlias(record_u64(record, &schema.identity.tx_node_field)?),
+        schema_version_alias: crate::ids::SchemaVersionAlias(record_u64(
+            record,
+            &schema.identity.schema_field,
+        )?),
+        tx_time,
+        parents: tx_ids_from_value(record.get_idx(field_idx(record, &schema.parents_field)?)?)?,
+        created_by: AuthorId(record.get_uuid(field_idx(record, &schema.created_by_field)?)?),
+        created_at: TxTime(record_u64(record, &schema.created_at_field)?),
+        updated_by: AuthorId(record.get_uuid(field_idx(record, &schema.updated_by_field)?)?),
+        updated_at: TxTime(record_u64(record, &schema.updated_at_field)?),
+        cells,
+        deletion,
+    };
+    let descriptor = *descriptor_cache
+        .entry((table.name.clone(), layer))
+        .or_insert_with(|| {
+            if layer == VersionLayer::Deletion {
+                table.register_storage_table().record_schema()
+            } else {
+                table.history_storage_table().record_schema()
+            }
+        });
+    let values = if layer == VersionLayer::Deletion {
+        register_values_from_parts(&parts)?
+    } else {
+        history_values_from_parts(table, &parts)?
+    };
+    Ok(VersionRow {
+        table: groove::Intern::new(parts.table),
+        record: owned_record_from_storage_values_with_descriptor(descriptor, values)?,
+    })
 }
 
 fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {
