@@ -447,6 +447,30 @@ pub(super) fn join_keys(
     record: &[u8],
     fields: &[String],
 ) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
+    if fields.len() == 1 {
+        let values = descriptor.get(record, &fields[0])?;
+        let parts = join_key_parts(values);
+        if parts.is_empty() {
+            return Ok(Vec::new());
+        }
+        if parts.len() == 1 {
+            let mut key = Vec::new();
+            encode_key_part(&mut key, &parts[0])?;
+            return Ok(vec![key]);
+        }
+        let mut keys = Vec::with_capacity(parts.len());
+        let mut seen = HashSet::new();
+        for value in &parts {
+            let mut key = Vec::new();
+            encode_key_part(&mut key, value)?;
+            if !seen.contains(&key) {
+                seen.insert(key.clone());
+                keys.push(key);
+            }
+        }
+        return Ok(keys);
+    }
+
     let mut keys = vec![Vec::new()];
     let mut seen = HashSet::new();
 
@@ -463,7 +487,8 @@ pub(super) fn join_keys(
             for value in &parts {
                 let mut next = key.clone();
                 encode_key_part(&mut next, value)?;
-                if seen.insert(next.clone()) {
+                if !seen.contains(&next) {
+                    seen.insert(next.clone());
                     next_keys.push(next);
                 }
             }

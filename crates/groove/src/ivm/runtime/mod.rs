@@ -6039,6 +6039,9 @@ pub(super) fn project_binding_source_deltas(
 }
 
 fn consolidate_deltas(deltas: Vec<RecordDelta>) -> Vec<RecordDelta> {
+    if deltas.len() <= 1 {
+        return deltas;
+    }
     let mut consolidated = HashMap::<Vec<u8>, i64>::default();
     for delta in deltas {
         *consolidated.entry(delta.record).or_default() += delta.weight;
