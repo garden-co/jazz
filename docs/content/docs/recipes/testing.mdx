@@ -1,7 +1,6 @@
 ---
 title: Testing
 description: Patterns for testing Jazz applications.
-fullCodeBlocks: true
 ---
 
 As you develop your Jazz application, you might find yourself needing to test functionality relating to the database, including sync and offline behaviour.
@@ -26,7 +25,7 @@ Jazz provides utilities to test permissions in isolation without testing your wh
 The `createPolicyTestApp` helper from `jazz-tools/testing` starts an isolated local Jazz server, publishes your app schema
 and permissions, and gives you session-scoped database clients for assertions.
 
-```typescript title="permissions.test.ts"
+```typescript title="permissions.test.ts" custom="noscroll"
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "../schema.js";
@@ -125,7 +124,7 @@ Once the server is created, you can connect client databases to it using `create
 
 If your app uses external JWT auth, `startTestJwtIssuer` starts a local JWKS endpoint and mints signed JWTs for test users.
 
-```typescript
+```typescript custom="noscroll"
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDb, type Db } from "jazz-tools";
 import {
@@ -244,7 +243,7 @@ After `reconnect()`, pending writes are sent to the server and writes missed fro
 `deploy` can also be used to publish [migrations](/docs/schemas/migrations). When the server already has a schema, `deploy` can push
 a migration between the current server schema and the new schema. This makes it possible to test clients with different schemas.
 
-```typescript
+```typescript custom="noscroll"
 import { createDb, schema as s, type Db } from "jazz-tools";
 import { deploy, startLocalJazzServer } from "jazz-tools/testing";
 import { describe, expect, it, vi } from "vitest";

@@ -1,4 +1,5 @@
 import defaultMdxComponents from "fumadocs-ui/mdx";
+import { CodeBlock, Pre, type CodeBlockProps } from "fumadocs-ui/components/codeblock";
 import * as TabsComponents from "./components/mdx/tabs";
 import type { MDXComponents } from "mdx/types";
 import type { ReactNode } from "react";
@@ -10,6 +11,31 @@ import { TierSyncDiagram } from "./components/mdx/tier-sync-diagram";
 import { Graph, Sequence } from "./components/mdx/diagram";
 import { WriteTierDiagram } from "./components/mdx/write-tier-diagram";
 import { JazzLogo } from "./components/brand/jazz-logo";
+
+type CodeBlockPreProps = CodeBlockProps & {
+  custom?: string | null;
+};
+
+function joinClassNames(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+function CodeBlockPre({ children, viewportProps, custom, ...props }: CodeBlockPreProps) {
+  // Inspired by https://github.com/fuma-nama/fumadocs/discussions/1018
+  const disableVerticalScroll = custom === "noscroll";
+
+  return (
+    <CodeBlock
+      {...props}
+      viewportProps={{
+        ...viewportProps,
+        className: joinClassNames(disableVerticalScroll && "max-h-none", viewportProps?.className),
+      }}
+    >
+      <Pre>{children}</Pre>
+    </CodeBlock>
+  );
+}
 
 function SlideCodeCell({ children, title }: { children: ReactNode; title: string }) {
   return (
@@ -25,6 +51,7 @@ function SlideCodeCell({ children, title }: { children: ReactNode; title: string
 export function getMDXComponents(components?: MDXComponents): MDXComponents {
   return {
     ...defaultMdxComponents,
+    pre: CodeBlockPre,
     ...TabsComponents,
     GenerateAppId,
     CloudConfig,
