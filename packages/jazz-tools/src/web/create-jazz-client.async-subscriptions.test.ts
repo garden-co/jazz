@@ -38,6 +38,7 @@ vi.mock("../dev-tools/index.js", () => ({
 }));
 
 import { createJazzClient, type JazzClient } from "./create-jazz-client.js";
+import { createBrowserWorkerSubscriptionChannel } from "./browser-subscription-channel.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 
 type TestRow = { id: string; value: string };
@@ -232,10 +233,25 @@ describe("web/createJazzClient async subscription channel", () => {
     await client.shutdown();
   });
 
-  it("requires a channel for async-only clients", async () => {
-    await expect(createJazzClient({ appId: "missing-channel" })).rejects.toThrow(
-      "asyncSubscriptionsOnly clients require a subscriptionChannel",
+  it("creates a browser worker channel for async-only clients without an explicit channel", async () => {
+    const db = createMockDb([{ id: "worker-row", value: "from-worker-channel" }]);
+    mocks.createDb.mockResolvedValue(db);
+
+    const client = await createJazzClient({ appId: "default-worker-channel" });
+
+    expect("db" in client).toBe(false);
+    expect(mocks.createDb).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appId: "default-worker-channel",
+        asyncSubscriptionsOnly: false,
+      }),
     );
+    await expect(readSubscriptionRows(client)).resolves.toEqual([
+      { id: "worker-row", value: "from-worker-channel" },
+    ]);
+
+    await client.shutdown();
+    expect(db.shutdown).toHaveBeenCalledTimes(1);
   });
 
   it("routes false-context subscriptions to the local node by default", async () => {
@@ -269,5 +285,26 @@ describe("web/createJazzClient async subscription channel", () => {
     ]);
     expect(db.subscribeAll).not.toHaveBeenCalled();
     expect(channel.calls).toHaveLength(1);
+  });
+
+  it("exposes the browser worker subscription channel directly", async () => {
+    const db = createMockDb([{ id: "direct-worker-row", value: "from-direct-channel" }]);
+    mocks.createDb.mockResolvedValue(db);
+
+    const channel = createBrowserWorkerSubscriptionChannel({ appId: "direct-channel" });
+    const updates: TestRow[][] = [];
+    const unsubscribe = channel.subscribeAll(query, (next) => {
+      updates.push(next.all);
+    });
+
+    await vi.waitFor(() => {
+      expect(updates).toHaveLength(1);
+    });
+    expect(updates[0]).toEqual([{ id: "direct-worker-row", value: "from-direct-channel" }]);
+    expect(db.subscribeAll).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
+    await channel.shutdown();
+    expect(db.shutdown).toHaveBeenCalledTimes(1);
   });
 });
