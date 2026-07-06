@@ -32,6 +32,9 @@ pub const CONTENT_META_STORE: &str = "jazz_content_meta";
 pub const CONTENT_CHECKPOINTS_STORE: &str = "jazz_content_checkpoints";
 /// Direct groove record store used for persisted fast known-state facts.
 pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
+/// Direct groove record store used to distinguish clean shutdown from crash
+/// recovery windows for bounded startup repair.
+pub const CLEAN_CLOSE_MARKERS_STORE: &str = "jazz_clean_close_markers";
 /// Node-local derived content-head table used to avoid row-history scans on
 /// ordinary accepted writes. It is storage metadata, never wire or app data.
 pub const MERGE_HEADS_TABLE: &str = "jazz_merge_heads";
@@ -340,6 +343,11 @@ impl JazzSchema {
                     ("read_view_id", ValueType::Uuid),
                 ]),
                 RecordDescriptor::new([("settled_through", ValueType::U64)]),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                CLEAN_CLOSE_MARKERS_STORE,
+                RecordDescriptor::new([("marker", ValueType::String)]),
+                RecordDescriptor::new([("version", ValueType::U64), ("node", ValueType::Uuid)]),
             ))
     }
 }

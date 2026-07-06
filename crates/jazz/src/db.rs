@@ -366,6 +366,12 @@ where
         })
     }
 
+    /// Flush node-local maintenance state, write a clean-close marker, and
+    /// close the underlying storage.
+    pub fn close(&self) -> Result<(), Error> {
+        Ok(self.node.node.borrow_mut().close()?)
+    }
+
     /// Seed a settled mergeable row for server bootstrap/import flows.
     ///
     /// This bypasses the client pending-upload path and immediately finalizes

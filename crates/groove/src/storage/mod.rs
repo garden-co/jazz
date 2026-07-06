@@ -250,6 +250,11 @@ pub trait OrderedKvStorage {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error>;
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error>;
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error>;
+    /// Flush and close any backend resources that require an explicit clean
+    /// shutdown boundary. Backends without close-time work may keep the default.
+    fn close(&self) -> Result<(), Error> {
+        Ok(())
+    }
     /// Return approximate live bytes for one storage class/column family when
     /// the backend can expose them cheaply.
     ///
@@ -620,6 +625,10 @@ where
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
         let (physical_cf, physical_key) = self.physical_key(cf, key);
         self.inner.delete(&physical_cf, &physical_key)
+    }
+
+    fn close(&self) -> Result<(), Error> {
+        self.inner.close()
     }
 
     fn scan_range(
