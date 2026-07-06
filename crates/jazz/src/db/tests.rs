@@ -1186,6 +1186,16 @@ fn db_facade_opens_writes_and_reads_todos_end_to_end() {
 }
 
 #[test]
+fn db_close_is_idempotent() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    db.insert("todos", doctest_support::todo_cells("close me", false))
+        .unwrap();
+
+    db.close().unwrap();
+    db.close().unwrap();
+}
+
+#[test]
 fn permission_introspection_magic_columns_fail_closed_on_prepare_query() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
 

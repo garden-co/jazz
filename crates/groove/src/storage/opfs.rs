@@ -151,6 +151,10 @@ where
         Ok(self.tree.borrow_mut().delete(&key)?)
     }
 
+    fn close(&self) -> Result<(), Error> {
+        Ok(self.tree.borrow_mut().close()?)
+    }
+
     fn scan_range(
         &self,
         cf: &ColumnFamilyName,

@@ -113,6 +113,10 @@ where
         self.storage.into_inner()
     }
 
+    pub fn close(&self) -> Result<(), Error> {
+        Ok(self.storage.close()?)
+    }
+
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
     }

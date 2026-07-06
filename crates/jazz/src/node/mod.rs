@@ -38,8 +38,8 @@ use crate::protocol::{
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
-    ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind, MergeStrategy, TableSchema,
-    registered_column_transform,
+    CLEAN_CLOSE_MARKERS_STORE, ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind,
+    MergeStrategy, TableSchema, registered_column_transform,
 };
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
@@ -51,6 +51,8 @@ use crate::tx::{
 
 const TEXT_EXTENT_OPS_MAGIC: &[u8] = b"JTXTREF1";
 const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH1";
+const CLEAN_CLOSE_MARKER_NAME: &str = "node-clean-close";
+const CLEAN_CLOSE_MARKER_VERSION: u64 = 1;
 
 mod branches;
 mod codec;
@@ -2251,6 +2253,47 @@ where
         Ok(())
     }
 
+    pub(crate) fn close(&mut self) -> Result<(), Error> {
+        self.database.flush()?;
+        self.persist_clean_close_marker()?;
+        self.database.close()?;
+        Ok(())
+    }
+
+    fn persist_clean_close_marker(&self) -> Result<(), Error> {
+        self.database
+            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?
+            .set(
+                &clean_close_marker_key(),
+                &[
+                    Value::U64(CLEAN_CLOSE_MARKER_VERSION),
+                    Value::Uuid(self.node_uuid.0),
+                ],
+            )?;
+        Ok(())
+    }
+
+    fn take_valid_clean_close_marker(&mut self) -> Result<bool, Error> {
+        let store = self
+            .database
+            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?;
+        let key = clean_close_marker_key();
+        let Some(record) = store.get(&key)? else {
+            return Ok(false);
+        };
+        store.delete(&key)?;
+
+        let version = match record.get_idx(0)? {
+            Value::U64(value) => value,
+            _ => return Ok(false),
+        };
+        let node = match record.get_idx(1)? {
+            Value::Uuid(value) => value,
+            _ => return Ok(false),
+        };
+        Ok(version == CLEAN_CLOSE_MARKER_VERSION && node == self.node_uuid.0)
+    }
+
     fn recover_known_state_facts(&mut self) -> Result<(), Error> {
         self.query.settled_through_by_binding_view.clear();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
@@ -4209,6 +4252,10 @@ fn known_state_fact_key(binding_view_key: BindingViewKey) -> [Value; 3] {
         Value::Uuid(binding_view_key.binding_id.0),
         Value::Uuid(binding_view_key.read_view.id),
     ]
+}
+
+fn clean_close_marker_key() -> [Value; 1] {
+    [Value::String(CLEAN_CLOSE_MARKER_NAME.to_owned())]
 }
 
 /// Error type returned by the storage-backed node API.

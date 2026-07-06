@@ -35,8 +35,13 @@ struct PageWrite<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncPolicy {
+    /// Sync the file at each write/checkpoint boundary.
     PerWrite,
+    /// Skip per-write syncs and sync only when [`OpfsBTree::close`] is called.
+    /// Dropping an open tree does not run fallible close logic.
     OnClose,
+    /// Never explicitly sync. The operating system may still flush dirty pages
+    /// on its own schedule.
     Never,
 }
 
@@ -224,7 +229,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(tree)
     }
 
-    pub fn close(mut self) -> Result<(), BTreeError> {
+    pub fn close(&mut self) -> Result<(), BTreeError> {
         self.checkpoint()?;
         self.flush_for_close()
     }

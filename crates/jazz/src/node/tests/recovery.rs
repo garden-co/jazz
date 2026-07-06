@@ -80,7 +80,12 @@ fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
         assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
     }
 
+    reset_query_versions_for_tx_call_count();
     let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert!(
+        query_versions_for_tx_call_count() > 0,
+        "crash recovery must sweep fated ahead-current leftovers"
+    );
     assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
     assert_eq!(
         reopened
@@ -90,6 +95,49 @@ fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(12), title_cells("crash window"))])
+    );
+}
+
+#[test]
+fn clean_close_reopen_skips_fated_ahead_current_sweep() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(13), 10).cells(title_cells("clean close")),
+            )
+            .unwrap();
+        assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        assert_eq!(ahead_current_row_count(&mut node, "todos"), 0);
+        node.close().unwrap();
+        node.close().unwrap();
+    }
+
+    reset_query_versions_for_tx_call_count();
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_eq!(
+        query_versions_for_tx_call_count(),
+        0,
+        "clean close marker should skip crash-only ahead-current sweep"
+    );
+    assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(13), title_cells("clean close"))])
     );
 }
 
