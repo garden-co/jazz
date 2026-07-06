@@ -22,8 +22,6 @@ postcard = { version = "1.1.3", features = ["alloc"] }
 uuid = { version = "1.18.1", features = ["serde", "v5"] }
 web-time = "1.1.0"
 rustc-hash.workspace = true
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
 opfs-btree = { path = "../opfs-btree" }
 
 [dev-dependencies]

@@ -15,7 +15,6 @@
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod key_codec;
 mod memory;
-#[cfg(target_arch = "wasm32")]
 mod opfs;
 #[cfg(feature = "rocksdb")]
 #[path = "rocksdb.rs"]
@@ -34,6 +33,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use memory::MemoryStorage;
+#[cfg(not(target_arch = "wasm32"))]
+pub use opfs::NativeBtreeStorage;
 #[cfg(target_arch = "wasm32")]
 pub use opfs::OpfsStorage;
 #[cfg(feature = "rocksdb")]
@@ -1875,7 +1876,6 @@ pub enum Error {
     #[cfg(feature = "rocksdb")]
     #[error(transparent)]
     RocksDb(#[from] ::rocksdb::Error),
-    #[cfg(target_arch = "wasm32")]
     #[error(transparent)]
     Opfs(#[from] opfs_btree::BTreeError),
 }

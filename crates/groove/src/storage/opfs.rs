@@ -1,10 +1,14 @@
-//! OPFS-backed ordered key/value storage for browser wasm.
+//! BTree-backed ordered key/value storage.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use opfs_btree::{BTreeOptions, OpfsBTree, OpfsFile};
+#[cfg(target_arch = "wasm32")]
+use opfs_btree::OpfsFile;
+#[cfg(not(target_arch = "wasm32"))]
+use opfs_btree::StdFile;
+use opfs_btree::{BTreeOptions, OpfsBTree, SyncFile};
 
 use super::{
     ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation,
@@ -12,32 +16,37 @@ use super::{
 };
 
 #[derive(Clone)]
-pub struct OpfsStorage {
-    tree: Rc<RefCell<OpfsBTree<OpfsFile>>>,
+pub struct BtreeStorage<F: SyncFile> {
+    tree: Rc<RefCell<OpfsBTree<F>>>,
     column_families: Rc<RefCell<BTreeSet<String>>>,
 }
 
-impl OpfsStorage {
-    pub async fn open(namespace: &str, column_families: &[&str]) -> Result<Self, Error> {
-        let file = OpfsFile::open(namespace).await?;
-        let tree = OpfsBTree::open(
-            file,
-            BTreeOptions {
-                pin_internal_pages: true,
-                read_coalesce_pages: 4,
-                ..Default::default()
-            },
-        )?;
+#[cfg(target_arch = "wasm32")]
+pub type OpfsStorage = BtreeStorage<OpfsFile>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type NativeBtreeStorage = BtreeStorage<StdFile>;
+
+fn browser_fidelity_options() -> BTreeOptions {
+    BTreeOptions {
+        pin_internal_pages: true,
+        read_coalesce_pages: 4,
+        ..Default::default()
+    }
+}
+
+impl<F> BtreeStorage<F>
+where
+    F: SyncFile,
+{
+    pub fn from_file(file: F, column_families: &[&str]) -> Result<Self, Error> {
+        let tree = OpfsBTree::open(file, browser_fidelity_options())?;
         Ok(Self {
             tree: Rc::new(RefCell::new(tree)),
             column_families: Rc::new(RefCell::new(
                 column_families.iter().map(|cf| (*cf).to_owned()).collect(),
             )),
         })
-    }
-
-    pub async fn destroy(namespace: &str) -> Result<(), Error> {
-        Ok(OpfsFile::destroy(namespace).await?)
     }
 
     fn ensure_cf(&self, cf: &ColumnFamilyName) -> Result<(), Error> {
@@ -69,7 +78,38 @@ impl OpfsStorage {
     }
 }
 
-impl OrderedKvStorage for OpfsStorage {
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeBtreeStorage {
+    /// Open the native BTree backend at `path`.
+    ///
+    /// This uses the same opfs-btree layout and options as the browser OPFS
+    /// backend, but stores the tree in a native [`StdFile`]. It is intended for
+    /// native harnesses that need browser-storage fidelity rather than RocksDB
+    /// tuning.
+    pub fn open(
+        path: impl AsRef<std::path::Path>,
+        column_families: &[&str],
+    ) -> Result<Self, Error> {
+        Self::from_file(StdFile::open(path)?, column_families)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OpfsStorage {
+    pub async fn open(namespace: &str, column_families: &[&str]) -> Result<Self, Error> {
+        let file = OpfsFile::open(namespace).await?;
+        Self::from_file(file, column_families)
+    }
+
+    pub async fn destroy(namespace: &str) -> Result<(), Error> {
+        Ok(OpfsFile::destroy(namespace).await?)
+    }
+}
+
+impl<F> OrderedKvStorage for BtreeStorage<F>
+where
+    F: SyncFile,
+{
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         let key = self.encoded_key(cf, key)?;
         Ok(self.tree.borrow_mut().get(&key)?)
@@ -96,7 +136,7 @@ impl OrderedKvStorage for OpfsStorage {
         let end = self.encoded_key(cf, end)?;
         for (key, value) in self.tree.borrow_mut().range(&start, &end, usize::MAX)? {
             let (_, user_key) = key_codec::decode_column_family_key(&key)?;
-            visit(&user_key, &value)?;
+            visit(user_key, &value)?;
         }
         Ok(())
     }
@@ -111,7 +151,7 @@ impl OrderedKvStorage for OpfsStorage {
         let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
         for (key, value) in self.tree.borrow_mut().range(&start, &end, usize::MAX)? {
             let (_, user_key) = key_codec::decode_column_family_key(&key)?;
-            visit(&user_key, &value)?;
+            visit(user_key, &value)?;
         }
         Ok(())
     }
@@ -147,18 +187,18 @@ impl OrderedKvStorage for OpfsStorage {
     }
 }
 
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use opfs_btree::MemoryFile;
+
+    fn memory_storage(column_families: &[&str]) -> BtreeStorage<MemoryFile> {
+        BtreeStorage::from_file(MemoryFile::new(), column_families).unwrap()
+    }
 
     #[test]
     fn write_many_prevalidates_column_families_before_writing() {
-        let storage = OpfsStorage {
-            tree: Rc::new(RefCell::new(
-                OpfsBTree::open(opfs_btree::MemoryFile::new(), BTreeOptions::default()).unwrap(),
-            )),
-            column_families: Rc::new(RefCell::new(["records".to_owned()].into())),
-        };
+        let storage = memory_storage(&["records"]);
 
         let error = storage
             .write_many(&[
@@ -173,18 +213,50 @@ mod tests {
 
     #[test]
     fn memory_file_conforms_to_order_and_atomic_batch_contract() {
-        let storage = OpfsStorage {
-            tree: Rc::new(RefCell::new(
-                OpfsBTree::open(opfs_btree::MemoryFile::new(), BTreeOptions::default()).unwrap(),
-            )),
-            column_families: Rc::new(RefCell::new(["records".to_owned()].into())),
-        };
+        let storage = memory_storage(&["records"]);
 
         super::super::conformance::persistence_order_and_batch_atomicity(storage);
     }
+
+    #[test]
+    fn memory_file_conforms_to_delta_append_contract() {
+        let storage = memory_storage(&["records"]);
+        super::super::conformance::delta_append_current_winner_observes_merged_state(storage);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_storage(column_families: &[&str]) -> NativeBtreeStorage {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.keep().join("native.btree");
+        NativeBtreeStorage::open(path, column_families).unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_btree_conforms_to_order_and_atomic_batch_contract() {
+        let storage = native_storage(&["records"]);
+        super::super::conformance::persistence_order_and_batch_atomicity(storage);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_btree_conforms_to_delta_append_contract() {
+        let storage = native_storage(&["records"]);
+        super::super::conformance::delta_append_current_winner_observes_merged_state(storage);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_btree_reopen_adds_column_families_without_losing_data() {
+        let storage = native_storage(&["records"]);
+        super::super::conformance::reopen_preserves_data_and_adds_families(storage);
+    }
 }
 
-impl super::ReopenableStorage for OpfsStorage {
+impl<F> super::ReopenableStorage for BtreeStorage<F>
+where
+    F: SyncFile,
+{
     fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
         self.column_families
             .borrow_mut()
