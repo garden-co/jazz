@@ -19,6 +19,8 @@ export declare class NapiDb {
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
@@ -27,6 +29,8 @@ export declare class NapiDb {
   detachQuery(attachment: QueryAttachment): void
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
+  subscribeRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
+  subscribeRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
   insertWithIdEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): Write

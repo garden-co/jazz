@@ -58,7 +58,9 @@ use jazz::groove::storage::{
     ReopenableStorage as CoreReopenableStorage, RocksDbStorage as CoreRocksDbStorage,
 };
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-use jazz::query::Query as CoreQuery;
+use jazz::query::{
+    Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
+};
 use jazz::schema::JazzSchema;
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
 use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
@@ -742,6 +744,64 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
+    #[napi(js_name = "allRelationQuery")]
+    pub fn all_relation_query(
+        &self,
+        query_json: String,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Uint8Array> {
+        let query = core_relation_query_from_json(&query_json)?;
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let snapshot = match db {
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.all_relation_query(&query, opts)),
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.all_relation_query(&query, opts))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        encode_core_rows(&snapshot.rows)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "allRelationQueryForIdentity")]
+    pub fn all_relation_query_for_identity(
+        &self,
+        query_json: String,
+        author: Uint8Array,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Uint8Array> {
+        let query = core_relation_query_from_json(&query_json)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let snapshot = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.all_relation_query_for_identity(&query, opts, author))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.all_relation_query_for_identity(&query, opts, author))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        encode_core_rows(&snapshot.rows)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
     #[napi(js_name = "attachQuery")]
     pub fn attach_query(
         &self,
@@ -861,6 +921,64 @@ impl NapiDb {
             ),
             NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
                 core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        };
+        Ok(Subscription { inner: Some(inner) })
+    }
+
+    #[napi(js_name = "subscribeRelationQuery")]
+    pub fn subscribe_relation_query(
+        &self,
+        query_json: String,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Subscription> {
+        let query = core_relation_query_from_json(&query_json)?;
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
+                core_block_on(db.subscribe_relation_query(&query, opts))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
+                core_block_on(db.subscribe_relation_query(&query, opts))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        };
+        Ok(Subscription { inner: Some(inner) })
+    }
+
+    #[napi(js_name = "subscribeRelationQueryForIdentity")]
+    pub fn subscribe_relation_query_for_identity(
+        &self,
+        query_json: String,
+        author: Uint8Array,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Subscription> {
+        let query = core_relation_query_from_json(&query_json)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
+                core_block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
+                core_block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
@@ -1807,6 +1925,18 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
         }
         SubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
     }
+}
+
+fn core_relation_query_from_json(query_json: &str) -> napi::Result<CoreRelationQuery> {
+    let value: serde_json::Value = serde_json::from_str(query_json)
+        .map_err(|err| napi::Error::from_reason(format!("decode query json: {err}")))?;
+    let relation_ir = value
+        .get("relation_ir")
+        .ok_or_else(|| napi::Error::from_reason("relation query json is missing relation_ir"))?
+        .clone();
+    let rel: CoreRelationExpr = serde_json::from_value(relation_ir)
+        .map_err(|err| napi::Error::from_reason(format!("decode relation_ir: {err}")))?;
+    Ok(CoreRelationQuery { rel })
 }
 
 // ============================================================================
