@@ -15,10 +15,6 @@ import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -67,7 +63,7 @@ describe("Canvas E2E", () => {
     const appId =
       config.appId ?? `test-canvas-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    r.render(<App config={{ appId, ...config }} />);
+    r.render(<App config={{ appId, dbName: crypto.randomUUID(), ...config }} />);
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
@@ -107,7 +103,7 @@ describe("Canvas E2E", () => {
   // -------------------------------------------------------------------------
 
   it("can create a canvas and draw on it", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("canvas-draw") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,
@@ -206,7 +202,6 @@ describe("Canvas E2E", () => {
     // --- User A: create a canvas -------------------------------------------
     const aliceContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("collab-canvas-a"),
       serverUrl,
     });
 
@@ -262,7 +257,6 @@ describe("Canvas E2E", () => {
 
     const bobContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("collab-canvas-b"),
       serverUrl,
     });
 

@@ -15,10 +15,6 @@ import { TEST_PORT, APP_ID } from "./test-constants.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -63,7 +59,7 @@ describe("Profile E2E", () => {
     const appId = config.appId ?? APP_ID;
     const serverUrl = config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`;
 
-    r.render(<App config={{ appId, serverUrl, ...config }} />);
+    r.render(<App config={{ appId, dbName: crypto.randomUUID(), serverUrl, ...config }} />);
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
@@ -94,7 +90,7 @@ describe("Profile E2E", () => {
   // -------------------------------------------------------------------------
 
   it("can open profile and update name", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("profile") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,
@@ -163,7 +159,7 @@ describe("Profile E2E", () => {
   // -------------------------------------------------------------------------
 
   it("can upload and remove avatar", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("avatar") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,

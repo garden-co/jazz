@@ -46,10 +46,6 @@ const DIRECTION_INTERVAL_MS = 5_000;
 
 const mounts: MountEntry[] = [];
 
-function uniqueDbName(label: string): string {
-  return `soak-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function mountApp(opts: {
   appId?: string;
   dbName?: string;
@@ -107,7 +103,6 @@ describe("Moon Lander — Soak Test", () => {
         // on the same page-wide keydown event.
         const elA = await mountApp({
           appId: APP_ID_MULTI,
-          dbName: uniqueDbName("soak-a"),
           serverUrl,
           adminSecret: ADMIN_SECRET,
           physicsSpeed: 5,
@@ -116,7 +111,6 @@ describe("Moon Lander — Soak Test", () => {
 
         const elB = await mountApp({
           appId: APP_ID_MULTI,
-          dbName: uniqueDbName("soak-b"),
           serverUrl,
           adminSecret: ADMIN_SECRET,
           physicsSpeed: 5,
