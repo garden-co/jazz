@@ -183,7 +183,6 @@ impl Storage for MemoryStorage {
                 encoded_visible_rows.len()
             )));
         }
-
         let table = table.to_string();
 
         for (row, encoded) in history_rows.iter().zip(encoded_history_rows) {
@@ -251,6 +250,7 @@ impl Storage for MemoryStorage {
         if !index_mutations.is_empty() {
             self.apply_index_mutations(index_mutations)?;
         }
+        self.index_local_batch_history_rows(&table, history_rows, encoded_history_rows)?;
         Ok(())
     }
 
@@ -262,6 +262,7 @@ impl Storage for MemoryStorage {
         index_mutations: &[IndexMutation<'_>],
     ) -> Result<(), StorageError> {
         let table = table.to_string();
+        let mut decoded_history_rows = Vec::with_capacity(history_rows.len());
 
         for row in history_rows {
             self.ensure_cached_row_raw_table_header(
@@ -292,6 +293,7 @@ impl Storage for MemoryStorage {
                 row.batch_id,
                 &row.bytes,
             )?;
+            decoded_history_rows.push(decoded.clone());
             self.row_histories
                 .entry(table.clone())
                 .or_default()
@@ -306,7 +308,6 @@ impl Storage for MemoryStorage {
                 .or_default()
                 .insert((row.branch.clone().into(), row.batch_id), row.bytes.clone());
         }
-
         for row in visible_rows {
             self.ensure_cached_row_raw_table_header(
                 row.row_raw_table.as_str(),
@@ -346,6 +347,7 @@ impl Storage for MemoryStorage {
         if !index_mutations.is_empty() {
             self.apply_index_mutations(index_mutations)?;
         }
+        self.index_local_batch_history_rows(&table, &decoded_history_rows, history_rows)?;
         Ok(())
     }
 
@@ -617,12 +619,13 @@ impl Storage for MemoryStorage {
             }
         }
         let raw_regions = self.row_history_bytes.entry(table.to_string()).or_default();
-        for row in encoded_rows {
+        for row in &encoded_rows {
             raw_regions
                 .entry(row.row_id)
                 .or_default()
-                .insert((row.branch.clone().into(), row.batch_id), row.bytes);
+                .insert((row.branch.clone().into(), row.batch_id), row.bytes.clone());
         }
+        self.index_local_batch_history_rows(table, rows, &encoded_rows)?;
         Ok(())
     }
 
