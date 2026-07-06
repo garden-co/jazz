@@ -33,10 +33,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use memory::MemoryStorage;
-#[cfg(not(target_arch = "wasm32"))]
-pub use opfs::NativeBtreeStorage;
 #[cfg(target_arch = "wasm32")]
 pub use opfs::OpfsStorage;
+#[cfg(not(target_arch = "wasm32"))]
+pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
 #[cfg(feature = "rocksdb")]
 pub use rocksdb_storage::{Durability, RocksDbStorage};
 

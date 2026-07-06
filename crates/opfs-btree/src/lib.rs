@@ -8,7 +8,7 @@ mod wal;
 #[cfg(all(target_arch = "wasm32", feature = "wasm-bench"))]
 pub mod wasm_bench;
 
-pub use db::{BTreeOptions, CheckpointState, OpfsBTree};
+pub use db::{BTreeOptions, CheckpointState, OpfsBTree, SyncPolicy};
 pub use error::BTreeError;
 #[cfg(target_arch = "wasm32")]
 pub use file::OpfsFile;

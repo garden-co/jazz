@@ -6,7 +6,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::file::{OpfsIoCounters, opfs_io_counters_reset, opfs_io_counters_snapshot};
-use crate::{BTreeOptions, OpfsBTree, OpfsFile};
+use crate::{BTreeOptions, OpfsBTree, OpfsFile, SyncPolicy};
 
 #[derive(Debug, Clone, Serialize)]
 struct PhaseTiming {
@@ -119,6 +119,7 @@ fn benchmark_options() -> BTreeOptions {
         overflow_threshold: BENCH_OVERFLOW_THRESHOLD.with(|bytes| bytes.get()),
         pin_internal_pages: BENCH_PIN_INTERNAL_PAGES.with(|flag| flag.get()),
         read_coalesce_pages: BENCH_READ_COALESCE_PAGES.with(|pages| pages.get()),
+        sync_policy: SyncPolicy::PerWrite,
     }
 }
 
