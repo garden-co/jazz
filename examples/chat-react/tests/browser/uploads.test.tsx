@@ -16,10 +16,6 @@ import { TEST_PORT, APP_ID } from "./test-constants.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -69,7 +65,7 @@ describe("Upload E2E", () => {
 
     r.render(
       <>
-        <App config={{ appId, serverUrl, ...config }} />
+        <App config={{ appId, dbName: crypto.randomUUID(), serverUrl, ...config }} />
         <Toaster />
       </>,
     );
@@ -103,7 +99,7 @@ describe("Upload E2E", () => {
   // -------------------------------------------------------------------------
 
   it("uploads an image and displays it in chat", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("img-upload") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,
@@ -184,7 +180,7 @@ describe("Upload E2E", () => {
   // -------------------------------------------------------------------------
 
   it("uploads a file and displays it in chat", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("file-upload") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,

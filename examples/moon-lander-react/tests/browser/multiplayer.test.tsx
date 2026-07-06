@@ -43,10 +43,6 @@ const SYNC_TIMEOUT = 20_000;
 
 const mounts: MountEntry[] = [];
 
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function mountApp(opts: {
   appId?: string;
   dbName?: string;
@@ -125,7 +121,6 @@ describe("Moon Lander — Cross-Client Sync", () => {
 
       const el = await mountApp({
         appId: APP_ID_MULTI,
-        dbName: uniqueDbName("inv-a"),
         serverUrl,
         playerId,
         physicsSpeed: 10,
@@ -189,7 +184,6 @@ describe("Moon Lander — Cross-Client Sync", () => {
     try {
       const elA = await mountApp({
         appId: APP_ID_MULTI,
-        dbName: uniqueDbName("cross-coll-a"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
@@ -203,7 +197,6 @@ describe("Moon Lander — Cross-Client Sync", () => {
       // Mount B after A exits — B starts in "landed" mode and stays there.
       const elB = await mountApp({
         appId: APP_ID_MULTI,
-        dbName: uniqueDbName("cross-coll-b"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
@@ -284,7 +277,6 @@ describe("Moon Lander — Cross-Client Sync", () => {
 
       const el = await mountApp({
         appId: APP_ID,
-        dbName: uniqueDbName("burst-release"),
         serverUrl,
         playerId,
         physicsSpeed: 10,
@@ -373,7 +365,6 @@ describe("Moon Lander — Cross-Client Sync", () => {
     try {
       const elA = await mountApp({
         appId: APP_ID_MULTI,
-        dbName: uniqueDbName("full-a"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
@@ -381,7 +372,6 @@ describe("Moon Lander — Cross-Client Sync", () => {
 
       const elB = await mountApp({
         appId: APP_ID_MULTI,
-        dbName: uniqueDbName("full-b"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
