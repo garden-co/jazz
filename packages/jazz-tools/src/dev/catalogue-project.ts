@@ -1040,6 +1040,8 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
             appId: options.appId,
             serverUrl: options.serverUrl,
             adminSecret: options.adminSecret,
+            fromHash,
+            toHash,
             migration,
           }
         : {

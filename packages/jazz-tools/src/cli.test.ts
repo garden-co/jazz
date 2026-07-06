@@ -1783,7 +1783,7 @@ export default s.defineMigration({
       toHash: toShortHash,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("pushes an inferred empty migration when hashes differ but no reviewed file is needed", async () => {
