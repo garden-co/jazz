@@ -5,7 +5,11 @@
 import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
 import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
-import { isProvenanceMagicTimestampColumn, magicColumnType } from "../magic-columns.js";
+import {
+  isPermissionIntrospectionColumn,
+  isProvenanceMagicTimestampColumn,
+  magicColumnType,
+} from "../magic-columns.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
@@ -63,6 +67,9 @@ function resolveBaseColumns(
       const magicType = magicColumnType(columnName);
       if (magicType) {
         return { name: columnName, columnType: magicType };
+      }
+      if (isPermissionIntrospectionColumn(columnName)) {
+        return { name: columnName, columnType: { type: "Boolean" } as const };
       }
       const column = table.columns.find((candidate) => candidate.name === columnName);
       return column ? { name: column.name, columnType: column.column_type } : null;
