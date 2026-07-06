@@ -132,6 +132,14 @@ pub struct OpfsBTree<F: SyncFile> {
     free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
     last_leaf_hint: Option<PageId>,
+    leaf_index_cache: Option<Vec<LeafIndexEntry>>,
+}
+
+#[derive(Debug, Clone)]
+struct LeafIndexEntry {
+    page_id: PageId,
+    first_key: Vec<u8>,
+    last_key: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -183,6 +191,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
             last_leaf_hint: None,
+            leaf_index_cache: None,
         };
 
         if tree.active.generation == 0 {
@@ -264,6 +273,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         )
         .entered();
         self.last_leaf_hint = None;
+        self.leaf_index_cache = None;
         if self.root_page_id.is_none() {
             let root_page_id = self.alloc_page();
             let value_cell = self.build_value_cell(value)?;
@@ -295,6 +305,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
         let _span = tracing::trace_span!("OpfsBTree::delete", key_len = key.len()).entered();
         self.last_leaf_hint = None;
+        self.leaf_index_cache = None;
         let root_page_id = match self.root_page_id {
             Some(id) => id,
             None => return Ok(()),
@@ -401,13 +412,19 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let page_size = self.options.page_size;
         let mut out = Vec::with_capacity(limit.min(1024));
-        let mut upper = end.to_vec();
         let mut staged: Vec<(Vec<u8>, StagedValue)> = Vec::new();
+        let mut upper = end.to_vec();
+        let mut current = self.leaf_index_before(&upper)?;
 
         while out.len() < limit {
-            let Some(page_id) = self.leaf_at_or_before_key(&upper)? else {
+            let Some(index) = current else {
                 break;
             };
+            let leaf_index = &self.leaf_index_cache.as_ref().expect("leaf index cache")[index];
+            if leaf_index.last_key.as_slice() < start {
+                break;
+            }
+            let page_id = leaf_index.page_id;
             let page = {
                 let raw = self.ensure_page_loaded(page_id)?;
                 decode_page(raw, page_size)?
@@ -426,7 +443,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     continue;
                 }
                 if key.as_slice() < start {
-                    return Ok(out);
+                    continue;
                 }
                 let staged_value = match value {
                     ValueCell::Inline(value) => StagedValue::Inline(value),
@@ -445,9 +462,11 @@ impl<F: SyncFile> OpfsBTree<F> {
             }
 
             let Some((next_upper, _)) = staged.last() else {
-                break;
+                current = index.checked_sub(1);
+                continue;
             };
             upper = next_upper.clone();
+            current = index.checked_sub(1);
 
             for (key, value) in staged.drain(..) {
                 let value = match value {
@@ -1139,12 +1158,21 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(leaf)
     }
 
-    fn leaf_at_or_before_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+    fn leaf_index_before(&mut self, upper: &[u8]) -> Result<Option<usize>, BTreeError> {
+        if self.leaf_index_cache.is_none() {
+            self.rebuild_leaf_index_cache()?;
+        }
+        let cache = self.leaf_index_cache.as_ref().expect("leaf index cache");
+        Ok(cache
+            .partition_point(|entry| entry.first_key.as_slice() < upper)
+            .checked_sub(1))
+    }
+
+    fn leftmost_leaf(&mut self) -> Result<Option<PageId>, BTreeError> {
         let mut current = match self.root_page_id {
             Some(id) => id,
             None => return Ok(None),
         };
-        let mut predecessor_subtrees = Vec::new();
         let page_size = self.options.page_size;
 
         loop {
@@ -1153,32 +1181,16 @@ impl<F: SyncFile> OpfsBTree<F> {
                 decode_page(raw, page_size)?
             };
             match page {
-                Page::Leaf { entries, .. } => {
-                    if entries
-                        .last()
-                        .is_some_and(|(entry_key, _)| entry_key.as_slice() < key)
-                    {
-                        return Ok(Some(current));
-                    }
-                    while let Some(subtree) = predecessor_subtrees.pop() {
-                        if let Some(leaf) = self.rightmost_leaf(subtree)? {
-                            return Ok(Some(leaf));
-                        }
-                    }
-                    return Ok(None);
-                }
+                Page::Leaf { .. } => return Ok(Some(current)),
                 Page::Internal { keys, children } => {
-                    let idx = child_index(&keys, key);
-                    if idx > 0 {
-                        predecessor_subtrees.push(children[idx - 1]);
-                    }
-                    current = *children.get(idx).ok_or_else(|| {
-                        BTreeError::Corrupt("internal child index out of bounds".to_string())
+                    let _ = keys;
+                    current = *children.first().ok_or_else(|| {
+                        BTreeError::Corrupt("internal page without children".to_string())
                     })?;
                 }
                 other => {
                     return Err(BTreeError::Corrupt(format!(
-                        "unexpected {:?} page {} in reverse range path",
+                        "unexpected {:?} page {} in leftmost leaf path",
                         other, current
                     )));
                 }
@@ -1186,30 +1198,40 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
-    fn rightmost_leaf(&mut self, mut current: PageId) -> Result<Option<PageId>, BTreeError> {
+    fn rebuild_leaf_index_cache(&mut self) -> Result<(), BTreeError> {
         let page_size = self.options.page_size;
-        loop {
+        let mut cache = Vec::new();
+        let mut current = self.leftmost_leaf()?;
+        let mut visited = OpfsSet::default();
+
+        while let Some(page_id) = current {
+            if !visited.insert(page_id) {
+                return Err(BTreeError::Corrupt(
+                    "leaf chain contains a cycle".to_string(),
+                ));
+            }
             let page = {
-                let raw = self.ensure_page_loaded(current)?;
+                let raw = self.ensure_page_loaded(page_id)?;
                 decode_page(raw, page_size)?
             };
-            match page {
-                Page::Leaf { entries, .. } => {
-                    return Ok((!entries.is_empty()).then_some(current));
-                }
-                Page::Internal { children, .. } => {
-                    current = *children.last().ok_or_else(|| {
-                        BTreeError::Corrupt("internal page without children".to_string())
-                    })?;
-                }
-                other => {
-                    return Err(BTreeError::Corrupt(format!(
-                        "unexpected {:?} page {} in rightmost leaf path",
-                        other, current
-                    )));
-                }
+            let Page::Leaf { entries, next } = page else {
+                return Err(BTreeError::Corrupt(format!(
+                    "expected leaf page {}, found non-leaf while indexing leaf chain",
+                    page_id
+                )));
+            };
+            if let (Some((first_key, _)), Some((last_key, _))) = (entries.first(), entries.last()) {
+                cache.push(LeafIndexEntry {
+                    page_id,
+                    first_key: first_key.clone(),
+                    last_key: last_key.clone(),
+                });
             }
+            current = next;
         }
+
+        self.leaf_index_cache = Some(cache);
+        Ok(())
     }
 
     fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<&[u8], BTreeError> {
@@ -2224,6 +2246,86 @@ mod tests {
         options
     }
 
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn new(seed: u64) -> Self {
+            Self(seed | 1)
+        }
+
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        fn usize(&mut self, upper: usize) -> usize {
+            if upper == 0 {
+                0
+            } else {
+                (self.next() as usize) % upper
+            }
+        }
+
+        fn bool(&mut self) -> bool {
+            self.next() & 1 == 0
+        }
+
+        fn byte(&mut self) -> u8 {
+            (self.next() & 0xff) as u8
+        }
+    }
+
+    fn random_cf_shaped_key(rng: &mut TestRng, ordinal: usize) -> Vec<u8> {
+        const PREFIXES: [&[u8]; 5] = [
+            b"indices\0jazz_table_history\0by_tx\0",
+            b"indices\0jazz_table_register\0by_tx\0",
+            b"history\0row\0",
+            b"current\0row\0",
+            b"\xffedge\0prefix\0",
+        ];
+        let mut key = PREFIXES[rng.usize(PREFIXES.len())].to_vec();
+        if rng.usize(4) == 0 {
+            key.extend_from_slice(&(ordinal as u32).to_be_bytes());
+        }
+        let suffix_len = rng.usize(24);
+        for _ in 0..suffix_len {
+            key.push(match rng.usize(6) {
+                0 => 0,
+                1 => 0xff,
+                2 => b'0' + rng.usize(10) as u8,
+                _ => rng.byte(),
+            });
+        }
+        key
+    }
+
+    fn random_bound(rng: &mut TestRng, keys: &[Vec<u8>]) -> Vec<u8> {
+        match rng.usize(8) {
+            0 => Vec::new(),
+            1 => vec![0xff],
+            2 | 3 if !keys.is_empty() => keys[rng.usize(keys.len())].clone(),
+            4 if !keys.is_empty() => {
+                let mut key = keys[rng.usize(keys.len())].clone();
+                key.push(0);
+                key
+            }
+            5 if !keys.is_empty() => {
+                let mut key = keys[rng.usize(keys.len())].clone();
+                if let Some(last) = key.last_mut() {
+                    *last = last.saturating_add(1);
+                }
+                key
+            }
+            _ => {
+                let ordinal = rng.usize(10_000);
+                random_cf_shaped_key(rng, ordinal)
+            }
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct CountingFile {
         inner: MemoryFile,
@@ -2514,6 +2616,42 @@ mod tests {
             reverse_nanos <= forward_nanos.saturating_mul(20),
             "reverse scan should stay in the same order of magnitude as forward: forward={forward_elapsed:?}, reverse={reverse_elapsed:?}"
         );
+    }
+
+    #[test]
+    fn reverse_range_matches_forward_range_reversed_for_random_bounds() {
+        for seed in 0..128u64 {
+            let mut rng = TestRng::new(0xB7_EE_u64 ^ seed.wrapping_mul(0x9E37_79B9));
+            let file = MemoryFile::new();
+            let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+            let mut model = std::collections::BTreeMap::<Vec<u8>, Vec<u8>>::new();
+            let key_count = 96 + rng.usize(160);
+
+            for i in 0..key_count {
+                let key = random_cf_shaped_key(&mut rng, i);
+                let value = format!("value-{seed}-{i}").into_bytes();
+                tree.put(&key, &value).expect("put");
+                model.insert(key, value);
+            }
+
+            let keys = model.keys().cloned().collect::<Vec<_>>();
+            for _ in 0..256 {
+                let mut start = random_bound(&mut rng, &keys);
+                let mut end = random_bound(&mut rng, &keys);
+                if rng.bool() {
+                    std::mem::swap(&mut start, &mut end);
+                }
+
+                let forward = tree.range(&start, &end, usize::MAX).expect("forward");
+                let mut expected = forward.clone();
+                expected.reverse();
+                let reverse = tree
+                    .range_reverse(&start, &end, usize::MAX)
+                    .expect("reverse");
+
+                assert_eq!(reverse, expected, "seed={seed} start={start:?} end={end:?}");
+            }
+        }
     }
 
     #[test]
