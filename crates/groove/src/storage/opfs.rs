@@ -8,6 +8,8 @@ use std::rc::Rc;
 use opfs_btree::OpfsFile;
 #[cfg(not(target_arch = "wasm32"))]
 use opfs_btree::StdFile;
+#[cfg(not(target_arch = "wasm32"))]
+pub use opfs_btree::SyncPolicy as BtreeSyncPolicy;
 use opfs_btree::{BTreeOptions, OpfsBTree, SyncFile};
 
 use super::{
@@ -35,12 +37,24 @@ fn browser_fidelity_options() -> BTreeOptions {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn browser_fidelity_options_with_sync_policy(sync_policy: BtreeSyncPolicy) -> BTreeOptions {
+    BTreeOptions {
+        sync_policy,
+        ..browser_fidelity_options()
+    }
+}
+
 impl<F> BtreeStorage<F>
 where
     F: SyncFile,
 {
     pub fn from_file(file: F, column_families: &[&str]) -> Result<Self, Error> {
         let tree = OpfsBTree::open(file, browser_fidelity_options())?;
+        Self::from_tree(tree, column_families)
+    }
+
+    fn from_tree(tree: OpfsBTree<F>, column_families: &[&str]) -> Result<Self, Error> {
         Ok(Self {
             tree: Rc::new(RefCell::new(tree)),
             column_families: Rc::new(RefCell::new(
@@ -91,6 +105,18 @@ impl NativeBtreeStorage {
         column_families: &[&str],
     ) -> Result<Self, Error> {
         Self::from_file(StdFile::open(path)?, column_families)
+    }
+
+    pub fn open_with_sync_policy(
+        path: impl AsRef<std::path::Path>,
+        column_families: &[&str],
+        sync_policy: BtreeSyncPolicy,
+    ) -> Result<Self, Error> {
+        let tree = OpfsBTree::open(
+            StdFile::open(path)?,
+            browser_fidelity_options_with_sync_policy(sync_policy),
+        )?;
+        Self::from_tree(tree, column_families)
     }
 }
 

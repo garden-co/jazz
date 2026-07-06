@@ -33,6 +33,13 @@ struct PageWrite<'a> {
     raw: Cow<'a, [u8]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPolicy {
+    PerWrite,
+    OnClose,
+    Never,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BTreeOptions {
     pub page_size: usize,
@@ -40,6 +47,7 @@ pub struct BTreeOptions {
     pub overflow_threshold: usize,
     pub pin_internal_pages: bool,
     pub read_coalesce_pages: usize,
+    pub sync_policy: SyncPolicy,
 }
 
 impl Default for BTreeOptions {
@@ -50,6 +58,7 @@ impl Default for BTreeOptions {
             overflow_threshold: DEFAULT_OVERFLOW_THRESHOLD,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
         }
     }
 }
@@ -181,7 +190,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 Superblock::new(options.page_size as u32, BOOTSTRAP_GENERATION, 0, 0, 2);
             write_slot(&tree.file, SuperblockSlot::A, options.page_size, bootstrap)?;
             write_slot(&tree.file, SuperblockSlot::B, options.page_size, bootstrap)?;
-            tree.file.flush()?;
+            tree.flush_for_write()?;
             tree.active_slot = SuperblockSlot::A;
             tree.active = bootstrap;
             tree.total_pages = 2;
@@ -213,6 +222,11 @@ impl<F: SyncFile> OpfsBTree<F> {
         tree.replay_wal()?;
 
         Ok(tree)
+    }
+
+    pub fn close(mut self) -> Result<(), BTreeError> {
+        self.checkpoint()?;
+        self.flush_for_close()
     }
 
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
@@ -381,7 +395,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         dirty_page_ids.sort_unstable();
         let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
         self.write_pages_to_disk(&dirty_page_ids, &freelist_pages)?;
-        self.file.flush()?;
+        self.flush_for_write()?;
         self.checkpoint_superblock(
             self.root_page_id.unwrap_or(0),
             freelist_head_page_id,
@@ -449,7 +463,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 .ok_or_else(|| BTreeError::Io("WAL persisted pages overflow".to_string()))?
         };
         self.persisted_pages = persisted_pages;
-        self.file.flush()?;
+        self.flush_for_write()?;
 
         self.wal_pages.extend(dirty_page_ids);
         self.dirty_pages.clear();
@@ -1317,8 +1331,22 @@ impl<F: SyncFile> OpfsBTree<F> {
             .checked_mul(self.options.page_size as u64)
             .ok_or_else(|| BTreeError::Io("checkpoint truncate length overflow".to_string()))?;
         self.file.truncate(required_len)?;
-        self.file.flush()?;
+        self.flush_for_write()?;
         self.persisted_pages = self.total_pages;
+        Ok(())
+    }
+
+    fn flush_for_write(&self) -> Result<(), BTreeError> {
+        if self.options.sync_policy == SyncPolicy::PerWrite {
+            self.file.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush_for_close(&self) -> Result<(), BTreeError> {
+        if self.options.sync_policy != SyncPolicy::Never {
+            self.file.flush()?;
+        }
         Ok(())
     }
 
@@ -1794,7 +1822,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let target_slot = self.active_slot.inactive();
         write_slot_unchecked(&self.file, target_slot, self.options.page_size, next)?;
-        self.file.flush()?;
+        self.flush_for_write()?;
 
         self.active_slot = target_slot;
         self.active = next;
@@ -2017,6 +2045,7 @@ mod tests {
             overflow_threshold: 128,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
         }
     }
 
@@ -2027,6 +2056,7 @@ mod tests {
             overflow_threshold: 128,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
         }
     }
 
@@ -2041,6 +2071,7 @@ mod tests {
         inner: MemoryFile,
         writes: Rc<RefCell<Vec<(u64, usize)>>>,
         reads: Rc<RefCell<Vec<(u64, usize)>>>,
+        flushes: Rc<RefCell<usize>>,
     }
 
     impl CountingFile {
@@ -2049,6 +2080,7 @@ mod tests {
                 inner: MemoryFile::new(),
                 writes: Rc::new(RefCell::new(Vec::new())),
                 reads: Rc::new(RefCell::new(Vec::new())),
+                flushes: Rc::new(RefCell::new(0)),
             }
         }
 
@@ -2087,6 +2119,10 @@ mod tests {
             self.reads.borrow_mut().clear();
             self.writes.borrow_mut().clear();
         }
+
+        fn flush_count(&self) -> usize {
+            *self.flushes.borrow()
+        }
     }
 
     impl SyncFile for CountingFile {
@@ -2109,6 +2145,7 @@ mod tests {
         }
 
         fn flush(&self) -> Result<(), BTreeError> {
+            *self.flushes.borrow_mut() += 1;
             self.inner.flush()
         }
     }
@@ -2432,6 +2469,51 @@ mod tests {
         assert!(state.generation >= 2);
         assert!(state.root_page_id >= 2);
         assert!(state.total_pages > 2);
+    }
+
+    #[test]
+    fn sync_policy_controls_durable_flush_cadence() {
+        let per_write_file = CountingFile::new();
+        let mut tree =
+            OpfsBTree::open(per_write_file.clone(), small_options()).expect("open per-write");
+        tree.put(b"k", b"v").expect("put per-write");
+        tree.checkpoint().expect("checkpoint per-write");
+        assert!(
+            per_write_file.flush_count() >= 1,
+            "per-write policy should flush during write boundaries"
+        );
+
+        let on_close_file = CountingFile::new();
+        let mut on_close_options = small_options();
+        on_close_options.sync_policy = SyncPolicy::OnClose;
+        let mut tree =
+            OpfsBTree::open(on_close_file.clone(), on_close_options).expect("open on-close");
+        tree.put(b"k", b"v").expect("put on-close");
+        tree.checkpoint().expect("checkpoint on-close");
+        assert_eq!(
+            on_close_file.flush_count(),
+            0,
+            "on-close policy should skip per-write flushes"
+        );
+        tree.close().expect("close on-close");
+        assert_eq!(
+            on_close_file.flush_count(),
+            1,
+            "on-close policy should flush when explicitly closed"
+        );
+
+        let never_file = CountingFile::new();
+        let mut never_options = small_options();
+        never_options.sync_policy = SyncPolicy::Never;
+        let mut tree = OpfsBTree::open(never_file.clone(), never_options).expect("open never");
+        tree.put(b"k", b"v").expect("put never");
+        tree.checkpoint().expect("checkpoint never");
+        tree.close().expect("close never");
+        assert_eq!(
+            never_file.flush_count(),
+            0,
+            "never policy should not flush at write or close boundaries"
+        );
     }
 
     #[test]
@@ -2775,6 +2857,7 @@ mod tests {
             overflow_threshold: 256,
             pin_internal_pages: true,
             read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
         };
         let value_len = 24 * 1024;
         let row_count = 512usize;
@@ -2812,6 +2895,7 @@ mod tests {
             overflow_threshold: 128,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
         };
         let mut tree = OpfsBTree::open(file, options).expect("open tree");
         let max_cached = tree.max_cached_pages();
