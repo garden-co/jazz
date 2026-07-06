@@ -44,6 +44,7 @@ import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import type { SubscriptionChannel } from "./subscription-channel.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import {
@@ -101,6 +102,18 @@ export interface DbConfig {
   devMode?: boolean;
   /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
   secret?: string;
+  /**
+   * Client-factory option. Defaults to true at `createJazzClient`: subscriptions
+   * are served over an API-level channel and no main-thread Db is exposed.
+   * `createDb` itself ignores this field.
+   */
+  asyncSubscriptionsOnly?: boolean;
+  /**
+   * Client-factory option used when `asyncSubscriptionsOnly` is true, or when a
+   * false-context subscription opts into `subscriptionMode: "async"`.
+   * `createDb` itself ignores this field.
+   */
+  subscriptionChannel?: SubscriptionChannel;
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -192,8 +205,12 @@ type DbRuntimeOperationContext = {
   readSession?: Session;
 };
 
-function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
-  return options ?? {};
+function nativeDbQueryOptions(options?: QueryOptions): QueryOptions {
+  if (!options?.subscriptionMode) {
+    return options ?? {};
+  }
+  const { subscriptionMode: _subscriptionMode, ...nativeOptions } = options;
+  return nativeOptions;
 }
 
 function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -1441,7 +1458,7 @@ export class Db {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    const queryOptions = ordinaryDbQueryOptions(options);
+    const queryOptions = nativeDbQueryOptions(options);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getRuntimeOperationContext();
@@ -1582,7 +1599,7 @@ export class Db {
       callback(typedDelta);
     };
 
-    const queryOptions = ordinaryDbQueryOptions(options);
+    const queryOptions = nativeDbQueryOptions(options);
     const context = this.getRuntimeOperationContext();
     let subId: number | null = null;
     let unsubscribed = false;

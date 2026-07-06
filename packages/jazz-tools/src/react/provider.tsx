@@ -6,6 +6,7 @@ import {
   useDb as useCoreDb,
   useJazzClient as useCoreJazzClient,
   useSession,
+  type CreateJazzClient,
 } from "../react-core/provider.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 
@@ -33,11 +34,14 @@ export type JazzProviderProps = {
 };
 
 export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzProviderProps) {
+  const createSyncJazzClient: CreateJazzClient = (nextConfig) =>
+    createJazzClient({ ...nextConfig, asyncSubscriptionsOnly: false });
+
   return (
     <CoreJazzProvider
       config={config}
       fallback={fallback}
-      createJazzClient={createJazzClient}
+      createJazzClient={createSyncJazzClient}
       onJWTExpired={onJWTExpired}
     >
       {children}
