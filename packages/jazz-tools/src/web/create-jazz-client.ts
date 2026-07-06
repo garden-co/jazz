@@ -8,6 +8,12 @@ import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orches
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createDbFromInspectedPage } from "../dev-tools/index.js";
 import { registerWindowJazzStorageClient } from "../window-client-storage.js";
+import { createBrowserWorkerSubscriptionChannel } from "./browser-subscription-channel.js";
+
+export {
+  BrowserWorkerSubscriptionChannel,
+  createBrowserWorkerSubscriptionChannel,
+} from "./browser-subscription-channel.js";
 
 type AsyncSubscriptionsOnlyConfig<TAsyncSubscriptionsOnly extends boolean> =
   TAsyncSubscriptionsOnly extends false
@@ -107,13 +113,12 @@ async function createSyncJazzClientInternal(
 async function createAsyncOnlyJazzClientInternal(
   config: JazzClientConfig<true>,
 ): Promise<ChannelBackedClient> {
-  if (!config.subscriptionChannel) {
-    throw new Error("asyncSubscriptionsOnly clients require a subscriptionChannel.");
-  }
+  const subscriptionChannel =
+    config.subscriptionChannel ?? createBrowserWorkerSubscriptionChannel(config);
   const session = config.cookieSession ?? null;
   const manager = new SubscriptionsOrchestrator(
     { appId: config.appId },
-    config.subscriptionChannel,
+    subscriptionChannel,
     session,
   );
   await manager.init();
@@ -123,9 +128,9 @@ async function createAsyncOnlyJazzClientInternal(
       session,
       async shutdown() {
         await manager.shutdown();
-        await config.subscriptionChannel?.shutdown?.();
+        await subscriptionChannel.shutdown?.();
       },
-      subscriptionChannel: config.subscriptionChannel,
+      subscriptionChannel,
     },
     manager,
   );
