@@ -3150,6 +3150,42 @@ fn wire_transport_adapter_lz4_compresses_payload_when_negotiated() {
     assert_eq!(receiver.try_recv(), Some(message));
 }
 
+#[cfg(feature = "transport-compression-zstd")]
+#[test]
+fn wire_transport_adapter_zstd_stream_preserves_message_order() {
+    let (left, right) = byte_duplex_raw();
+    let mut sender = WireTransportAdapter::new(
+        left,
+        WIRE_PROTOCOL_VERSION,
+        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD,
+        None,
+    );
+    let mut receiver = WireTransportAdapter::new(
+        right,
+        WIRE_PROTOCOL_VERSION,
+        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD,
+        None,
+    );
+    let first = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
+        revision: Some(7),
+        schema: None,
+        lens: None,
+        applied: true,
+    });
+    let second = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
+        revision: Some(8),
+        schema: None,
+        lens: None,
+        applied: true,
+    });
+
+    sender.send(first.clone()).unwrap();
+    sender.send(second.clone()).unwrap();
+
+    assert_eq!(receiver.try_recv(), Some(first));
+    assert_eq!(receiver.try_recv(), Some(second));
+}
+
 fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.keep();

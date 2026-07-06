@@ -55,8 +55,8 @@ use crate::time::GlobalSeq;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
 use crate::wire::{
     TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError, WireErrorCode, WireFeatures,
-    WireFrame, WireRetry, WireSession, WireTransport, compress_sync_payload, current_wire_features,
-    decode_frame, decode_sync_message, decompress_sync_payload, encode_frame, encode_sync_message,
+    WireFrame, WireRetry, WireSession, WireStreamDecoder, WireStreamEncoder, WireTransport,
+    current_wire_features, decode_frame, decode_sync_message, encode_frame, encode_sync_message,
 };
 
 /// How urgently a runtime should service pending peer-connection work.
@@ -3150,6 +3150,8 @@ pub struct WireTransportAdapter<T> {
     protocol_version: u16,
     features: WireFeatures,
     session: Option<WireSession>,
+    outbound_stream: WireStreamEncoder,
+    inbound_stream: WireStreamDecoder,
 }
 
 impl<T> WireTransportAdapter<T>
@@ -3168,11 +3170,17 @@ where
         features: WireFeatures,
         session: Option<WireSession>,
     ) -> Self {
+        let outbound_stream = WireStreamEncoder::new(features)
+            .expect("negotiated wire compression must be compiled into this binary");
+        let inbound_stream = WireStreamDecoder::new(features)
+            .expect("negotiated wire compression must be compiled into this binary");
         Self {
             inner,
             protocol_version,
             features,
             session,
+            outbound_stream,
+            inbound_stream,
         }
     }
 
@@ -3249,13 +3257,13 @@ where
         if let Err(message) = validate_sync_message_len(payload.len()) {
             return Err(TransportError::Failed(message));
         }
-        let (payload, active_compression) = match compress_sync_payload(payload, self.features) {
+        let payload = match self.outbound_stream.encode_message(&payload) {
             Ok(payload) => payload,
             Err(message) => return Err(TransportError::Failed(message)),
         };
         let active_features = (self.features
             & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD))
-            | active_compression;
+            | self.outbound_stream.active_feature();
         let mut envelope = WireEnvelope::new(self.protocol_version, active_features, payload);
         if let Some(session) = self.session.clone() {
             envelope = envelope.with_session(session);
@@ -3309,18 +3317,20 @@ where
                         self.send_wire_error(error);
                         continue;
                     }
-                    let payload =
-                        match decompress_sync_payload(&envelope.payload, envelope.features) {
-                            Ok(payload) => payload,
-                            Err(message) => {
-                                self.send_wire_error(WireError::new(
-                                    WireErrorCode::MalformedFrame,
-                                    WireRetry::Never,
-                                    message,
-                                ));
-                                continue;
-                            }
-                        };
+                    let payload = match self
+                        .inbound_stream
+                        .decode_message(&envelope.payload, envelope.features)
+                    {
+                        Ok(payload) => payload,
+                        Err(message) => {
+                            self.send_wire_error(WireError::new(
+                                WireErrorCode::MalformedFrame,
+                                WireRetry::Never,
+                                message,
+                            ));
+                            continue;
+                        }
+                    };
                     if let Err(message) = validate_sync_message_len(payload.len()) {
                         self.send_wire_error(WireError::new(
                             WireErrorCode::MalformedFrame,

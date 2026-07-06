@@ -6,6 +6,14 @@
 //! server shells can adopt the envelope before the full [`crate::protocol::SyncMessage`]
 //! encoder is frozen.
 
+#[cfg(feature = "transport-compression-lz4")]
+use std::io::Read;
+#[cfg(any(
+    feature = "transport-compression-lz4",
+    feature = "transport-compression-zstd"
+))]
+use std::io::Write;
+
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
 
@@ -93,14 +101,14 @@ pub struct WireNegotiated {
     pub features: WireFeatures,
 }
 
-/// Frame-level payload compression codec.
+/// Transport payload compression codec.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireCompression {
     /// No transport compression.
     None,
-    /// LZ4 frame payload compression.
+    /// LZ4 stream payload compression.
     Lz4,
-    /// Zstandard frame payload compression.
+    /// Zstandard stream payload compression.
     Zstd,
 }
 
@@ -293,6 +301,10 @@ fn cfg_zstd_feature() -> WireFeatures {
 }
 
 /// Compress a sync payload for one message envelope.
+///
+/// This remains available for measurement compatibility. Production peer links
+/// use [`WireStreamEncoder`] so the dictionary/window lives for the whole
+/// negotiated connection direction and resets only on reconnect.
 pub fn compress_sync_payload(
     payload: Vec<u8>,
     negotiated_features: WireFeatures,
@@ -363,6 +375,238 @@ fn decompress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
 
 #[cfg(not(feature = "transport-compression-zstd"))]
 fn decompress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
+    Err("zstd transport compression feature is not compiled in".to_owned())
+}
+
+/// Connection-direction compression state for sync message payloads.
+///
+/// Compressed links write `u32 little-endian length || sync_payload` records into
+/// one codec stream. The state is intentionally per connection direction:
+/// reconnect creates a fresh stream context, and known-state redelivery makes
+/// that reset protocol-safe.
+pub struct WireStreamEncoder {
+    codec: WireCompression,
+    inner: WireStreamEncoderInner,
+}
+
+enum WireStreamEncoderInner {
+    None,
+    #[cfg(feature = "transport-compression-lz4")]
+    Lz4(lz4_flex::frame::FrameEncoder<Vec<u8>>),
+    #[cfg(feature = "transport-compression-zstd")]
+    Zstd(zstd::stream::write::Encoder<'static, Vec<u8>>),
+}
+
+impl WireStreamEncoder {
+    /// Create encoder state for one outbound connection direction.
+    pub fn new(features: WireFeatures) -> Result<Self, String> {
+        let codec = WireCompression::from_features(features);
+        let inner = match codec {
+            WireCompression::None => WireStreamEncoderInner::None,
+            WireCompression::Lz4 => new_lz4_stream_encoder()?,
+            WireCompression::Zstd => new_zstd_stream_encoder()?,
+        };
+        Ok(Self { codec, inner })
+    }
+
+    /// Active feature bit carried by message envelopes for this stream.
+    pub fn active_feature(&self) -> WireFeatures {
+        self.codec.feature()
+    }
+
+    /// Encode one sync payload into the connection stream and return the bytes
+    /// newly emitted by this message.
+    pub fn encode_message(&mut self, payload: &[u8]) -> Result<Vec<u8>, String> {
+        match &mut self.inner {
+            WireStreamEncoderInner::None => Ok(payload.to_vec()),
+            #[cfg(feature = "transport-compression-lz4")]
+            WireStreamEncoderInner::Lz4(encoder) => {
+                let start = encoder.get_ref().len();
+                write_length_prefixed_payload(encoder, payload)?;
+                encoder
+                    .flush()
+                    .map_err(|error| format!("failed to flush lz4 stream: {error}"))?;
+                Ok(encoder.get_ref()[start..].to_vec())
+            }
+            #[cfg(feature = "transport-compression-zstd")]
+            WireStreamEncoderInner::Zstd(encoder) => {
+                let start = encoder.get_ref().len();
+                write_length_prefixed_payload(encoder, payload)?;
+                encoder
+                    .flush()
+                    .map_err(|error| format!("failed to flush zstd stream: {error}"))?;
+                Ok(encoder.get_ref()[start..].to_vec())
+            }
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "transport-compression-lz4",
+    feature = "transport-compression-zstd"
+))]
+fn write_length_prefixed_payload(writer: &mut impl Write, payload: &[u8]) -> Result<(), String> {
+    let len = u32::try_from(payload.len())
+        .map_err(|_| "sync payload is too large for transport stream frame".to_owned())?;
+    writer
+        .write_all(&len.to_le_bytes())
+        .and_then(|_| writer.write_all(payload))
+        .map_err(|error| format!("failed to write transport stream payload: {error}"))
+}
+
+#[cfg(feature = "transport-compression-lz4")]
+fn new_lz4_stream_encoder() -> Result<WireStreamEncoderInner, String> {
+    Ok(WireStreamEncoderInner::Lz4(
+        lz4_flex::frame::FrameEncoder::new(Vec::new()),
+    ))
+}
+
+#[cfg(not(feature = "transport-compression-lz4"))]
+fn new_lz4_stream_encoder() -> Result<WireStreamEncoderInner, String> {
+    Err("lz4 transport compression feature is not compiled in".to_owned())
+}
+
+#[cfg(feature = "transport-compression-zstd")]
+fn new_zstd_stream_encoder() -> Result<WireStreamEncoderInner, String> {
+    zstd::stream::write::Encoder::new(Vec::new(), 3)
+        .map(WireStreamEncoderInner::Zstd)
+        .map_err(|error| format!("failed to create zstd stream encoder: {error}"))
+}
+
+#[cfg(not(feature = "transport-compression-zstd"))]
+fn new_zstd_stream_encoder() -> Result<WireStreamEncoderInner, String> {
+    Err("zstd transport compression feature is not compiled in".to_owned())
+}
+
+/// Connection-direction decompression state for sync message payloads.
+pub struct WireStreamDecoder {
+    codec: WireCompression,
+    inner: WireStreamDecoderInner,
+}
+
+enum WireStreamDecoderInner {
+    None,
+    #[cfg(feature = "transport-compression-lz4")]
+    Lz4 {
+        compressed: Vec<u8>,
+        plain_consumed: usize,
+    },
+    #[cfg(feature = "transport-compression-zstd")]
+    Zstd {
+        decoder: zstd::stream::write::Decoder<'static, Vec<u8>>,
+        plain_consumed: usize,
+    },
+}
+
+impl WireStreamDecoder {
+    /// Create decoder state for one inbound connection direction.
+    pub fn new(features: WireFeatures) -> Result<Self, String> {
+        let codec = WireCompression::from_features(features);
+        let inner = match codec {
+            WireCompression::None => WireStreamDecoderInner::None,
+            WireCompression::Lz4 => new_lz4_stream_decoder()?,
+            WireCompression::Zstd => new_zstd_stream_decoder()?,
+        };
+        Ok(Self { codec, inner })
+    }
+
+    /// Decode one message's stream chunk into one semantic sync payload.
+    pub fn decode_message(
+        &mut self,
+        payload: &[u8],
+        envelope_features: WireFeatures,
+    ) -> Result<Vec<u8>, String> {
+        let active = envelope_features & FEATURE_PAYLOAD_COMPRESSION_MASK;
+        if active.count_ones() > 1 {
+            return Err("wire frame declares more than one payload compression codec".to_owned());
+        }
+        if WireCompression::from_features(active) != self.codec {
+            return Err("wire frame compression codec changed within one connection".to_owned());
+        }
+        match &mut self.inner {
+            WireStreamDecoderInner::None => Ok(payload.to_vec()),
+            #[cfg(feature = "transport-compression-lz4")]
+            WireStreamDecoderInner::Lz4 {
+                compressed,
+                plain_consumed,
+            } => {
+                compressed.extend_from_slice(payload);
+                let mut decoder = lz4_flex::frame::FrameDecoder::new(&compressed[..]);
+                let mut plain = Vec::new();
+                decoder
+                    .read_to_end(&mut plain)
+                    .map_err(|error| format!("failed to decompress lz4 stream: {error}"))?;
+                read_next_stream_payload(&plain, plain_consumed)
+            }
+            #[cfg(feature = "transport-compression-zstd")]
+            WireStreamDecoderInner::Zstd {
+                decoder,
+                plain_consumed,
+            } => {
+                decoder
+                    .write_all(payload)
+                    .and_then(|_| decoder.flush())
+                    .map_err(|error| format!("failed to decompress zstd stream: {error}"))?;
+                read_next_stream_payload(decoder.get_ref(), plain_consumed)
+            }
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "transport-compression-lz4",
+    feature = "transport-compression-zstd"
+))]
+fn read_next_stream_payload(plain: &[u8], plain_consumed: &mut usize) -> Result<Vec<u8>, String> {
+    let remaining = plain
+        .get(*plain_consumed..)
+        .ok_or_else(|| "transport stream consumed past available bytes".to_owned())?;
+    let len_bytes: [u8; 4] = remaining
+        .get(..4)
+        .ok_or_else(|| "transport stream did not produce a complete length prefix".to_owned())?
+        .try_into()
+        .expect("slice length checked");
+    let len = u32::from_le_bytes(len_bytes) as usize;
+    if len > crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES {
+        return Err(format!(
+            "transport stream payload exceeds max sync message bytes: {len}"
+        ));
+    }
+    let start = *plain_consumed + 4;
+    let end = start + len;
+    let payload = plain
+        .get(start..end)
+        .ok_or_else(|| "transport stream did not produce a complete message".to_owned())?
+        .to_vec();
+    *plain_consumed = end;
+    Ok(payload)
+}
+
+#[cfg(feature = "transport-compression-lz4")]
+fn new_lz4_stream_decoder() -> Result<WireStreamDecoderInner, String> {
+    Ok(WireStreamDecoderInner::Lz4 {
+        compressed: Vec::new(),
+        plain_consumed: 0,
+    })
+}
+
+#[cfg(not(feature = "transport-compression-lz4"))]
+fn new_lz4_stream_decoder() -> Result<WireStreamDecoderInner, String> {
+    Err("lz4 transport compression feature is not compiled in".to_owned())
+}
+
+#[cfg(feature = "transport-compression-zstd")]
+fn new_zstd_stream_decoder() -> Result<WireStreamDecoderInner, String> {
+    zstd::stream::write::Decoder::new(Vec::new())
+        .map(|decoder| WireStreamDecoderInner::Zstd {
+            decoder,
+            plain_consumed: 0,
+        })
+        .map_err(|error| format!("failed to create zstd stream decoder: {error}"))
+}
+
+#[cfg(not(feature = "transport-compression-zstd"))]
+fn new_zstd_stream_decoder() -> Result<WireStreamDecoderInner, String> {
     Err("zstd transport compression feature is not compiled in".to_owned())
 }
 
@@ -517,6 +761,152 @@ mod tests {
         let decoded = decode_sync_message(&encoded).unwrap();
 
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn uncompressed_stream_round_trips_message_boundaries() {
+        let mut encoder = WireStreamEncoder::new(FEATURE_NONE).unwrap();
+        let mut decoder = WireStreamDecoder::new(FEATURE_NONE).unwrap();
+        let first = vec![1, 2, 3];
+        let second = vec![4, 5];
+
+        let encoded_first = encoder.encode_message(&first).unwrap();
+        let encoded_second = encoder.encode_message(&second).unwrap();
+
+        assert_eq!(
+            decoder
+                .decode_message(&encoded_first, FEATURE_NONE)
+                .unwrap(),
+            first
+        );
+        assert_eq!(
+            decoder
+                .decode_message(&encoded_second, FEATURE_NONE)
+                .unwrap(),
+            second
+        );
+    }
+
+    #[cfg(feature = "transport-compression-zstd")]
+    #[test]
+    fn zstd_stream_round_trips_multiple_message_boundaries() {
+        let mut encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
+        let mut decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
+        let messages = [
+            b"alpha alpha alpha".to_vec(),
+            b"alpha alpha beta".to_vec(),
+            b"alpha alpha gamma".to_vec(),
+        ];
+
+        for message in messages {
+            let chunk = encoder.encode_message(&message).unwrap();
+            let decoded = decoder
+                .decode_message(&chunk, FEATURE_PAYLOAD_ZSTD)
+                .unwrap();
+            assert_eq!(decoded, message);
+        }
+    }
+
+    #[cfg(feature = "transport-compression-lz4")]
+    #[test]
+    fn lz4_stream_round_trips_multiple_message_boundaries() {
+        let mut encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
+        let mut decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
+        let messages = [
+            b"alpha alpha alpha".to_vec(),
+            b"alpha alpha beta".to_vec(),
+            b"alpha alpha gamma".to_vec(),
+        ];
+
+        for message in messages {
+            let chunk = encoder.encode_message(&message).unwrap();
+            let decoded = decoder.decode_message(&chunk, FEATURE_PAYLOAD_LZ4).unwrap();
+            assert_eq!(decoded, message);
+        }
+    }
+
+    #[cfg(all(
+        feature = "transport-compression-lz4",
+        feature = "transport-compression-zstd"
+    ))]
+    #[test]
+    fn synthetic_small_delta_streaming_compression_receipt() {
+        let shape_id = ShapeId(uuid::Uuid::from_bytes([0x22; 16]));
+        let binding_id = BindingId(uuid::Uuid::from_bytes([0x33; 16]));
+        let subscription = crate::protocol::SubscriptionKey {
+            shape_id,
+            binding_id,
+            read_view: Default::default(),
+        };
+        let node = NodeUuid::from_bytes([0x44; 16]);
+        let schema_version = SchemaVersionId::from_bytes([0x55; 16]);
+        let messages = (0..300_u64)
+            .map(|i| {
+                let row = crate::ids::RowUuid(uuid::Uuid::from_u128(0x7000_0000_0000 + i as u128));
+                let tx = TxId::new(TxTime(1_000_000 + i), node);
+                let member =
+                    crate::protocol::ResultMemberEntry::Row(crate::protocol::RealRowMemberEntry {
+                        table: groove::Intern::new("res_l_child_3".to_owned()),
+                        row_uuid: row,
+                        content_tx: Some(tx),
+                        layer: Default::default(),
+                        deletion_tx: None,
+                        source: Default::default(),
+                        read_view: Default::default(),
+                        schema_version: Some(schema_version),
+                        branch_or_prefix: None,
+                        row_digest: Some(vec![0xAB; 8]),
+                        batch: Some(tx),
+                        settle_position: Some(GlobalSeq(10_000 + i)),
+                    });
+                SyncMessage::ViewUpdate {
+                    subscription,
+                    settled_through: GlobalSeq(10_000 + i),
+                    reset_result_set: false,
+                    version_bundles: Vec::new(),
+                    peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                    result_member_adds: vec![member],
+                    result_member_removes: Vec::new(),
+                    program_fact_adds: Vec::new(),
+                    program_fact_removes: Vec::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut raw = 0_u64;
+        let mut per_message_zstd = 0_u64;
+        let mut streaming_zstd = 0_u64;
+        let mut streaming_lz4 = 0_u64;
+        let mut zstd_encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
+        let mut zstd_decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
+        let mut lz4_encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
+        let mut lz4_decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
+        for message in &messages {
+            let payload = encode_sync_message(message).unwrap();
+            raw += payload.len() as u64;
+            let (compressed, active) =
+                compress_sync_payload(payload.clone(), FEATURE_PAYLOAD_ZSTD).unwrap();
+            let decompressed = decompress_sync_payload(&compressed, active).unwrap();
+            assert_eq!(decompressed, payload);
+            per_message_zstd += compressed.len() as u64;
+
+            let zstd_chunk = zstd_encoder.encode_message(&payload).unwrap();
+            let zstd_decoded = zstd_decoder
+                .decode_message(&zstd_chunk, FEATURE_PAYLOAD_ZSTD)
+                .unwrap();
+            assert_eq!(zstd_decoded, payload);
+            streaming_zstd += zstd_chunk.len() as u64;
+
+            let lz4_chunk = lz4_encoder.encode_message(&payload).unwrap();
+            let lz4_decoded = lz4_decoder
+                .decode_message(&lz4_chunk, FEATURE_PAYLOAD_LZ4)
+                .unwrap();
+            assert_eq!(lz4_decoded, payload);
+            streaming_lz4 += lz4_chunk.len() as u64;
+        }
+        eprintln!(
+            "SYNTHETIC_SMALL_DELTA_COMPRESSION raw={raw} per_message_zstd={per_message_zstd} streaming_zstd={streaming_zstd} streaming_lz4={streaming_lz4}"
+        );
+        assert!(streaming_zstd < per_message_zstd);
     }
 
     #[test]

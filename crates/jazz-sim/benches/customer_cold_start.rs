@@ -18,7 +18,10 @@ use jazz::node::MergeableCommit;
 use jazz::protocol::{SubscriptionKey, SyncMessage};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
-use jazz::wire::{TransportError, compress_sync_payload, current_wire_features};
+use jazz::wire::{
+    FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireStreamDecoder,
+    WireStreamEncoder, compress_sync_payload, current_wire_features,
+};
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
@@ -454,6 +457,14 @@ struct RunSummary {
     server_to_client_bytes: u64,
     server_to_client_compress_encode_us: u64,
     server_to_client_compress_decode_us: u64,
+    server_to_client_raw_payload_bytes: u64,
+    server_to_client_per_message_zstd_bytes: Option<u64>,
+    server_to_client_streaming_zstd_bytes: Option<u64>,
+    server_to_client_streaming_zstd_encode_us: u64,
+    server_to_client_streaming_zstd_decode_us: u64,
+    server_to_client_streaming_lz4_bytes: Option<u64>,
+    server_to_client_streaming_lz4_encode_us: u64,
+    server_to_client_streaming_lz4_decode_us: u64,
     client_to_relay_messages: u64,
     relay_to_core_messages: u64,
     known_state_declared: u64,
@@ -528,7 +539,72 @@ struct TransportMetrics {
     compress_encode_ns: Cell<u64>,
     compress_decode_ns: Cell<u64>,
     known_state_subscribes: Cell<u64>,
+    codec_probe: RefCell<CodecProbe>,
     view_updates_by_subscription: RefCell<BTreeMap<SubscriptionKey, ViewUpdateSummary>>,
+}
+
+#[derive(Default)]
+struct CodecProbe {
+    raw_bytes: u64,
+    per_message_zstd_bytes: Option<u64>,
+    streaming_zstd_bytes: Option<u64>,
+    streaming_zstd_encode_ns: u64,
+    streaming_zstd_decode_ns: u64,
+    streaming_lz4_bytes: Option<u64>,
+    streaming_lz4_encode_ns: u64,
+    streaming_lz4_decode_ns: u64,
+    zstd_stream: Option<(WireStreamEncoder, WireStreamDecoder)>,
+    lz4_stream: Option<(WireStreamEncoder, WireStreamDecoder)>,
+}
+
+impl CodecProbe {
+    fn record(&mut self, payload: &[u8]) {
+        self.raw_bytes += payload.len() as u64;
+        if let Ok((compressed, active)) =
+            compress_sync_payload(payload.to_vec(), FEATURE_PAYLOAD_ZSTD)
+        {
+            *self.per_message_zstd_bytes.get_or_insert(0) += compressed.len() as u64;
+            let _ = jazz::wire::decompress_sync_payload(&compressed, active);
+        }
+        if self.zstd_stream.is_none() {
+            if let (Ok(encoder), Ok(decoder)) = (
+                WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD),
+                WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD),
+            ) {
+                self.zstd_stream = Some((encoder, decoder));
+                self.streaming_zstd_bytes = Some(0);
+            }
+        }
+        if let Some((encoder, decoder)) = &mut self.zstd_stream {
+            let encode_start = Instant::now();
+            if let Ok(chunk) = encoder.encode_message(payload) {
+                self.streaming_zstd_encode_ns += encode_start.elapsed().as_nanos() as u64;
+                *self.streaming_zstd_bytes.get_or_insert(0) += chunk.len() as u64;
+                let decode_start = Instant::now();
+                let _ = decoder.decode_message(&chunk, FEATURE_PAYLOAD_ZSTD);
+                self.streaming_zstd_decode_ns += decode_start.elapsed().as_nanos() as u64;
+            }
+        }
+        if self.lz4_stream.is_none() {
+            if let (Ok(encoder), Ok(decoder)) = (
+                WireStreamEncoder::new(FEATURE_PAYLOAD_LZ4),
+                WireStreamDecoder::new(FEATURE_PAYLOAD_LZ4),
+            ) {
+                self.lz4_stream = Some((encoder, decoder));
+                self.streaming_lz4_bytes = Some(0);
+            }
+        }
+        if let Some((encoder, decoder)) = &mut self.lz4_stream {
+            let encode_start = Instant::now();
+            if let Ok(chunk) = encoder.encode_message(payload) {
+                self.streaming_lz4_encode_ns += encode_start.elapsed().as_nanos() as u64;
+                *self.streaming_lz4_bytes.get_or_insert(0) += chunk.len() as u64;
+                let decode_start = Instant::now();
+                let _ = decoder.decode_message(&chunk, FEATURE_PAYLOAD_LZ4);
+                self.streaming_lz4_decode_ns += decode_start.elapsed().as_nanos() as u64;
+            }
+        }
+    }
 }
 
 struct DuplexTransport {
@@ -594,6 +670,9 @@ impl Transport for DuplexTransport {
         self.metrics
             .compress_decode_ns
             .set(self.metrics.compress_decode_ns.get() + measurement.compress_decode_ns);
+        if let Some(payload) = measurement.raw_payload.as_deref() {
+            self.metrics.codec_probe.borrow_mut().record(payload);
+        }
         self.outbound.borrow_mut().push_back(message);
         Ok(())
     }
@@ -1363,6 +1442,7 @@ fn run_connect_and_subscribe(
     } else {
         alloc_snapshot.bytes as f64 / rows_materialized as f64
     };
+    let server_to_client_probe = client_relay.right_to_left.codec_probe.borrow();
     RunSummary {
         wall_ms: start.elapsed().as_millis(),
         connect_ms,
@@ -1379,6 +1459,18 @@ fn run_connect_and_subscribe(
         server_to_client_compress_encode_us: client_relay.right_to_left.compress_encode_ns.get()
             / 1_000,
         server_to_client_compress_decode_us: client_relay.right_to_left.compress_decode_ns.get()
+            / 1_000,
+        server_to_client_raw_payload_bytes: server_to_client_probe.raw_bytes,
+        server_to_client_per_message_zstd_bytes: server_to_client_probe.per_message_zstd_bytes,
+        server_to_client_streaming_zstd_bytes: server_to_client_probe.streaming_zstd_bytes,
+        server_to_client_streaming_zstd_encode_us: server_to_client_probe.streaming_zstd_encode_ns
+            / 1_000,
+        server_to_client_streaming_zstd_decode_us: server_to_client_probe.streaming_zstd_decode_ns
+            / 1_000,
+        server_to_client_streaming_lz4_bytes: server_to_client_probe.streaming_lz4_bytes,
+        server_to_client_streaming_lz4_encode_us: server_to_client_probe.streaming_lz4_encode_ns
+            / 1_000,
+        server_to_client_streaming_lz4_decode_us: server_to_client_probe.streaming_lz4_decode_ns
             / 1_000,
         client_to_relay_messages: client_relay.left_to_right.messages.get(),
         relay_to_core_messages: relay_core.left_to_right.messages.get(),
@@ -1775,6 +1867,38 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         json!(summary.server_to_client_compress_decode_us),
     );
     fields.insert(
+        "server_to_client_raw_payload_bytes".to_owned(),
+        json!(summary.server_to_client_raw_payload_bytes),
+    );
+    fields.insert(
+        "server_to_client_per_message_zstd_bytes".to_owned(),
+        json!(summary.server_to_client_per_message_zstd_bytes),
+    );
+    fields.insert(
+        "server_to_client_streaming_zstd_bytes".to_owned(),
+        json!(summary.server_to_client_streaming_zstd_bytes),
+    );
+    fields.insert(
+        "server_to_client_streaming_zstd_encode_us".to_owned(),
+        json!(summary.server_to_client_streaming_zstd_encode_us),
+    );
+    fields.insert(
+        "server_to_client_streaming_zstd_decode_us".to_owned(),
+        json!(summary.server_to_client_streaming_zstd_decode_us),
+    );
+    fields.insert(
+        "server_to_client_streaming_lz4_bytes".to_owned(),
+        json!(summary.server_to_client_streaming_lz4_bytes),
+    );
+    fields.insert(
+        "server_to_client_streaming_lz4_encode_us".to_owned(),
+        json!(summary.server_to_client_streaming_lz4_encode_us),
+    );
+    fields.insert(
+        "server_to_client_streaming_lz4_decode_us".to_owned(),
+        json!(summary.server_to_client_streaming_lz4_decode_us),
+    );
+    fields.insert(
         "client_to_relay_messages".to_owned(),
         json!(summary.client_to_relay_messages),
     );
@@ -1912,6 +2036,7 @@ struct EncodedMessageMeasurement {
     bytes: u64,
     compress_encode_ns: u64,
     compress_decode_ns: u64,
+    raw_payload: Option<Vec<u8>>,
 }
 
 fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasurement {
@@ -1920,8 +2045,10 @@ fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasureme
             bytes: 0,
             compress_encode_ns: 0,
             compress_decode_ns: 0,
+            raw_payload: None,
         };
     };
+    let raw_payload = Some(bytes.clone());
     let features = current_wire_features();
     let encode_start = Instant::now();
     let compressed = compress_sync_payload(bytes, features);
@@ -1935,12 +2062,14 @@ fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasureme
                 bytes: compressed.len() as u64,
                 compress_encode_ns: encode_ns,
                 compress_decode_ns: decode_ns,
+                raw_payload,
             }
         }
         Err(_) => EncodedMessageMeasurement {
             bytes: 0,
             compress_encode_ns: encode_ns,
             compress_decode_ns: 0,
+            raw_payload,
         },
     }
 }
