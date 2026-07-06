@@ -7,7 +7,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
@@ -276,6 +276,33 @@ impl TestServer {
             }
         )
     }
+
+    #[cfg(unix)]
+    fn send_sigterm(&mut self) {
+        let status = Command::new("kill")
+            .args(["-TERM", &self.process.id().to_string()])
+            .status()
+            .expect("send SIGTERM to jazz-tools server");
+
+        assert!(status.success(), "kill -TERM should succeed: {status}");
+    }
+
+    async fn wait_for_exit(&mut self, timeout: Duration) -> ExitStatus {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        while tokio::time::Instant::now() < deadline {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-tools server") {
+                return status;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        panic!(
+            "jazz-tools server did not exit within {timeout:?}{}",
+            self.process_output_summary()
+        );
+    }
 }
 
 impl Drop for TestServer {
@@ -327,6 +354,27 @@ async fn test_server_health_check_in_memory_does_not_create_data_dir() {
     assert!(
         !server.configured_data_dir.exists(),
         "--in-memory should not create the configured data directory"
+    );
+}
+
+#[cfg(unix)]
+/// Contract: a production `jazz-tools server` process exits cleanly when the
+/// orchestrator starts controlled termination with SIGTERM.
+///
+/// Actors: alice represents Kubernetes or another process supervisor; server is
+/// the spawned `jazz-tools` process.
+///
+/// alice --SIGTERM--> server --controlled shutdown--> exit status 0
+#[tokio::test]
+async fn test_server_exits_successfully_on_sigterm() {
+    let mut server = TestServer::start(0).await;
+
+    server.send_sigterm();
+
+    let status = server.wait_for_exit(Duration::from_secs(10)).await;
+    assert!(
+        status.success(),
+        "SIGTERM should trigger controlled shutdown and a clean process exit, got {status}"
     );
 }
 
