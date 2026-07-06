@@ -3097,15 +3097,7 @@ where
             if incoming.contains(&version_ref) {
                 continue;
             }
-            let has_body = self
-                .query_versions_for_tx(tx_id)?
-                .into_iter()
-                .any(|version| {
-                    version.table() == table.as_str()
-                        && version.row_uuid() == row_uuid
-                        && version.tx_time() == tx_id.time
-                        && self.node_for_alias(version.tx_node_alias()) == Some(tx_id.node)
-                });
+            let has_body = self.local_version_row_for_ref(&version_ref)?.is_some();
             if !has_body {
                 missing.insert(version_ref);
             } else if let Some(version) = self.local_version_record_for_ref(&version_ref)? {
@@ -3151,13 +3143,28 @@ where
         &mut self,
         version_ref: &RowVersionRef,
     ) -> Result<Option<VersionRecord>, Error> {
-        for version in self.query_versions_for_tx(version_ref.tx_id())? {
-            if version.table() == version_ref.table.as_str()
-                && version.row_uuid() == version_ref.row_uuid
-                && version.tx_time() == version_ref.tx_time
-                && self.node_for_alias(version.tx_node_alias()) == Some(version_ref.tx_node_id)
-            {
-                return self.version_record_from_row(&version).map(Some);
+        let Some(version) = self.local_version_row_for_ref(version_ref)? else {
+            return Ok(None);
+        };
+        self.version_record_from_row(&version).map(Some)
+    }
+
+    fn local_version_row_for_ref(
+        &mut self,
+        version_ref: &RowVersionRef,
+    ) -> Result<Option<VersionRow>, Error> {
+        let Some(tx_node_alias) = self.node_aliases.get(&version_ref.tx_node_id).copied() else {
+            return Ok(None);
+        };
+        for layer in [VersionLayer::Content, VersionLayer::Deletion] {
+            if let Some(version) = self.query_version_by_alias(
+                &version_ref.table,
+                version_ref.row_uuid,
+                layer,
+                version_ref.tx_time,
+                tx_node_alias,
+            )? {
+                return Ok(Some(version));
             }
         }
         Ok(None)
