@@ -1,12 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  createDb,
-  fetchSchemaHashes,
-  publishStoredPermissions,
-  type QueryBuilder,
-  type TableProxy,
-} from "../../src/runtime/index.js";
-import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
+import { createDb, type QueryBuilder, type TableProxy } from "../../src/runtime/index.js";
+import { deploy } from "../../src/dev/catalogue.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
 import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
@@ -88,29 +82,11 @@ describe("Db auth refresh browser integration", () => {
       }),
     );
 
-    const { hash: publishedSchemaHash } = await publishStoredSchema(serverUrl, {
+    await deploy({
       appId,
+      serverUrl,
       adminSecret,
       schema,
-    });
-
-    let latestSchemaHash: string | null = publishedSchemaHash;
-    await waitForCondition(
-      async () => {
-        const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
-        latestSchemaHash = hashes.at(-1) ?? publishedSchemaHash;
-        return latestSchemaHash !== null;
-      },
-      20_000,
-      "expected at least one published schema hash before publishing test permissions",
-    );
-
-    const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
-
-    await publishStoredPermissions(serverUrl, {
-      appId,
-      adminSecret,
-      schemaHash: latestSchemaHash!,
       permissions: {
         todos: {
           select: { using: { type: "True" } },
@@ -122,7 +98,6 @@ describe("Db auth refresh browser integration", () => {
           delete: { using: { type: "True" } },
         },
       },
-      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
     });
 
     const marker = `queued-after-auth-loss-${Date.now()}`;
