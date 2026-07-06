@@ -739,6 +739,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 out.len()
             )));
         }
+        self.evict_pages_if_needed(Some(head_page_id));
         Ok(out)
     }
 
@@ -807,7 +808,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
                 BTreeError::Corrupt("overflow extent page id overflow".to_string())
             })?;
-            if self.dirty_pages.contains(&page_id) {
+            if self.dirty_pages.contains(&page_id) || self.wal_pages.contains(&page_id) {
                 return Ok(true);
             }
         }
@@ -898,7 +899,9 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.blob_pages.insert(page_id);
             self.touch_page(page_id);
         }
-        self.evict_pages_if_needed(Some(head_page_id));
+        // The caller reads the whole overflow extent immediately after this
+        // load. Evicting here can drop tail pages before that read observes
+        // them when the extent is larger than the cache budget.
         Ok(())
     }
 
@@ -2116,6 +2119,18 @@ mod tests {
             .expect("corrupt slot bytes");
     }
 
+    fn deterministic_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            out.push((state >> 32) as u8);
+        }
+        out
+    }
+
     #[test]
     fn interleaved_ops_match_btreemap_model() {
         let file = MemoryFile::new();
@@ -2745,6 +2760,45 @@ mod tests {
                 tree.pages.contains_key(&page_id),
                 "dirty page {} was evicted",
                 page_id
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reopened_overflow_values_survive_cache_pressure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("overflow.opfs");
+        let options = BTreeOptions {
+            page_size: 4 * 1024,
+            cache_bytes: 4 * 1024 * 3,
+            overflow_threshold: 256,
+            pin_internal_pages: true,
+            read_coalesce_pages: 1,
+        };
+        let value_len = 24 * 1024;
+        let row_count = 512usize;
+
+        {
+            let file = crate::file::StdFile::open(&path).expect("open file");
+            let mut tree = OpfsBTree::open(file, options).expect("open tree");
+            for row in 0..row_count {
+                let key = format!("row/{row:04}");
+                let value = deterministic_bytes(row as u64, value_len);
+                tree.put(key.as_bytes(), &value).expect("put overflow row");
+            }
+            tree.checkpoint().expect("checkpoint");
+        }
+
+        let file = crate::file::StdFile::open(&path).expect("reopen file");
+        let mut tree = OpfsBTree::open(file, options).expect("reopen tree");
+        for row in 0..row_count {
+            let key = format!("row/{row:04}");
+            let expected = deterministic_bytes(row as u64, value_len);
+            assert_eq!(
+                tree.get(key.as_bytes()).expect("get overflow row"),
+                Some(expected),
+                "row {row} changed across reopen"
             );
         }
     }
