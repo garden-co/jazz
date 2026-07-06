@@ -388,7 +388,20 @@ where
                 }
             }
             if needs_storage_fallback && allow_storage_witness_fallback {
-                tx_versions_cache.insert(*tx_id, self.query_versions_for_tx(*tx_id)?);
+                let stored_tx = self
+                    .query_transaction_memo(*tx_id, &mut context)?
+                    .ok_or(Error::MissingTransaction(*tx_id))?;
+                let fallback_versions =
+                    if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
+                        self.query_versions_for_tx(*tx_id)?
+                    } else {
+                        self.query_versions_for_tx_rows_by_alias(
+                            *tx_id,
+                            stored_tx.node_alias,
+                            wanted_rows,
+                        )?
+                    };
+                tx_versions_cache.insert(*tx_id, fallback_versions);
             }
             let tx_versions = tx_versions_cache
                 .get_mut(tx_id)

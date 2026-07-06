@@ -388,6 +388,85 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(out)
     }
 
+    pub fn range_reverse(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KvPair>, BTreeError> {
+        let _span = tracing::trace_span!("OpfsBTree::range_reverse", limit).entered();
+        if limit == 0 || start >= end {
+            return Ok(Vec::new());
+        }
+
+        let page_size = self.options.page_size;
+        let mut out = Vec::with_capacity(limit.min(1024));
+        let mut upper = end.to_vec();
+        let mut staged: Vec<(Vec<u8>, StagedValue)> = Vec::new();
+
+        while out.len() < limit {
+            let Some(page_id) = self.leaf_at_or_before_key(&upper)? else {
+                break;
+            };
+            let page = {
+                let raw = self.ensure_page_loaded(page_id)?;
+                decode_page(raw, page_size)?
+            };
+            let Page::Leaf { entries, .. } = page else {
+                return Err(BTreeError::Corrupt(format!(
+                    "expected leaf page {}, found non-leaf during reverse range",
+                    page_id
+                )));
+            };
+
+            staged.clear();
+            let remaining = limit.saturating_sub(out.len());
+            for (key, value) in entries.into_iter().rev() {
+                if key.as_slice() >= upper.as_slice() {
+                    continue;
+                }
+                if key.as_slice() < start {
+                    return Ok(out);
+                }
+                let staged_value = match value {
+                    ValueCell::Inline(value) => StagedValue::Inline(value),
+                    ValueCell::Overflow {
+                        head_page_id,
+                        total_len,
+                    } => StagedValue::Overflow {
+                        head_page_id,
+                        total_len: total_len as usize,
+                    },
+                };
+                staged.push((key, staged_value));
+                if staged.len() == remaining {
+                    break;
+                }
+            }
+
+            let Some((next_upper, _)) = staged.last() else {
+                break;
+            };
+            upper = next_upper.clone();
+
+            for (key, value) in staged.drain(..) {
+                let value = match value {
+                    StagedValue::Inline(value) => value,
+                    StagedValue::Overflow {
+                        head_page_id,
+                        total_len,
+                    } => self.read_overflow_value(head_page_id, total_len)?,
+                };
+                out.push((key, value));
+                if out.len() == limit {
+                    return Ok(out);
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
         let _span = tracing::debug_span!(
             "OpfsBTree::checkpoint",
@@ -1058,6 +1137,79 @@ impl<F: SyncFile> OpfsBTree<F> {
         let leaf = self.find_leaf_page_id(key)?;
         self.last_leaf_hint = leaf;
         Ok(leaf)
+    }
+
+    fn leaf_at_or_before_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        let mut current = match self.root_page_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let mut predecessor_subtrees = Vec::new();
+        let page_size = self.options.page_size;
+
+        loop {
+            let page = {
+                let raw = self.ensure_page_loaded(current)?;
+                decode_page(raw, page_size)?
+            };
+            match page {
+                Page::Leaf { entries, .. } => {
+                    if entries
+                        .last()
+                        .is_some_and(|(entry_key, _)| entry_key.as_slice() < key)
+                    {
+                        return Ok(Some(current));
+                    }
+                    while let Some(subtree) = predecessor_subtrees.pop() {
+                        if let Some(leaf) = self.rightmost_leaf(subtree)? {
+                            return Ok(Some(leaf));
+                        }
+                    }
+                    return Ok(None);
+                }
+                Page::Internal { keys, children } => {
+                    let idx = child_index(&keys, key);
+                    if idx > 0 {
+                        predecessor_subtrees.push(children[idx - 1]);
+                    }
+                    current = *children.get(idx).ok_or_else(|| {
+                        BTreeError::Corrupt("internal child index out of bounds".to_string())
+                    })?;
+                }
+                other => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "unexpected {:?} page {} in reverse range path",
+                        other, current
+                    )));
+                }
+            }
+        }
+    }
+
+    fn rightmost_leaf(&mut self, mut current: PageId) -> Result<Option<PageId>, BTreeError> {
+        let page_size = self.options.page_size;
+        loop {
+            let page = {
+                let raw = self.ensure_page_loaded(current)?;
+                decode_page(raw, page_size)?
+            };
+            match page {
+                Page::Leaf { entries, .. } => {
+                    return Ok((!entries.is_empty()).then_some(current));
+                }
+                Page::Internal { children, .. } => {
+                    current = *children.last().ok_or_else(|| {
+                        BTreeError::Corrupt("internal page without children".to_string())
+                    })?;
+                }
+                other => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "unexpected {:?} page {} in rightmost leaf path",
+                        other, current
+                    )));
+                }
+            }
+        }
     }
 
     fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<&[u8], BTreeError> {
@@ -2039,6 +2191,7 @@ fn write_slot_unchecked<F: SyncFile>(
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::Instant;
 
     use super::*;
     use crate::file::{MemoryFile, SyncFile};
@@ -2328,6 +2481,39 @@ mod tests {
 
         tree.delete(b"b").expect("delete b");
         assert_eq!(tree.get(b"b").expect("get b after delete"), None);
+    }
+
+    #[test]
+    fn reverse_range_streams_in_reverse_order_with_forward_order_cost() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        for i in 0..10_000u32 {
+            let key = format!("k{i:05}");
+            let value = format!("v{i:05}");
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put");
+        }
+
+        let forward_start = Instant::now();
+        let forward = tree.range(b"k00000", b"k10000", usize::MAX).unwrap();
+        let forward_elapsed = forward_start.elapsed();
+
+        let reverse_start = Instant::now();
+        let reverse = tree
+            .range_reverse(b"k00000", b"k10000", usize::MAX)
+            .unwrap();
+        let reverse_elapsed = reverse_start.elapsed();
+
+        let mut expected = forward.clone();
+        expected.reverse();
+        assert_eq!(reverse, expected);
+        assert_eq!(forward.len(), 10_000);
+
+        let forward_nanos = forward_elapsed.as_nanos().max(1);
+        let reverse_nanos = reverse_elapsed.as_nanos();
+        assert!(
+            reverse_nanos <= forward_nanos.saturating_mul(20),
+            "reverse scan should stay in the same order of magnitude as forward: forward={forward_elapsed:?}, reverse={reverse_elapsed:?}"
+        );
     }
 
     #[test]

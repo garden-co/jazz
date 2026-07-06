@@ -186,6 +186,25 @@ where
         Ok(())
     }
 
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        let start = self.encoded_key(cf, prefix)?;
+        let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
+        for (key, value) in self
+            .tree
+            .borrow_mut()
+            .range_reverse(&start, &end, usize::MAX)?
+        {
+            let (_, user_key) = key_codec::decode_column_family_key(&key)?;
+            visit(user_key, &value)?;
+        }
+        Ok(())
+    }
+
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         self.prevalidate_write_many(operations)?;
         let mut encoded_operations = Vec::with_capacity(operations.len());

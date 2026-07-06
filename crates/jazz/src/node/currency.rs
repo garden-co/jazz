@@ -224,6 +224,31 @@ where
         Ok(versions)
     }
 
+    pub(super) fn query_versions_for_tx_rows_by_alias(
+        &mut self,
+        tx_id: TxId,
+        tx_node_alias: NodeAlias,
+        rows: &BTreeSet<(String, RowUuid)>,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let mut versions = Vec::new();
+        for (table, row_uuid) in rows {
+            for layer in [VersionLayer::Content, VersionLayer::Deletion] {
+                if let Some(version) =
+                    self.query_version_by_alias(table, *row_uuid, layer, tx_id.time, tx_node_alias)?
+                {
+                    versions.push(version);
+                }
+            }
+        }
+        versions.sort_by(|left, right| {
+            left.table()
+                .cmp(right.table())
+                .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
+                .then_with(|| left.layer().cmp(&right.layer()))
+        });
+        Ok(versions)
+    }
+
     fn tx_version_scan_tables(&self) -> BTreeSet<String> {
         self.catalogue
             .schema
