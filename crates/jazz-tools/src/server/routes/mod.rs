@@ -29,10 +29,9 @@ use tower_http::trace::TraceLayer;
 use crate::server::ServerState;
 
 use http::{
-    admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
-    permissions_handler, permissions_head_handler, publish_migration_handler,
-    publish_permissions_handler, publish_schema_handler, schema_connectivity_handler,
-    schema_handler, schema_hashes_handler,
+    admin_subscription_introspection_handler, health_handler, permissions_handler,
+    permissions_head_handler, publish_migration_handler, publish_permissions_handler,
+    publish_schema_handler, schema_connectivity_handler, schema_handler, schema_hashes_handler,
 };
 use websocket::ws_handler;
 
@@ -84,7 +83,6 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
 
     Router::new()
         .route("/health", get(health_handler))
-        .route("/internal/shutdown", post(internal_shutdown_handler))
         .nest(&app_route_prefix, traced_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -210,21 +208,6 @@ mod tests {
         create_router(state)
     }
 
-    async fn post_internal_shutdown(
-        app: axum::Router,
-        admin_secret: Option<&str>,
-    ) -> axum::response::Response {
-        let mut builder = axum::http::Request::builder()
-            .method("POST")
-            .uri("/internal/shutdown");
-        if let Some(admin_secret) = admin_secret {
-            builder = builder.header("X-Jazz-Admin-Secret", admin_secret);
-        }
-        app.oneshot(builder.body(axum::body::Body::empty()).unwrap())
-            .await
-            .unwrap()
-    }
-
     fn test_app_id_text() -> String {
         AppId::from_name("test-app").to_string()
     }
@@ -341,93 +324,34 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn internal_shutdown_requires_configured_admin_secret() {
-        let auth_config = AuthConfig {
-            admin_secret: None,
-            allow_local_first_auth: true,
-            ..Default::default()
-        };
-        let state = ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build server without admin secret")
-            .state;
-
-        let response = post_internal_shutdown(make_test_router(state), Some("admin-secret")).await;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    async fn post_removed_internal_shutdown(app: axum::Router) -> axum::response::Response {
+        app.oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/internal/shutdown")
+                .header("X-Jazz-Admin-Secret", "admin-secret")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
-    async fn internal_shutdown_requires_admin_secret_header() {
-        let state = make_state_with_schema(Schema::new()).await;
-        let response = post_internal_shutdown(make_test_router(state), None).await;
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn internal_shutdown_rejects_wrong_admin_secret() {
-        let state = make_state_with_schema(Schema::new()).await;
-        let response = post_internal_shutdown(make_test_router(state), Some("wrong-secret")).await;
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn internal_shutdown_accepts_valid_admin_secret_and_marks_health_unhealthy() {
-        let state = make_state_with_schema(Schema::new()).await;
-        let app = make_test_router(state.clone());
-
-        let response = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("shutdown body");
-        let json: Value = serde_json::from_slice(&body).expect("shutdown json");
-        assert_eq!(json["status"].as_str(), Some("shutting_down"));
-
-        let repeated = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
-        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
-        let repeated_body = body::to_bytes(repeated.into_body(), usize::MAX)
-            .await
-            .expect("repeated shutdown body");
-        let repeated_json: Value = serde_json::from_slice(&repeated_body).expect("repeated json");
-        assert_eq!(
-            repeated_json["status"].as_str(),
-            Some("already_shutting_down")
-        );
-
-        let health = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/health")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let health_body = body::to_bytes(health.into_body(), usize::MAX)
-            .await
-            .expect("health body");
-        let health_json: Value = serde_json::from_slice(&health_body).expect("health json");
-        assert_eq!(health_json["status"].as_str(), Some("shutting_down"));
-        assert_eq!(health_json["phase"].as_str(), Some("shutting_down"));
-
-        assert_eq!(
-            state.shutdown.phase(),
-            crate::server::ShutdownPhase::ShuttingDown
-        );
-    }
-
-    #[tokio::test]
-    async fn shutdown_rejects_new_app_scoped_http_requests_but_keeps_internal_routes_available() {
+    async fn internal_shutdown_http_endpoint_is_not_routed() {
         let state = make_state_with_schema(Schema::new()).await;
         let app = make_test_router(state);
 
-        let shutdown = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
-        assert_eq!(shutdown.status(), StatusCode::ACCEPTED);
+        let response = post_removed_internal_shutdown(app).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_new_app_scoped_http_requests_but_keeps_health_available() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let app = make_test_router(state.clone());
+
+        state.shutdown.request_shutdown();
 
         let app_scoped = app
             .clone()
@@ -441,9 +365,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(app_scoped.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        let repeated = post_internal_shutdown(app.clone(), Some("admin-secret")).await;
-        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
 
         let health = app
             .oneshot(
