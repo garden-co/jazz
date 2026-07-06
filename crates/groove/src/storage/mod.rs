@@ -26,9 +26,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
 use crate::records::{OwnedRecord, Record, RecordDescriptor, Value as RecordValue, ValueType};
-use crate::window_codec::{
-    WindowRecord, WindowSchema, decode_window, encode_window, lookup_window,
-};
+use crate::window_codec::{WindowRecord, WindowSchema, decode_window, encode_window};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1044,7 +1042,7 @@ where
         }
         if let Some(value) = self.storage.get(self.column_family, key)? {
             if let Some(window) = decode_window_value(&value)? {
-                return self.lookup_window_record(window.codec, key);
+                return self.lookup_window_record(key, window.codec, key);
             }
             return Ok(Some(value));
         }
@@ -1070,7 +1068,7 @@ where
                     return Ok(());
                 };
                 if key <= window.max_key {
-                    found = self.lookup_window_record(window.codec, key)?;
+                    found = self.lookup_window_record(raw_key, window.codec, key)?;
                 }
                 Ok(())
             })?;
@@ -1159,10 +1157,16 @@ where
             .unwrap_or_default())
     }
 
-    fn lookup_window_record(&self, window: &[u8], key: &Key) -> Result<Option<Vec<u8>>, Error> {
-        let key_record = self.key_record_from_bytes(key)?;
-        let schema = self.window_schema()?;
-        Ok(lookup_window(&schema, window, &key_record)?.map(|record| record.value.into_raw()))
+    fn lookup_window_record(
+        &self,
+        window_key: &[u8],
+        window: &[u8],
+        key: &Key,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        Ok(self
+            .decode_window_records_cached(window_key, window)?
+            .into_iter()
+            .find_map(|(record_key, value)| (record_key == key).then_some(value)))
     }
 
     fn decode_window_records(&self, window: &[u8]) -> Result<Vec<KeyValue>, Error> {
