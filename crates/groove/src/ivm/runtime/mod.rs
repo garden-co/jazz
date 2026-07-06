@@ -382,7 +382,6 @@ impl IvmRuntime {
     {
         let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
-        let mut eval_memo = HashMap::default();
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
@@ -393,7 +392,14 @@ impl IvmRuntime {
             current_tick: self.current_tick,
             operator_states: &mut self.operator_states,
             arrangement_states: &mut self.arrangement_states,
-            eval_memo: &mut eval_memo,
+            // Snapshot hydration is evaluated at the runtime's current
+            // logical frontier. If a canonical fragment has already been
+            // hydrated at this frontier, reusing its memoized output is an
+            // attach/probe operation, not an accumulation over stale state:
+            // any table or binding change that could invalidate it advances
+            // `current_tick`, and public ticks clear this memo before the next
+            // frontier is used.
+            eval_memo: &mut self.eval_memo,
             node_meta: &mut self.node_meta,
             storage: Some(storage),
             context: EvalContext::root_snapshot(),
