@@ -60,5 +60,12 @@ export {
   type FileWriteOptions,
 } from "./file-storage.js";
 export { RowChangeKind, type RowDelta, type SubscriptionDelta } from "./subscription-manager.js";
+export {
+  InProcessSubscriptionChannel,
+  createInProcessSubscriptionChannel,
+  type SubscriptionChannel,
+  type SubscriptionChannelCallback,
+  type SubscriptionChannelTarget,
+} from "./subscription-channel.js";
 export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";

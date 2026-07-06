@@ -2,7 +2,11 @@ import { type Accessor } from "solid-js";
 import type { AuthState } from "../runtime/auth-state.js";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
-import { createExtensionJazzClient, createJazzClient } from "../web/create-jazz-client.js";
+import {
+  createExtensionJazzClient,
+  createJazzClient,
+  type JazzClientConfig,
+} from "../web/create-jazz-client.js";
 import {
   JazzClientFactory,
   createSolidJazzClientInternal,
@@ -54,7 +58,8 @@ const makeCreateSolidJazzClient =
   };
 
 export const createSolidJazzClient = makeCreateSolidJazzClient({
-  factory: createJazzClient,
+  factory: (config) =>
+    createJazzClient({ ...config, asyncSubscriptionsOnly: false } as JazzClientConfig<false>),
 });
 export const createSolidExtensionJazzClient = makeCreateSolidJazzClient({
   factory: createExtensionJazzClient,

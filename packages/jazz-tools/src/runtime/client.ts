@@ -143,6 +143,12 @@ export interface QueryExecutionOptions {
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
+  /**
+   * In dual-mode clients, route this subscription over the API-level
+   * async subscription channel instead of the local main-thread node.
+   * Queries and writes are unaffected.
+   */
+  subscriptionMode?: "sync" | "async";
 }
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {

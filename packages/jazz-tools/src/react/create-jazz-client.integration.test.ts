@@ -54,7 +54,10 @@ describe("react/create-jazz-client integration", () => {
     let client: JazzClient | null = null;
 
     try {
-      client = await createJazzClient({ appId: makeAppId("mutation-query") });
+      client = await createJazzClient({
+        appId: makeAppId("mutation-query"),
+        asyncSubscriptionsOnly: false,
+      });
 
       const { value: inserted } = await client.db.insert(todosTable, {
         title: "buy milk",
@@ -79,7 +82,10 @@ describe("react/create-jazz-client integration", () => {
     const externalId = "550e8400-e29b-41d4-a716-446655440000";
 
     try {
-      client = await createJazzClient({ appId: makeAppId("external-id") });
+      client = await createJazzClient({
+        appId: makeAppId("external-id"),
+        asyncSubscriptionsOnly: false,
+      });
 
       const { value: inserted } = await client.db.insert(
         todosTable,
@@ -105,7 +111,10 @@ describe("react/create-jazz-client integration", () => {
     let client: JazzClient | null = null;
 
     try {
-      client = await createJazzClient({ appId: makeAppId("shutdown") });
+      client = await createJazzClient({
+        appId: makeAppId("shutdown"),
+        asyncSubscriptionsOnly: false,
+      });
       await client.db.insert(todosTable, { title: "shutdown-check", done: false });
       await client.db.all(allTodosQuery);
 
