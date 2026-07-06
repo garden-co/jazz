@@ -7,10 +7,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::TryRecvError;
-use std::time::Instant;
 
 use groove::ivm::MultisinkSubscription;
 use groove::storage::OrderedKvStorage;
+use web_time::Instant;
 
 use crate::ids::{AuthorId, RowUuid};
 use crate::node::content_store::Extent;

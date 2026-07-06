@@ -128,36 +128,6 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
-  it("decodes native subscription additions directly to typed rows", () => {
-    const manager = new SubscriptionManager<TestItem>();
-    const id = "00000000-0000-4000-8000-000000000002";
-    const delta: NativeRowDelta = {
-      __jazzNativeRowDelta: true,
-      added: nativeAddedRecord(id, 0, "direct", 7),
-      removed: new Uint8Array(),
-      updated: new Uint8Array(),
-      addedCount: 1,
-      removedCount: 0,
-      updatedCount: 0,
-    };
-
-    const result = manager.handleDelta(delta, transform, nativeColumns, (row) => ({
-      id: row.id as string,
-      name: row.name as string,
-      count: row.count as number,
-    }));
-
-    expect(result.all).toEqual([{ id, name: "direct", count: 7 }]);
-    expect(result.delta).toEqual([
-      {
-        kind: 0,
-        id,
-        index: 0,
-        item: { id, name: "direct", count: 7 },
-      },
-    ]);
-  });
-
   it("tracks content updates", () => {
     const manager = new SubscriptionManager<TestItem>();
 

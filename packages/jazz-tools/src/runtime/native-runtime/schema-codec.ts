@@ -79,6 +79,7 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
       column.string(columnSpec.name);
       writeValueType(column, columnValueType(columnSpec));
       writeLargeValueKind(column, columnSpec);
+      column.none();
     }, definition.columns.length);
     table.map(definition.columns.filter((column) => column.references).length);
     for (const column of definition.columns) {
@@ -213,6 +214,7 @@ function writePolicyQuery(
     (reachable, index) => writePolicyReachable(reachable, query.reachable[index]!),
     query.reachable.length,
   );
+  writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.none();
@@ -390,6 +392,7 @@ function writePolicyBranch(writer: PostcardWriter, branch: PolicyQueryShape): vo
     (reachable, index) => writePolicyReachable(reachable, branch.reachable[index]!),
     branch.reachable.length,
   );
+  writer.vec(() => undefined, 0);
 }
 
 function writePolicyReachable(writer: PostcardWriter, reachable: PolicyReachable): void {
@@ -411,6 +414,8 @@ function writePolicyReachable(writer: PostcardWriter, reachable: PolicyReachable
     (filter, index) => writePolicyPredicate(filter, edgeFilters[index]!),
     edgeFilters.length,
   );
+  // RecursionBound::MaxDepth(maxDepth)
+  writer.u64(1);
   writer.u64(reachable.maxDepth);
   if (reachable.seed) {
     writer.some((seed) => {
