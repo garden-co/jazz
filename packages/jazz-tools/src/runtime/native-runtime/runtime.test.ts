@@ -3709,6 +3709,7 @@ function readPreparedQueryTail(
     reader.readVec(() => undefined); // joins
     reader.readVec(() => undefined); // policy_branches
     reader.readVec(() => undefined); // reachable
+    reader.readVec(() => undefined); // inherits
     reader.readVec(() => undefined); // includes
     reader.readVec(() => undefined); // array_subqueries
   }
@@ -3735,6 +3736,7 @@ function readPreparedSelect(query: Uint8Array): string[] | undefined {
     reader.u64();
     reader.string();
   });
+  reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
@@ -3813,6 +3815,7 @@ function readSchemaPolicyBranches(
       columnReader.string();
       skipSchemaValueType(columnReader);
       columnReader.option(() => undefined);
+      columnReader.option(() => undefined);
     });
     const referenceCount = tableReader.u64();
     for (let index = 0; index < referenceCount; index += 1) {
@@ -3855,10 +3858,11 @@ function readSchemaColumnLargeValues(
       const largeValue =
         columnReader.option((kindReader) => {
           const tag = kindReader.u64();
-          if (tag === 0) return "Text";
-          if (tag === 1) return "Blob";
+          if (tag === 0) return "Text" as const;
+          if (tag === 1) return "Blob" as const;
           throw new Error(`unsupported large value kind ${tag}`);
         }) ?? null;
+      columnReader.option(() => undefined);
       return { name, largeValue };
     });
     const referenceCount = tableReader.u64();
@@ -3897,6 +3901,7 @@ function readSchemaTableMetadata(
     tableReader.readVec((columnReader) => {
       columnReader.string();
       skipSchemaValueType(columnReader);
+      columnReader.option(() => undefined);
       columnReader.option(() => undefined);
     });
     const referenceCount = tableReader.u64();
@@ -3946,6 +3951,7 @@ function readPolicyQueryForTest(reader: PostcardReader): {
   reader.readVec(skipPolicyReachableForTest);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
   reader.option(() => undefined);
   reader.readVec(() => undefined);
   reader.option(() => undefined);
@@ -3964,6 +3970,7 @@ function readSchemaSelectPolicyReachables(
     tableReader.readVec((columnReader) => {
       columnReader.string();
       skipSchemaValueType(columnReader);
+      columnReader.option(() => undefined);
       columnReader.option(() => undefined);
     });
     const referenceCount = tableReader.u64();
@@ -3999,6 +4006,7 @@ function readPolicyQueryWithReachablesForTest(reader: PostcardReader): {
   const reachables = reader.readVec(readPolicyReachableForTest);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
   reader.option(() => undefined);
   reader.readVec(() => undefined);
   reader.option(() => undefined);
@@ -4011,6 +4019,7 @@ function readPolicyBranchForTest(reader: PostcardReader): TestPolicyBranch {
   const filters = reader.readVec(readPolicyPredicateForTest);
   const joins = reader.readVec(readPolicyJoinForTest);
   reader.readVec(skipPolicyReachableForTest);
+  reader.readVec(() => undefined);
   return { filters, joins };
 }
 
@@ -4048,7 +4057,8 @@ function readPolicyReachableForTest(reader: PostcardReader): TestPolicyReachable
   const edgeMemberColumn = reader.string();
   const edgeParentColumn = reader.string();
   const edgeFilters = reader.readVec(readPolicyPredicateForTest);
-  const maxDepth = reader.u64();
+  const boundTag = reader.u64();
+  const maxDepth = boundTag === 1 ? reader.u64() : 0;
   const seed = reader.option((seedReader) => ({
     table: seedReader.string(),
     userColumn: seedReader.option((userColumnReader) => userColumnReader.string()),

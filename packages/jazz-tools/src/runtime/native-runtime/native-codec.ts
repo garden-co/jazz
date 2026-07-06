@@ -89,8 +89,12 @@ export function tableSchema(tableName: string, descriptor: DescriptorField[]): U
       column.string(columnSpec.name ?? "");
       writeValueType(column, columnSpec.valueType);
       column.none();
+      column.none();
     }, descriptor.length);
     table.map(0);
+    table.none();
+    table.none();
+    table.none();
     table.none();
     table.none();
     table.set(0);
@@ -238,6 +242,7 @@ export function queryWithPredicates(
     const predicate = predicates[index]!;
     writePredicate(filter, predicate);
   }, predicates.length);
+  writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);

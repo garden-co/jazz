@@ -15,7 +15,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::task::{Context, Poll, Waker};
-use std::time::Instant;
 
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_channel::oneshot;
@@ -23,6 +22,7 @@ use futures_core::Stream;
 use groove::records::Value;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
+use web_time::Instant;
 
 /// Maximum history-codec windows built during one outer `Db::tick` post-tick
 /// maintenance pass.
