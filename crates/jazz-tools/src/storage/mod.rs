@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use smolset::SmolSet;
 
 use crate::batch_fate::{
-    BatchFate, CapturedFrontierMember, LocalBatchRecord, SealedBatchSubmission,
+    BatchFate, CapturedFrontierMember, LocalBatchMember, LocalBatchRecord, SealedBatchSubmission,
 };
 use crate::catalogue::CatalogueEntry;
 use crate::digest::Digest32;
@@ -155,6 +155,7 @@ const ROW_LOCATOR_TABLE: &str = "__row_locator";
 const VISIBLE_ROW_TABLE_LOCATOR_TABLE: &str = "__visible_row_table_locator";
 const HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE: &str = "__history_row_batch_table_locator";
 const LOCAL_BATCH_RECORD_TABLE: &str = "__local_batch_record";
+const LOCAL_BATCH_ROW_INDEX_TABLE: &str = "__local_batch_row_index";
 const AUTHORITATIVE_BATCH_SETTLEMENT_TABLE: &str = "__authoritative_batch_settlement";
 const ACKNOWLEDGED_REJECTED_BATCH_TABLE: &str = "__acknowledged_rejected_batch";
 const SEALED_BATCH_SUBMISSION_TABLE: &str = "__sealed_batch_submission";
@@ -177,6 +178,7 @@ const SEALED_BATCH_SUBMISSION_FORMAT_V2: i32 = 2;
 const AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2: i32 = 2;
 const ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1: i32 = 1;
 const LOCAL_BATCH_RECORD_FORMAT_V3: i32 = 3;
+const LOCAL_BATCH_ROW_INDEX_FORMAT_V1: i32 = 1;
 
 pub type BranchOrd = i32;
 
@@ -187,6 +189,7 @@ const STORAGE_KIND_BRANCH_ORD_BY_NAME: &str = "branch_ord_by_name";
 const STORAGE_KIND_BRANCH_NAME_BY_ORD: &str = "branch_name_by_ord";
 const STORAGE_KIND_BRANCH_ORD_META: &str = "branch_ord_meta";
 const STORAGE_KIND_LOCAL_BATCH_RECORD: &str = "local_batch_record";
+const STORAGE_KIND_LOCAL_BATCH_ROW_INDEX: &str = "local_batch_row_index";
 const STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT: &str = "authoritative_batch_settlement";
 const STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH: &str = "acknowledged_rejected_batch";
 const STORAGE_KIND_SEALED_BATCH_SUBMISSION: &str = "sealed_batch_submission";
@@ -1073,6 +1076,7 @@ fn supported_storage_format_version(storage_kind: &str) -> Result<i32, StorageEr
         STORAGE_KIND_BRANCH_NAME_BY_ORD => Ok(BRANCH_NAME_BY_ORD_FORMAT_V1),
         STORAGE_KIND_BRANCH_ORD_META => Ok(BRANCH_ORD_META_FORMAT_V1),
         STORAGE_KIND_LOCAL_BATCH_RECORD => Ok(LOCAL_BATCH_RECORD_FORMAT_V3),
+        STORAGE_KIND_LOCAL_BATCH_ROW_INDEX => Ok(LOCAL_BATCH_ROW_INDEX_FORMAT_V1),
         STORAGE_KIND_SEALED_BATCH_SUBMISSION => Ok(SEALED_BATCH_SUBMISSION_FORMAT_V2),
         STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT => Ok(AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2),
         STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH => Ok(ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1),
@@ -1668,6 +1672,26 @@ fn local_batch_record_storage_descriptor_with_branch_ords() -> RowDescriptor {
                         ColumnDescriptor::new("object_id", ColumnType::Bytea),
                         ColumnDescriptor::new("table_name", ColumnType::Text),
                         ColumnDescriptor::new("branch_ord", ColumnType::Integer),
+                        ColumnDescriptor::new("schema_hash", ColumnType::Bytea),
+                        ColumnDescriptor::new("row_digest", ColumnType::Bytea),
+                    ])),
+                }),
+            },
+        ),
+    ])
+}
+
+fn local_batch_row_index_storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+        ColumnDescriptor::new(
+            "members",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("table_name", ColumnType::Text),
+                        ColumnDescriptor::new("branch_name", ColumnType::Text),
                         ColumnDescriptor::new("schema_hash", ColumnType::Bytea),
                         ColumnDescriptor::new("row_digest", ColumnType::Bytea),
                     ])),
@@ -2714,6 +2738,199 @@ fn encode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
         ],
     )
     .map_err(|err| StorageError::IoError(format!("encode local batch record: {err}")))
+}
+
+fn compare_local_batch_member_identity(
+    left: &LocalBatchMember,
+    right: &LocalBatchMember,
+) -> std::cmp::Ordering {
+    left.object_id
+        .uuid()
+        .as_bytes()
+        .cmp(right.object_id.uuid().as_bytes())
+        .then_with(|| left.table_name.cmp(&right.table_name))
+        .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
+}
+
+fn compare_local_batch_member_version(
+    left: &LocalBatchMember,
+    right: &LocalBatchMember,
+) -> std::cmp::Ordering {
+    left.schema_hash
+        .as_bytes()
+        .cmp(right.schema_hash.as_bytes())
+        .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
+}
+
+pub(crate) fn upsert_local_batch_member(
+    members: &mut Vec<LocalBatchMember>,
+    member: LocalBatchMember,
+) {
+    match members.binary_search_by(|existing| {
+        compare_local_batch_member_identity(existing, &member)
+            .then_with(|| compare_local_batch_member_version(existing, &member))
+    }) {
+        Ok(index) => {
+            members[index] = member;
+        }
+        Err(index) => {
+            if index > 0
+                && compare_local_batch_member_identity(&members[index - 1], &member)
+                    == std::cmp::Ordering::Equal
+            {
+                members[index - 1] = member;
+            } else if index < members.len()
+                && compare_local_batch_member_identity(&members[index], &member)
+                    == std::cmp::Ordering::Equal
+            {
+                members[index] = member;
+            } else {
+                members.insert(index, member);
+            }
+        }
+    }
+}
+
+fn encode_local_batch_members(members: &[LocalBatchMember]) -> Value {
+    Value::Array(
+        members
+            .iter()
+            .map(|member| Value::Row {
+                id: None,
+                values: vec![
+                    Value::Bytea(member.object_id.uuid().as_bytes().to_vec()),
+                    Value::Text(member.table_name.clone()),
+                    Value::Text(member.branch_name.to_string()),
+                    Value::Bytea(member.schema_hash.as_bytes().to_vec()),
+                    Value::Bytea(member.row_digest.0.to_vec()),
+                ],
+            })
+            .collect(),
+    )
+}
+
+fn encode_local_batch_row_index(
+    batch_id: BatchId,
+    members: &[LocalBatchMember],
+) -> Result<Vec<u8>, StorageError> {
+    encode_row(
+        &local_batch_row_index_storage_descriptor(),
+        &[
+            Value::BatchId(*batch_id.as_bytes()),
+            encode_local_batch_members(members),
+        ],
+    )
+    .map_err(|err| StorageError::IoError(format!("encode local batch row index: {err}")))
+}
+
+fn decode_local_batch_members(members: &Value) -> Result<Vec<LocalBatchMember>, StorageError> {
+    match members {
+        Value::Array(values) => values
+            .iter()
+            .map(|value| match value {
+                Value::Row { values, .. } => {
+                    let [object_id, table_name, branch_name, schema_hash, row_digest] =
+                        values.as_slice()
+                    else {
+                        return Err(StorageError::IoError(
+                            "expected local batch member row to have five values".to_string(),
+                        ));
+                    };
+                    let object_id = match object_id {
+                        Value::Bytea(bytes) => {
+                            let uuid = uuid::Uuid::from_slice(bytes).map_err(|err| {
+                                StorageError::IoError(format!(
+                                    "decode local batch member object id: expected uuid bytes: {err}"
+                                ))
+                            })?;
+                            ObjectId::from_uuid(uuid)
+                        }
+                        other => {
+                            return Err(StorageError::IoError(format!(
+                                "expected local batch member object id bytes, got {other:?}"
+                            )));
+                        }
+                    };
+                    let table_name = match table_name {
+                        Value::Text(raw) => raw.clone(),
+                        other => {
+                            return Err(StorageError::IoError(format!(
+                                "expected local batch member table name text, got {other:?}"
+                            )));
+                        }
+                    };
+                    let branch_name = match branch_name {
+                        Value::Text(raw) => BranchName::new(raw),
+                        other => {
+                            return Err(StorageError::IoError(format!(
+                                "expected local batch member branch name text, got {other:?}"
+                            )));
+                        }
+                    };
+                    let schema_hash = match schema_hash {
+                        Value::Bytea(bytes) => {
+                            let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                                StorageError::IoError(format!(
+                                    "expected local batch member schema hash to be 32 bytes, got {}",
+                                    bytes.len()
+                                ))
+                            })?;
+                            SchemaHash::from_bytes(bytes)
+                        }
+                        other => {
+                            return Err(StorageError::IoError(format!(
+                                "expected local batch member schema hash bytes, got {other:?}"
+                            )));
+                        }
+                    };
+                    let row_digest = match row_digest {
+                        Value::Bytea(bytes) => Digest32(bytes.as_slice().try_into().map_err(
+                            |_| {
+                                StorageError::IoError(format!(
+                                    "expected local batch member row digest to be 32 bytes, got {}",
+                                    bytes.len()
+                                ))
+                            },
+                        )?),
+                        other => {
+                            return Err(StorageError::IoError(format!(
+                                "expected local batch member row digest bytes, got {other:?}"
+                            )));
+                        }
+                    };
+                    Ok(LocalBatchMember {
+                        object_id,
+                        table_name,
+                        branch_name,
+                        schema_hash,
+                        row_digest,
+                    })
+                }
+                other => Err(StorageError::IoError(format!(
+                    "expected local batch member row, got {other:?}"
+                ))),
+            })
+            .collect::<Result<Vec<_>, StorageError>>(),
+        other => Err(StorageError::IoError(format!(
+            "expected local batch members array, got {other:?}"
+        ))),
+    }
+}
+
+fn decode_local_batch_row_index(
+    bytes: &[u8],
+) -> Result<(BatchId, Vec<LocalBatchMember>), StorageError> {
+    let values = decode_row(&local_batch_row_index_storage_descriptor(), bytes)
+        .map_err(|err| StorageError::IoError(format!("decode local batch row index: {err}")))?;
+    let [batch_id, members] = values.as_slice() else {
+        return Err(StorageError::IoError(
+            "unexpected local batch row index shape".to_string(),
+        ));
+    };
+
+    let batch_id =
+        decode_storage_batch_id_value(batch_id, "decode local batch row index batch id")?;
+    Ok((batch_id, decode_local_batch_members(members)?))
 }
 
 fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(

@@ -1,172 +1,116 @@
 use super::*;
 use crate::batch_fate::{LocalBatchMember, SealedBatchMember, SealedBatchSubmission};
-use crate::row_histories::{RowState, patch_row_batch_state};
+use crate::row_histories::{BatchId, RowState, StoredRowBatch, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
 use crate::sync_manager::{RowMetadata, SyncPayload};
 
-impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
-    fn local_batch_row_was_insert(
-        &self,
-        table: &str,
-        row: &crate::row_histories::StoredRowBatch,
-    ) -> bool {
-        if !row.parents.is_empty() {
-            return false;
-        }
+type LocalBatchRow = (LocalBatchMember, crate::storage::RowLocator, StoredRowBatch);
 
-        let Ok(history_rows) = self.storage.scan_history_row_batches(table, row.row_id) else {
-            return true;
-        };
-        !history_rows.iter().any(|candidate| {
-            candidate.branch == row.branch
-                && candidate.batch_id != row.batch_id
-                && !matches!(candidate.state, RowState::Rejected)
-        })
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    fn local_batch_row_from_member(
+        &self,
+        batch_id: BatchId,
+        member: &LocalBatchMember,
+    ) -> Option<(crate::storage::RowLocator, StoredRowBatch)> {
+        let row_locator = self
+            .storage
+            .load_row_locator(member.object_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| crate::storage::RowLocator {
+                table: member.table_name.clone().into(),
+                origin_schema_hash: None,
+            });
+        let row = self
+            .storage
+            .load_history_row_batch_for_schema_hash(
+                member.table_name.as_str(),
+                member.schema_hash,
+                member.branch_name.as_str(),
+                member.object_id,
+                batch_id,
+            )
+            .ok()
+            .flatten()?;
+        (row.content_digest() == member.row_digest).then_some((row_locator, row))
     }
 
-    pub(crate) fn local_batch_rows(
-        &self,
-        batch_id: crate::row_histories::BatchId,
-    ) -> Vec<(
-        LocalBatchMember,
-        crate::storage::RowLocator,
-        crate::row_histories::StoredRowBatch,
-    )> {
-        let mut rows = Vec::new();
-        if let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) {
-            for sealed_member in submission.members {
-                let Ok(Some(row_locator)) = self.storage.load_row_locator(sealed_member.object_id)
-                else {
-                    continue;
-                };
-                let Some(row) = self
+    fn sealed_submission_batch_members(&self, batch_id: BatchId) -> Vec<LocalBatchMember> {
+        let Some(submission) = self
+            .storage
+            .load_sealed_batch_submission(batch_id)
+            .ok()
+            .flatten()
+        else {
+            return Vec::new();
+        };
+
+        submission
+            .members
+            .into_iter()
+            .filter_map(|sealed_member| {
+                let row_locator = self
                     .storage
-                    .scan_history_row_batches(row_locator.table.as_str(), sealed_member.object_id)
+                    .load_row_locator(sealed_member.object_id)
                     .ok()
-                    .and_then(|rows| {
-                        rows.into_iter().find(|row| {
-                            row.batch_id == batch_id
-                                && row.branch.as_str() == submission.target_branch_name.as_str()
-                                && row.content_digest() == sealed_member.row_digest
-                        })
-                    })
-                else {
-                    continue;
-                };
-                let Ok(schema_hash) = self.local_batch_member_schema_hash(
-                    submission.target_branch_name,
-                    sealed_member.object_id,
-                    batch_id,
-                ) else {
-                    continue;
-                };
-                let member = LocalBatchMember {
+                    .flatten()?;
+                let schema_hash = self
+                    .local_batch_member_schema_hash(
+                        submission.target_branch_name,
+                        sealed_member.object_id,
+                        batch_id,
+                    )
+                    .ok()?;
+                Some(LocalBatchMember {
                     object_id: sealed_member.object_id,
                     table_name: row_locator.table.to_string(),
                     branch_name: submission.target_branch_name,
                     schema_hash,
                     row_digest: sealed_member.row_digest,
-                };
-                rows.push((member, row_locator, row));
-            }
-        }
+                })
+            })
+            .collect()
+    }
 
-        if rows.is_empty()
-            && let Some(record) = self.local_batch_record_cache.get(&batch_id)
-        {
-            for member in record.members.clone() {
-                let row_locator = self
-                    .storage
-                    .load_row_locator(member.object_id)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| crate::storage::RowLocator {
-                        table: member.table_name.clone().into(),
-                        origin_schema_hash: None,
-                    });
-                let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
-                    member.table_name.as_str(),
-                    member.schema_hash,
-                    member.branch_name.as_str(),
-                    member.object_id,
-                    batch_id,
-                ) else {
-                    let Some(row) = self
-                        .storage
-                        .scan_history_row_batches(member.table_name.as_str(), member.object_id)
-                        .ok()
-                        .and_then(|rows| {
-                            rows.into_iter().find(|row| {
-                                row.batch_id == batch_id
-                                    && row.branch.as_str() == member.branch_name.as_str()
-                            })
-                        })
-                    else {
-                        continue;
-                    };
-                    rows.push((member, row_locator, row));
-                    continue;
-                };
-                rows.push((member, row_locator, row));
-            }
-        }
-        if rows.is_empty()
-            && let Ok(Some(record)) = self.storage.load_local_batch_record(batch_id)
-        {
-            for member in record.members {
-                let row_locator = self
-                    .storage
-                    .load_row_locator(member.object_id)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| crate::storage::RowLocator {
-                        table: member.table_name.clone().into(),
-                        origin_schema_hash: None,
-                    });
-                let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
-                    member.table_name.as_str(),
-                    member.schema_hash,
-                    member.branch_name.as_str(),
-                    member.object_id,
-                    batch_id,
-                ) else {
-                    continue;
-                };
-                rows.push((member, row_locator, row));
-            }
-        }
-        if rows.is_empty()
-            && let Ok(row_locators) = self.storage.scan_row_locators()
-        {
-            for (object_id, row_locator) in row_locators {
-                let Ok(history_rows) = self
-                    .storage
-                    .scan_history_row_batches(row_locator.table.as_str(), object_id)
-                else {
-                    continue;
-                };
-                for row in history_rows
-                    .into_iter()
-                    .filter(|row| row.batch_id == batch_id)
-                {
-                    let branch_name = BranchName::new(row.branch.as_str());
-                    let Ok(schema_hash) =
-                        self.local_batch_member_schema_hash(branch_name, object_id, batch_id)
-                    else {
-                        continue;
-                    };
-                    let member = LocalBatchMember {
-                        object_id,
-                        table_name: row_locator.table.to_string(),
-                        branch_name,
-                        schema_hash,
-                        row_digest: row.content_digest(),
-                    };
-                    rows.push((member, row_locator.clone(), row));
-                }
-            }
-        }
+    fn cached_local_batch_members(&self, batch_id: BatchId) -> Vec<LocalBatchMember> {
+        self.local_batch_record_cache
+            .get(&batch_id)
+            .map(|record| record.members.clone())
+            .unwrap_or_default()
+    }
 
+    fn persisted_local_batch_members(&self, batch_id: BatchId) -> Vec<LocalBatchMember> {
+        self.storage
+            .load_local_batch_record(batch_id)
+            .ok()
+            .flatten()
+            .map(|record| record.members)
+            .unwrap_or_default()
+    }
+
+    fn indexed_local_batch_members(&self, batch_id: BatchId) -> Vec<LocalBatchMember> {
+        self.storage
+            .load_local_batch_row_index(batch_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    fn local_batch_rows_from_members(
+        &self,
+        batch_id: BatchId,
+        members: Vec<LocalBatchMember>,
+    ) -> Vec<LocalBatchRow> {
+        members
+            .into_iter()
+            .filter_map(|member| {
+                self.local_batch_row_from_member(batch_id, &member)
+                    .map(|(row_locator, row)| (member, row_locator, row))
+            })
+            .collect()
+    }
+
+    fn sort_local_batch_rows(rows: &mut [LocalBatchRow]) {
         rows.sort_by(
             |(left_member, left_locator, left_row), (right_member, right_locator, right_row)| {
                 left_member
@@ -190,6 +134,44 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .then_with(|| left_row.batch_id.0.cmp(&right_row.batch_id.0))
             },
         );
+    }
+
+    fn local_batch_row_was_insert(
+        &self,
+        table: &str,
+        row: &crate::row_histories::StoredRowBatch,
+    ) -> bool {
+        if !row.parents.is_empty() {
+            return false;
+        }
+
+        let Ok(history_rows) = self.storage.scan_history_row_batches(table, row.row_id) else {
+            return true;
+        };
+        !history_rows.iter().any(|candidate| {
+            candidate.branch == row.branch
+                && candidate.batch_id != row.batch_id
+                && !matches!(candidate.state, RowState::Rejected)
+        })
+    }
+
+    pub(crate) fn local_batch_rows(&self, batch_id: BatchId) -> Vec<LocalBatchRow> {
+        let member_sources: [fn(&Self, BatchId) -> Vec<LocalBatchMember>; 4] = [
+            Self::sealed_submission_batch_members,
+            Self::cached_local_batch_members,
+            Self::persisted_local_batch_members,
+            Self::indexed_local_batch_members,
+        ];
+
+        let mut rows = Vec::new();
+        for load_members in member_sources {
+            rows = self.local_batch_rows_from_members(batch_id, load_members(self, batch_id));
+            if !rows.is_empty() {
+                break;
+            }
+        }
+
+        Self::sort_local_batch_rows(&mut rows);
         rows
     }
 
