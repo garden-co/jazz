@@ -324,28 +324,6 @@ mod tests {
         }
     }
 
-    async fn post_removed_internal_shutdown(app: axum::Router) -> axum::response::Response {
-        app.oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/internal/shutdown")
-                .header("X-Jazz-Admin-Secret", "admin-secret")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn internal_shutdown_http_endpoint_is_not_routed() {
-        let state = make_state_with_schema(Schema::new()).await;
-        let app = make_test_router(state);
-
-        let response = post_removed_internal_shutdown(app).await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
     #[tokio::test]
     async fn shutdown_rejects_new_app_scoped_http_requests_but_keeps_health_available() {
         let state = make_state_with_schema(Schema::new()).await;

@@ -358,6 +358,13 @@ async fn test_server_health_check_in_memory_does_not_create_data_dir() {
 }
 
 #[cfg(unix)]
+/// Contract: a production `jazz-tools server` process exits cleanly when the
+/// orchestrator starts controlled termination with SIGTERM.
+///
+/// Actors: alice represents Kubernetes or another process supervisor; server is
+/// the spawned `jazz-tools` process.
+///
+/// alice --SIGTERM--> server --controlled shutdown--> exit status 0
 #[tokio::test]
 async fn test_server_exits_successfully_on_sigterm() {
     let mut server = TestServer::start(0).await;
