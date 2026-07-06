@@ -983,7 +983,13 @@ export function defineMigration<
      * Optional schema hash. Used only for documentation purposes.
      */
     toHash?: string;
+    /**
+     * Tables from the source schema that are affected by this migration
+     */
     from: TFrom;
+    /**
+     * Tables from the destination schema that are affected by this migration
+     */
     to: TTo;
     renameTables?: TRenameTables;
     createTables?: TCreateTables;
