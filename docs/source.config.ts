@@ -10,6 +10,7 @@ export const docs = defineDocs({
   docs: {
     schema: pageSchema.extend({
       reviewedAt: z.string().optional(),
+      fullCodeBlocks: z.boolean().optional(),
     }),
     postprocess: {
       includeProcessedMarkdown: true,

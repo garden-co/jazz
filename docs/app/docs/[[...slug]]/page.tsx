@@ -25,7 +25,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
           githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/content/docs/${page.path}`}
         />
       </div>
-      <DocsBody>
+      <DocsBody className={page.data.fullCodeBlocks ? "[&_figure>div]:max-h-none" : undefined}>
         <MDX
           components={getMDXComponents({
             // this allows you to link to other pages with relative file paths
