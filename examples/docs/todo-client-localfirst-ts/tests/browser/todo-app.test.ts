@@ -15,10 +15,6 @@ import { createDb, DbConfig } from "jazz-tools";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -59,7 +55,10 @@ describe("Vanilla TS Todo App E2E", () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
-    const { destroy } = await startApp(el, config);
+    const { destroy } = await startApp(el, {
+      driver: { type: "persistent", dbName: crypto.randomUUID() },
+      ...config,
+    });
     instances.push({ container: el, destroy });
 
     // Wait for the app to render
@@ -96,7 +95,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders the app with an empty todo list", async () => {
-    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("empty") } });
+    const el = await mount();
 
     expect(el.querySelector("h1")!.textContent).toBe("Todos");
     expect(el.querySelector("#todo-list")).toBeTruthy();
@@ -108,7 +107,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("adds a todo via the form", async () => {
-    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("add") } });
+    const el = await mount();
 
     addTodo(el, "Buy milk");
 
@@ -124,9 +123,7 @@ describe("Vanilla TS Todo App E2E", () => {
   });
 
   it("renders child todos directly under their parent with nesting depth", async () => {
-    const el = await mount({
-      driver: { type: "persistent", dbName: uniqueDbName("parent-child") },
-    });
+    const el = await mount();
 
     addTodo(el, "Parent task");
 
@@ -158,7 +155,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // TODO: fails — the TS app's toggle handler uses db.one(app.todos.where({ id }))
   // which returns null. The React app avoids this by keeping the todo in scope.
   it("toggles a todo's done state via checkbox", async () => {
-    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("toggle") } });
+    const el = await mount();
 
     addTodo(el, "Toggle me");
 
@@ -187,7 +184,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("deletes a todo via the delete button", async () => {
-    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("delete") } });
+    const el = await mount();
 
     addTodo(el, "Delete me");
 
@@ -212,7 +209,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders multiple todos", async () => {
-    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("multi") } });
+    const el = await mount();
 
     addTodo(el, "First");
     addTodo(el, "Second");
@@ -233,7 +230,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("persists todos across app destroy and remount (OPFS)", async () => {
-    const dbName = uniqueDbName("opfs");
+    const dbName = crypto.randomUUID();
 
     // First session: mount, add todo, destroy
     const el1 = await mount({ driver: { type: "persistent", dbName } });
@@ -268,14 +265,12 @@ describe("Vanilla TS Todo App E2E", () => {
 
     const el1 = await mount({
       appId: APP_ID,
-      driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
       auth: { localFirstSecret: "IsHiz7lWH1KJEuM5J8Hn_oleBb6SBcuGSE9Ro3H0G68" },
       adminSecret: ADMIN_SECRET,
     });
     const el2 = await mount({
       appId: APP_ID,
-      driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
       auth: { localFirstSecret: "C5-etNr9-YLchXK15XLhDVIn-An8mgb35sc5lfJpAQE" },
       adminSecret: ADMIN_SECRET,

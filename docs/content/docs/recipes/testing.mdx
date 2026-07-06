@@ -181,15 +181,14 @@ This lets your framework's bindings create their own Jazz clients connected to t
 You can often do this in a single place (e.g. using Vitest's [globalsetup](https://vitest.dev/config/globalsetup)).
 
 ```typescript title="tests/browser/global-setup.ts"
-import { join } from "node:path";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import permissions from "../../permissions.js";
+import { app } from "../../schema.js";
 import { ADMIN_SECRET, APP_ID, TEST_PORT } from "./test-constants.js";
 
-let server: LocalJazzServerHandle | null = null;
+let server: LocalJazzServerHandle;
 
 export async function setup(): Promise<void> {
-  if (server) return;
-
   server = await startLocalJazzServer({
     appId: APP_ID,
     port: TEST_PORT,
@@ -200,37 +199,28 @@ export async function setup(): Promise<void> {
     serverUrl: server.url,
     appId: server.appId,
     adminSecret: server.adminSecret,
-    schemaDir: join(import.meta.dirname, "../.."),
+    schema: app,
+    permissions,
   });
 }
 
 export async function teardown(): Promise<void> {
-  await server?.stop();
-  server = null;
+  await server.stop();
 }
 ```
 
 If you need to isolate data across tests, you can use different `dbName`s when creating the client database.
-For local-first auth in browser tests, also use a separate auth storage key for each logical user if your
-app exposes one.
+For local-first auth in browser tests, also use a separate auth storage key for each logical user.
 
-```tsx title="chat-app.test.tsx"
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function uniqueAuthKey(label: string): string {
-  return `test-auth-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
+```typescript
 await mountApp({
   appId: APP_ID,
   serverUrl: `http://127.0.0.1:${TEST_PORT}`,
   driver: {
     type: "persistent",
-    dbName: uniqueDbName("alice"),
+    dbName: crypto.randomUUID(),
   },
-  authSecretStorageKey: uniqueAuthKey("alice"),
+  authSecretStorageKey: crypto.randomUUID(),
 });
 ```
 
@@ -253,7 +243,7 @@ After `reconnect()`, pending writes are sent to the server and writes missed fro
 `deploy` can also be used to publish [migrations](/docs/schemas/migrations). When the server already has a schema, `deploy` can push
 a migration between the current server schema and the new schema. This makes it possible to test clients with different schemas.
 
-```typescript title="migrations.test.ts"
+```typescript
 import { createDb, schema as s, type Db } from "jazz-tools";
 import { deploy, startLocalJazzServer } from "jazz-tools/testing";
 import { describe, expect, it, vi } from "vitest";
