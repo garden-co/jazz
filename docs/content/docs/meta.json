@@ -17,6 +17,7 @@
     "recipes/access-control",
     "recipes/data-patterns",
     "recipes/auth",
+    "recipes/testing",
     "---Reference---",
     "reference",
     "faq"

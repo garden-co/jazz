@@ -14,10 +14,6 @@ import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function uniqueDbName(label: string): string {
-  return `test-settings-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -63,7 +59,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
     const appId =
       config.appId ?? `test-settings-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    r.render(<App config={{ appId, ...config }} />);
+    r.render(<App config={{ appId, dbName: crypto.randomUUID(), ...config }} />);
 
     await waitFor(
       () =>
@@ -120,7 +116,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
   // -------------------------------------------------------------------------
 
   it("shows participant name in the chat header by default", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("header-name") });
+    const el = await mountApp();
 
     // Solo user: the header should show the chat start date (DD Mon YYYY HH:MM)
     // since there are no other members to display.
@@ -142,7 +138,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renames a chat via the settings sheet", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("rename") });
+    const el = await mountApp();
 
     await openSettings(el);
 
@@ -178,7 +174,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
   // -------------------------------------------------------------------------
 
   it("clearing chat name reverts to participant names", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("clear-name") });
+    const el = await mountApp();
 
     // Set a name first
     await openSettings(el);
@@ -223,7 +219,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
   // -------------------------------------------------------------------------
 
   it("shows current user in the member list", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("members") });
+    const el = await mountApp();
 
     await openSettings(el);
 
@@ -244,7 +240,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
   // -------------------------------------------------------------------------
 
   it("leaves a chat via settings and navigates to chat list", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("leave") });
+    const el = await mountApp();
 
     await openSettings(el);
 
@@ -294,7 +290,6 @@ describe("ChatHeader + ChatSettings E2E", () => {
     // --- Alice: create a public chat -----------------------------------------
     const aliceContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("members-alice"),
       serverUrl,
     });
 
@@ -316,7 +311,6 @@ describe("ChatHeader + ChatSettings E2E", () => {
 
     const bobContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("members-bob"),
       serverUrl,
     });
 

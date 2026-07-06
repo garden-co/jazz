@@ -15,10 +15,6 @@ import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -63,7 +59,7 @@ describe("Invite Flow E2E", () => {
     const appId =
       config.appId ?? `test-invite-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    r.render(<App config={{ appId, ...config }} />);
+    r.render(<App config={{ appId, dbName: crypto.randomUUID(), ...config }} />);
 
     await waitFor(
       () =>
@@ -116,7 +112,6 @@ describe("Invite Flow E2E", () => {
     // --- User A: create private chat and generate invite --------------------
     const aliceContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("invite-a"),
       serverUrl,
     });
 
@@ -263,7 +258,6 @@ describe("Invite Flow E2E", () => {
 
     const bobContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("invite-b"),
       serverUrl,
     });
 

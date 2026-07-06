@@ -31,10 +31,6 @@ import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -72,6 +68,10 @@ describe("auto-join race on first message send", () => {
     return { container, root };
   }
 
+  function renderApp(root: Root, config: { appId: string; serverUrl: string }) {
+    root.render(<App config={{ dbName: crypto.randomUUID(), ...config }} />);
+  }
+
   afterEach(async () => {
     resetProfileGuard();
     for (const { root, container } of mounts) {
@@ -105,15 +105,7 @@ describe("auto-join race on first message send", () => {
     try {
       // ── Alice: create a public chat ────────────────────────────────────────
       const { container: aliceContainer, root: aliceRoot } = makeMount();
-      aliceRoot.render(
-        <App
-          config={{
-            appId: APP_ID,
-            dbName: uniqueDbName("autojoin-alice"),
-            serverUrl,
-          }}
-        />,
-      );
+      renderApp(aliceRoot, { appId: APP_ID, serverUrl });
 
       // The app redirects from / to /#/chat/:id once it has created the seed
       // public chat.  Wait for the hash to settle.
@@ -171,15 +163,7 @@ describe("auto-join race on first message send", () => {
       // URL so addInitScript fires before any client-side routing).
       window.location.hash = `#/chat/${chatId}`;
 
-      bobRoot.render(
-        <App
-          config={{
-            appId: APP_ID,
-            dbName: uniqueDbName("autojoin-bob"),
-            serverUrl,
-          }}
-        />,
-      );
+      renderApp(bobRoot, { appId: APP_ID, serverUrl });
 
       // ── Assert A: composer must transition through disabled before enabling ─
       //

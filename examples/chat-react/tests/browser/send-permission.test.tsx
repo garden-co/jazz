@@ -39,10 +39,6 @@ import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 // Helpers (same conventions as chat-app.test.tsx)
 // ---------------------------------------------------------------------------
 
-function uniqueDbName(label: string): string {
-  return `test-send-perm-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -83,7 +79,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const r = createRoot(el);
     mounts.push({ root: r, container: el });
 
-    r.render(<App config={{ appId: APP_ID, ...config }} />);
+    r.render(<App config={{ appId: APP_ID, dbName: crypto.randomUUID(), ...config }} />);
 
     return el;
   }
@@ -180,7 +176,6 @@ describe("Send permission — private chat INSERT policy", () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
 
     const aliceContainer = await mountApp({
-      dbName: uniqueDbName("alice-a"),
       serverUrl,
     });
 
@@ -229,7 +224,6 @@ describe("Send permission — private chat INSERT policy", () => {
 
     // --- Alice: create private chat and generate an invite link -------------
     const aliceContainer = await mountApp({
-      dbName: uniqueDbName("alice-b"),
       serverUrl,
     });
 
@@ -289,7 +283,6 @@ describe("Send permission — private chat INSERT policy", () => {
     if (hashIdx !== -1) window.location.hash = inviteLink.substring(hashIdx + 1);
 
     const bobContainer = await mountApp({
-      dbName: uniqueDbName("bob-b"),
       serverUrl,
     });
 
