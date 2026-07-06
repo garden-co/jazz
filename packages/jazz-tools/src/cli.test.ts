@@ -230,20 +230,6 @@ export default s.definePermissions(app, ({ policy, session }) => [
 `;
 }
 
-function rootBooleanLiteralPermissionsSchema(
-  appImportPath: string = "./schema.ts",
-  importPath: string = indexPath,
-): string {
-  return `
-import { schema as s } from ${JSON.stringify(importPath)};
-import { app } from ${JSON.stringify(appImportPath)};
-
-export default s.definePermissions(app, ({ policy }) => [
-  policy.todos.allowRead.where({ done: true }),
-]);
-`;
-}
-
 function rootAllExplicitPermissionsSchema(
   appImportPath: string = "./schema.ts",
   importPath: string = indexPath,
@@ -358,6 +344,77 @@ function storedRootSchema() {
       columns: [
         { name: "title", column_type: { type: "Text" }, nullable: false },
         { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  };
+}
+
+function storedRootSchemaBeforeOwnerRename() {
+  return {
+    projects: {
+      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+    },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "owner_id", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  };
+}
+
+function storedUsersEmailSchema() {
+  return {
+    users: {
+      columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+    },
+  };
+}
+
+function storedUsersEmailAddressSchema(columnName: "email_address" | "emailAddress") {
+  return {
+    users: {
+      columns: [{ name: columnName, column_type: { type: "Text" }, nullable: false }],
+    },
+  };
+}
+
+function storedPeopleEmailAddressSchema() {
+  return {
+    people: {
+      columns: [{ name: "email_address", column_type: { type: "Text" }, nullable: false }],
+    },
+  };
+}
+
+function storedUsersWithLegacyProfilesSchema() {
+  return {
+    users: {
+      columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+    },
+    legacy_profiles: {
+      columns: [{ name: "bio", column_type: { type: "Text" }, nullable: true }],
+    },
+  };
+}
+
+function storedUsersWithProfilesSchema() {
+  return {
+    users: {
+      columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+    },
+    profiles: {
+      columns: [{ name: "bio", column_type: { type: "Text" }, nullable: true }],
+    },
+  };
+}
+
+function storedBooleanTodoSchema() {
+  return {
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
       ],
     },
   };
@@ -1479,8 +1536,8 @@ describe("cli migrations", () => {
     const migrationsDir = join(root, "migrations");
     await mkdir(migrationsDir, { recursive: true });
 
-    const fromHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-    const toHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const fromHash = await computeTestSchemaHash(storedUsersEmailSchema());
+    const toHash = await computeTestSchemaHash(storedUsersEmailAddressSchema("email_address"));
     const fromShortHash = fromHash.slice(0, 12);
     const toShortHash = toHash.slice(0, 12);
     const migrationPath = join(migrationsDir, `20260318-rename-${fromShortHash}-${toShortHash}.ts`);
@@ -1566,8 +1623,8 @@ export default s.defineMigration({
       ) + "\n",
     );
 
-    const fromHash = "abababababababababababababababababababababababababababababababab";
-    const toHash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    const fromHash = await computeTestSchemaHash(storedUsersEmailSchema());
+    const toHash = await computeTestSchemaHash(storedUsersEmailAddressSchema("email_address"));
     const fromShortHash = fromHash.slice(0, 12);
     const toShortHash = toHash.slice(0, 12);
     const migrationPath = join(migrationsDir, `20260318-rename-${fromShortHash}-${toShortHash}.ts`);
@@ -1654,8 +1711,8 @@ export default s.defineMigration({
       ) + "\n",
     );
 
-    const fromHash = "9090909090909090909090909090909090909090909090909090909090909090";
-    const toHash = "9191919191919191919191919191919191919191919191919191919191919191";
+    const fromHash = await computeTestSchemaHash(storedBooleanTodoSchema());
+    const toHash = await computeTestSchemaHash(storedBooleanTodoSchemaWithDefaultFalse());
     const fromShortHash = fromHash.slice(0, 12);
     const toShortHash = toHash.slice(0, 12);
     const migrationPath = join(
@@ -1665,14 +1722,7 @@ export default s.defineMigration({
 
     await writeFile(
       join(snapshotsDir, `20260411T212509-${fromShortHash}.json`),
-      JSON.stringify({
-        todos: {
-          columns: [
-            { name: "title", column_type: { type: "Text" }, nullable: false },
-            { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          ],
-        },
-      }) + "\n",
+      JSON.stringify(storedBooleanTodoSchema()) + "\n",
     );
     await writeFile(
       join(snapshotsDir, `20260411T212510-${toShortHash}.json`),
@@ -1688,8 +1738,18 @@ export default s.defineMigration({
   migrate: {},
   fromHash: ${JSON.stringify(fromShortHash)},
   toHash: ${JSON.stringify(toShortHash)},
-  from: {},
-  to: {},
+  from: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+    }),
+  },
+  to: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean().default(false),
+    }),
+  },
 });
 `,
     );
@@ -1700,14 +1760,7 @@ export default s.defineMigration({
       }
 
       if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          todos: {
-            columns: [
-              { name: "title", column_type: { type: "Text" }, nullable: false },
-              { name: "done", column_type: { type: "Boolean" }, nullable: false },
-            ],
-          },
-        });
+        return storedSchemaResponse(storedBooleanTodoSchema());
       }
 
       if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
@@ -1850,8 +1903,8 @@ export default s.defineMigration({
     const migrationsDir = join(root, "migrations");
     await mkdir(migrationsDir, { recursive: true });
 
-    const fromHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    const toHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    const fromHash = await computeTestSchemaHash(storedUsersEmailSchema());
+    const toHash = await computeTestSchemaHash(storedPeopleEmailAddressSchema());
     const fromShortHash = fromHash.slice(0, 12);
     const toShortHash = toHash.slice(0, 12);
     const migrationPath = join(
@@ -1930,8 +1983,8 @@ export default s.defineMigration({
     const migrationsDir = join(root, "migrations");
     await mkdir(migrationsDir, { recursive: true });
 
-    const fromHash = "1111111111111111111111111111111111111111111111111111111111111111";
-    const toHash = "2222222222222222222222222222222222222222222222222222222222222222";
+    const fromHash = await computeTestSchemaHash(storedUsersWithLegacyProfilesSchema());
+    const toHash = await computeTestSchemaHash(storedUsersWithProfilesSchema());
     const fromShortHash = fromHash.slice(0, 12);
     const toShortHash = toHash.slice(0, 12);
     const migrationPath = join(
@@ -2447,8 +2500,8 @@ describe("cli deploy", () => {
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
 
-    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const previousSchemaHash = await computeTestSchemaHash(storedRootSchemaBeforeOwnerRename());
+    const nextSchemaHash = await computeTestSchemaHash(storedRootSchema());
     const previousShortHash = previousSchemaHash.slice(0, 12);
     const nextShortHash = nextSchemaHash.slice(0, 12);
     const currentHead = {
@@ -2465,20 +2518,28 @@ import { schema as s } from ${JSON.stringify(indexPath)};
 
 export default s.defineMigration({
   migrate: {
-    users: {
-      email_address: s.renameFrom("email"),
+    todos: {
+      ownerId: s.renameFrom("owner_id"),
     },
   },
   fromHash: ${JSON.stringify(previousShortHash)},
   toHash: ${JSON.stringify(nextShortHash)},
   from: {
-    users: s.table({
-      email: s.string(),
+    projects: s.table({
+      name: s.string(),
+    }),
+    todos: s.table({
+      title: s.string(),
+      owner_id: s.string(),
     }),
   },
   to: {
-    users: s.table({
-      email_address: s.string(),
+    projects: s.table({
+      name: s.string(),
+    }),
+    todos: s.table({
+      title: s.string(),
+      ownerId: s.string(),
     }),
   },
 });
@@ -2493,11 +2554,7 @@ export default s.defineMigration({
       }
 
       if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
-        return storedSchemaResponse({
-          users: {
-            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
+        return storedSchemaResponse(storedRootSchemaBeforeOwnerRename());
       }
 
       if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
@@ -2518,12 +2575,12 @@ export default s.defineMigration({
         expect(body.toHash).toBe(nextSchemaHash);
         expect(body.forward).toEqual([
           {
-            table: "users",
+            table: "todos",
             operations: [
               {
                 type: "rename",
-                column: "email",
-                value: "email_address",
+                column: "owner_id",
+                value: "ownerId",
               },
             ],
           },
@@ -2653,7 +2710,7 @@ export default s.defineMigration({
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
 
     const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
-    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: string) => {
       if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
         return new Response(
           JSON.stringify({ objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", hash: schemaHash }),

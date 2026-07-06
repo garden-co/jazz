@@ -34,11 +34,7 @@ import {
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
-import {
-  fetchPermissionsHead,
-  publishStoredPermissions,
-  publishStoredSchema,
-} from "../../src/runtime/schema-fetch.js";
+import { deploy } from "../../src/dev/catalogue.js";
 
 interface DebugLensEdgeState {
   sourceHash: string;
@@ -2944,21 +2940,12 @@ async function publishPermissionsForServer(
   schema?: Schema,
 ): Promise<void> {
   const { appId, serverUrl, adminSecret } = testingServer;
-  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+  await deploy({
     appId,
+    serverUrl,
     adminSecret,
     schema: schema ?? app.wasmSchema,
-  });
-  const { head } = await fetchPermissionsHead(serverUrl, {
-    appId,
-    adminSecret,
-  });
-  await publishStoredPermissions(serverUrl, {
-    appId,
-    adminSecret,
-    schemaHash,
     permissions,
-    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 }
 

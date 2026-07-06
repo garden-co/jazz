@@ -514,8 +514,6 @@ export interface DefinedMigration<
   TFrom extends SchemaLike = SchemaLike,
   TTo extends SchemaLike = SchemaLike,
 > {
-  readonly fromHash: string;
-  readonly toHash: string;
   readonly from: TFrom;
   readonly to: TTo;
   readonly forward: Lens[];
@@ -977,9 +975,21 @@ export function defineMigration<
   const TMigrate extends MigrationShape<TFrom, TTo, TRenameTables> | undefined = undefined,
 >(
   config: {
-    fromHash: string;
-    toHash: string;
+    /**
+     * Optional schema hash. Used only for documentation purposes.
+     */
+    fromHash?: string;
+    /**
+     * Optional schema hash. Used only for documentation purposes.
+     */
+    toHash?: string;
+    /**
+     * Tables from the source schema that are affected by this migration
+     */
     from: TFrom;
+    /**
+     * Tables from the destination schema that are affected by this migration
+     */
     to: TTo;
     renameTables?: TRenameTables;
     createTables?: TCreateTables;
@@ -995,8 +1005,6 @@ export function defineMigration<
   ) as NormalizedSchema<TTo>;
 
   return {
-    fromHash: config.fromHash,
-    toHash: config.toHash,
     from: config.from,
     to: config.to,
     forward: buildForwardLenses(

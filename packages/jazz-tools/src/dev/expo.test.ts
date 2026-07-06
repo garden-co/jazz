@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
+import * as catalogueProject from "./catalogue-project.js";
 import { __resetJazzPluginForTests, withJazz } from "./expo.js";
 
 const dev = await import("./index.js");
@@ -118,7 +119,7 @@ describe("withJazz", () => {
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
 
     const deploy = vi
-      .spyOn(devServer, "deploy")
+      .spyOn(catalogueProject, "deploy")
       .mockRejectedValueOnce(new Error("schema push failed"));
 
     await expect(

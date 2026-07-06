@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
-import { publishStoredPermissions, publishStoredSchema } from "./schema-fetch.js";
+import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
 const reproApp = s.defineApp({
@@ -188,15 +188,11 @@ async function createServerBackedReproContext(
     adminSecret,
   });
   const permissions = definePermissions(reproApp, defineCasePermissions);
-  const publishedSchema = await publishStoredSchema(server.url, {
+  await deploy({
     appId,
+    serverUrl: server.url,
     adminSecret,
-    schema: reproApp.wasmSchema,
-  });
-  await publishStoredPermissions(server.url, {
-    appId,
-    adminSecret,
-    schemaHash: publishedSchema.hash,
+    schema: reproApp,
     permissions,
   });
 

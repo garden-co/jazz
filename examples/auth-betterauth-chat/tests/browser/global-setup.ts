@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
-import { join } from "node:path";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import permissions from "../../permissions.js";
+import { app } from "../../schema.js";
 import { TEST_ADMIN_SECRET, TEST_APP_ID } from "./test-constants.js";
 
 function requireEnv(name: string): string {
@@ -46,7 +47,8 @@ export async function setup(): Promise<void> {
     serverUrl: handle.url,
     appId: handle.appId,
     adminSecret: handle.adminSecret,
-    schemaDir: join(import.meta.dirname, "../.."),
+    schema: app,
+    permissions,
   });
 }
 
