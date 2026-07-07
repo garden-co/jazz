@@ -5,13 +5,18 @@ import {
   type DbConfig,
   type QueryBuilder,
   type QueryOptions,
+  type TableProxy,
 } from "../runtime/db.js";
+import type { CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import type {
+  AsyncWriteHandle,
+  AsyncWriteResult,
   SubscriptionChannel,
   SubscriptionChannelCallback,
 } from "../runtime/subscription-channel.js";
-import { acquireWebLockWithRetry, type LeaderLockLease } from "../runtime/leader-lock.js";
+import type { AuthState } from "../runtime/auth-state.js";
+import { acquireWebLockWithRetry, type LeaderLockLease } from "./tab-ownership-lock.js";
 
 /**
  * SubscriptionChannel backed by the browser persistent runtime.
@@ -70,6 +75,100 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
       unsubscribe?.();
       unsubscribe = undefined;
     };
+  }
+
+  async insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+    _session?: Session,
+  ): Promise<AsyncWriteResult<T>> {
+    const db = await this.owner.db();
+    return db.insert(table, data, options);
+  }
+
+  async update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+    _session?: Session,
+  ): Promise<AsyncWriteHandle> {
+    const db = await this.owner.db();
+    return db.update(table, id, data, options);
+  }
+
+  async delete<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: DeleteOptions,
+    _session?: Session,
+  ): Promise<AsyncWriteHandle> {
+    const db = await this.owner.db();
+    return db.delete(table, id, options);
+  }
+
+  async canInsert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    _session?: Session,
+  ): Promise<boolean> {
+    const db = await this.owner.db();
+    return db.canInsert(table, data);
+  }
+
+  async canUpdate<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    _session?: Session,
+  ): Promise<boolean> {
+    const db = await this.owner.db();
+    return db.canUpdate(table, id, data);
+  }
+
+  async canDelete<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    _session?: Session,
+  ): Promise<boolean> {
+    const db = await this.owner.db();
+    return db.canDelete(table, id);
+  }
+
+  async getAuthState(): Promise<AuthState> {
+    const db = await this.owner.db();
+    return db.getAuthState();
+  }
+
+  onAuthChanged(listener: (state: AuthState) => void): () => void {
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+    void this.owner
+      .db()
+      .then((db) => {
+        if (cancelled || this.closed) return;
+        unsubscribe = db.onAuthChanged(listener);
+        if (cancelled || this.closed) {
+          unsubscribe();
+          unsubscribe = undefined;
+        }
+      })
+      .catch((error: unknown) => {
+        setTimeout(() => {
+          throw error;
+        }, 0);
+      });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+      unsubscribe = undefined;
+    };
+  }
+
+  async updateAuthToken(token: string | null): Promise<void> {
+    const db = await this.owner.db();
+    db.updateAuthToken(token);
   }
 
   async shutdown(): Promise<void> {

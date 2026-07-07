@@ -4,7 +4,7 @@ import {
   monitorWebLockRelease,
   stealAndReleaseWebLock,
   tryAcquireWebLock,
-} from "./leader-lock.js";
+} from "./tab-ownership-lock.js";
 
 class FakeLockManager {
   private held = new Set<string>();

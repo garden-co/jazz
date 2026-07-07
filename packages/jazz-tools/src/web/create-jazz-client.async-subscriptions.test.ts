@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "../runtime/context.js";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import type { CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
+import type { QueryBuilder, QueryOptions, TableProxy } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import {
   decodeEncodedSubscriptionDelta,
@@ -44,8 +45,10 @@ import {
   createBrowserWorkerSubscriptionChannel,
 } from "./browser-subscription-channel.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
+import type { AuthState } from "../runtime/auth-state.js";
 
 type TestRow = { id: string; value: string };
+type TestInit = { value: string };
 
 const query = {
   _table: "items",
@@ -54,6 +57,8 @@ const query = {
     return JSON.stringify({ table: "items" });
   },
 } as QueryBuilder<TestRow>;
+
+const table = query as QueryBuilder<TestRow> & TableProxy<TestRow, TestInit>;
 
 function delta(rows: TestRow[]): SubscriptionDelta<TestRow> {
   return {
@@ -86,6 +91,7 @@ function encodeRows(rows: TestRow[]): EncodedSubscriptionDelta {
 
 function createChannel(rows: TestRow[]): SubscriptionChannel & {
   calls: Array<{ options?: QueryOptions; session?: Session }>;
+  writes: Array<{ operation: string; id?: string; session?: Session }>;
   unsubscribeCount: number;
   decodeCount: number;
 } {
@@ -98,6 +104,7 @@ function createChannel(rows: TestRow[]): SubscriptionChannel & {
   };
   const channel = {
     calls: [],
+    writes: [],
     unsubscribeCount: 0,
     decodeCount: 0,
     subscribeAll(_query, callback, options, session) {
@@ -107,8 +114,65 @@ function createChannel(rows: TestRow[]): SubscriptionChannel & {
         this.unsubscribeCount++;
       };
     },
+    async insert<T, Init>(
+      _table: TableProxy<T, Init>,
+      data: Init,
+      _options?: CreateOptions,
+      session?: Session,
+    ) {
+      this.writes.push({ operation: "insert", session });
+      const value = { id: "async-inserted", ...(data as Record<string, unknown>) } as T;
+      return {
+        value,
+        transactionId: "tx-insert",
+        wait: async () => value,
+      };
+    },
+    async update<T, Init>(
+      _table: TableProxy<T, Init>,
+      id: string,
+      _data: Partial<Init>,
+      _options?: UpdateOptions,
+      session?: Session,
+    ) {
+      this.writes.push({ operation: "update", id, session });
+      return {
+        transactionId: "tx-update",
+        wait: async () => undefined,
+      };
+    },
+    async delete<T, Init>(
+      _table: TableProxy<T, Init>,
+      id: string,
+      _options?: DeleteOptions,
+      session?: Session,
+    ) {
+      this.writes.push({ operation: "delete", id, session });
+      return {
+        transactionId: "tx-delete",
+        wait: async () => undefined,
+      };
+    },
+    async canInsert() {
+      return true;
+    },
+    async canUpdate() {
+      return true;
+    },
+    async canDelete() {
+      return true;
+    },
+    async getAuthState() {
+      return TEST_AUTH_STATE;
+    },
+    onAuthChanged(listener) {
+      listener(TEST_AUTH_STATE);
+      return () => {};
+    },
+    async updateAuthToken(_token) {},
   } satisfies SubscriptionChannel & {
     calls: Array<{ options?: QueryOptions; session?: Session }>;
+    writes: Array<{ operation: string; id?: string; session?: Session }>;
     unsubscribeCount: number;
     decodeCount: number;
   };
@@ -117,10 +181,12 @@ function createChannel(rows: TestRow[]): SubscriptionChannel & {
 
 function createTypedChannel(rows: TestRow[]): SubscriptionChannel & {
   calls: Array<{ options?: QueryOptions; session?: Session }>;
+  writes: Array<{ operation: string; id?: string; session?: Session }>;
   unsubscribeCount: number;
 } {
   return {
     calls: [],
+    writes: [],
     unsubscribeCount: 0,
     subscribeAll(_query, callback, options, session) {
       this.calls.push({ options, session });
@@ -129,6 +195,62 @@ function createTypedChannel(rows: TestRow[]): SubscriptionChannel & {
         this.unsubscribeCount++;
       };
     },
+    async insert<T, Init>(
+      _table: TableProxy<T, Init>,
+      data: Init,
+      _options?: CreateOptions,
+      session?: Session,
+    ) {
+      this.writes.push({ operation: "insert", session });
+      const value = { id: "async-inserted", ...(data as Record<string, unknown>) } as T;
+      return {
+        value,
+        transactionId: "tx-insert",
+        wait: async () => value,
+      };
+    },
+    async update<T, Init>(
+      _table: TableProxy<T, Init>,
+      id: string,
+      _data: Partial<Init>,
+      _options?: UpdateOptions,
+      session?: Session,
+    ) {
+      this.writes.push({ operation: "update", id, session });
+      return {
+        transactionId: "tx-update",
+        wait: async () => undefined,
+      };
+    },
+    async delete<T, Init>(
+      _table: TableProxy<T, Init>,
+      id: string,
+      _options?: DeleteOptions,
+      session?: Session,
+    ) {
+      this.writes.push({ operation: "delete", id, session });
+      return {
+        transactionId: "tx-delete",
+        wait: async () => undefined,
+      };
+    },
+    async canInsert() {
+      return true;
+    },
+    async canUpdate() {
+      return true;
+    },
+    async canDelete() {
+      return true;
+    },
+    async getAuthState() {
+      return TEST_AUTH_STATE;
+    },
+    onAuthChanged(listener) {
+      listener(TEST_AUTH_STATE);
+      return () => {};
+    },
+    async updateAuthToken(_token) {},
   };
 }
 
@@ -139,6 +261,23 @@ function createMockDb(rows: TestRow[] = []) {
       session: null,
     })),
     onAuthChanged: vi.fn(() => () => {}),
+    updateAuthToken: vi.fn(),
+    insert: vi.fn((_table, data) => ({
+      value: { id: "worker-inserted", ...(data as Record<string, unknown>) },
+      transactionId: "tx-worker-insert",
+      wait: vi.fn(async () => undefined),
+    })),
+    update: vi.fn(() => ({
+      transactionId: "tx-worker-update",
+      wait: vi.fn(async () => undefined),
+    })),
+    delete: vi.fn(() => ({
+      transactionId: "tx-worker-delete",
+      wait: vi.fn(async () => undefined),
+    })),
+    canInsert: vi.fn(() => true),
+    canUpdate: vi.fn(() => true),
+    canDelete: vi.fn(() => true),
     deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
     getConfig: vi.fn(() => ({ appId: "test-app" })),
@@ -148,6 +287,15 @@ function createMockDb(rows: TestRow[] = []) {
     }),
   };
 }
+
+const TEST_AUTH_STATE: AuthState = {
+  authMode: "local-first",
+  session: {
+    user_id: "user-1",
+    claims: { subject: "user-1" },
+    authMode: "local-first",
+  },
+};
 
 async function readSubscriptionRows(client: object, options?: QueryOptions): Promise<TestRow[]> {
   const store = getSubscriptionStore(client);
@@ -168,7 +316,8 @@ async function typeSurfaceChecks(channel: SubscriptionChannel) {
     subscriptionChannel: channel,
   });
   // @ts-expect-error asyncSubscriptionsOnly defaults to true and does not expose sync Db APIs.
-  acceptsSyncDb(asyncClient.db);
+  void asyncClient.db.all(query);
+  void asyncClient.db.insert(table, { value: "ok" });
 
   const explicitAsyncClient = await createJazzClient({
     appId: "types-explicit-async",
@@ -176,7 +325,7 @@ async function typeSurfaceChecks(channel: SubscriptionChannel) {
     subscriptionChannel: channel,
   });
   // @ts-expect-error explicit async-only clients do not expose sync Db APIs.
-  acceptsSyncDb(explicitAsyncClient.db);
+  void explicitAsyncClient.db.one(query);
 
   const syncClient = await createJazzClient({
     appId: "types-sync",
@@ -207,7 +356,8 @@ describe("web/createJazzClient async subscription channel", () => {
       subscriptionChannel: channel,
     });
 
-    expect("db" in client).toBe(false);
+    expect(client.db).toBeDefined();
+    expect("all" in client.db).toBe(false);
     expect(mocks.createDb).not.toHaveBeenCalled();
 
     await expect(readSubscriptionRows(client)).resolves.toEqual([
@@ -218,6 +368,37 @@ describe("web/createJazzClient async subscription channel", () => {
 
     await client.shutdown();
     expect(channel.unsubscribeCount).toBe(1);
+  });
+
+  it("routes async-only writes and dry-run checks through the channel", async () => {
+    const channel = createChannel([]);
+
+    const client = await createJazzClient({
+      appId: "async-only-writes",
+      subscriptionChannel: channel,
+    });
+
+    await expect(client.db.insert(table, { value: "created" })).resolves.toMatchObject({
+      value: { id: "async-inserted", value: "created" },
+      transactionId: "tx-insert",
+    });
+    await expect(client.db.update(table, "row-1", { value: "updated" })).resolves.toMatchObject({
+      transactionId: "tx-update",
+    });
+    await expect(client.db.delete(table, "row-1")).resolves.toMatchObject({
+      transactionId: "tx-delete",
+    });
+    await expect(client.db.canInsert(table, { value: "created" })).resolves.toBe(true);
+    await expect(client.db.canUpdate(table, "row-1", { value: "updated" })).resolves.toBe(true);
+    await expect(client.db.canDelete(table, "row-1")).resolves.toBe(true);
+
+    expect(channel.writes).toEqual([
+      { operation: "insert", session: TEST_AUTH_STATE.session },
+      { operation: "update", id: "row-1", session: TEST_AUTH_STATE.session },
+      { operation: "delete", id: "row-1", session: TEST_AUTH_STATE.session },
+    ]);
+
+    await client.shutdown();
   });
 
   it("keeps channel rows encoded until a field is read", async () => {
@@ -244,7 +425,8 @@ describe("web/createJazzClient async subscription channel", () => {
 
     const client = await createJazzClient({ appId: "default-worker-channel" });
 
-    expect("db" in client).toBe(false);
+    expect(client.db).toBeDefined();
+    expect("all" in client.db).toBe(false);
     expect(mocks.createDb).toHaveBeenCalledWith(
       expect.objectContaining({
         appId: "default-worker-channel",
@@ -311,6 +493,40 @@ describe("web/createJazzClient async subscription channel", () => {
     unsubscribe();
     await channel.shutdown();
     expect(db.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes browser worker channel writes to the worker-owned Db", async () => {
+    const db = createMockDb([]);
+    mocks.createDb.mockResolvedValue(db);
+
+    const channel = createBrowserWorkerSubscriptionChannel({ appId: "direct-write-channel" });
+
+    await expect(channel.insert(table, { value: "worker-created" })).resolves.toMatchObject({
+      value: { id: "worker-inserted", value: "worker-created" },
+      transactionId: "tx-worker-insert",
+    });
+    await expect(
+      channel.update(table, "row-1", { value: "worker-updated" }),
+    ).resolves.toMatchObject({
+      transactionId: "tx-worker-update",
+    });
+    await expect(channel.delete(table, "row-1")).resolves.toMatchObject({
+      transactionId: "tx-worker-delete",
+    });
+    await expect(channel.canInsert(table, { value: "worker-created" })).resolves.toBe(true);
+    await expect(channel.canUpdate(table, "row-1", { value: "worker-updated" })).resolves.toBe(
+      true,
+    );
+    await expect(channel.canDelete(table, "row-1")).resolves.toBe(true);
+
+    expect(db.insert).toHaveBeenCalledWith(table, { value: "worker-created" }, undefined);
+    expect(db.update).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" }, undefined);
+    expect(db.delete).toHaveBeenCalledWith(table, "row-1", undefined);
+    expect(db.canInsert).toHaveBeenCalledWith(table, { value: "worker-created" });
+    expect(db.canUpdate).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" });
+    expect(db.canDelete).toHaveBeenCalledWith(table, "row-1");
+
+    await channel.shutdown();
   });
 
   it("shares one worker-owned node across multiple async-only tabs", async () => {
