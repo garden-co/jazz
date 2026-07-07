@@ -2650,6 +2650,12 @@ where
     pub fn sync_metrics_for_test(&self) -> crate::node::SyncMetrics {
         self.node.node.borrow().sync_metrics().clone()
     }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only runtime diagnostics used by performance receipts.
+    pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
+        self.node.node.borrow().runtime_stats_for_test()
+    }
 }
 
 /// Counts produced while servicing non-blocking database connection work.
@@ -2746,6 +2752,12 @@ where
     /// classes.
     pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
         Ok(self.node.borrow().encoded_storage_bytes_for_test()?)
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only runtime diagnostics used by performance receipts.
+    pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
+        self.node.borrow().runtime_stats_for_test()
     }
 
     fn next_subscription_key(

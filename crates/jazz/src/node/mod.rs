@@ -2528,6 +2528,12 @@ where
         self.database.last_tick_metrics()
     }
 
+    #[cfg(feature = "testing")]
+    /// Test/bench-only runtime diagnostics used by performance receipts.
+    pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
+        self.database.runtime_stats()
+    }
+
     /// Return accumulated storage-read metrics since the last reset.
     pub fn storage_read_metrics(&self) -> groove::db::StorageReadMetrics {
         self.database.storage_read_metrics()
