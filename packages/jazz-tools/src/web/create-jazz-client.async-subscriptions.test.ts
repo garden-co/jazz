@@ -273,6 +273,7 @@ function createTypedChannel(rows: TestRow[]): SubscriptionChannel & {
 }
 
 function createMockDb(rows: TestRow[] = []) {
+  let runtimeContext: { session?: Session } | null = null;
   return {
     getAuthState: vi.fn(() => ({
       status: "unauthenticated",
@@ -283,19 +284,31 @@ function createMockDb(rows: TestRow[] = []) {
     insert: vi.fn((_table, data) => ({
       value: { id: "worker-inserted", ...(data as Record<string, unknown>) },
       transactionId: "tx-worker-insert",
+      session: runtimeContext?.session,
       wait: vi.fn(async () => undefined),
     })),
     update: vi.fn(() => ({
       transactionId: "tx-worker-update",
+      session: runtimeContext?.session,
       wait: vi.fn(async () => undefined),
     })),
     delete: vi.fn(() => ({
       transactionId: "tx-worker-delete",
+      session: runtimeContext?.session,
       wait: vi.fn(async () => undefined),
     })),
-    canInsert: vi.fn(() => true),
-    canUpdate: vi.fn(() => true),
-    canDelete: vi.fn(() => true),
+    canInsert: vi.fn(() => !runtimeContext?.session || runtimeContext.session.user_id === "user-1"),
+    canUpdate: vi.fn(() => !runtimeContext?.session || runtimeContext.session.user_id === "user-1"),
+    canDelete: vi.fn(() => !runtimeContext?.session || runtimeContext.session.user_id === "user-1"),
+    __withRuntimeOperationContext: vi.fn((context, operation) => {
+      const previous = runtimeContext;
+      runtimeContext = context;
+      try {
+        return operation();
+      } finally {
+        runtimeContext = previous;
+      }
+    }),
     createFileFromBlob: vi.fn(async (_app, blob) => ({
       id: "worker-file",
       data: new Uint8Array(await blob.arrayBuffer()),
@@ -548,6 +561,15 @@ describe("web/createJazzClient async subscription channel", () => {
     expect(db.canInsert).toHaveBeenCalledWith(table, { value: "worker-created" });
     expect(db.canUpdate).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" });
     expect(db.canDelete).toHaveBeenCalledWith(table, "row-1");
+
+    await expect(
+      channel.insert(table, { value: "session-created" }, undefined, TEST_AUTH_STATE.session!),
+    ).resolves.toMatchObject({
+      session: TEST_AUTH_STATE.session,
+    });
+    await expect(
+      channel.canInsert(table, { value: "session-created" }, TEST_AUTH_STATE.session!),
+    ).resolves.toBe(true);
 
     await channel.shutdown();
   });
