@@ -367,13 +367,34 @@ fn compress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
     Err("zstd transport compression feature is not compiled in".to_owned())
 }
 
-#[cfg(feature = "transport-compression-zstd")]
+#[cfg(any(
+    feature = "transport-compression-zstd",
+    feature = "transport-compression-ruzstd"
+))]
 fn decompress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
-    zstd::bulk::decompress(payload, crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES)
-        .map_err(|error| format!("failed to decompress zstd payload: {error}"))
+    #[cfg(feature = "transport-compression-zstd")]
+    {
+        return zstd::bulk::decompress(payload, crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES)
+            .map_err(|error| format!("failed to decompress zstd payload: {error}"));
+    }
+    #[cfg(all(
+        not(feature = "transport-compression-zstd"),
+        feature = "transport-compression-ruzstd"
+    ))]
+    {
+        let mut decoder = ruzstd::decoding::FrameDecoder::new();
+        let mut output = Vec::with_capacity(crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES);
+        decoder
+            .decode_all_to_vec(payload, &mut output)
+            .map_err(|error| format!("failed to decompress ruzstd payload: {error}"))?;
+        Ok(output)
+    }
 }
 
-#[cfg(not(feature = "transport-compression-zstd"))]
+#[cfg(not(any(
+    feature = "transport-compression-zstd",
+    feature = "transport-compression-ruzstd"
+)))]
 fn decompress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
     Err("zstd transport compression feature is not compiled in".to_owned())
 }
@@ -496,6 +517,15 @@ enum WireStreamDecoderInner {
         decoder: zstd::stream::write::Decoder<'static, Vec<u8>>,
         plain_consumed: usize,
     },
+    #[cfg(all(
+        not(feature = "transport-compression-zstd"),
+        feature = "transport-compression-ruzstd"
+    ))]
+    ZstdRuzstd {
+        compressed: Vec<u8>,
+        plain: Vec<u8>,
+        plain_consumed: usize,
+    },
 }
 
 impl WireStreamDecoder {
@@ -549,13 +579,32 @@ impl WireStreamDecoder {
                     .map_err(|error| format!("failed to decompress zstd stream: {error}"))?;
                 read_next_stream_payload(decoder.get_ref(), plain_consumed)
             }
+            #[cfg(all(
+                not(feature = "transport-compression-zstd"),
+                feature = "transport-compression-ruzstd"
+            ))]
+            WireStreamDecoderInner::ZstdRuzstd {
+                compressed,
+                plain,
+                plain_consumed,
+            } => {
+                compressed.extend_from_slice(payload);
+                let mut decoder = ruzstd::decoding::FrameDecoder::new();
+                plain.clear();
+                plain.reserve(crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES);
+                decoder
+                    .decode_all_to_vec(compressed, plain)
+                    .map_err(|error| format!("failed to decompress ruzstd stream: {error}"))?;
+                read_next_stream_payload(plain, plain_consumed)
+            }
         }
     }
 }
 
 #[cfg(any(
     feature = "transport-compression-lz4",
-    feature = "transport-compression-zstd"
+    feature = "transport-compression-zstd",
+    feature = "transport-compression-ruzstd"
 ))]
 fn read_next_stream_payload(plain: &[u8], plain_consumed: &mut usize) -> Result<Vec<u8>, String> {
     let remaining = plain
@@ -605,7 +654,22 @@ fn new_zstd_stream_decoder() -> Result<WireStreamDecoderInner, String> {
         .map_err(|error| format!("failed to create zstd stream decoder: {error}"))
 }
 
-#[cfg(not(feature = "transport-compression-zstd"))]
+#[cfg(all(
+    not(feature = "transport-compression-zstd"),
+    feature = "transport-compression-ruzstd"
+))]
+fn new_zstd_stream_decoder() -> Result<WireStreamDecoderInner, String> {
+    Ok(WireStreamDecoderInner::ZstdRuzstd {
+        compressed: Vec::new(),
+        plain: Vec::new(),
+        plain_consumed: 0,
+    })
+}
+
+#[cfg(not(any(
+    feature = "transport-compression-zstd",
+    feature = "transport-compression-ruzstd"
+)))]
 fn new_zstd_stream_decoder() -> Result<WireStreamDecoderInner, String> {
     Err("zstd transport compression feature is not compiled in".to_owned())
 }
