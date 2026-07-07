@@ -1357,11 +1357,23 @@ export function defineSliceableApp(
   } as SliceableApp<Schema<SchemaDefinition>>;
 }
 
+// The most recently defined app's WasmSchema. The inspector overlay reads this
+// to render the schema before any query has created a runtime client — e.g. on
+// a page that only writes data (useDb/insert, no useAll). It's known statically
+// at defineApp time, so it does not depend on a connection being established.
+let registeredWasmSchema: WasmSchema | undefined;
+
+/** The most recently defined app's WasmSchema, if any (used by the inspector). */
+export function getRegisteredWasmSchema(): WasmSchema | undefined {
+  return registeredWasmSchema;
+}
+
 function createAppForTables(
   tableNames: readonly string[],
   wasmSchema: WasmSchema,
   definition?: SchemaDefinition,
 ): App<Schema<SchemaDefinition>> {
+  registeredWasmSchema = wasmSchema;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
   for (const tableName of tableNames) {

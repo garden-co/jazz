@@ -50,7 +50,7 @@ Pass a pre-created client or a promise that resolves to one.
 				});
 
 				if (process.env.NODE_ENV !== 'production' && autoAttachDevTools) {
-					startInspectorOnce(resolved.db as object);
+					startInspectorOnce(resolved.db);
 				}
 			})
 			.catch((reason) => {

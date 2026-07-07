@@ -33,7 +33,7 @@ interface JazzClientContextValue {
 function DevToolsAutoAttach() {
   const { db } = useCoreJazzClient() as JazzClientContextValue;
   useEffect(() => {
-    startInspectorOnce(db as object);
+    startInspectorOnce(db);
   }, [db]);
   return null;
 }

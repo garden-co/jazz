@@ -1,8 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { NavLink, Outlet, useNavigate, useOutletContext, useParams } from "react-router";
-import type { QueryPropagation } from "jazz-tools";
-import { useDevtoolsContext, type InspectorRuntime } from "../../contexts/devtools-context.js";
+import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
 import styles from "./index.module.css";
 
@@ -27,38 +26,13 @@ function isTablesSidebarSize(value: unknown): value is number {
 interface TablesSidebarProps {
   tableNames: string[];
   selectedTableName?: string;
-  runtime: InspectorRuntime;
-  queryPropagation: QueryPropagation;
-  onQueryPropagationChange: (value: QueryPropagation) => void;
 }
 
-function TablesSidebar({
-  tableNames,
-  selectedTableName,
-  runtime,
-  queryPropagation,
-  onQueryPropagationChange,
-}: TablesSidebarProps) {
+function TablesSidebar({ tableNames, selectedTableName }: TablesSidebarProps) {
   return (
     <aside className={styles.sidebar}>
       <div className={styles.sidebarHeader}>
         <h2 className={styles.sidebarTitle}>Tables</h2>
-        {runtime === "extension" ? (
-          <label
-            className={styles.propagationSwitch}
-            title="Only read data already synced to this device. Turn off to also fetch matching rows from the server."
-          >
-            <span className={styles.propagationLabel}>Local-only</span>
-            <input
-              type="checkbox"
-              checked={queryPropagation === "local-only"}
-              onChange={(event) => {
-                onQueryPropagationChange(event.target.checked ? "local-only" : "full");
-              }}
-              aria-label="Local-only: read only data already on this device, don't fetch from the server"
-            />
-          </label>
-        ) : null}
       </div>
       <ul className={styles.tableList}>
         {tableNames.map((tableName) => (
@@ -80,12 +54,7 @@ function TablesSidebar({
 }
 
 export function DataExplorer() {
-  const {
-    wasmSchema: schema,
-    runtime,
-    queryPropagation,
-    setQueryPropagation,
-  } = useDevtoolsContext();
+  const { wasmSchema: schema } = useDevtoolsContext();
   const isTablesPanelOpen =
     useOutletContext<DataExplorerOutletContext | null>()?.isTablesPanelOpen ?? true;
   const { table } = useParams();
@@ -128,13 +97,7 @@ export function DataExplorer() {
             minSize={`${TABLES_SIDEBAR_MIN_SIZE}%`}
             maxSize={`${TABLES_SIDEBAR_MAX_SIZE}%`}
           >
-            <TablesSidebar
-              tableNames={tableNames}
-              selectedTableName={table}
-              runtime={runtime}
-              queryPropagation={queryPropagation}
-              onQueryPropagationChange={setQueryPropagation}
-            />
+            <TablesSidebar tableNames={tableNames} selectedTableName={table} />
           </Panel>
           <Separator className={styles.resizeHandle} />
         </>

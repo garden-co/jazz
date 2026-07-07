@@ -88,7 +88,7 @@ export const JazzProvider = defineComponent({
             });
 
             if (process.env.NODE_ENV !== "production" && props.autoAttachDevTools) {
-              startInspectorOnce(client.db as object);
+              startInspectorOnce(client.db);
             }
           })
           .catch((reason) => {
