@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useDb, useSession } from "jazz-tools/react";
 import { useRouter } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
+import { waitForWrite } from "@/lib/db-write";
 import { app } from "../../schema.js";
 import { type DurabilityTier } from "jazz-tools";
 
@@ -27,13 +28,14 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     if (handled.current || !userId || !myProfile) return;
     handled.current = true;
 
-    void db
-      .insert(app.chatMembers, {
+    void waitForWrite(
+      db.insert(app.chatMembers, {
         chatId,
         userId,
         joinCode: code,
-      })
-      .wait(sharedWriteOptions)
+      }),
+      sharedWriteOptions,
+    )
       .then(() => {
         navigate(`/#/chat/${chatId}`);
       })

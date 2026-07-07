@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useMyProfile } from "@/hooks/useMyProfile";
+import { waitForWrite } from "@/lib/db-write";
 import { app } from "../../../schema.js";
 import { DurabilityTier } from "jazz-tools";
 
@@ -34,20 +35,22 @@ export function ActionMenu({ chatId, onAttachment, disabled = false }: ActionMen
   const handleCreateCanvas = () => {
     if (!userId || !myProfile) return;
     void (async () => {
-      const canvas = await db
-        .insert(app.canvases, {
+      const canvas = await waitForWrite(
+        db.insert(app.canvases, {
           chatId,
           createdAt: new Date(),
-        })
-        .wait(sharedWriteOptions);
-      await db
-        .insert(app.messages, {
+        }),
+        sharedWriteOptions,
+      );
+      await waitForWrite(
+        db.insert(app.messages, {
           chatId,
           text: `[Canvas: ${canvas.id}]`,
           senderId: myProfile.id,
           createdAt: new Date(),
-        })
-        .wait(sharedWriteOptions);
+        }),
+        sharedWriteOptions,
+      );
     })().catch((error) => {
       console.error("failed to create canvas", error);
     });

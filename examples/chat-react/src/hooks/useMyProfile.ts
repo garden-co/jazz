@@ -38,22 +38,21 @@ export function useMyProfile(): Profile | null {
   useEffect(() => {
     if (!userId || !profiles || profiles.length > 0 || createdForUser.has(userId)) return;
     createdForUser.add(userId);
-    const profile = { userId, name: getRandomUsername() };
-    const created = db.insert(app.profiles, profile);
-    setOptimisticProfile(created.value);
-    if (!sharedWriteOptions) {
-      setConfirmedProfileId(created.value.id);
-      return;
-    }
 
-    void created
-      .wait(sharedWriteOptions)
-      .then(() => {
+    void (async () => {
+      const profile = { userId, name: getRandomUsername() };
+      const created = await Promise.resolve(db.insert(app.profiles, profile));
+      setOptimisticProfile(created.value);
+      if (!sharedWriteOptions) {
         setConfirmedProfileId(created.value.id);
-      })
-      .catch(() => {
-        createdForUser.delete(userId);
-      });
+        return;
+      }
+
+      await created.wait(sharedWriteOptions);
+      setConfirmedProfileId(created.value.id);
+    })().catch(() => {
+      createdForUser.delete(userId);
+    });
   }, [userId, profiles, db, sharedWriteOptions]);
 
   return profileConfirmed ? profile : null;
