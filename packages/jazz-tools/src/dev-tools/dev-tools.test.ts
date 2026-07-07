@@ -108,6 +108,7 @@ describe("attachDevTools active query subscription bridge", () => {
       connection: { client: {} },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+      getRuntimeOperationContext: () => ({ session: { user_id: "u1" }, attribution: "attr" }),
     };
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
@@ -231,6 +232,7 @@ describe("attachDevTools mutation bridge", () => {
       connection: { client: fakeClient },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+      getRuntimeOperationContext: () => ({ session: { user_id: "u1" }, attribution: "attr" }),
     };
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
@@ -252,7 +254,13 @@ describe("attachDevTools mutation bridge", () => {
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual(insertedRow);
-    expect(insert).toHaveBeenCalledWith("todos", { title: { type: "Text", value: "hello" } });
+    expect(insert).toHaveBeenCalledWith(
+      "todos",
+      { title: { type: "Text", value: "hello" } },
+      undefined,
+      { user_id: "u1" },
+      "attr",
+    );
     expect(waitForBatch).toHaveBeenCalledWith("batch-insert-devtools", "local");
   });
 
@@ -281,6 +289,7 @@ describe("attachDevTools mutation bridge", () => {
       connection: { client: fakeClient },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+      getRuntimeOperationContext: () => ({ session: { user_id: "u1" }, attribution: "attr" }),
     };
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
@@ -304,7 +313,13 @@ describe("attachDevTools mutation bridge", () => {
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ updated: true });
-    expect(update).toHaveBeenCalledWith("row-1", { title: { type: "Text", value: "updated" } });
+    expect(update).toHaveBeenCalledWith(
+      "row-1",
+      { title: { type: "Text", value: "updated" } },
+      undefined,
+      { user_id: "u1" },
+      "attr",
+    );
     expect(waitForBatch).toHaveBeenCalledWith("batch-update-devtools", "edge");
   });
 
@@ -335,6 +350,7 @@ describe("attachDevTools mutation bridge", () => {
       connection: { client: fakeClient },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+      getRuntimeOperationContext: () => ({ session: { user_id: "u1" }, attribution: "attr" }),
     };
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
@@ -355,7 +371,7 @@ describe("attachDevTools mutation bridge", () => {
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ deleted: true });
-    expect(deleteMutation).toHaveBeenCalledWith("row-1");
+    expect(deleteMutation).toHaveBeenCalledWith("row-1", undefined, { user_id: "u1" }, "attr");
     expect(waitForBatch).toHaveBeenCalledWith("batch-delete-devtools", "global");
   });
 
@@ -375,6 +391,7 @@ describe("attachDevTools mutation bridge", () => {
       connection: { client: fakeClient },
       getActiveQuerySubscriptions: vi.fn(() => []),
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+      getRuntimeOperationContext: () => ({ session: { user_id: "u1" }, attribution: "attr" }),
     };
 
     await attachDevTools({ db: fakeDb as any }, {} as any);

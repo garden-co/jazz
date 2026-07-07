@@ -1,7 +1,8 @@
 import { join, resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
+import { wireInspectorOverlay } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime, type ManagedRuntime } from "./managed-runtime.js";
-import { resolveJazzWasmEntry } from "./vite.js";
+import { buildJazzViteConfig } from "./vite.js";
 import type {
   JazzServerOptions as BaseJazzServerOptions,
   JazzPluginOptions as BaseJazzPluginOptions,
@@ -67,26 +68,6 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
   let viteServerRef: ViteDevServer | null = null;
   let managed: ManagedRuntime | null = null;
 
-  function buildMergedConfig(config: ViteUserConfigLike) {
-    const existingSsr = config.ssr?.external;
-    const existingExclude = config.optimizeDeps?.exclude ?? [];
-    const jazzWasmEntry = resolveJazzWasmEntry();
-    // `ssr.external: true` means "externalize everything", so jazz-napi is
-    // already covered — preserve the bool rather than coercing to an array.
-    const ssrExternal: true | string[] =
-      existingSsr === true ? true : Array.from(new Set([...(existingSsr ?? []), "jazz-napi"]));
-    return {
-      worker: { format: "es" as const },
-      optimizeDeps: {
-        exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])),
-      },
-      ssr: { external: ssrExternal },
-      ...(jazzWasmEntry
-        ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
-        : {}),
-    };
-  }
-
   function buildInitOptions(serverConfig: ViteServerConfigLike | undefined, root: string) {
     const schemaDir = options.schemaDir ?? join(root, "src", "lib");
     const serverOpt = options.server ?? true;
@@ -148,7 +129,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
     enforce: "pre" as const,
 
     config(config: ViteUserConfigLike, env?: ViteConfigEnvLike) {
-      const merged = buildMergedConfig(config);
+      const merged = buildJazzViteConfig(config);
       if (env?.command !== "serve" || options.server === false) {
         return merged;
       }
@@ -182,6 +163,8 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         viteServer.config.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL =
           resolvedRuntime.telemetryCollectorUrl;
       }
+
+      if (options.inspector !== false) wireInspectorOverlay(viteServer);
     },
   };
 }

@@ -5,6 +5,7 @@ import {
   InsertValues,
   QueryExecutionOptions,
   QueryInput,
+  Session,
   Value,
   WasmSchema,
 } from "../index.js";
@@ -213,6 +214,9 @@ function hookRegistration(
     registeredRuntimeBridgeDbs.add(db);
 
     window.addEventListener("message", async (event) => {
+      // LOAD-BEARING for the inspector overlay: the relay (dev/inspector-overlay)
+      // re-injects iframe requests into THIS window so event.source === window.
+      // Loosening this guard would let any frame drive the bridge and could loop.
       if (event.source !== window) return;
       const rawMessage = event.data;
       if (!isRecord(rawMessage)) return;
@@ -262,10 +266,9 @@ function hookRegistration(
         }
 
         if (envelope.command === DEVTOOLS_COMMANDS.ANNOUNCE) {
-          let schema = resolveBridgeSchema(db);
-          if (!schema && state?.wasmSchema) {
-            schema = state.wasmSchema;
-          }
+          // resolveBridgeSchema already falls back to state.wasmSchema, so the
+          // schema is complete here — no secondary fallback needed.
+          const schema = resolveBridgeSchema(db);
           const dbConfig = resolveBridgeDbConfig(db);
 
           if (schema && dbConfig) {
@@ -333,6 +336,22 @@ function hookRegistration(
           return client;
         };
 
+        // Run mutations with the inspected page's own session/attribution so
+        // row-level policies authorize them exactly as the app's own writes do.
+        // Without this, edits from the inspector are rejected ("policy denied").
+        const resolveOperationContext = (): { session?: Session; attribution?: string } => {
+          const getContext = (
+            db as unknown as {
+              getRuntimeOperationContext?: () => {
+                session?: Session;
+                attribution?: string;
+              } | null;
+            }
+          ).getRuntimeOperationContext;
+          if (typeof getContext !== "function") return {};
+          return getContext.call(db) ?? {};
+        };
+
         if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE) {
           const payload = isRecord(envelope.payload)
             ? (envelope.payload as Partial<
@@ -347,7 +366,14 @@ function hookRegistration(
           }
 
           const client = await resolveCommandClient();
-          const result = await client.insert(table, values as InsertValues);
+          const ctx = resolveOperationContext();
+          const result = await client.insert(
+            table,
+            values as InsertValues,
+            undefined,
+            ctx.session,
+            ctx.attribution,
+          );
           const row = tier ? await result.wait({ tier }) : result.value;
           respond({ ok: true, payload: row });
           return;
@@ -367,7 +393,14 @@ function hookRegistration(
           }
 
           const client = await resolveCommandClient();
-          const updateHandle = client.update(objectId, updates as Record<string, Value>);
+          const ctx = resolveOperationContext();
+          const updateHandle = client.update(
+            objectId,
+            updates as Record<string, Value>,
+            undefined,
+            ctx.session,
+            ctx.attribution,
+          );
           if (tier) {
             await updateHandle.wait({ tier });
           }
@@ -388,7 +421,8 @@ function hookRegistration(
           }
 
           const client = await resolveCommandClient();
-          const deleteHandle = client.delete(objectId);
+          const ctx = resolveOperationContext();
+          const deleteHandle = client.delete(objectId, undefined, ctx.session, ctx.attribution);
           if (tier) {
             await deleteHandle.wait({ tier });
           }
@@ -511,7 +545,9 @@ function resolveDb(input: Db | { db: Db }): Db {
 
 export async function attachDevTools(
   clientOrDb: Promise<{ db: Db }> | { db: Db } | Db,
-  wasmSchema: WasmSchema,
+  // Optional: when omitted, the inspector resolves the schema from the live
+  // runtime at announce time (resolveBridgeSchema → runtime.getSchema()).
+  wasmSchema?: WasmSchema,
 ): Promise<DevToolsAttachment> {
   const resolved = await Promise.resolve(clientOrDb as Promise<{ db: Db }> | { db: Db } | Db);
   const db = resolveDb(resolved as Db | { db: Db });

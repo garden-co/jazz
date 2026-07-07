@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
+import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
@@ -26,14 +27,34 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
+// Dev-only: mount the inspector overlay + attach the bridge for this db. Only
+// rendered when shouldAutoAttach is true, so the lazy overlay chunk is dropped
+// from production bundles.
+function DevToolsAutoAttach() {
+  const { db } = useCoreJazzClient() as JazzClientContextValue;
+  useEffect(() => {
+    startInspectorOnce(db as object);
+  }, [db]);
+  return null;
+}
+
 export type JazzProviderProps = {
   config: DbConfig;
   fallback?: ReactNode;
   children: ReactNode;
   onJWTExpired?: () => Promise<string | null | undefined>;
+  /** Dev-only: auto-open the inspector overlay. Default true. */
+  autoAttachDevTools?: boolean;
 };
 
-export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzProviderProps) {
+export function JazzProvider({
+  config,
+  fallback,
+  children,
+  onJWTExpired,
+  autoAttachDevTools,
+}: JazzProviderProps) {
+  const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   return (
     <CoreJazzProvider
       config={config}
@@ -41,6 +62,7 @@ export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzP
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
     >
+      {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}
     </CoreJazzProvider>
   );
