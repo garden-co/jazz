@@ -21,7 +21,7 @@ const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
 function HostInner() {
   const { db } = useJazzClient();
   // A real query: creates the host client (so getRuntimeSchema resolves) and
-  // registers a public subscription the overlay's Live Query should display.
+  // registers a public subscription the overlay's Subscriptions tab should display.
   useAll(app.todos);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 

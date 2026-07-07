@@ -1032,6 +1032,7 @@ export class Db {
    * against this connection without bridging or private-field access. Null if
    * no client exists yet — run a query/subscription (or wait for connection)
    * first.
+   * @internal
    */
   getRuntimeSchema(): WasmSchema | null {
     const schema = this.connection.getRuntimeSchema();
@@ -1794,16 +1795,6 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   }
 
   let resolvedConfig = { ...config };
-
-  // Enable subscription tracing in dev so the inspector's Live Query sees the
-  // subscriptions an app creates on mount, with no app config. Keyed on
-  // "development" specifically (not `!== "production"`) to keep tracing off under
-  // `test`/SSR; the runtime is the only client-creation seam shared by every
-  // binding (svelte/vue/solid receive a pre-created client), so it lives here
-  // rather than in the provider. Overridable explicitly via config.devMode.
-  if (resolvedConfig.devMode === undefined && process.env.NODE_ENV === "development") {
-    resolvedConfig.devMode = true;
-  }
   await runtimeModule.load(config);
 
   // Local-first auth: resolve seed and mint a JWT
