@@ -721,8 +721,7 @@ export function TableDataGrid() {
   );
 
   // `undefined` means the live query hasn't resolved yet (loading); `[]` means
-  // it resolved and is genuinely empty. Collapsing both to EMPTY_ROWS made
-  // "loading" and "no rows" look identical — keep them apart so the grid can
+  // it resolved and is genuinely empty. Keep them apart so the grid can
   // show a skeleton while the first result is in flight.
   const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   const isInitialLoading = queryResult === undefined;
