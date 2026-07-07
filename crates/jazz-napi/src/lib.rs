@@ -1777,6 +1777,9 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
             }
         };
     }
+    if optional_json_bool_prop(&value, "propagate")? == Some(false) {
+        opts.propagation = CorePropagation::LocalOnly;
+    }
     if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
         opts.propagation = match propagation.as_str() {
             "Full" | "full" => CorePropagation::Full,

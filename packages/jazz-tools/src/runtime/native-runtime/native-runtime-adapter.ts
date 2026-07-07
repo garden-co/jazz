@@ -1386,6 +1386,9 @@ function readOptions(
   const options = optionsJson == null ? ({} as Record<string, unknown>) : JSON.parse(optionsJson);
   const readOptions: Record<string, unknown> = { tier: tier ?? "local" };
   if (includeDeleted) readOptions.include_deleted = true;
+  if (options.propagate === false && options.propagation == null) {
+    readOptions.propagation = "local_only";
+  }
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
   return readOptions;
@@ -1394,8 +1397,9 @@ function readOptions(
 function readPropagationIsFull(optionsJson?: string | null): boolean {
   if (optionsJson == null) return true;
   try {
-    const options = JSON.parse(optionsJson) as { propagation?: unknown };
-    return options.propagation == null || options.propagation === "full";
+    const options = JSON.parse(optionsJson) as { propagation?: unknown; propagate?: unknown };
+    if (options.propagation != null) return options.propagation === "full";
+    return options.propagate !== false;
   } catch {
     return true;
   }
@@ -1462,6 +1466,10 @@ function readSupportedReadOptions(optionsJson: string): void {
     throw new Error(
       `Native runtime does not support read propagation '${String(propagation)}' yet`,
     );
+  }
+  const propagate = parsed.propagate;
+  if (propagate != null && typeof propagate !== "boolean") {
+    throw new Error(`Native runtime does not support read propagate '${String(propagate)}' yet`);
   }
 }
 
