@@ -238,6 +238,7 @@ type RuntimeSession = {
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
   rows: RowState[];
+  rowIndexByKey: Map<string, number>;
   rootTable: string | null;
   session: RuntimeSession | null;
   opts: unknown;
@@ -742,6 +743,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       rows: [],
+      rowIndexByKey: new Map(),
       rootTable: usesNativeRelationApi ? null : queryTable(queryJson),
       session,
       opts,
@@ -1173,18 +1175,26 @@ export class NativeRuntimeAdapter implements Runtime {
       subscription.cancelled = true;
       return;
     }
-    const previousRows = subscription.rows;
     if (chunk.type === "snapshot") {
       subscription.rows = rowsFromRelationSnapshot(
         chunk.snapshot,
         this.schema,
         subscription.rootTable,
       );
+      subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
+      subscription.callback?.(nativeDeltaFromRows(subscription.rows, []));
     } else {
-      subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
+      const applied = applySubscriptionDeltaWithWireDelta(
+        subscription.rows,
+        subscription.rowIndexByKey,
+        chunk.delta,
+        this.schema,
+      );
+      subscription.rows = applied.rows;
+      subscription.rowIndexByKey = applied.rowIndexByKey;
+      subscription.callback?.(applied.wireDelta);
     }
-    subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
   }
 
   private scheduleServerPump(): void {
@@ -2793,21 +2803,73 @@ function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): 
   return row;
 }
 
-function applySubscriptionDelta(
+function applySubscriptionDeltaWithWireDelta(
   currentRows: RowState[],
+  currentIndexByKey: Map<string, number>,
   delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
   schema: WasmSchema,
-): RowState[] {
+): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: SubscriptionWireDelta } {
   const rowsByKey = new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
+  const removedEntries: Array<{ id: string; index: number }> = [];
+
   for (const removed of delta.removed) {
-    rowsByKey.delete(rowKey(removed.table, formatUuid(removed.rowId)));
+    const id = formatUuid(removed.rowId);
+    const key = rowKey(removed.table, id);
+    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0 });
+    rowsByKey.delete(key);
   }
-  for (const row of rowsFromBatches(delta.added, schema).concat(
-    rowsFromBatches(delta.updated, schema),
-  )) {
+
+  const addedRows = rowsFromBatches(delta.added, schema);
+  const updatedRows = rowsFromBatches(delta.updated, schema);
+  for (const row of addedRows.concat(updatedRows)) {
     rowsByKey.set(rowKey(row.table, row.id), row);
   }
-  return Array.from(rowsByKey.values());
+
+  const rows = Array.from(rowsByKey.values());
+  const rowIndexByKey = indexRowsByKey(rows);
+  return {
+    rows,
+    rowIndexByKey,
+    wireDelta: wireDeltaFromNativeBatches(delta, rowIndexByKey, removedEntries, schema),
+  };
+}
+
+function indexRowsByKey(rows: RowState[]): Map<string, number> {
+  const index = new Map<string, number>();
+  rows.forEach((row, rowIndex) => {
+    index.set(rowKey(row.table, row.id), rowIndex);
+  });
+  return index;
+}
+
+function wireDeltaFromNativeBatches(
+  delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
+  rowIndexByKey: Map<string, number>,
+  removedEntries: Array<{ id: string; index: number }>,
+  schema: WasmSchema,
+): SubscriptionWireDelta {
+  const changes: SubscriptionWireDelta = [];
+  for (const row of rowsFromBatches(delta.added, schema)) {
+    changes.push({
+      kind: 0,
+      id: row.id,
+      index: rowIndexByKey.get(rowKey(row.table, row.id)) ?? 0,
+      row: rowValueWithValuesByColumn(row),
+    });
+  }
+  for (const row of rowsFromBatches(delta.updated, schema)) {
+    changes.push({
+      kind: 2,
+      id: row.id,
+      index: rowIndexByKey.get(rowKey(row.table, row.id)) ?? 0,
+      row: rowValueWithValuesByColumn(row),
+    });
+  }
+  changes.sort((left, right) => left.index - right.index);
+  for (const row of removedEntries) {
+    changes.push({ kind: 1, id: row.id, index: row.index });
+  }
+  return changes;
 }
 
 function rowKey(table: string, id: string): string {

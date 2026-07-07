@@ -10,6 +10,8 @@ import { openConfig } from "./native-runtime/native-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import { SubscriptionManager } from "./subscription-manager.js";
+import type { WasmRow } from "../drivers/types.js";
 
 const TEST_SCHEMA: WasmSchema = {
   todos: {
@@ -321,13 +323,20 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
     runtimes.push(runtime);
 
-    const updates: unknown[] = [];
+    const manager = new SubscriptionManager<WasmRow>();
+    const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
     runtime.executeSubscription(handle, (delta: unknown) => {
-      updates.push(delta);
+      updates.push(
+        manager.handleDelta(
+          delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
+          (row) => row,
+          TEST_SCHEMA.todos.columns,
+        ),
+      );
     });
 
-    expect(updates).toEqual([[]]);
+    expect(updates).toEqual([{ all: [], delta: [] }]);
 
     const inserted = runtime.insert("todos", {
       title: { type: "Text", value: "direct napi subscribed row" },
@@ -335,12 +344,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
 
     expect(updates).toHaveLength(2);
-    expect(updates[1]).toEqual([
+    expect(updates[1]?.delta).toEqual([
       {
         kind: 0,
         id: inserted.id,
         index: 0,
-        row: {
+        item: {
           id: inserted.id,
           values: [
             { type: "Text", value: "direct napi subscribed row" },
@@ -355,12 +364,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
 
     expect(updates).toHaveLength(3);
-    expect(updates[2]).toEqual([
+    expect(updates[2]?.delta).toEqual([
       {
-        kind: 0,
+        kind: 2,
         id: inserted.id,
         index: 0,
-        row: {
+        item: {
           id: inserted.id,
           values: [
             { type: "Text", value: "direct napi subscribed updated row" },
