@@ -21,7 +21,10 @@ use crate::query::{
     in_list, is_null, lit, lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema, WritePolicies};
-use crate::wire::{FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD};
+use crate::wire::{
+    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireStreamDecoder,
+    current_wire_features,
+};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -66,6 +69,16 @@ where
         .iter()
         .filter(|command| matches!(command, PendingUpstreamCommand::Unsubscribe(_)))
         .count()
+}
+
+fn decode_wire_message_payload(
+    decoder: &mut WireStreamDecoder,
+    envelope: &crate::wire::WireEnvelope,
+) -> SyncMessage {
+    let payload = decoder
+        .decode_message(&envelope.payload, envelope.features)
+        .unwrap();
+    decode_sync_message(&payload).unwrap()
 }
 
 fn delta_rows(event: SubscriptionEvent) -> (Vec<CurrentRow>, Vec<CurrentRow>, Vec<RemovedRow>) {
@@ -3173,12 +3186,13 @@ fn wire_transport_adapter_preserves_message_order() {
 
     let first = right.try_recv_frame().unwrap();
     let second = right.try_recv_frame().unwrap();
+    let mut decoder = WireStreamDecoder::new(current_wire_features()).unwrap();
     let first = match decode_frame(&first).unwrap() {
-        WireFrame::Message(envelope) => decode_sync_message(&envelope.payload).unwrap(),
+        WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
         other => panic!("expected message frame, got {other:?}"),
     };
     let second = match decode_frame(&second).unwrap() {
-        WireFrame::Message(envelope) => decode_sync_message(&envelope.payload).unwrap(),
+        WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
         other => panic!("expected message frame, got {other:?}"),
     };
 
@@ -4724,13 +4738,13 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     else {
         panic!("expected subscriber connection");
     };
-    assert_eq!(served.len(), 2);
+    assert_eq!(served.len(), 1);
     assert_eq!(coverage_groups.len(), 1);
     let group = coverage_groups
         .values()
         .next()
-        .expect("subscriptions should share one coverage group");
-    assert_eq!(group.subscribers.len(), 2);
+        .expect("propagating subscriptions should share one forwarded coverage group");
+    assert_eq!(group.subscribers.len(), 1);
     drop(subscriber_ref);
 
     drop(first_subscription);
@@ -5391,12 +5405,13 @@ fn byte_wire_round_trips_subscription_to_client() {
         let queued = server_inbound.borrow();
         let first = queued.front().expect("register shape frame");
         let second = queued.get(1).expect("subscribe frame");
+        let mut decoder = WireStreamDecoder::new(current_wire_features()).unwrap();
         let first = match decode_frame(first).unwrap() {
-            WireFrame::Message(envelope) => decode_sync_message(&envelope.payload).unwrap(),
+            WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
             other => panic!("expected message frame, got {other:?}"),
         };
         let second = match decode_frame(second).unwrap() {
-            WireFrame::Message(envelope) => decode_sync_message(&envelope.payload).unwrap(),
+            WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
             other => panic!("expected message frame, got {other:?}"),
         };
         let SyncMessage::RegisterShape { shape_id, .. } = first else {
